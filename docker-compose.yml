@@ -58,6 +58,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       TOKEN_SECRET: ${TOKEN_SECRET}
+      ADMIN_KEY: ${ADMIN_KEY}            # not used by monitor, but Settings requires it
       INTERNAL_SECRET: ${INTERNAL_SECRET}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-0}
