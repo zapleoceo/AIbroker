@@ -1,0 +1,80 @@
+name: Deploy aibroker to Hetzner
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: aibroker-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HOST: ${{ secrets.HETZNER_HOST }}
+      PORT: ${{ secrets.HETZNER_PORT || '9617' }}
+      USER: root
+      REMOTE_DIR: /var/www/aibroker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.HETZNER_SSH_KEY }}
+
+      - name: Trust host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Rsync code → server
+        run: |
+          ssh -p "$PORT" "$USER@$HOST" "mkdir -p $REMOTE_DIR"
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.pytest_cache' \
+            --exclude '.coverage' \
+            --exclude '.env' \
+            -e "ssh -p $PORT" \
+            ./ "$USER@$HOST:$REMOTE_DIR/"
+
+      - name: Build & up
+        run: |
+          ssh -p "$PORT" -o ServerAliveInterval=30 "$USER@$HOST" "
+            set -e
+            cd $REMOTE_DIR
+            docker compose build
+            docker compose up -d --remove-orphans
+            sleep 8
+            docker compose ps
+          "
+
+      - name: Smoke check
+        run: |
+          ssh -p "$PORT" "$USER@$HOST" '
+            set -e
+            docker exec aibroker-api curl -fsS http://localhost:8000/healthz || exit 11
+            curl -sf -o /dev/null -w "HTTPS %{http_code}\n" \
+              https://aib.zapleo.com/healthz | grep -q 200 || exit 12
+          '
+
+      - name: Notify failure
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_VERA }}
+          OWNER_ID: ${{ secrets.OWNER_TELEGRAM_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -z "$BOT_TOKEN" ] && exit 0
+          curl -s "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+               -d "chat_id=${OWNER_ID}" \
+               -d "parse_mode=HTML" \
+               -d "text=⚠️ aibroker deploy failed%0A${RUN_URL}" \
+               -o /dev/null || true

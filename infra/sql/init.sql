@@ -1,0 +1,100 @@
+-- Initial broker schema. Idempotent. Runs on first postgres start
+-- via /docker-entrypoint-initdb.d. After this Alembic takes over migrations.
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ─── Projects (client apps that consume the broker) ─────────────────────────
+CREATE TABLE IF NOT EXISTS projects (
+  id BIGSERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL UNIQUE,
+  owner_email VARCHAR(255),
+  project_key_hash VARCHAR(255) NOT NULL,   -- bcrypt of X-Project-Key
+  project_key_prefix VARCHAR(20) NOT NULL,  -- first chars for ops display
+  allowed_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  daily_cost_cap_usd DOUBLE PRECISION,
+  monthly_cost_cap_usd DOUBLE PRECISION,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_projects_active ON projects(is_active);
+
+-- ─── API keys (the actual provider credentials) ─────────────────────────────
+CREATE TABLE IF NOT EXISTS api_keys (
+  id BIGSERIAL PRIMARY KEY,
+  provider VARCHAR(50) NOT NULL,
+  label VARCHAR(100) NOT NULL,
+  tier VARCHAR(10) NOT NULL DEFAULT 'free',   -- free|paid|trial
+  scopes JSONB NOT NULL DEFAULT '[]'::jsonb,  -- ['llm:chat','llm:embed',...]
+  token_encrypted TEXT NOT NULL,              -- Fernet
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  is_alive BOOLEAN NOT NULL DEFAULT TRUE,     -- set by monitor
+  daily_limit INT NOT NULL DEFAULT 999999,
+  daily_used INT NOT NULL DEFAULT 0,
+  daily_cost_cap_usd DOUBLE PRECISION,
+  daily_cost_used_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  monthly_cost_cap_usd DOUBLE PRECISION,
+  monthly_cost_used_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  total_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  daily_reset_at DATE,
+  cooldown_until TIMESTAMP,
+  error_count INT NOT NULL DEFAULT 0,
+  last_used_at TIMESTAMP,
+  last_alive_check_at TIMESTAMP,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  CONSTRAINT uq_api_keys_provider_label UNIQUE (provider, label)
+);
+CREATE INDEX IF NOT EXISTS ix_api_keys_provider_active ON api_keys(provider, is_active, is_alive);
+CREATE INDEX IF NOT EXISTS ix_api_keys_lru ON api_keys(last_used_at NULLS FIRST);
+
+-- ─── Active leases (vending mode: key checked out, not yet reported) ────────
+CREATE TABLE IF NOT EXISTS leases (
+  id VARCHAR(64) PRIMARY KEY,                 -- lse_<random>
+  api_key_id BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  workflow VARCHAR(50),
+  request_meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+  leased_at TIMESTAMP NOT NULL DEFAULT now(),
+  lease_until TIMESTAMP NOT NULL,
+  released_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_leases_open ON leases(lease_until) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_leases_project ON leases(project_id, leased_at);
+
+-- ─── Usage log (every successful + failed call, source of truth for billing)─
+CREATE TABLE IF NOT EXISTS usage_log (
+  id BIGSERIAL PRIMARY KEY,
+  api_key_id BIGINT REFERENCES api_keys(id) ON DELETE SET NULL,
+  project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL,
+  lease_id VARCHAR(64) REFERENCES leases(id) ON DELETE SET NULL,
+  provider VARCHAR(50) NOT NULL,
+  model VARCHAR(100),
+  capability VARCHAR(30),
+  workflow VARCHAR(50),
+  tokens_in INT NOT NULL DEFAULT 0,
+  tokens_out INT NOT NULL DEFAULT 0,
+  cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+  latency_ms INT,
+  status VARCHAR(20) NOT NULL,                -- ok|rate_limit|auth_fail|error
+  error_kind VARCHAR(80),
+  http_status INT,
+  created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_usage_project_date ON usage_log(project_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_usage_key_date ON usage_log(api_key_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_usage_provider_date ON usage_log(provider, created_at);
+
+-- ─── Audit log (every admin op, every key checkout) ─────────────────────────
+CREATE TABLE IF NOT EXISTS audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  actor VARCHAR(100) NOT NULL,                -- 'admin' or 'project:<name>'
+  action VARCHAR(50) NOT NULL,
+  target VARCHAR(120),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ip VARCHAR(45),
+  created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_audit_actor_date ON audit_log(actor, created_at);
+CREATE INDEX IF NOT EXISTS ix_audit_action_date ON audit_log(action, created_at);
