@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     ADMIN_KEY: str = Field(..., min_length=20)
     INTERNAL_SECRET: str = Field(..., min_length=8)
 
-    # Alerts
+    # Alerts + TG login widget for dashboard
     TELEGRAM_BOT_TOKEN: str = ""
     OWNER_TELEGRAM_ID: int = 0
+    TELEGRAM_BOT_USERNAME: str = ""   # widget needs it, e.g. "Dimondra_Ai_Bot"
+
+    # Session cookie HMAC (for /dashboard browser sessions)
+    SESSION_SECRET: str = ""
 
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
