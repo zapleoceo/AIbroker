@@ -12,16 +12,12 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
       HOST: ${{ secrets.HETZNER_HOST }}
       PORT: ${{ secrets.HETZNER_PORT || '9617' }}
-      USER: root
-      REMOTE_DIR: /var/www/aibroker
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Set up SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -32,52 +28,21 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts
 
-      - name: Rsync code → server
+      - name: Trigger restricted deploy
+        # The SSH key is wired to `command="/usr/local/bin/aibroker-deploy"` on
+        # the server — connecting at all runs git-pull + compose up. Any other
+        # command the client passes is ignored. Worst-case key leak = attacker
+        # can re-run our own deploy, nothing else (no shell, no file access).
         run: |
-          ssh -p "$PORT" "$USER@$HOST" "mkdir -p $REMOTE_DIR"
-          rsync -az --delete \
-            --exclude '.git' \
-            --exclude '__pycache__' \
-            --exclude '*.pyc' \
-            --exclude '.pytest_cache' \
-            --exclude '.coverage' \
-            --exclude '.env' \
-            -e "ssh -p $PORT" \
-            ./ "$USER@$HOST:$REMOTE_DIR/"
+          ssh -p "$PORT" -o ServerAliveInterval=30 \
+              -o BatchMode=yes -o ConnectTimeout=15 \
+              root@"$HOST"
 
-      - name: Build & up
+      - name: HTTPS probe (best-effort)
         run: |
-          ssh -p "$PORT" -o ServerAliveInterval=30 "$USER@$HOST" "
-            set -e
-            cd $REMOTE_DIR
-            docker compose build
-            docker compose up -d --remove-orphans
-            sleep 8
-            docker compose ps
-          "
-
-      - name: Smoke check
-        run: |
-          ssh -p "$PORT" "$USER@$HOST" '
-            set -e
-            echo "--- waiting for aibroker-api to respond (up to 60s) ---"
-            for i in $(seq 1 30); do
-              if docker exec aibroker-api curl -fsS http://localhost:8000/healthz >/dev/null 2>&1; then
-                echo "api ready after ${i}x2s"
-                break
-              fi
-              if [ "$i" -eq 30 ]; then
-                echo "api never responded"
-                docker logs aibroker-api --tail 30
-                exit 11
-              fi
-              sleep 2
-            done
-            echo "--- HTTPS via CF (best-effort, not fatal) ---"
-            curl -sf -o /dev/null -w "HTTPS %{http_code}\n" \
-              https://aib.zapleo.com/healthz || \
-              echo "(CF probe failed — likely SSL mode mismatch, not deploy issue)"
-          '
+          curl -sf -o /dev/null -w "HTTPS aib.zapleo.com → %{http_code}\n" \
+            https://aib.zapleo.com/healthz || \
+            echo "(CF probe failed — likely SSL mode mismatch, not deploy issue)"
 
       - name: Notify failure
         if: failure()
