@@ -17,7 +17,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import JSON
+from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
+
+# JSONB on Postgres, plain JSON on SQLite (for tests). Same Python API.
+JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aibroker.db.engine import Base
