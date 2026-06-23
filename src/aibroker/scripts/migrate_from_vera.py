@@ -29,9 +29,15 @@ VISION_PROVIDERS = {"gemini", "anthropic", "openai"}
 
 
 def vera_decrypt(ciphertext: str, secret: str) -> str:
-    """Vera uses the same Fernet scheme — different key."""
-    f = Fernet(secret.encode())
-    return f.decrypt(ciphertext.encode()).decode()
+    """Replicate Vera's vera_shared.tokens.crypto:
+    Fernet key = base64(sha256(secret_utf8)).  Strip 'enc1:' prefix if present."""
+    import base64
+    import hashlib
+    digest = hashlib.sha256(secret.encode("utf-8")).digest()
+    fernet_key = base64.urlsafe_b64encode(digest)
+    f = Fernet(fernet_key)
+    payload = ciphertext[5:] if ciphertext.startswith("enc1:") else ciphertext
+    return f.decrypt(payload.encode()).decode()
 
 
 def map_scopes(provider: str) -> list[str]:
