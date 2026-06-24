@@ -80,5 +80,20 @@ split.
 - One test file per source module: `test_<module>.py`.
 - Fixtures in `tests/conftest.py`.
 - In-memory SQLite for unit tests; mark DB-dependent tests with `@pytest.mark.asyncio`.
-- Aim for >70% line coverage on `src/aibroker/` (gate currently 40%).
+- Aim for >70% line coverage on `src/aibroker/` (current gate 23%, stair-step up).
 - Integration tests for routes use FastAPI `TestClient`.
+
+## Pre-commit hooks
+
+Optional but recommended — same checks CI runs:
+
+```bash
+pip install pre-commit
+pre-commit install            # ruff + format on every commit
+pre-commit install -t pre-push  # plus pytest on push
+```
+
+`.pre-commit-config.yaml` is in the repo root. Hooks: trailing whitespace,
+EOL fixer, YAML syntax, large-file guard, merge-conflict markers,
+`detect-private-key` (blocks accidental .pem / id_rsa commits), `ruff
+--fix`, `ruff format`, `pytest -x` on push.
