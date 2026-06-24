@@ -87,10 +87,22 @@ async def call_llm(
     latency_ms = int((time.time() - t0) * 1000)
 
     choices = resp.choices or []
-    text = (choices[0].message.content if choices else "") or ""
+    if choices:
+        ch = choices[0]
+        msg = getattr(ch, "message", None) or (ch.get("message") if isinstance(ch, dict) else None)
+        if isinstance(msg, dict):
+            text = msg.get("content") or ""
+        else:
+            text = getattr(msg, "content", "") or ""
+    else:
+        text = ""
     usage = getattr(resp, "usage", None) or {}
-    tokens_in = getattr(usage, "prompt_tokens", 0) if usage else 0
-    tokens_out = getattr(usage, "completion_tokens", 0) if usage else 0
+    if isinstance(usage, dict):
+        tokens_in = usage.get("prompt_tokens", 0) or 0
+        tokens_out = usage.get("completion_tokens", 0) or 0
+    else:
+        tokens_in = getattr(usage, "prompt_tokens", 0)
+        tokens_out = getattr(usage, "completion_tokens", 0)
     cost = estimate_llm_cost(model, tokens_in, tokens_out)
 
     meta = {
@@ -110,9 +122,19 @@ async def embed(
     t0 = time.time()
     resp = await litellm.aembedding(model=model, input=texts, api_key=api_key)
     latency_ms = int((time.time() - t0) * 1000)
-    vectors = [d.embedding for d in (resp.data or [])]
+    # LiteLLM may return either objects with .embedding or plain dicts
+    data_items = resp.data or []
+    vectors: list[list[float]] = []
+    for d in data_items:
+        if isinstance(d, dict):
+            vectors.append(d.get("embedding") or d.get("vector") or [])
+        else:
+            vectors.append(getattr(d, "embedding", None) or [])
     usage = getattr(resp, "usage", None) or {}
-    tokens_in = getattr(usage, "prompt_tokens", 0) if usage else 0
+    if isinstance(usage, dict):
+        tokens_in = usage.get("prompt_tokens", 0) or usage.get("total_tokens", 0)
+    else:
+        tokens_in = getattr(usage, "prompt_tokens", 0)
     meta = {
         "model": model,
         "tokens_in": tokens_in,
