@@ -36,15 +36,17 @@ async def _global_cost_today() -> float:
     now = time.time()
     if now - _global_cache["fetched_at"] < _GLOBAL_TTL_S:
         return _global_cache["value"]
-    today = datetime.now(timezone.utc).date()
+    from datetime import timedelta as _td
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + _td(days=1)
     async with get_session() as s:
         v = (
             await s.execute(
                 text(
                     "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_log "
-                    "WHERE created_at::date = :d"
+                    "WHERE created_at >= :start AND created_at < :end"
                 ),
-                {"d": today},
+                {"start": day_start.replace(tzinfo=None), "end": day_end.replace(tzinfo=None)},
             )
         ).scalar() or 0.0
     _global_cache["value"] = float(v)
@@ -79,15 +81,21 @@ async def check_caps(
 
     # 2. per-project
     if project.daily_cost_cap_usd is not None:
-        today = datetime.now(timezone.utc).date()
+        from datetime import timedelta as _td
+        day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + _td(days=1)
         async with get_session() as s:
             used = (
                 await s.execute(
                     text(
                         "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_log "
-                        "WHERE project_id = :pid AND created_at::date = :d"
+                        "WHERE project_id = :pid AND created_at >= :start AND created_at < :end"
                     ),
-                    {"pid": project.id, "d": today},
+                    {
+                        "pid": project.id,
+                        "start": day_start.replace(tzinfo=None),
+                        "end": day_end.replace(tzinfo=None),
+                    },
                 )
             ).scalar() or 0.0
         if used + estimated_cost > project.daily_cost_cap_usd:

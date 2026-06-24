@@ -64,6 +64,12 @@ The global cache TTL is 30s — an upper bound of error per replica. Tighter
 TTL means more `SUM(cost_usd)` queries; looser means more risk of overshoot
 under a sudden burst. 30s was chosen empirically.
 
+### Portability note
+
+"Today" queries use `created_at >= :start AND created_at < :next_day` rather
+than `created_at::date = :today`. Postgres-only `::date` casting was replaced
+to make tests pass on SQLite in-memory.
+
 ## Failure → next provider
 
 Selector returns a row → LiteLLM call → exception?
