@@ -48,8 +48,12 @@ def test_landing_default_lang_is_english():
 
 def test_landing_has_all_sections():
     r = client.get("/")
-    for anchor in ["#how", "#features", "#providers", "#api", "#pricing", "#faq"]:
-        assert anchor in r.text, f"Missing anchor {anchor}"
+    # Nav links use #anchor refs; FAQ is rendered but not in nav
+    for anchor in ["#how", "#features", "#providers", "#api", "#pricing"]:
+        assert anchor in r.text, f"Missing nav anchor {anchor}"
+    for sec_id in ['id="problem"', 'id="how"', 'id="features"',
+                    'id="providers"', 'id="api"', 'id="pricing"', 'id="faq"']:
+        assert sec_id in r.text, f"Missing section {sec_id}"
 
 
 def test_landing_links_to_docs():
