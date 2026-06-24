@@ -1,6 +1,11 @@
-"""Selector — atomic LRU + cap-aware key picker."""
+"""Selector — atomic LRU + cap-aware key picker.
+
+Skipped on SQLite: selector relies on JSONB `?` operator + FOR UPDATE SKIP LOCKED,
+neither of which SQLite supports. These tests need a real Postgres to run.
+"""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,6 +19,12 @@ from aibroker.routing.selector import (
     mark_dead,
     pick_and_reserve,
     record_usage,
+)
+
+
+pytestmark = pytest.mark.skipif(
+    "sqlite" in os.environ.get("DATABASE_URL", ""),
+    reason="Selector uses Postgres-specific JSONB ? operator + FOR UPDATE SKIP LOCKED",
 )
 
 
