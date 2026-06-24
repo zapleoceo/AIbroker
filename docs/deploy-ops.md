@@ -2,18 +2,22 @@
 
 ## Auto-deploy
 
-Push to `master` → `.github/workflows/deploy.yml` runs:
+Push to `master` → `.github/workflows/deploy.yml` runs **three jobs** in
+this order:
 
-1. `test` job — `pytest`, must pass. Coverage gate 40% on `aibroker` package.
-2. `docs-check` — must update a `docs/*.md` file OR commit must contain
-   `docs-not-needed` literally.
-3. `deploy` — SSH to `aib.zapleo.com`, the SSH key on the server is wired
-   to `command="/usr/local/bin/aibroker-deploy"` in `authorized_keys`. The
-   wrapper does `git pull → docker compose build → up -d → poll healthz
-   for up to 60s`.
+1. **`docs` job** — fails if any change under `src/`, `infra/`, `services/`
+   or `monitor/` lands without a matching change under `docs/`. Opt-out
+   per commit: literal `docs-not-needed` in the commit message.
+2. **`test` job** — `pytest`, must pass. Coverage gate currently **58%**
+   on `aibroker` package (stair-step; never drops).
+3. **`deploy` job** — `needs: [docs, test]`. SSH to `aib.zapleo.com`; the
+   key on the server is wired to `command="/usr/local/bin/aibroker-deploy"`
+   in `authorized_keys`. Wrapper does `git pull → docker compose build
+   → up -d → poll healthz for up to 60s`.
 
 If any step fails, Telegram alert goes to `OWNER_TELEGRAM_ID` from
-`@aibzapleo_bot`.
+`@aibzapleo_bot`. A separate `docs-check.yml` workflow runs the docs gate
+on every push (including feature branches) so PRs see the verdict early.
 
 ## Restricted SSH key
 

@@ -11,6 +11,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ─── 1. Docs gate ────────────────────────────────────────────────────────
+  # Deploy is blocked if code under src|infra|services|monitor changed
+  # without /docs being updated. Opt-out per commit: `docs-not-needed`.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify /docs updated alongside code
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "$HEAD")"
+          fi
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "changed files:"; echo "$CHANGED"
+
+          if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -qiF "docs-not-needed"; then
+            echo "::notice::'docs-not-needed' marker found, skipping docs gate"
+            exit 0
+          fi
+
+          CODE="$(echo "$CHANGED" | grep -E '^(src|infra|services|monitor)/' || true)"
+          DOCS="$(echo "$CHANGED" | grep -E '^docs/' || true)"
+          if [ -n "$CODE" ] && [ -z "$DOCS" ]; then
+            echo "::error::Code changed in src|infra|services|monitor but /docs was not updated."
+            echo "Update the relevant doc OR add 'docs-not-needed' to a commit message."
+            exit 1
+          fi
+          echo "docs gate passed"
+
+  # ─── 2. Test gate ────────────────────────────────────────────────────────
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -33,11 +71,13 @@ jobs:
         run: |
           export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
           # Coverage gate stair-step. Raise as we add tests; never drop.
-          # 2026-06-24: 18 → 20 → 23 → 27 → 30 → 50 → 55 (99 passed, dashboard+vending+admin route tests)
-          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=55
+          # 2026-06-24: 18 → 20 → 23 → 27 → 30 → 50 → 55 → 58 (108 passed, after monitor)
+          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=58
 
+  # ─── 3. Deploy ───────────────────────────────────────────────────────────
+  # Hard-gated: both docs AND tests must pass.
   deploy:
-    needs: test
+    needs: [docs, test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
