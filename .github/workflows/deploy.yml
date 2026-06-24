@@ -71,8 +71,8 @@ jobs:
         run: |
           export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
           # Coverage gate stair-step. Raise as we add tests; never drop.
-          # 2026-06-24: 18 → 20 → 23 → 27 → 30 → 50 → 55 → 58 (108 passed, after monitor)
-          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=58
+          # 2026-06-24: 18 → 20 → 23 → 27 → 30 → 50 → 55 → 58 → 62 (129 passed, +proxy +landing)
+          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=62
 
   # ─── 3. Deploy ───────────────────────────────────────────────────────────
   # Hard-gated: both docs AND tests must pass.
