@@ -34,15 +34,17 @@ async def test_audit_silently_ignores_failures(monkeypatch):
         await audit(actor="x", action="y")
 
 
-def test_state_file_path_is_safe():
+def test_state_file_path_is_safe(monkeypatch, tmp_path):
     """state_file sanitizes key strings — no path traversal."""
+    monkeypatch.setattr("aibroker.telemetry.notifier.STATE_DIR", tmp_path)
     p = _state_file("../../../etc/passwd")
-    # Result should not break out of STATE_DIR
-    assert "etc" not in str(p.parent)
-    assert "passwd" in p.name or "_" in p.name
+    # Result should not break out of STATE_DIR — stays inside tmp_path
+    assert str(tmp_path) in str(p)
+    assert "/etc/" not in str(p)
 
 
-def test_state_file_keeps_alphanumeric():
+def test_state_file_keeps_alphanumeric(monkeypatch, tmp_path):
+    monkeypatch.setattr("aibroker.telemetry.notifier.STATE_DIR", tmp_path)
     p = _state_file("key_abc-123")
     assert "key_abc-123" in p.name
 
