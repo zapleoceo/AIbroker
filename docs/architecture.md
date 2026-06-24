@@ -58,6 +58,30 @@ broker doesn't know the wire format (e.g. weird custom auth flows).
      daily_used / cost counters in the same TX.
 5. Walks to next provider in chain on failure. Returns 503 if all exhausted.
 
+## Dashboard
+
+`/dashboard` (Telegram-login or `X-Admin-Key`) renders single-page HTML:
+
+- KPI cards: spend today vs global cap, calls 1h, project count, key count.
+- Provider summary line (alive / dead / total per provider).
+- Projects table — `id, name, scopes, active, daily cap, key prefix,
+  actions`. Each row has inline **edit** that swaps the row for a form
+  with `name`, `allowed_scopes` (csv), `daily_cost_cap_usd`,
+  `owner_email`.
+- API keys table — `id, provider, label, tier, status, used, $/cap, errs,
+  actions`. The `$/cap` cell shows `used / cap` with a coloured progress
+  bar (blue < 70 % → yellow < 90 % → red). Inline **edit** form lets
+  the operator rename the key, change tier/scope/cap, and optionally
+  rotate the token in one shot. Old buttons (enable/disable/delete)
+  stay.
+- All table headers are clickable for client-side sort (asc → desc → asc).
+  Each cell uses `data-sort` for the canonical comparable value, so
+  monetary or status text doesn't break ordering.
+
+All form posts go through `require_owner_session`; an unauth POST returns
+401. Every mutation writes an `audit_log` row through
+`telemetry.audit()`.
+
 ## Scaling story
 
 - API is stateless — all state in Postgres. Add replicas behind a load

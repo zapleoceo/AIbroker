@@ -139,6 +139,24 @@ legend {{ color:#aaa; padding:0 8px; font-size:12px; }}
 .row-form input, .row-form select {{ min-width:120px; }}
 .provider {{ display:inline-block; margin:4px 6px 4px 0; padding:5px 10px;
              background:#1a1d24; border:1px solid #2a2d34; border-radius:6px; font-size:12px; }}
+/* Sortable headers */
+th.sortable {{ cursor:pointer; user-select:none; position:relative; padding-right:18px; }}
+th.sortable:hover {{ color:#e4e6eb; background:#13161c; }}
+th.sortable::after {{ content:"↕"; position:absolute; right:6px; opacity:.3; font-size:10px; }}
+th.sortable.asc::after  {{ content:"↑"; opacity:1; color:#4dabf7; }}
+th.sortable.desc::after {{ content:"↓"; opacity:1; color:#4dabf7; }}
+/* Inline edit row */
+tr.editing td {{ background:#13161c; }}
+tr.edit-row {{ display:none; }}
+tr.edit-row.active {{ display:table-row; background:#13161c; }}
+tr.edit-row td {{ padding:14px 12px; }}
+tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
+/* Cap bar */
+.cap-bar {{ display:inline-block; width:80px; height:6px; background:#0f1115;
+            border-radius:3px; vertical-align:middle; margin-left:6px; overflow:hidden; }}
+.cap-bar .fill {{ display:block; height:100%; background:#4dabf7; }}
+.cap-bar .fill.warn {{ background:#ffd84a; }}
+.cap-bar .fill.bad  {{ background:#f44336; }}
 </style></head><body>
 
 <nav>
@@ -155,6 +173,65 @@ legend {{ color:#aaa; padding:0 8px; font-size:12px; }}
 {('<div class="flash err">' + esc(flash[1:]) + '</div>') if flash.startswith('!') else ''}
 
 {body}
+
+<script>
+// Click-to-sort tables. <th class="sortable" data-type="num|text|date"> opt-in.
+(function() {{
+  function cellValue(tr, idx, kind) {{
+    const td = tr.children[idx];
+    const raw = (td.dataset.sort !== undefined) ? td.dataset.sort : td.textContent.trim();
+    if (kind === "num") return parseFloat(raw.replace(/[$,]/g,"")) || 0;
+    return raw.toLowerCase();
+  }}
+  document.querySelectorAll("th.sortable").forEach((th, idx) => {{
+    const colIdx = Array.from(th.parentNode.children).indexOf(th);
+    th.addEventListener("click", () => {{
+      const table = th.closest("table");
+      const tbody = table.tBodies[0];
+      // Only sort .data-row tbody rows (skip inline edit-row)
+      const rows = Array.from(tbody.querySelectorAll("tr.data-row"));
+      const kind = th.dataset.type || "text";
+      const asc = !th.classList.contains("asc");
+      table.querySelectorAll("th.sortable").forEach(o => o.classList.remove("asc","desc"));
+      th.classList.add(asc ? "asc" : "desc");
+      rows.sort((a, b) => {{
+        const va = cellValue(a, colIdx, kind);
+        const vb = cellValue(b, colIdx, kind);
+        if (va < vb) return asc ? -1 : 1;
+        if (va > vb) return asc ?  1 : -1;
+        return 0;
+      }});
+      rows.forEach(r => {{
+        // Move data row + its edit-row partner together
+        const partner = tbody.querySelector('tr.edit-row[data-edit-for="' + r.dataset.rowId + '"]');
+        tbody.appendChild(r);
+        if (partner) tbody.appendChild(partner);
+      }});
+    }});
+  }});
+
+  // Inline edit toggle
+  document.querySelectorAll("button[data-edit-toggle]").forEach(btn => {{
+    btn.addEventListener("click", () => {{
+      const id = btn.dataset.editToggle;
+      const editRow = document.querySelector('tr.edit-row[data-edit-for="' + id + '"]');
+      const dataRow = document.querySelector('tr.data-row[data-row-id="' + id + '"]');
+      if (!editRow) return;
+      const wasActive = editRow.classList.contains("active");
+      // Close any other open editors first
+      document.querySelectorAll("tr.edit-row.active").forEach(r => {{
+        r.classList.remove("active");
+        const peer = document.querySelector('tr.data-row[data-row-id="' + r.dataset.editFor + '"]');
+        if (peer) peer.classList.remove("editing");
+      }});
+      if (!wasActive) {{
+        editRow.classList.add("active");
+        dataRow.classList.add("editing");
+      }}
+    }});
+  }});
+}})();
+</script>
 
 </body></html>"""
 
@@ -221,40 +298,107 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'(not retrievable later):<br><code>{esc(new_project_key)}</code></div>'
         )
 
-    rows_projects = "".join(
-        f"<tr><td>{p.id}</td><td>{esc(p.name)}</td>"
-        f"<td><span class='pill'>{', '.join(esc(s) for s in p.allowed_scopes)}</span></td>"
-        f"<td>{'<span class=ok>✓</span>' if p.is_active else '<span class=bad>✗</span>'}</td>"
-        f"<td>{p.daily_cost_cap_usd if p.daily_cost_cap_usd is not None else '—'}</td>"
-        f"<td><code>{esc(p.project_key_prefix)}…</code></td></tr>"
-        for p in data["projects"]
-    )
+    rows_projects = ""
+    for p in data["projects"]:
+        scopes_csv = ",".join(p.allowed_scopes)
+        cap_val = p.daily_cost_cap_usd if p.daily_cost_cap_usd is not None else ""
+        cap_disp = f"${p.daily_cost_cap_usd:.2f}" if p.daily_cost_cap_usd is not None else "—"
+        active_cell = "✓" if p.is_active else "✗"
+        active_class = "ok" if p.is_active else "bad"
+        rows_projects += (
+            f'<tr class="data-row" data-row-id="p{p.id}">'
+            f'<td data-sort="{p.id}">{p.id}</td>'
+            f'<td>{esc(p.name)}</td>'
+            f"<td><span class='pill'>{esc(scopes_csv)}</span></td>"
+            f"<td class='{active_class}'>{active_cell}</td>"
+            f"<td data-sort=\"{p.daily_cost_cap_usd or 0}\">{cap_disp}</td>"
+            f"<td><code>{esc(p.project_key_prefix)}…</code></td>"
+            f'<td><button type="button" data-edit-toggle="p{p.id}">edit</button></td>'
+            f"</tr>"
+            # ── inline edit form row ──
+            f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="7">'
+            f'<form method="post" action="/dashboard/projects/{p.id}/edit" class="row-form">'
+            f'<input name="name" value="{esc(p.name)}" required>'
+            f'<input name="allowed_scopes" value="{esc(scopes_csv)}" style="min-width:240px">'
+            f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
+            f'placeholder="cap (blank = none)" value="{cap_val}">'
+            f'<input name="owner_email" value="{esc(p.owner_email or "")}" placeholder="owner email">'
+            f'<button type="submit">save</button>'
+            f'<button type="button" data-edit-toggle="p{p.id}">cancel</button>'
+            f'</form></td></tr>'
+        )
 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows_keys = ""
     for k in data["keys"]:
         in_cd = k.cooldown_until and k.cooldown_until > now
-        status = (
-            '<span class="ok">alive</span>' if (k.is_alive and not in_cd)
-            else '<span class="warn">cooldown</span>' if in_cd
-            else '<span class="bad">dead</span>'
+        status_label = (
+            "alive" if (k.is_alive and not in_cd)
+            else "cooldown" if in_cd
+            else "dead"
         )
-        cap = (f"${k.daily_cost_used_usd:.4f}/${k.daily_cost_cap_usd}"
-               if k.daily_cost_cap_usd else f"${k.daily_cost_used_usd:.4f}")
+        status_class = {"alive": "ok", "cooldown": "warn", "dead": "bad"}[status_label]
+        status_html = f'<span class="{status_class}">{status_label}</span>'
+
+        used = float(k.daily_cost_used_usd or 0)
+        cap_v = k.daily_cost_cap_usd
+        if cap_v:
+            pct = min(100, int(used / float(cap_v) * 100)) if cap_v else 0
+            bar_cls = "fill bad" if pct >= 90 else "fill warn" if pct >= 70 else "fill"
+            cap_html = (
+                f"<span class='mono'>${used:.4f} / ${cap_v:.2f}</span>"
+                f"<span class='cap-bar'><span class='{bar_cls}' "
+                f"style='width:{pct}%'></span></span>"
+            )
+            cap_sort = float(cap_v)
+        else:
+            cap_html = f"<span class='mono'>${used:.4f}</span>"
+            cap_sort = 0.0
+
+        cap_input_val = f"{cap_v:.2f}" if cap_v is not None else ""
+        scope_now = (k.scopes[0] if k.scopes else "llm:chat")
+        scope_options = "".join(
+            f'<option value="{s}"{" selected" if s == scope_now else ""}>{s}</option>'
+            for s in ("llm:chat", "llm:embed", "llm:vision")
+        )
+        tier_options = "".join(
+            f'<option value="{t}"{" selected" if t == k.tier else ""}>{t}</option>'
+            for t in ("free", "paid", "trial")
+        )
+
         rows_keys += (
-            f"<tr><td>{k.id}</td><td>{esc(k.provider)}</td><td>{esc(k.label)}</td>"
-            f"<td><span class='pill'>{esc(k.tier)}</span></td>"
-            f"<td>{status}</td><td>{k.daily_used}</td><td class='mono'>{cap}</td>"
-            f"<td>{k.error_count}</td>"
+            f'<tr class="data-row" data-row-id="k{k.id}">'
+            f'<td data-sort="{k.id}">{k.id}</td>'
+            f"<td>{esc(k.provider)}</td>"
+            f"<td>{esc(k.label)}</td>"
+            f"<td data-sort='{esc(k.tier)}'><span class='pill'>{esc(k.tier)}</span></td>"
+            f"<td data-sort='{status_label}'>{status_html}</td>"
+            f"<td data-sort='{k.daily_used}'>{k.daily_used}</td>"
+            f"<td data-sort='{cap_sort}'>{cap_html}</td>"
+            f"<td data-sort='{k.error_count}'>{k.error_count}</td>"
             f"<td>"
-            f'  <form class="inline" method="post" action="/dashboard/keys/{k.id}/disable">'
-            f'    <button type="submit">{"enable" if not k.is_active else "disable"}</button>'
-            f'  </form> '
-            f'  <form class="inline" method="post" action="/dashboard/keys/{k.id}/delete"'
-            f'        onsubmit="return confirm(\'Delete {esc(k.provider)}/{esc(k.label)}?\')">'
-            f'    <button class="danger" type="submit">delete</button>'
-            f'  </form>'
+            f'<button type="button" data-edit-toggle="k{k.id}">edit</button> '
+            f'<form class="inline" method="post" action="/dashboard/keys/{k.id}/disable">'
+            f'<button type="submit">{"enable" if not k.is_active else "disable"}</button>'
+            f'</form> '
+            f'<form class="inline" method="post" action="/dashboard/keys/{k.id}/delete"'
+            f' onsubmit="return confirm(\'Delete {esc(k.provider)}/{esc(k.label)}?\')">'
+            f'<button class="danger" type="submit">del</button>'
+            f'</form>'
             f"</td></tr>"
+            # ── inline edit form row ──
+            f'<tr class="edit-row" data-edit-for="k{k.id}"><td colspan="9">'
+            f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
+            f'<input name="label" value="{esc(k.label)}" required>'
+            f'<select name="tier">{tier_options}</select>'
+            f'<select name="scope">{scope_options}</select>'
+            f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
+            f'placeholder="cap (blank = none)" value="{cap_input_val}">'
+            f'<input name="token" type="password" placeholder="new token (leave blank to keep)" '
+            f'style="min-width:240px">'
+            f'<button type="submit">save</button>'
+            f'<button type="button" data-edit-toggle="k{k.id}">cancel</button>'
+            f'</form></td></tr>'
         )
 
     add_key_form = """
@@ -299,13 +443,28 @@ def _render(data: dict[str, Any], *, flash: str = "",
 
     <h2>Projects</h2>
     {add_project_form}
-    <table><thead><tr><th>id</th><th>name</th><th>scopes</th><th>act</th>
-    <th>daily cap</th><th>key prefix</th></tr></thead><tbody>{rows_projects}</tbody></table>
+    <table><thead><tr>
+      <th class="sortable" data-type="num">id</th>
+      <th class="sortable">name</th>
+      <th class="sortable">scopes</th>
+      <th class="sortable">act</th>
+      <th class="sortable" data-type="num">daily cap</th>
+      <th class="sortable">key prefix</th>
+      <th>actions</th>
+    </tr></thead><tbody>{rows_projects}</tbody></table>
 
     <h2>API keys</h2>
     {add_key_form}
-    <table><thead><tr><th>id</th><th>provider</th><th>label</th><th>tier</th>
-    <th>status</th><th>used</th><th>$/cap</th><th>errs</th><th>actions</th>
+    <table><thead><tr>
+      <th class="sortable" data-type="num">id</th>
+      <th class="sortable">provider</th>
+      <th class="sortable">label</th>
+      <th class="sortable">tier</th>
+      <th class="sortable">status</th>
+      <th class="sortable" data-type="num">used</th>
+      <th class="sortable" data-type="num">$/cap</th>
+      <th class="sortable" data-type="num">errs</th>
+      <th>actions</th>
     </tr></thead><tbody>{rows_keys}</tbody></table>
     """
     return HTMLResponse(_dash_html(body=body, flash=flash))
@@ -402,6 +561,71 @@ async def dash_delete_key(
     await audit(actor="dashboard", action="key.delete", target=target, ip=_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{target}+deleted", status_code=303
+    )
+
+
+@router.post("/dashboard/keys/{key_id}/edit")
+async def dash_edit_key(
+    key_id: int,
+    request: Request,
+    label: str = Form(...),
+    tier: str = Form("free"),
+    scope: str = Form("llm:chat"),
+    daily_cost_cap_usd: str = Form(""),
+    token: str = Form(""),
+    _: OwnerSession = Depends(require_owner_session),
+) -> RedirectResponse:
+    if tier not in ("free", "paid", "trial"):
+        return RedirectResponse("/dashboard?flash=!Bad+tier", status_code=303)
+    if scope not in ("llm:chat", "llm:embed", "llm:vision"):
+        return RedirectResponse("/dashboard?flash=!Bad+scope", status_code=303)
+    cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, key_id)
+        if not row:
+            return RedirectResponse("/dashboard?flash=!Key+not+found", status_code=303)
+        row.label = label
+        row.tier = tier
+        row.scopes = [scope]
+        row.daily_cost_cap_usd = cap_v
+        if token.strip():
+            row.token_encrypted = encrypt(token.strip())
+        target = f"{row.provider}/{row.label}"
+    await audit(actor="dashboard", action="key.edit", target=target,
+                metadata={"tier": tier, "scope": scope, "cap": cap_v,
+                          "token_rotated": bool(token.strip())},
+                ip=_ip(request))
+    return RedirectResponse(
+        f"/dashboard?flash=Key+{target}+updated", status_code=303
+    )
+
+
+@router.post("/dashboard/projects/{project_id}/edit")
+async def dash_edit_project(
+    project_id: int,
+    request: Request,
+    name: str = Form(...),
+    allowed_scopes: str = Form(""),
+    daily_cost_cap_usd: str = Form(""),
+    owner_email: str = Form(""),
+    _: OwnerSession = Depends(require_owner_session),
+) -> RedirectResponse:
+    scopes = [x.strip() for x in allowed_scopes.split(",") if x.strip()]
+    if not scopes:
+        return RedirectResponse("/dashboard?flash=!Need+at+least+one+scope", status_code=303)
+    cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    async with get_session() as s:
+        row = await s.get(ProjectRow, project_id)
+        if not row:
+            return RedirectResponse("/dashboard?flash=!Project+not+found", status_code=303)
+        row.name = name
+        row.allowed_scopes = scopes
+        row.daily_cost_cap_usd = cap_v
+        row.owner_email = owner_email or None
+    await audit(actor="dashboard", action="project.edit", target=name,
+                metadata={"scopes": scopes, "cap": cap_v}, ip=_ip(request))
+    return RedirectResponse(
+        f"/dashboard?flash=Project+{name}+updated", status_code=303
     )
 
 

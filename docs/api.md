@@ -54,8 +54,12 @@ See [routing.md](./routing.md) for the chain per capability.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/dashboard` | Inventory, spend today, calls 1h, inline forms |
-| `POST` | `/dashboard/keys/create` | HTML form handler |
+| `GET` | `/dashboard` | Inventory, spend today, calls 1h, sortable tables, inline edit |
+| `POST` | `/dashboard/keys/create` | HTML form: add or upsert key |
+| `POST` | `/dashboard/keys/{id}/edit` | HTML form: rename, change tier/scope/cap, rotate token |
 | `POST` | `/dashboard/keys/{id}/disable` | Toggle active |
+| `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
+| `POST` | `/dashboard/projects/create` | HTML form handler |
+| `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
 | `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
 | `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |

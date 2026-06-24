@@ -129,3 +129,79 @@ def test_dashboard_create_project_form_requires_auth():
         follow_redirects=False,
     )
     assert r.status_code == 401
+
+
+# ─── Edit form handlers (auth + validation) ────────────────────────────────
+
+
+def test_dashboard_edit_key_requires_auth():
+    r = client.post(
+        "/dashboard/keys/42/edit",
+        data={"label": "x", "tier": "free", "scope": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 401
+
+
+def test_dashboard_edit_project_requires_auth():
+    r = client.post(
+        "/dashboard/projects/42/edit",
+        data={"name": "x", "allowed_scopes": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 401
+
+
+def test_dashboard_edit_key_with_session_rejects_bad_tier():
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"label": "x", "tier": "lifetime", "scope": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Bad+tier" in r.headers["location"]
+
+
+def test_dashboard_edit_key_with_session_rejects_bad_scope():
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"label": "x", "tier": "free", "scope": "admin:write"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Bad+scope" in r.headers["location"]
+
+
+def test_dashboard_edit_key_404_when_missing():
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"label": "x", "tier": "free", "scope": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Key+not+found" in r.headers["location"]
+
+
+def test_dashboard_edit_project_rejects_empty_scopes():
+    r = client.post(
+        "/dashboard/projects/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"name": "x", "allowed_scopes": "   ,  ,"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Need+at+least+one+scope" in r.headers["location"]
+
+
+def test_dashboard_edit_project_404_when_missing():
+    r = client.post(
+        "/dashboard/projects/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"name": "x", "allowed_scopes": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Project+not+found" in r.headers["location"]
