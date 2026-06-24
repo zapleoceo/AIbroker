@@ -37,6 +37,15 @@ def test_login_page_shows_error_param():
     assert "Bad" in r.text and "sig" in r.text
 
 
+def test_login_page_has_lang_toggle():
+    r = client.get("/login")
+    assert 'data-lang="en"' in r.text
+    assert 'data-lang="ru"' in r.text
+    assert "Войти через Telegram" in r.text  # RU embedded
+    assert "Sign in with Telegram" in r.text  # EN embedded
+    assert "localStorage" in r.text
+
+
 # ─── TG widget callback ─────────────────────────────────────────────────────
 
 

@@ -82,6 +82,20 @@ All form posts go through `require_owner_session`; an unauth POST returns
 401. Every mutation writes an `audit_log` row through
 `telemetry.audit()`.
 
+### Bilingual UI (EN/RU)
+
+The login page and the dashboard both ship every visible label in both
+languages. EN is the default on first paint; an `EN/RU` toggle in the
+top-right swaps `textContent` from `data-en` / `data-ru` attributes on
+elements marked with `data-i18n`. Input placeholders use a parallel
+`data-en-placeholder` / `data-ru-placeholder` pair. The choice is
+persisted in `localStorage` under `aib_lang`; `?lang=ru` or `?lang=en`
+in the URL takes precedence on the next paint (handy for sharing).
+
+The toggle is pure client-side — no server round-trip. Adding a new
+label means writing `data-i18n data-en="..." data-ru="..."` next to
+the source string; no template engine, no .po files.
+
 ## Scaling story
 
 - API is stateless — all state in Postgres. Add replicas behind a load

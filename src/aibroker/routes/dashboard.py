@@ -34,14 +34,28 @@ _LOGIN_HTML = """<!doctype html><html><head>
   body {{ font-family:-apple-system, sans-serif; background:#0f1115; color:#e4e6eb;
          display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }}
   .box {{ background:#1a1d24; padding:48px 40px; border-radius:14px; max-width:420px;
-          text-align:center; border:1px solid #2a2d34; }}
+          text-align:center; border:1px solid #2a2d34; position:relative; }}
   h1 {{ font-weight:500; font-size:28px; margin:0 0 8px; }}
   p {{ color:#888; margin:6px 0 24px; font-size:14px; }}
   .err {{ color:#f44336; margin-top:18px; font-size:13px; }}
+  .lang-toggle {{ position:absolute; top:14px; right:14px;
+                display:inline-flex; background:#0f1115; border:1px solid #2a2d34;
+                border-radius:6px; overflow:hidden;
+                font-family:ui-monospace,monospace; font-size:11px; }}
+  .lang-toggle button {{ background:none; border:none; color:#888;
+                       padding:5px 10px; cursor:pointer;
+                       font-family:ui-monospace,monospace; font-size:11px; }}
+  .lang-toggle button.active {{ background:rgba(77,171,247,.12); color:#4dabf7; }}
 </style></head><body>
 <div class="box">
+  <span class="lang-toggle">
+    <button type="button" data-lang="en" class="active">EN</button>
+    <button type="button" data-lang="ru">RU</button>
+  </span>
   <h1>AIbroker</h1>
-  <p>Sign in with Telegram to administer</p>
+  <p data-i18n
+     data-en="Sign in with Telegram to administer"
+     data-ru="Войти через Telegram, чтобы администрировать">Sign in with Telegram to administer</p>
   <script async src="https://telegram.org/js/telegram-widget.js?22"
           data-telegram-login="__BOT__"
           data-size="large"
@@ -50,6 +64,32 @@ _LOGIN_HTML = """<!doctype html><html><head>
           data-request-access="write"></script>
   __ERR__
 </div>
+<script>
+(function() {{
+  const KEY = "aib_lang";
+  const params = new URLSearchParams(location.search);
+  const fromQuery = params.get("lang");
+  const fromStore = localStorage.getItem(KEY);
+  let lang = (fromQuery === "ru" || fromQuery === "en") ? fromQuery
+            : (fromStore === "ru" || fromStore === "en") ? fromStore
+            : "en";
+  function apply(l) {{
+    document.documentElement.lang = l;
+    document.querySelectorAll("[data-i18n]").forEach(el => {{
+      const txt = el.getAttribute("data-" + l);
+      if (txt !== null) el.textContent = txt;
+    }});
+    document.querySelectorAll(".lang-toggle button").forEach(b => {{
+      b.classList.toggle("active", b.dataset.lang === l);
+    }});
+    localStorage.setItem(KEY, l);
+  }}
+  document.querySelectorAll(".lang-toggle button").forEach(b => {{
+    b.addEventListener("click", () => apply(b.dataset.lang));
+  }});
+  apply(lang);
+}})();
+</script>
 </body></html>"""
 
 
@@ -157,15 +197,28 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 .cap-bar .fill {{ display:block; height:100%; background:#4dabf7; }}
 .cap-bar .fill.warn {{ background:#ffd84a; }}
 .cap-bar .fill.bad  {{ background:#f44336; }}
+/* Lang toggle */
+.lang-toggle {{ display:inline-flex; background:#1a1d24; border:1px solid #2a2d34;
+              border-radius:6px; overflow:hidden; font-family:ui-monospace,monospace;
+              font-size:11px; margin-right:10px; vertical-align:middle; }}
+.lang-toggle button {{ background:none; border:none; color:#888;
+              padding:5px 10px; cursor:pointer; font-family:ui-monospace,monospace;
+              font-size:11px; }}
+.lang-toggle button.active {{ background:rgba(77,171,247,.12); color:#4dabf7; }}
+[data-i18n].lang-hidden {{ display:none !important; }}
 </style></head><body>
 
 <nav>
   <h1>AIbroker</h1>
   <span class="pill">v0.1.0</span>
   <span class="right">
+    <span class="lang-toggle">
+      <button type="button" data-lang="en" class="active">EN</button>
+      <button type="button" data-lang="ru">RU</button>
+    </span>
     <a href="/v1/health">/v1/health</a>
     <a href="/docs">/docs</a>
-    <a href="/logout">logout</a>
+    <a href="/logout" data-i18n data-en="logout" data-ru="выйти">logout</a>
   </span>
 </nav>
 
@@ -174,6 +227,42 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 
 {body}
 
+<script>
+// Lang toggle — same pattern as landing page. Default EN, persisted in localStorage.
+(function() {{
+  const KEY = "aib_lang";
+  const params = new URLSearchParams(location.search);
+  const fromQuery = params.get("lang");
+  const fromStore = localStorage.getItem(KEY);
+  let lang = (fromQuery === "ru" || fromQuery === "en") ? fromQuery
+            : (fromStore === "ru" || fromStore === "en") ? fromStore
+            : "en";
+
+  function apply(l) {{
+    document.documentElement.lang = l;
+    document.querySelectorAll("[data-i18n]").forEach(el => {{
+      const txt = el.getAttribute("data-" + l);
+      if (txt !== null) el.textContent = txt;
+    }});
+    document.querySelectorAll("input[data-en], input[data-ru]").forEach(el => {{
+      const ph = el.getAttribute("data-" + l + "-placeholder");
+      if (ph !== null) el.placeholder = ph;
+    }});
+    document.querySelectorAll("[data-en-placeholder], [data-ru-placeholder]").forEach(el => {{
+      const ph = el.getAttribute("data-" + l + "-placeholder");
+      if (ph !== null) el.placeholder = ph;
+    }});
+    document.querySelectorAll(".lang-toggle button").forEach(b => {{
+      b.classList.toggle("active", b.dataset.lang === l);
+    }});
+    localStorage.setItem(KEY, l);
+  }}
+  document.querySelectorAll(".lang-toggle button").forEach(b => {{
+    b.addEventListener("click", () => apply(b.dataset.lang));
+  }});
+  apply(lang);
+}})();
+</script>
 <script>
 // Click-to-sort tables. <th class="sortable" data-type="num|text|date"> opt-in.
 (function() {{
@@ -274,15 +363,23 @@ def _render(data: dict[str, Any], *, flash: str = "",
 
     cards = f"""
     <div class="cards">
-      <div class="card"><div class="card-label">Spend today</div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Spend today" data-ru="Сегодня потрачено">Spend today</div>
         <div class="card-value">${data['spend_today']:.4f}</div>
-        <div class="card-sub">cap ${s.GLOBAL_DAILY_CAP_USD}</div></div>
-      <div class="card"><div class="card-label">Calls 1h</div>
-        <div class="card-value">{data['calls_1h']}</div></div>
-      <div class="card"><div class="card-label">Projects</div>
-        <div class="card-value">{len(data['projects'])}</div></div>
-      <div class="card"><div class="card-label">API keys</div>
-        <div class="card-value">{len(data['keys'])}</div></div>
+        <div class="card-sub"><span data-i18n data-en="cap" data-ru="лимит">cap</span> ${s.GLOBAL_DAILY_CAP_USD}</div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Calls 1h" data-ru="Вызовов за час">Calls 1h</div>
+        <div class="card-value">{data['calls_1h']}</div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Projects" data-ru="Проекты">Projects</div>
+        <div class="card-value">{len(data['projects'])}</div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="API keys" data-ru="API-ключи">API keys</div>
+        <div class="card-value">{len(data['keys'])}</div>
+      </div>
     </div>"""
 
     providers_html = "".join(
@@ -313,7 +410,8 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f"<td class='{active_class}'>{active_cell}</td>"
             f"<td data-sort=\"{p.daily_cost_cap_usd or 0}\">{cap_disp}</td>"
             f"<td><code>{esc(p.project_key_prefix)}…</code></td>"
-            f'<td><button type="button" data-edit-toggle="p{p.id}">edit</button></td>'
+            f'<td><button type="button" data-edit-toggle="p{p.id}" data-i18n '
+            f'data-en="edit" data-ru="ред.">edit</button></td>'
             f"</tr>"
             # ── inline edit form row ──
             f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="7">'
@@ -321,10 +419,17 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'<input name="name" value="{esc(p.name)}" required>'
             f'<input name="allowed_scopes" value="{esc(scopes_csv)}" style="min-width:240px">'
             f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
-            f'placeholder="cap (blank = none)" value="{cap_val}">'
-            f'<input name="owner_email" value="{esc(p.owner_email or "")}" placeholder="owner email">'
-            f'<button type="submit">save</button>'
-            f'<button type="button" data-edit-toggle="p{p.id}">cancel</button>'
+            f'value="{cap_val}" '
+            f'data-en-placeholder="cap (blank = none)" '
+            f'data-ru-placeholder="лимит (пусто = нет)" '
+            f'placeholder="cap (blank = none)">'
+            f'<input name="owner_email" value="{esc(p.owner_email or "")}" '
+            f'data-en-placeholder="owner email" '
+            f'data-ru-placeholder="email владельца" '
+            f'placeholder="owner email">'
+            f'<button type="submit" data-i18n data-en="save" data-ru="сохранить">save</button>'
+            f'<button type="button" data-edit-toggle="p{p.id}" data-i18n '
+            f'data-en="cancel" data-ru="отмена">cancel</button>'
             f'</form></td></tr>'
         )
 
@@ -338,7 +443,11 @@ def _render(data: dict[str, Any], *, flash: str = "",
             else "dead"
         )
         status_class = {"alive": "ok", "cooldown": "warn", "dead": "bad"}[status_label]
-        status_html = f'<span class="{status_class}">{status_label}</span>'
+        status_ru = {"alive": "жив", "cooldown": "пауза", "dead": "мёртв"}[status_label]
+        status_html = (
+            f'<span class="{status_class}" data-i18n '
+            f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
+        )
 
         used = float(k.daily_cost_used_usd or 0)
         cap_v = k.daily_cost_cap_usd
@@ -377,13 +486,21 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f"<td data-sort='{cap_sort}'>{cap_html}</td>"
             f"<td data-sort='{k.error_count}'>{k.error_count}</td>"
             f"<td>"
-            f'<button type="button" data-edit-toggle="k{k.id}">edit</button> '
+            f'<button type="button" data-edit-toggle="k{k.id}" '
+            f'data-i18n data-en="edit" data-ru="ред.">edit</button> '
             f'<form class="inline" method="post" action="/dashboard/keys/{k.id}/disable">'
-            f'<button type="submit">{"enable" if not k.is_active else "disable"}</button>'
+            f'<button type="submit" data-i18n '
+            + (
+                'data-en="enable" data-ru="вкл.">enable'
+                if not k.is_active else
+                'data-en="disable" data-ru="откл.">disable'
+            )
+            + "</button>"
             f'</form> '
             f'<form class="inline" method="post" action="/dashboard/keys/{k.id}/delete"'
             f' onsubmit="return confirm(\'Delete {esc(k.provider)}/{esc(k.label)}?\')">'
-            f'<button class="danger" type="submit">del</button>'
+            f'<button class="danger" type="submit" data-i18n '
+            f'data-en="del" data-ru="удал.">del</button>'
             f'</form>'
             f"</td></tr>"
             # ── inline edit form row ──
@@ -393,20 +510,35 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'<select name="tier">{tier_options}</select>'
             f'<select name="scope">{scope_options}</select>'
             f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
-            f'placeholder="cap (blank = none)" value="{cap_input_val}">'
-            f'<input name="token" type="password" placeholder="new token (leave blank to keep)" '
-            f'style="min-width:240px">'
-            f'<button type="submit">save</button>'
-            f'<button type="button" data-edit-toggle="k{k.id}">cancel</button>'
+            f'value="{cap_input_val}" '
+            f'data-en-placeholder="cap (blank = none)" '
+            f'data-ru-placeholder="лимит (пусто = нет)" '
+            f'placeholder="cap (blank = none)">'
+            f'<input name="token" type="password" style="min-width:240px" '
+            f'data-en-placeholder="new token (leave blank to keep)" '
+            f'data-ru-placeholder="новый токен (пусто = оставить)" '
+            f'placeholder="new token (leave blank to keep)">'
+            f'<button type="submit" data-i18n data-en="save" data-ru="сохранить">save</button>'
+            f'<button type="button" data-edit-toggle="k{k.id}" data-i18n '
+            f'data-en="cancel" data-ru="отмена">cancel</button>'
             f'</form></td></tr>'
         )
 
     add_key_form = """
-    <fieldset><legend>Add API key</legend>
+    <fieldset><legend data-i18n data-en="Add API key" data-ru="Добавить API-ключ">Add API key</legend>
       <form method="post" action="/dashboard/keys/create" class="row-form">
-        <input name="provider" placeholder="provider (cerebras, …)" required>
-        <input name="label" placeholder="label (demoniwwwe, …)" required>
-        <input name="token" type="password" placeholder="raw token" required style="min-width:280px">
+        <input name="provider" required
+               data-en-placeholder="provider (cerebras, …)"
+               data-ru-placeholder="провайдер (cerebras, …)"
+               placeholder="provider (cerebras, …)">
+        <input name="label" required
+               data-en-placeholder="label"
+               data-ru-placeholder="ярлык"
+               placeholder="label">
+        <input name="token" type="password" required style="min-width:280px"
+               data-en-placeholder="raw token"
+               data-ru-placeholder="токен"
+               placeholder="raw token">
         <select name="tier">
           <option value="free">free</option>
           <option value="paid">paid</option>
@@ -417,20 +549,34 @@ def _render(data: dict[str, Any], *, flash: str = "",
           <option value="llm:embed">llm:embed</option>
           <option value="llm:vision">llm:vision</option>
         </select>
-        <input name="daily_cost_cap_usd" type="number" step="0.01" placeholder="cap (optional)" style="min-width:130px">
-        <button type="submit">add</button>
+        <input name="daily_cost_cap_usd" type="number" step="0.01" style="min-width:130px"
+               data-en-placeholder="cap (optional)"
+               data-ru-placeholder="лимит (опц.)"
+               placeholder="cap (optional)">
+        <button type="submit" data-i18n data-en="add" data-ru="добавить">add</button>
       </form>
     </fieldset>"""
 
     add_project_form = """
-    <fieldset><legend>Add project</legend>
+    <fieldset><legend data-i18n data-en="Add project" data-ru="Добавить проект">Add project</legend>
       <form method="post" action="/dashboard/projects/create" class="row-form">
-        <input name="name" placeholder="name (lowercase, e.g. stepan)" required>
-        <input name="owner_email" placeholder="owner email">
-        <input name="allowed_scopes" value="llm:chat,llm:embed"
-               placeholder="scopes comma-sep" style="min-width:240px">
-        <input name="daily_cost_cap_usd" type="number" step="0.01" placeholder="cap (optional)">
-        <button type="submit">create</button>
+        <input name="name" required
+               data-en-placeholder="name (lowercase, e.g. stepan)"
+               data-ru-placeholder="имя (lowercase, напр. stepan)"
+               placeholder="name (lowercase, e.g. stepan)">
+        <input name="owner_email"
+               data-en-placeholder="owner email"
+               data-ru-placeholder="email владельца"
+               placeholder="owner email">
+        <input name="allowed_scopes" value="llm:chat,llm:embed" style="min-width:240px"
+               data-en-placeholder="scopes comma-sep"
+               data-ru-placeholder="права через запятую"
+               placeholder="scopes comma-sep">
+        <input name="daily_cost_cap_usd" type="number" step="0.01"
+               data-en-placeholder="cap (optional)"
+               data-ru-placeholder="лимит (опц.)"
+               placeholder="cap (optional)">
+        <button type="submit" data-i18n data-en="create" data-ru="создать">create</button>
       </form>
     </fieldset>"""
 
@@ -438,33 +584,33 @@ def _render(data: dict[str, Any], *, flash: str = "",
     {show_new_key}
     {cards}
 
-    <h2>Providers</h2>
+    <h2 data-i18n data-en="Providers" data-ru="Провайдеры">Providers</h2>
     <div>{providers_html or '<span class="provider">none</span>'}</div>
 
-    <h2>Projects</h2>
+    <h2 data-i18n data-en="Projects" data-ru="Проекты">Projects</h2>
     {add_project_form}
     <table><thead><tr>
-      <th class="sortable" data-type="num">id</th>
-      <th class="sortable">name</th>
-      <th class="sortable">scopes</th>
-      <th class="sortable">act</th>
-      <th class="sortable" data-type="num">daily cap</th>
-      <th class="sortable">key prefix</th>
-      <th>actions</th>
+      <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
+      <th class="sortable" data-i18n data-en="name" data-ru="имя">name</th>
+      <th class="sortable" data-i18n data-en="scopes" data-ru="права">scopes</th>
+      <th class="sortable" data-i18n data-en="act" data-ru="акт">act</th>
+      <th class="sortable" data-type="num" data-i18n data-en="daily cap" data-ru="суточный лимит">daily cap</th>
+      <th class="sortable" data-i18n data-en="key prefix" data-ru="префикс ключа">key prefix</th>
+      <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_projects}</tbody></table>
 
-    <h2>API keys</h2>
+    <h2 data-i18n data-en="API keys" data-ru="API-ключи">API keys</h2>
     {add_key_form}
     <table><thead><tr>
-      <th class="sortable" data-type="num">id</th>
-      <th class="sortable">provider</th>
-      <th class="sortable">label</th>
-      <th class="sortable">tier</th>
-      <th class="sortable">status</th>
-      <th class="sortable" data-type="num">used</th>
-      <th class="sortable" data-type="num">$/cap</th>
-      <th class="sortable" data-type="num">errs</th>
-      <th>actions</th>
+      <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
+      <th class="sortable" data-i18n data-en="provider" data-ru="провайдер">provider</th>
+      <th class="sortable" data-i18n data-en="label" data-ru="ярлык">label</th>
+      <th class="sortable" data-i18n data-en="tier" data-ru="тариф">tier</th>
+      <th class="sortable" data-i18n data-en="status" data-ru="статус">status</th>
+      <th class="sortable" data-type="num" data-i18n data-en="used" data-ru="исп.">used</th>
+      <th class="sortable" data-type="num" data-i18n data-en="$/cap" data-ru="$/лимит">$/cap</th>
+      <th class="sortable" data-type="num" data-i18n data-en="errs" data-ru="ошибки">errs</th>
+      <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_keys}</tbody></table>
     """
     return HTMLResponse(_dash_html(body=body, flash=flash))
