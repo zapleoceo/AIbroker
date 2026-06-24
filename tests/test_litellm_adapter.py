@@ -1,0 +1,239 @@
+"""providers/litellm_adapter — call_llm + embed wrappers (mocked LiteLLM)."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from aibroker.providers.litellm_adapter import (
+    DEFAULT_MODEL,
+    call_llm,
+    embed,
+    estimate_llm_cost,
+    model_for,
+)
+
+
+# ─── model_for ────────────────────────────────────────────────────────────
+
+
+def test_model_for_known_provider_capability():
+    assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
+    assert model_for("voyage", "embedding") == "voyage/voyage-3"
+    assert model_for("anthropic", "chat:smart") == "anthropic/claude-sonnet-4-6"
+
+
+def test_model_for_unknown_provider_returns_none():
+    assert model_for("nonexistent", "chat:fast") is None
+
+
+def test_model_for_unknown_capability_returns_none():
+    assert model_for("cerebras", "chat:nothing") is None
+
+
+def test_default_model_has_voyage_embedding():
+    assert "voyage" in DEFAULT_MODEL
+    assert "embedding" in DEFAULT_MODEL["voyage"]
+
+
+# ─── estimate_llm_cost ────────────────────────────────────────────────────
+
+
+def test_estimate_cost_returns_float():
+    """Real LiteLLM cost lookup for cerebras."""
+    cost = estimate_llm_cost("cerebras/gpt-oss-120b", 1000, 100)
+    assert isinstance(cost, float)
+    assert cost >= 0.0
+
+
+def test_estimate_cost_unknown_model_returns_zero():
+    cost = estimate_llm_cost("nonsense-model-xyz", 100, 50)
+    assert cost == 0.0
+
+
+# ─── call_llm — mocked LiteLLM ────────────────────────────────────────────
+
+
+async def test_call_llm_happy_path_object_response():
+    """Response shape: SimpleNamespace with .choices and .usage."""
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="hello dima"),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=fake_resp)):
+        text, meta = await call_llm(
+            model="cerebras/gpt-oss-120b",
+            messages=[{"role": "user", "content": "hi"}],
+            api_key="test-key",
+        )
+    assert text == "hello dima"
+    assert meta["tokens_in"] == 12
+    assert meta["tokens_out"] == 3
+    assert meta["model"] == "cerebras/gpt-oss-120b"
+    assert meta["finish_reason"] == "stop"
+    assert "latency_ms" in meta
+
+
+async def test_call_llm_dict_message_response():
+    """Some providers return choices[0].message as a dict."""
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message={"content": "from dict"},
+            finish_reason="stop",
+        )],
+        usage={"prompt_tokens": 5, "completion_tokens": 2},
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=fake_resp)):
+        text, meta = await call_llm(
+            model="x/y", messages=[{"role": "user", "content": "x"}],
+            api_key="k",
+        )
+    assert text == "from dict"
+    assert meta["tokens_in"] == 5
+
+
+async def test_call_llm_empty_choices():
+    fake_resp = SimpleNamespace(
+        choices=[], usage={"prompt_tokens": 1, "completion_tokens": 0},
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=fake_resp)):
+        text, meta = await call_llm(
+            model="x/y", messages=[{"role": "user", "content": "hi"}],
+            api_key="k",
+        )
+    assert text == ""
+    assert meta["finish_reason"] is None
+
+
+async def test_call_llm_passes_response_format_kwarg():
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="{}"),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="x/y", messages=[{"role": "user", "content": "x"}],
+            api_key="k",
+            response_format={"type": "json_object"},
+            max_tokens=512, temperature=0.3,
+        )
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["max_tokens"] == 512
+    assert captured["temperature"] == 0.3
+    assert captured["api_key"] == "k"
+
+
+async def test_call_llm_extra_kwargs_passed_through():
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="ok"),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="x/y", messages=[{"role": "user", "content": "x"}],
+            api_key="k",
+            extra={"top_p": 0.9, "seed": 42},
+        )
+    assert captured["top_p"] == 0.9
+    assert captured["seed"] == 42
+
+
+async def test_call_llm_missing_usage_safe():
+    """If usage is absent, tokens default to 0."""
+    fake_resp = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="x"),
+            finish_reason="stop",
+        )],
+        usage=None,
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=fake_resp)):
+        _, meta = await call_llm(
+            model="x/y", messages=[{"role": "user", "content": "x"}],
+            api_key="k",
+        )
+    assert meta["tokens_in"] == 0
+    assert meta["tokens_out"] == 0
+
+
+# ─── embed — mocked LiteLLM ───────────────────────────────────────────────
+
+
+async def test_embed_happy_path_dict_data():
+    fake_resp = SimpleNamespace(
+        data=[{"embedding": [0.1, 0.2, 0.3]}, {"embedding": [0.4, 0.5]}],
+        usage={"prompt_tokens": 5},
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+                AsyncMock(return_value=fake_resp)):
+        vectors, meta = await embed(
+            model="voyage/voyage-3",
+            texts=["hello", "world"],
+            api_key="k",
+        )
+    assert vectors == [[0.1, 0.2, 0.3], [0.4, 0.5]]
+    assert meta["tokens_in"] == 5
+    assert meta["tokens_out"] == 0
+    assert meta["model"] == "voyage/voyage-3"
+
+
+async def test_embed_happy_path_object_data():
+    fake_resp = SimpleNamespace(
+        data=[SimpleNamespace(embedding=[0.1, 0.2])],
+        usage=SimpleNamespace(prompt_tokens=3),
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+                AsyncMock(return_value=fake_resp)):
+        vectors, _ = await embed(
+            model="voyage/voyage-3", texts=["x"], api_key="k",
+        )
+    assert vectors == [[0.1, 0.2]]
+
+
+async def test_embed_falls_back_to_vector_key():
+    """Older LiteLLM versions used `vector` instead of `embedding`."""
+    fake_resp = SimpleNamespace(
+        data=[{"vector": [0.7, 0.8]}],
+        usage={"total_tokens": 2},
+    )
+    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+                AsyncMock(return_value=fake_resp)):
+        vectors, meta = await embed(
+            model="voyage/voyage-3", texts=["x"], api_key="k",
+        )
+    assert vectors == [[0.7, 0.8]]
+    assert meta["tokens_in"] == 2  # from total_tokens fallback
+
+
+async def test_embed_empty_data_returns_empty_vectors():
+    fake_resp = SimpleNamespace(data=[], usage={"prompt_tokens": 0})
+    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+                AsyncMock(return_value=fake_resp)):
+        vectors, _ = await embed(
+            model="voyage/voyage-3", texts=[], api_key="k",
+        )
+    assert vectors == []
