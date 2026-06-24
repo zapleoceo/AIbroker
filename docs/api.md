@@ -8,7 +8,7 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | HTML landing page with route links |
+| `GET` | `/` | Public bilingual (EN/RU) landing page — product overview |
 | `GET` | `/healthz` | `{ok: true, service, ts}` — liveness probe |
 | `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts |
 | `GET` | `/login` | Telegram Login Widget for `/dashboard` |

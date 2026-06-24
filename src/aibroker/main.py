@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
-from aibroker.routes import admin, dashboard, health, proxy, vending
+from aibroker.routes import admin, dashboard, health, landing, proxy, vending
 
 
 def _configure_logging() -> None:
@@ -45,6 +45,7 @@ app = FastAPI(
     redoc_url=None,  # Swagger UI at /docs is enough
 )
 
+app.include_router(landing.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
 app.include_router(vending.router, prefix="/v1")
