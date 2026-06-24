@@ -18,16 +18,25 @@ def test_chain_first_provider_is_known(capability):
     assert chain[0] in KNOWN_FREE | KNOWN_PAID
 
 
-@pytest.mark.parametrize("capability", ["chat:smart", "chat:code", "prefilter",
-                                          "structured"])
-def test_strict_free_first_for_non_fast(capability):
-    """Every capability except chat:fast must put all free before all paid."""
+@pytest.mark.parametrize("capability", ["prefilter", "structured"])
+def test_strict_free_first(capability):
+    """Strictly-free-first capabilities — no paid before any free."""
     chain = chain_for(capability)
     paid_idx = [i for i, p in enumerate(chain) if p in KNOWN_PAID]
     free_idx = [i for i, p in enumerate(chain) if p in KNOWN_FREE]
     if paid_idx and free_idx:
         assert max(free_idx) < min(paid_idx), (
             f"{capability}: free providers must precede all paid"
+        )
+
+
+@pytest.mark.parametrize("capability", ["chat:fast", "chat:smart", "chat:code"])
+def test_chat_first_3_are_free(capability):
+    """Documented invariant: chat:* chains always START with at least 3 free providers."""
+    chain = chain_for(capability)
+    for provider in chain[:3]:
+        assert provider in KNOWN_FREE, (
+            f"{capability}: first 3 must be free, got {provider}"
         )
 
 
