@@ -5,6 +5,7 @@ import os
 
 # Test-time defaults for env-driven settings (BEFORE any aibroker import).
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-prod")
+os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
 
 import pytest_asyncio  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
