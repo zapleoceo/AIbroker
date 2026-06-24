@@ -1,0 +1,53 @@
+name: docs-check
+
+# Blocks pushes that touch src/ or infra/ but don't update /docs.
+# Opt-out for pure refactors that don't change behavior:
+#   add "docs-not-needed" anywhere in the commit message.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docs-updated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for diff
+
+      - name: Verify /docs updated alongside code
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+          # first push on branch / missing before → compare with parent
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "$HEAD")"
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "== changed files =="; echo "$CHANGED"
+
+          if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -qiF "docs-not-needed"; then
+            echo "::notice::'docs-not-needed' found in commit message — skipping check."
+            exit 0
+          fi
+
+          CODE="$(echo "$CHANGED" | grep -E '^(src|infra|services|monitor)/' || true)"
+          DOCS="$(echo "$CHANGED" | grep -E '^docs/' || true)"
+
+          if [ -n "$CODE" ] && [ -z "$DOCS" ]; then
+            echo "::error::Code under src/ or infra/ changed but /docs was not updated."
+            echo "Update the relevant doc (docs/README.md lists them) OR add"
+            echo "'docs-not-needed' to a commit message if the change is purely cosmetic."
+            exit 1
+          fi
+          echo "✓ docs-check passed"
