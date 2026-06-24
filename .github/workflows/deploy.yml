@@ -27,11 +27,12 @@ jobs:
         run: ruff check src tests
       - name: Pytest
         env:
-          TOKEN_SECRET: ZmtNeUVQR1RaQVF1bFlBd2hLbFNFLW9PRGxKa0tlSVMtTjFJNTlhRkFLST0=
           ADMIN_KEY: admin_test_key_for_ci_only
           INTERNAL_SECRET: internal_test_secret
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-        run: PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=40
+        run: |
+          export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=40
 
   deploy:
     needs: test
