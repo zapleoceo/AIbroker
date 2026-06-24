@@ -68,6 +68,8 @@ jobs:
           ADMIN_KEY: admin_test_key_for_ci_only
           INTERNAL_SECRET: internal_test_secret
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          OWNER_TELEGRAM_ID: "169510539"
+          SESSION_SECRET: test-session-secret-not-for-prod
         run: |
           export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
           # Coverage gate stair-step. Raise as we add tests; never drop.
