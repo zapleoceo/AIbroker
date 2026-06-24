@@ -33,8 +33,8 @@ jobs:
         run: |
           export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
           # Coverage gate stair-step. Raise as we add tests; never drop.
-          # 2026-06-24: 18 → 20 → 23 → 27 → 30 (after telemetry tests, 62 passed)
-          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=30
+          # 2026-06-24: 18 → 20 → 23 → 27 → 30 → 50 (after routes/health tests, 67 passed)
+          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=50
 
   deploy:
     needs: test
