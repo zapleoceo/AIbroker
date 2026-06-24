@@ -122,7 +122,7 @@ async def test_chat_falls_back_on_cap_block():
     async def fake_check(api_key, project, estimated_cost):
         call_count["n"] += 1
         if call_count["n"] == 1:
-            raise CostGuardError("cap exceeded")
+            raise CostGuardError(scope="key", limit=5.0, used=4.9, attempted=0.2)
 
     fake_meta = {
         "model": "groq/llama", "tokens_in": 1, "tokens_out": 1,

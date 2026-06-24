@@ -15,10 +15,14 @@ ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 
 def test_landing_returns_html():
+    """Landing covered in detail in test_routes_landing.py; this is a smoke."""
     r = client.get("/")
     assert r.status_code == 200
     assert "AIbroker" in r.text
     assert "/docs" in r.text
+    # New bilingual landing markers
+    assert 'data-lang="en"' in r.text
+    assert 'data-lang="ru"' in r.text
 
 
 def test_healthz_returns_json():
