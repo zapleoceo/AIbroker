@@ -24,19 +24,27 @@ client = TestClient(app)
 # ─── Fixture: in-DB project + key (uses default test fixture's SQLite) ───
 
 
+_PID_COUNTER = [1000]
+
+
 async def _make_project(scopes: list[str]) -> tuple[str, int]:
-    """Insert a project, return (project_key_plain, project_id)."""
+    """Insert a project, return (project_key_plain, project_id).
+
+    Provides explicit id since SQLite BIGINT doesn't autoincrement.
+    """
     plain = generate_project_key()
+    _PID_COUNTER[0] += 1
+    pid = _PID_COUNTER[0]
     async with get_session() as s:
-        result = await s.execute(insert(ProjectRow).values(
-            name=f"proxy_test_{id(scopes)}",
+        await s.execute(insert(ProjectRow).values(
+            id=pid,
+            name=f"proxy_test_{pid}",
             project_key_hash=hash_project_key(plain),
             project_key_prefix=plain[:12],
             allowed_scopes=scopes,
             is_active=True,
             notes="",
-        ).returning(ProjectRow.id))
-        pid = result.scalar_one()
+        ))
     return plain, pid
 
 
