@@ -1,12 +1,17 @@
 """routes/health — public endpoints."""
 from __future__ import annotations
 
+import os
+
+import pytest
 from fastapi.testclient import TestClient
 
 from aibroker.main import app
 
 
 client = TestClient(app)
+
+ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 
 def test_landing_returns_html():
@@ -25,6 +30,10 @@ def test_healthz_returns_json():
     assert "ts" in data
 
 
+@pytest.mark.skipif(
+    ON_SQLITE,
+    reason="/v1/health uses Postgres-only now() and FILTER (...)",
+)
 def test_v1_health_returns_providers_array():
     r = client.get("/v1/health")
     assert r.status_code == 200
