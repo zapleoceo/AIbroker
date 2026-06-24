@@ -83,3 +83,4 @@ jobs:
                -d "parse_mode=HTML" \
                -d "text=⚠️ aibroker deploy failed%0A${RUN_URL}" \
                -o /dev/null || true
+
