@@ -53,7 +53,7 @@ def _fake_key():
     return ApiKeyRow(
         id=1, provider="cerebras", label="t",
         token_encrypted=encrypt("fake-token"),
-        tier="free", allowed_scopes=["llm:chat"],
+        tier="free", scopes=["llm:chat"],
         is_active=True, is_alive=True,
         error_count=0,
     )
