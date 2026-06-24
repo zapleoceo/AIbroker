@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import os
 
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+# Test-time defaults for env-driven settings (BEFORE any aibroker import).
+os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-prod")
 
-import aibroker.db.engine as engine_mod
-from aibroker.db.engine import Base
+import pytest_asyncio  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+
+import aibroker.db.engine as engine_mod  # noqa: E402
+from aibroker.db.engine import Base  # noqa: E402
 
 
 @pytest_asyncio.fixture(autouse=True)
