@@ -194,6 +194,35 @@ async def test_chat_auth_error_marks_key_dead():
     md.assert_awaited()
 
 
+async def test_chat_invalid_json_falls_through_to_next_provider():
+    """JSON request: a provider that returns unparseable JSON is skipped."""
+    plain, _ = await _make_project(["llm:chat"])
+    call_count = {"n": 0}
+
+    async def fake_call_llm(*a, **kw):
+        call_count["n"] += 1
+        meta = {"model": "x", "tokens_in": 1, "tokens_out": 1,
+                "cost_usd": 0.0, "latency_ms": 1}
+        if call_count["n"] == 1:
+            return ("{ broken json", meta)   # unparseable → skip
+        return ('{"ok": true}', meta)        # valid → win
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+        r = client.post(
+            "/v1/chat?capability=chat:fast",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "response_format": {"type": "json_object"}},
+        )
+    assert r.status_code == 200
+    assert r.json()["text"] == '{"ok": true}'
+    assert call_count["n"] >= 2  # first (broken JSON) was skipped
+
+
 # ─── /v1/embed ─────────────────────────────────────────────────────────────
 
 

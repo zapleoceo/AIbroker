@@ -94,6 +94,14 @@ async def call_llm(
     }
     if response_format:
         kwargs["response_format"] = response_format
+        # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat
+        # the whole budget and truncate the object mid-string. Disable thinking
+        # so the JSON fits (mirrors Stepan's thinkingBudget=0). Other providers
+        # ignore reasoning_effort=disable, so gate it to gemini.
+        if model.startswith("gemini/") and response_format.get("type") in (
+            "json_object", "json_schema"
+        ):
+            kwargs["reasoning_effort"] = "disable"
     if extra:
         kwargs.update(extra)
 

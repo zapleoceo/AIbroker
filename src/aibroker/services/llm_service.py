@@ -6,6 +6,7 @@ and walking to the next provider in the chain lives here.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,20 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     elif kind == "auth":
         await mark_dead(key.id)
     return kind
+
+
+def _wants_json(response_format: dict[str, Any] | None) -> bool:
+    return bool(response_format) and response_format.get("type") in (
+        "json_object", "json_schema"
+    )
+
+
+def _is_valid_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 @dataclass
@@ -109,6 +124,22 @@ async def run_chat(
             )
             log.warning("provider %s failed (%s): %s", provider, kind, e)
             continue
+
+        # Deterministic quality gate for JSON requests: if the provider returned
+        # unparseable JSON (e.g. gemini truncated, or deepseek went rogue), treat
+        # it as a failure and walk to the next provider. We still bill the tokens.
+        if _wants_json(response_format) and not _is_valid_json(text):
+            await record_usage(
+                api_key_id=key.id, project_id=project.id, lease_id=None,
+                provider=provider, model=use_model, capability=capability,
+                workflow=workflow, tokens_in=meta["tokens_in"],
+                tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+                latency_ms=meta["latency_ms"], status="error",
+                error_kind="InvalidJSON", http_status=200,
+            )
+            log.warning("provider %s returned unparseable JSON, trying next", provider)
+            continue
+
         await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model, capability=capability,

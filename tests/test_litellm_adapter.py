@@ -12,7 +12,6 @@ from aibroker.providers.litellm_adapter import (
     model_for,
 )
 
-
 # ─── model_for ────────────────────────────────────────────────────────────
 
 
@@ -135,6 +134,53 @@ async def test_call_llm_passes_response_format_kwarg():
     assert captured["max_tokens"] == 512
     assert captured["temperature"] == 0.3
     assert captured["api_key"] == "k"
+
+
+async def test_call_llm_disables_gemini_thinking_for_json():
+    """gemini + JSON → reasoning_effort=disable so thinking doesn't truncate."""
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"),
+                                     finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="gemini/gemini-2.5-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"},
+        )
+    assert captured.get("reasoning_effort") == "disable"
+
+
+async def test_call_llm_no_thinking_disable_for_non_gemini_or_non_json():
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"),
+                                     finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        # non-gemini + JSON → no reasoning_effort
+        await call_llm(model="cerebras/gpt-oss-120b",
+                       messages=[{"role": "user", "content": "x"}], api_key="k",
+                       response_format={"type": "json_object"})
+        assert "reasoning_effort" not in captured
+        captured.clear()
+        # gemini + no JSON → no reasoning_effort
+        await call_llm(model="gemini/gemini-2.5-flash",
+                       messages=[{"role": "user", "content": "x"}], api_key="k")
+    assert "reasoning_effort" not in captured
 
 
 async def test_call_llm_extra_kwargs_passed_through():
