@@ -408,7 +408,12 @@ def test_render_project_detail_handles_no_recent_calls():
 
 def test_render_project_detail_handles_empty_breakdowns():
     from aibroker.routes.dashboard import _render_project_detail
-    body = _render_project_detail(_fake_proj_detail(providers=[])).body.decode()
+    d = _fake_proj_detail()
+    d["by_provider"] = []
+    d["by_capability"] = []
+    d["by_model"] = []
+    d["by_status"] = []
+    body = _render_project_detail(d).body.decode()
     # Empty breakdown card falls back to the no-data line (bilingual)
     assert "(no data in this range)" in body
 
