@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from aibroker.routing.chains import CAPABILITY_CHAINS, chain_for
+from aibroker.routing.chains import (
+    CAPABILITY_CHAINS,
+    CAPABILITY_SCOPE,
+    chain_for,
+    is_known_capability,
+    scope_for,
+)
 
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
@@ -73,3 +79,48 @@ def test_chain_returns_copy():
     c1.append("hacked")
     c2 = chain_for("chat:fast")
     assert "hacked" not in c2
+
+
+# ─── chat:edit — Coach lane ──────────────────────────────────────────────────
+
+
+def test_chat_edit_is_json_reliable_only():
+    """Coach edit chain: gemini-first, anthropic fallback, never deepseek."""
+    chain = chain_for("chat:edit")
+    assert chain[0] == "gemini"
+    assert "deepseek" not in chain
+    assert "anthropic" in chain
+
+
+def test_chat_edit_uses_edit_scope():
+    assert scope_for("chat:edit") == "llm:edit"
+
+
+# ─── CAPABILITY_SCOPE — single source of truth ───────────────────────────────
+
+
+def test_every_capability_has_a_scope():
+    """No chain may exist without a declared scope (drift guard)."""
+    assert set(CAPABILITY_SCOPE) == set(CAPABILITY_CHAINS)
+
+
+@pytest.mark.parametrize("capability", list(CAPABILITY_CHAINS.keys()))
+def test_scope_for_known(capability):
+    assert scope_for(capability).startswith("llm:")
+
+
+def test_scope_for_unknown_raises():
+    with pytest.raises(ValueError, match="unknown capability"):
+        scope_for("nope")  # type: ignore[arg-type]
+
+
+def test_is_known_capability():
+    assert is_known_capability("chat:edit")
+    assert not is_known_capability("nope")
+
+
+def test_dead_providers_not_in_any_chain():
+    """sambanova/nvidia/mistral have no DEFAULT_MODEL — must not be routed to."""
+    for cap, chain in CAPABILITY_CHAINS.items():
+        for dead in ("sambanova", "nvidia", "mistral"):
+            assert dead not in chain, f"{dead} still routed in {cap}"
