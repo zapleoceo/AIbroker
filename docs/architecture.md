@@ -43,20 +43,41 @@ broker doesn't know the wire format (e.g. weird custom auth flows).
 
 ## Request flow (proxy mode)
 
+Routes are thin (`routes/proxy.py`): authenticate, gate scope, delegate to
+`services/llm_service`, shape the response. All orchestration lives in the
+service (SRP — no business logic in the route layer).
+
 1. Client sends `POST /v1/chat?capability=chat:fast` with `X-Project-Key`.
 2. `auth.require_project` looks up project by hashed key, attaches scopes.
-3. `routing.chains.chain_for("chat:fast")` returns ordered provider list.
-4. For each provider:
-   - `routing.selector.pick_and_reserve` does atomic `SELECT FOR UPDATE
-     SKIP LOCKED` over alive/in-cap keys, picks the LRU oldest, touches
+3. The route checks `is_known_capability` (else 400) and that the project holds
+   `scope_for(capability)` (else 403) — so `vision` needs `llm:vision`,
+   `chat:edit` needs `llm:edit`, not a blanket `llm:chat`.
+4. `services.llm_service.run_chat` walks `chain_for(capability)`. For each
+   provider:
+   - `selector.pick_and_reserve(provider, scope_for(capability))` does atomic
+     `SELECT … FOR UPDATE SKIP LOCKED`, ordering `is_reserve, last_used_at` so
+     reserved keys are picked last (the reserved-lane mechanism). Touches
      `last_used_at` in the same TX.
-   - `routing.cost_guard.check_caps` validates per-key + per-project +
-     global daily caps against the estimated cost (0 for free tier).
-   - `providers.litellm_adapter.call_llm` invokes LiteLLM.
-   - On `429` → set cooldown 5 min; on `401/403` → mark dead.
-   - On success → `selector.record_usage` writes usage_log + bumps
-     daily_used / cost counters in the same TX.
-5. Walks to next provider in chain on failure. Returns 503 if all exhausted.
+   - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
+   - `litellm_adapter.call_llm` invokes LiteLLM (gemini+JSON also gets
+     `reasoning_effort=disable` so thinking doesn't truncate the object).
+   - `classify_provider_error`: 429 → cooldown 5 min; 401/403 → mark dead.
+   - JSON quality gate: a JSON request whose body doesn't parse is billed but
+     treated as a failure → next provider.
+   - On success → `selector.record_usage` writes usage_log + bumps counters.
+5. Walks to the next provider on failure. Returns 503 if all exhausted. The
+   success response includes the chosen key's `key_label` for client-side
+   cost/usage display.
+
+## Tests & CI
+
+`.github/workflows/ci.yml` runs on every push/PR: a **unit** job on in-memory
+SQLite (the bulk), and an **integration** job against a real `postgres:16`
+service so the Postgres-only paths — selector, reserved-lane, vending, monitor,
+bootstrap — actually execute. `conftest` binds the engine to `DATABASE_URL`
+(NullPool on Postgres so the sync TestClient's event-loop portal doesn't collide
+with pooled asyncpg connections). The `deploy.yml` test gate keeps the coverage
+floor on master.
 
 ## Dashboard
 
