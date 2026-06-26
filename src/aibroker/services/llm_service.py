@@ -29,6 +29,9 @@ from aibroker.telemetry import audit
 log = logging.getLogger(__name__)
 
 _COOLDOWN = timedelta(minutes=5)
+# Free keys (esp. gemini) rate-limit constantly; try a few keys of a provider
+# before falling through to the next provider, like a direct client would.
+_MAX_KEYS_PER_PROVIDER = 5
 
 
 def classify_provider_error(exc: Exception) -> str:
@@ -91,68 +94,75 @@ async def run_chat(
     response_format: dict[str, Any] | None,
     workflow: str | None,
 ) -> ChatOutcome | None:
-    """Walk the capability chain; return the first provider that succeeds, else None."""
+    """Walk the capability chain; return the first provider that succeeds, else None.
+
+    Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
+    out a fresh LRU key each time and `_penalize` cools failed ones) before falling
+    through — so one rate-limited free key doesn't sink the whole request.
+    """
     scope = scope_for(capability)
     for provider in chain_for(capability):
-        key = await pick_and_reserve(provider, scope=scope)
-        if key is None:
-            continue
-        try:
-            await check_caps(api_key=key, project=project, estimated_cost=0.0)
-        except CostGuardError as e:
-            await audit(actor=f"project:{project.name}", action="cap_block",
-                        target=f"provider={provider}", metadata={"reason": str(e)})
-            continue
-        use_model = model or model_for(provider, capability)
-        if not use_model:
-            continue
-        plain = decrypt(key.token_encrypted)
-        try:
-            text, meta = await call_llm(
-                model=use_model, messages=messages, api_key=plain,
-                max_tokens=max_tokens, temperature=temperature,
-                response_format=response_format,
-            )
-        except Exception as e:
-            kind = await _penalize(key, e)
-            await record_usage(
-                api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model, capability=capability,
-                workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-                latency_ms=None, status="error", error_kind=type(e).__name__,
-                http_status=None,
-            )
-            log.warning("provider %s failed (%s): %s", provider, kind, e)
-            continue
+        for _ in range(_MAX_KEYS_PER_PROVIDER):
+            key = await pick_and_reserve(provider, scope=scope)
+            if key is None:
+                break  # no (more) available key for this provider → next provider
+            try:
+                await check_caps(api_key=key, project=project, estimated_cost=0.0)
+            except CostGuardError as e:
+                await audit(actor=f"project:{project.name}", action="cap_block",
+                            target=f"provider={provider}", metadata={"reason": str(e)})
+                break  # project/global cap — more keys won't help → next provider
+            use_model = model or model_for(provider, capability)
+            if not use_model:
+                break  # provider can't serve this capability → next provider
+            plain = decrypt(key.token_encrypted)
+            try:
+                text, meta = await call_llm(
+                    model=use_model, messages=messages, api_key=plain,
+                    max_tokens=max_tokens, temperature=temperature,
+                    response_format=response_format,
+                )
+            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+                kind = await _penalize(key, e)
+                await record_usage(
+                    api_key_id=key.id, project_id=project.id, lease_id=None,
+                    provider=provider, model=use_model, capability=capability,
+                    workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+                    latency_ms=None, status="error", error_kind=type(e).__name__,
+                    http_status=None,
+                )
+                log.warning("provider %s key %s failed (%s): %s",
+                            provider, key.label, kind, e)
+                continue  # try the next key of this provider
 
-        # Deterministic quality gate for JSON requests: if the provider returned
-        # unparseable JSON (e.g. gemini truncated, or deepseek went rogue), treat
-        # it as a failure and walk to the next provider. We still bill the tokens.
-        if _wants_json(response_format) and not _is_valid_json(text):
+            # Deterministic JSON quality gate: an unparseable JSON body (gemini
+            # truncated, deepseek rogue) is billed but treated as a failure.
+            if _wants_json(response_format) and not _is_valid_json(text):
+                await record_usage(
+                    api_key_id=key.id, project_id=project.id, lease_id=None,
+                    provider=provider, model=use_model, capability=capability,
+                    workflow=workflow, tokens_in=meta["tokens_in"],
+                    tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+                    latency_ms=meta["latency_ms"], status="error",
+                    error_kind="InvalidJSON", http_status=200,
+                )
+                log.warning("provider %s returned unparseable JSON, trying next", provider)
+                continue  # try the next key of this provider
+
             await record_usage(
                 api_key_id=key.id, project_id=project.id, lease_id=None,
                 provider=provider, model=use_model, capability=capability,
                 workflow=workflow, tokens_in=meta["tokens_in"],
                 tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-                latency_ms=meta["latency_ms"], status="error",
-                error_kind="InvalidJSON", http_status=200,
+                latency_ms=meta["latency_ms"], status="ok", error_kind=None,
+                http_status=200,
             )
-            log.warning("provider %s returned unparseable JSON, trying next", provider)
-            continue
-
-        await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability=capability,
-            workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
-            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            status="ok", error_kind=None, http_status=200,
-        )
-        return ChatOutcome(
-            text=text, provider=provider, model=meta["model"],
-            tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
-            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            key_label=key.label,
-        )
+            return ChatOutcome(
+                text=text, provider=provider, model=meta["model"],
+                tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
+                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+                key_label=key.label,
+            )
     return None
 
 

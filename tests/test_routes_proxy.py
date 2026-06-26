@@ -194,6 +194,33 @@ async def test_chat_auth_error_marks_key_dead():
     md.assert_awaited()
 
 
+async def test_chat_retries_multiple_keys_of_same_provider():
+    """One rate-limited free key shouldn't sink the request — try the next key."""
+    plain, _ = await _make_project(["llm:chat"])
+    calls = {"n": 0}
+
+    async def fake_call_llm(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:                       # first two keys are rate-limited
+            raise RuntimeError("429 rate_limit hit")
+        return ("recovered", {"model": "x", "tokens_in": 1, "tokens_out": 1,
+                              "cost_usd": 0.0, "latency_ms": 1})
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+        r = client.post(
+            "/v1/chat?capability=chat:fast",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert r.status_code == 200
+    assert calls["n"] == 3  # tried 3 keys of the same provider before success
+
+
 async def test_chat_invalid_json_falls_through_to_next_provider():
     """JSON request: a provider that returns unparseable JSON is skipped."""
     plain, _ = await _make_project(["llm:chat"])
