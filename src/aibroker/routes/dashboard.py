@@ -1,13 +1,13 @@
 """Browser admin UI — Telegram login, dashboard, inline forms for CRUD."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import escape as esc
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import select, text
 
 from aibroker.auth_session import (
     COOKIE_NAME,
@@ -22,7 +22,6 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.telemetry import audit
-
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
 
@@ -437,7 +436,7 @@ async def _gather_data() -> dict[str, Any]:
         keys = (await s.execute(
             select(ApiKeyRow).order_by(ApiKeyRow.provider, ApiKeyRow.id)
         )).scalars().all()
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         spend_today = float((await s.execute(
             text("SELECT COALESCE(SUM(cost_usd), 0) FROM usage_log "
                  "WHERE created_at::date = :d"),
@@ -537,7 +536,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'</form></td></tr>'
         )
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     rows_keys = ""
     for k in data["keys"]:
         in_cd = k.cooldown_until and k.cooldown_until > now
@@ -569,11 +568,8 @@ def _render(data: dict[str, Any], *, flash: str = "",
             cap_sort = 0.0
 
         cap_input_val = f"{cap_v:.2f}" if cap_v is not None else ""
-        scope_now = (k.scopes[0] if k.scopes else "llm:chat")
-        scope_options = "".join(
-            f'<option value="{s}"{" selected" if s == scope_now else ""}>{s}</option>'
-            for s in ("llm:chat", "llm:embed", "llm:vision")
-        )
+        scopes_csv = ",".join(k.scopes or ["llm:chat"])
+        reserve_checked = " checked" if k.is_reserve else ""
         tier_options = "".join(
             f'<option value="{t}"{" selected" if t == k.tier else ""}>{t}</option>'
             for t in ("free", "paid", "trial")
@@ -612,7 +608,12 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
             f'<input name="label" value="{esc(k.label)}" required>'
             f'<select name="tier">{tier_options}</select>'
-            f'<select name="scope">{scope_options}</select>'
+            f'<input name="scopes" value="{esc(scopes_csv)}" style="min-width:160px" '
+            f'data-en-placeholder="scopes (csv)" data-ru-placeholder="scope-ы (csv)" '
+            f'placeholder="scopes (csv)">'
+            f'<label class="rsv" title="reserved lane: picked last in its group, '
+            f'invisible to other scopes"><input type="checkbox" name="is_reserve" '
+            f'value="1"{reserve_checked}> reserve</label>'
             f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
             f'value="{cap_input_val}" '
             f'data-en-placeholder="cap (blank = none)" '
@@ -655,11 +656,12 @@ def _render(data: dict[str, Any], *, flash: str = "",
           <option value="paid">paid</option>
           <option value="trial">trial</option>
         </select>
-        <select name="scope" id="add-key-scope">
-          <option value="llm:chat">llm:chat</option>
-          <option value="llm:embed">llm:embed</option>
-          <option value="llm:vision">llm:vision</option>
-        </select>
+        <input name="scopes" id="add-key-scope" value="llm:chat" style="min-width:160px"
+               data-en-placeholder="scopes (csv)"
+               data-ru-placeholder="scope-ы (csv)"
+               placeholder="scopes (csv)">
+        <label class="rsv" title="reserved lane: picked last in its group, invisible to other scopes">
+          <input type="checkbox" name="is_reserve" value="1"> reserve</label>
         <input name="daily_cost_cap_usd" type="number" step="0.01" style="min-width:130px"
                data-en-placeholder="cap (optional)"
                data-ru-placeholder="лимит (опц.)"
@@ -750,6 +752,17 @@ async def dashboard(
 # ─── Form handlers ──────────────────────────────────────────────────────────
 
 
+_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit")
+
+
+def _parse_scopes(csv: str) -> list[str] | None:
+    """Parse a comma-separated scope list; None if empty or any scope unknown."""
+    scopes = [x.strip() for x in csv.split(",") if x.strip()]
+    if not scopes or any(s not in _KNOWN_SCOPES for s in scopes):
+        return None
+    return scopes
+
+
 @router.post("/dashboard/keys/create")
 async def dash_create_key(
     request: Request,
@@ -757,10 +770,14 @@ async def dash_create_key(
     label: str = Form(...),
     token: str = Form(...),
     tier: str = Form("free"),
-    scope: str = Form("llm:chat"),
+    scopes: str = Form("llm:chat"),
+    is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
+    scope_list = _parse_scopes(scopes)
+    if scope_list is None:
+        return RedirectResponse("/dashboard?flash=!Bad+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         existing = (await s.execute(
@@ -771,7 +788,8 @@ async def dash_create_key(
         if existing:
             existing.token_encrypted = encrypt(token)
             existing.tier = tier
-            existing.scopes = [scope]
+            existing.scopes = scope_list
+            existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
             existing.is_active = True
             existing.is_alive = True
@@ -779,12 +797,15 @@ async def dash_create_key(
         else:
             s.add(ApiKeyRow(
                 provider=provider, label=label, tier=tier,
-                scopes=[scope], token_encrypted=encrypt(token),
+                scopes=scope_list, is_reserve=is_reserve,
+                token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
             ))
             verb = "added"
     await audit(actor="dashboard", action=f"key.{verb}",
-                target=f"{provider}/{label}", ip=_ip(request))
+                target=f"{provider}/{label}",
+                metadata={"scopes": scope_list, "is_reserve": is_reserve},
+                ip=_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{provider}/{label}+{verb}", status_code=303
     )
@@ -834,14 +855,16 @@ async def dash_edit_key(
     request: Request,
     label: str = Form(...),
     tier: str = Form("free"),
-    scope: str = Form("llm:chat"),
+    scopes: str = Form("llm:chat"),
+    is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
     if tier not in ("free", "paid", "trial"):
         return RedirectResponse("/dashboard?flash=!Bad+tier", status_code=303)
-    if scope not in ("llm:chat", "llm:embed", "llm:vision"):
+    scope_list = _parse_scopes(scopes)
+    if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
@@ -850,14 +873,15 @@ async def dash_edit_key(
             return RedirectResponse("/dashboard?flash=!Key+not+found", status_code=303)
         row.label = label
         row.tier = tier
-        row.scopes = [scope]
+        row.scopes = scope_list
+        row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
         if token.strip():
             row.token_encrypted = encrypt(token.strip())
         target = f"{row.provider}/{row.label}"
     await audit(actor="dashboard", action="key.edit", target=target,
-                metadata={"tier": tier, "scope": scope, "cap": cap_v,
-                          "token_rotated": bool(token.strip())},
+                metadata={"tier": tier, "scopes": scope_list, "is_reserve": is_reserve,
+                          "cap": cap_v, "token_rotated": bool(token.strip())},
                 ip=_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{target}+updated", status_code=303

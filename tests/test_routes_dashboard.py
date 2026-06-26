@@ -10,7 +10,6 @@ from aibroker.auth_session import COOKIE_NAME, issue_session_cookie
 from aibroker.config import get_settings
 from aibroker.main import app
 
-
 client = TestClient(app)
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
@@ -62,6 +61,7 @@ def test_provider_catalogue_lists_known_providers():
 
 def test_provider_meta_json_is_parseable():
     import json
+
     from aibroker.routes.dashboard import _provider_meta_json
     meta = json.loads(_provider_meta_json())
     assert "cerebras" in meta
@@ -179,10 +179,20 @@ def test_dashboard_create_project_form_requires_auth():
 # ─── Edit form handlers (auth + validation) ────────────────────────────────
 
 
+def test_parse_scopes_validation():
+    """Multi-scope CSV parsing for the key reassignment form."""
+    from aibroker.routes.dashboard import _parse_scopes
+    assert _parse_scopes("llm:chat,llm:edit") == ["llm:chat", "llm:edit"]
+    assert _parse_scopes("  llm:edit  ") == ["llm:edit"]
+    assert _parse_scopes("") is None
+    assert _parse_scopes("   ,  ,") is None
+    assert _parse_scopes("llm:chat,bogus") is None
+
+
 def test_dashboard_edit_key_requires_auth():
     r = client.post(
         "/dashboard/keys/42/edit",
-        data={"label": "x", "tier": "free", "scope": "llm:chat"},
+        data={"label": "x", "tier": "free", "scopes": "llm:chat"},
         follow_redirects=False,
     )
     assert r.status_code == 401
@@ -201,7 +211,7 @@ def test_dashboard_edit_key_with_session_rejects_bad_tier():
     r = client.post(
         "/dashboard/keys/99999/edit",
         cookies=_logged_in_cookies(),
-        data={"label": "x", "tier": "lifetime", "scope": "llm:chat"},
+        data={"label": "x", "tier": "lifetime", "scopes": "llm:chat"},
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -212,7 +222,7 @@ def test_dashboard_edit_key_with_session_rejects_bad_scope():
     r = client.post(
         "/dashboard/keys/99999/edit",
         cookies=_logged_in_cookies(),
-        data={"label": "x", "tier": "free", "scope": "admin:write"},
+        data={"label": "x", "tier": "free", "scopes": "admin:write"},
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -223,7 +233,7 @@ def test_dashboard_edit_key_404_when_missing():
     r = client.post(
         "/dashboard/keys/99999/edit",
         cookies=_logged_in_cookies(),
-        data={"label": "x", "tier": "free", "scope": "llm:chat"},
+        data={"label": "x", "tier": "free", "scopes": "llm:chat"},
         follow_redirects=False,
     )
     assert r.status_code == 303

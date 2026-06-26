@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from aibroker.config import get_settings
 from aibroker.main import app
 
-
 client = TestClient(app)
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 ADMIN = "admin_test_key_for_ci_only"
@@ -99,6 +98,28 @@ def test_create_key_via_admin():
     assert data["provider"] == "cerebras"
     assert data["tier"] == "free"
     assert data["is_active"] is True
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
+def test_create_key_with_reserve_lane():
+    """A reserved edit-lane key round-trips is_reserve + multi-scope via admin API."""
+    payload = {
+        "provider": "gemini", "label": "coach_reserve",
+        "token": "AQ-fake-reserve-token-123456",
+        "tier": "free", "scopes": ["llm:edit"], "is_reserve": True,
+    }
+    r = client.post("/admin/keys", headers=_admin_headers(), json=payload)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["is_reserve"] is True
+    assert data["scopes"] == ["llm:edit"]
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
+def test_create_key_defaults_is_reserve_false():
+    payload = {"provider": "cerebras", "label": "plain", "token": "csk-x-1234567890"}
+    r = client.post("/admin/keys", headers=_admin_headers(), json=payload)
+    assert r.json()["is_reserve"] is False
 
 
 def test_create_key_validates_tier():
