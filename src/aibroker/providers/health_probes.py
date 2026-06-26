@@ -83,10 +83,11 @@ _PROBES = {
                            {"model": "mistral-small-latest",
                             "messages": [{"role": "user", "content": "."}],
                             "max_tokens": 1}),
-    # Cohere v2 uses /v2/chat with a different schema; one user message + max_tokens=1.
+    # Cohere v2 (/v2/chat). command-r was retired 2025-09-15; use the small
+    # current model for probes — it's cheapest and most likely to stay live.
     "cohere": lambda k: ("POST", "https://api.cohere.com/v2/chat",
                           _bearer(k),
-                          {"model": "command-r",
+                          {"model": "command-r7b-12-2024",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
 }

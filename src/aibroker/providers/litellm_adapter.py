@@ -55,11 +55,13 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                 "chat:code":   "mistral/codestral-latest",
                 "prefilter":   "mistral/mistral-small-latest",
                 "structured":  "mistral/mistral-small-latest"},
-    "cohere": {"chat:fast":   "cohere/command-r",
-               "chat:smart":  "cohere/command-r-plus",
-               "chat:code":   "cohere/command-r-plus",
-               "prefilter":   "cohere/command-r",
-               "structured":  "cohere/command-r",
+    # 2026-06-26: command-r/r-plus retired 2025-09-15. command-a-03-2025 is
+    # flagship; command-r7b-12-2024 is the small/fast model.
+    "cohere": {"chat:fast":   "cohere/command-r7b-12-2024",
+               "chat:smart":  "cohere/command-a-03-2025",
+               "chat:code":   "cohere/command-a-03-2025",
+               "prefilter":   "cohere/command-r7b-12-2024",
+               "structured":  "cohere/command-r7b-12-2024",
                "embedding":   "cohere/embed-english-v3.0"},
     "voyage": {"embedding": "voyage/voyage-3"},
 }
