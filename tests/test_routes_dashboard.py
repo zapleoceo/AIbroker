@@ -274,8 +274,8 @@ def test_dashboard_edit_key_accepts_multiple_scopes():
     r = client.post(
         "/dashboard/keys/99999/edit",
         cookies=_logged_in_cookies(),
-        data=[("label", "x"), ("tier", "free"),
-              ("scopes", "llm:chat"), ("scopes", "llm:edit")],
+        data={"label": "x", "tier": "free",
+               "scopes": ["llm:chat", "llm:edit"]},
         follow_redirects=False,
     )
     # 303 because key 99999 doesn't exist, but multi-scope parsed ok
