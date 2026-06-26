@@ -807,31 +807,31 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "       COUNT(*) FILTER (WHERE status='ok') AS ok_n, "
             "       COUNT(*) FILTER (WHERE status<>'ok') AS err_n "
             "FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h || ' hours')::interval"
+            "  AND created_at > now() - (:h * INTERVAL '1 hour')"
         ), bind_)).one()
         by_provider = (await s.execute(text(
             "SELECT provider, COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS spend "
             "FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h || ' hours')::interval "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY provider ORDER BY n DESC"
         ), bind_)).all()
         by_model = (await s.execute(text(
             "SELECT model, COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS spend, "
             "       COALESCE(SUM(tokens_in+tokens_out),0) AS toks "
             "FROM usage_log WHERE project_id=:pid AND model IS NOT NULL "
-            "  AND created_at > now() - (:h || ' hours')::interval "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY model ORDER BY n DESC LIMIT 12"
         ), bind_)).all()
         by_capability = (await s.execute(text(
             "SELECT COALESCE(capability,'(none)') AS cap, COUNT(*) AS n, "
             "       COALESCE(SUM(cost_usd),0) AS spend "
             "FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h || ' hours')::interval "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY cap ORDER BY n DESC"
         ), bind_)).all()
         by_status = (await s.execute(text(
             "SELECT status, COUNT(*) AS n FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h || ' hours')::interval "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY status ORDER BY n DESC"
         ), bind_)).all()
         recent = (await s.execute(text(
