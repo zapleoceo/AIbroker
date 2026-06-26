@@ -51,7 +51,14 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
     kind = classify_provider_error(exc)
     if kind == "rate_limit":
-        await mark_cooldown(key.id, datetime.now(UTC) + _COOLDOWN)
+        # 2026-06-26: per-provider adaptive cooldown + exp backoff (cooldown.py).
+        # Falls back to flat _COOLDOWN if the lookup raises (e.g. tests).
+        try:
+            from aibroker.routing.cooldown import adaptive_cooldown
+            until = await adaptive_cooldown(key.id, key.provider)
+        except Exception:
+            until = datetime.now(UTC) + _COOLDOWN
+        await mark_cooldown(key.id, until)
     elif kind == "auth":
         await mark_dead(key.id)
     return kind

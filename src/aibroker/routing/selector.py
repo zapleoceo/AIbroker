@@ -38,27 +38,47 @@ async def pick_and_reserve(
     in another replica will see a different LRU order.
     """
     conds = [
-        "provider = :provider",
-        "is_active = TRUE",
-        "is_alive = TRUE",
-        "scopes ? :scope",
-        "(cooldown_until IS NULL OR cooldown_until < now())",
-        "(daily_cost_cap_usd IS NULL OR daily_cost_used_usd < daily_cost_cap_usd)",
-        "(daily_limit = 0 OR daily_used < daily_limit)",
+        "k.provider = :provider",
+        "k.is_active = TRUE",
+        "k.is_alive = TRUE",
+        "k.scopes ? :scope",
+        "(k.cooldown_until IS NULL OR k.cooldown_until < now())",
+        "(k.daily_cost_cap_usd IS NULL OR k.daily_cost_used_usd < k.daily_cost_cap_usd)",
+        "(k.daily_limit = 0 OR k.daily_used < k.daily_limit)",
     ]
     params: dict[str, object] = {"provider": provider, "scope": scope}
     if require_tier:
-        conds.append("tier = :tier")
+        conds.append("k.tier = :tier")
         params["tier"] = require_tier
 
     where = " AND ".join(conds)
+    # 2026-06-26: smarter ordering.
+    #   1. is_reserve — non-reserve keys first (Coach safety net last).
+    #   2. recent_errors  — penalise keys that failed 15 min ago, even if LRU.
+    #   3. daily_used     — spread today's volume across keys so quota
+    #                       headroom drains evenly, never one-key-first.
+    #   4. last_used_at   — classic LRU tie-break.
+    #   5. random()       — final jitter, so the same trio of keys at the
+    #                       same LRU stamp doesn't form a deterministic
+    #                       round-robin pattern (mild anti-fingerprint).
     stmt = text(
         f"""
         UPDATE api_keys SET last_used_at = now()
         WHERE id = (
-            SELECT id FROM api_keys
+            SELECT k.id FROM api_keys k
+            LEFT JOIN (
+                SELECT api_key_id, COUNT(*) AS recent_errors
+                FROM usage_log
+                WHERE created_at > now() - INTERVAL '15 minutes'
+                  AND status <> 'ok'
+                GROUP BY api_key_id
+            ) e ON e.api_key_id = k.id
             WHERE {where}
-            ORDER BY is_reserve, last_used_at NULLS FIRST, id
+            ORDER BY k.is_reserve,
+                     COALESCE(e.recent_errors, 0),
+                     k.daily_used,
+                     k.last_used_at NULLS FIRST,
+                     random()
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )

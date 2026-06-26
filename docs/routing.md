@@ -59,7 +59,31 @@ has driven every shared gemini key into cooldown — and we never pinned a key t
 a project. Set it up in the dashboard: edit the key, scopes = `llm:edit`, tick
 **reserve**.
 
-## Selector
+## Adaptive cooldown (2026-06-26)
+
+The 429 cooldown is no longer a flat 5 min. `routing/cooldown.py` exposes:
+
+| Provider | Base cooldown | Why |
+|---|---|---|
+| `gemini` | 60s | RPM window resets every 60s |
+| `mistral` | 10s | 1 RPS, recovers instantly |
+| `cohere` | 60s | per-minute trial limit |
+| `cerebras`, `groq`, `voyage` | 60s | rolling RPM |
+| `deepseek` | 30s | paid, fast quotas |
+| `anthropic`, `openai` | 120s | paid, conservative |
+| `openrouter` | 300s | `:free` overload can last minutes |
+| _(unknown)_ | 300s | safe default |
+
+Exponential backoff: each consecutive 429 on the same key within a 1h
+window doubles the wait (60 → 120 → 240 → 480 …) capped at 30 min.
+Counter resets when the key has gone 1h without a 429.
+
+`adaptive_cooldown(api_key_id, provider)` queries `usage_log` for recent
+429s and returns the right `until` timestamp. `services/llm_service.py`
+calls it on every rate-limit error. Vending mode honours the client's
+`retry_after_s` instead — the client knows its provider best.
+
+## Selector — fair, anti-fingerprint ordering
 
 `src/aibroker/routing/selector.py:pick_and_reserve(provider, scope)`
 
@@ -73,16 +97,33 @@ WHERE id = (
       AND (cooldown_until IS NULL OR cooldown_until < now())
       AND (daily_cost_cap_usd IS NULL OR daily_cost_used_usd < daily_cost_cap_usd)
       AND (daily_limit = 0 OR daily_used < daily_limit)
-    ORDER BY is_reserve, last_used_at NULLS FIRST, id
+    ORDER BY k.is_reserve,
+             COALESCE(e.recent_errors, 0),   -- prefer keys with fewer 15-min errors
+             k.daily_used,                     -- spread today's load evenly
+             k.last_used_at NULLS FIRST,       -- classic LRU tie-break
+             random()                          -- jitter against fingerprinting
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
 RETURNING *
 ```
 
-`ORDER BY is_reserve` first puts non-reserve keys (FALSE) ahead of reserve
-(TRUE); then LRU. Atomic, race-free across replicas, advances LRU in one go.
-Postgres-only (JSONB `?` + SKIP LOCKED); exercised by the Postgres CI job.
+(Plus a `LEFT JOIN` against `usage_log` rolled up by 15-min `recent_errors`.)
+
+Why each column matters:
+1. `is_reserve` — non-reserve keys first; reserved Coach safety net is last.
+2. `recent_errors` — a key that 5×429'd in the last 15 min waits until clean
+   keys are exhausted.
+3. `daily_used` — spreads today's volume across keys so quota headroom drains
+   evenly. No single key gets burned first while others sit idle.
+4. `last_used_at NULLS FIRST` — fresh keys onboarded today get traffic
+   immediately, then classic LRU.
+5. `random()` — tiny jitter at the same (errors, used, LRU) bucket so the
+   ordering isn't a deterministic round-robin that providers could
+   fingerprint as automation.
+
+Atomic, race-free across replicas, advances LRU in one go. Postgres-only
+(JSONB `?` + SKIP LOCKED + `random()`); exercised by the Postgres CI job.
 
 `mark_cooldown` normalises tz-aware datetimes to naive UTC — `cooldown_until` is
 a naive `TIMESTAMP` and asyncpg rejects offset-aware values.
