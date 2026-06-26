@@ -88,20 +88,26 @@ Three independent daily caps: per-key, per-project (live SUM from `usage_log`),
 global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`). Free-tier keys with `cost == 0`
 skip the check.
 
-## Failure → next provider
+## Failure → next key → next provider
 
 The orchestration lives in `services/llm_service.run_chat` (routes stay thin).
-For each provider in the chain:
+For each provider in the chain it tries **up to `_MAX_KEYS_PER_PROVIDER` (5)
+keys** before falling through — a direct client loops all of a provider's keys,
+and free keys (esp. gemini) 429 constantly, so a single rate-limited key must
+not sink the request. The selector hands a fresh LRU key each pick and
+`_penalize` cools failed ones, so each retry gets a different key.
 
-1. `pick_and_reserve` (None → next provider).
-2. `check_caps` (CostGuardError → audit + next provider).
+Per key:
+
+1. `pick_and_reserve` (None → no more keys for this provider → next provider).
+2. `check_caps` (CostGuardError → audit → next provider; caps are project/global).
 3. `call_llm`. Exceptions are classified by `classify_provider_error`:
-   - rate-limit / 429 → `mark_cooldown` 5 min, next provider.
-   - 401/403/auth → `mark_dead`, next provider.
-   - other → log, next provider.
+   - rate-limit / 429 → `mark_cooldown` 5 min, **try next key**.
+   - 401/403/auth → `mark_dead`, **try next key**.
+   - other → log, **try next key**.
 4. **JSON quality gate:** when the request asked for JSON (`response_format`
    type `json_object`/`json_schema`) and the body doesn't parse, the response is
-   billed but treated as a failure → next provider. Deterministic, no LLM judge.
+   billed but treated as a failure → **try next key**. Deterministic, no LLM judge.
    Paired with gemini's `reasoning_effort=disable` in the adapter, which stops
    2.5's thinking from eating the token budget and truncating the JSON.
 
