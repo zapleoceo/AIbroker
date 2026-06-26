@@ -61,26 +61,34 @@ async def pick_and_reserve(
     #   5. random()       — final jitter, so the same trio of keys at the
     #                       same LRU stamp doesn't form a deterministic
     #                       round-robin pattern (mild anti-fingerprint).
+    # Postgres rejects `FOR UPDATE` over a SELECT that contains `GROUP BY`
+    # ('FOR UPDATE is not allowed with GROUP BY clause'). Two tricks together:
+    #   1. The aggregate lives in a MATERIALIZED CTE so it's a separate scan,
+    #      not part of the locked SELECT.
+    #   2. `FOR UPDATE OF k` names the api_keys-only lock target explicitly,
+    #      so PG doesn't try to lock the CTE rows.
     stmt = text(
         f"""
+        WITH recent AS MATERIALIZED (
+            SELECT api_key_id, COUNT(*) AS n
+            FROM usage_log
+            WHERE created_at > now() - INTERVAL '15 minutes'
+              AND status <> 'ok'
+              AND api_key_id IS NOT NULL
+            GROUP BY api_key_id
+        )
         UPDATE api_keys SET last_used_at = now()
         WHERE id = (
             SELECT k.id FROM api_keys k
-            LEFT JOIN (
-                SELECT api_key_id, COUNT(*) AS recent_errors
-                FROM usage_log
-                WHERE created_at > now() - INTERVAL '15 minutes'
-                  AND status <> 'ok'
-                GROUP BY api_key_id
-            ) e ON e.api_key_id = k.id
+            LEFT JOIN recent r ON r.api_key_id = k.id
             WHERE {where}
             ORDER BY k.is_reserve,
-                     COALESCE(e.recent_errors, 0),
+                     COALESCE(r.n, 0),
                      k.daily_used,
                      k.last_used_at NULLS FIRST,
                      random()
             LIMIT 1
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF k SKIP LOCKED
         )
         RETURNING *
         """
