@@ -35,6 +35,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "vision": "gemini/gemini-2.5-flash"},
     "deepseek": {"chat:fast": "deepseek/deepseek-chat",
                  "chat:smart": "deepseek/deepseek-chat",
+                 "chat:edit": "deepseek/deepseek-chat",
                  "chat:code": "deepseek/deepseek-coder"},
     "openrouter": {"chat:fast": f"openrouter/openai/{_OSS}:free",
                    "chat:smart": f"openrouter/openai/{_OSS}:free",

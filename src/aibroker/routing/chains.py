@@ -45,9 +45,11 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "deepseek", "openai",
     ],
     # Coach editor (Stepan): JSON-reliable providers only. gemini first
-    # (thinking disabled for JSON), anthropic as the cross-provider fallback.
-    # Never deepseek here — it breaks structured JSON.
-    "chat:edit": ["gemini", "anthropic"],
+    # (thinking disabled for JSON), deepseek as the paid fallback that stays
+    # available when gemini's free/prepaid quota is exhausted — mirrors Stepan's
+    # proven local chain. The JSON validate-retry guards deepseek's occasional
+    # malformed output.
+    "chat:edit": ["gemini", "deepseek"],
     "prefilter": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",

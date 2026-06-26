@@ -85,12 +85,13 @@ def test_chain_returns_copy():
 # ─── chat:edit — Coach lane ──────────────────────────────────────────────────
 
 
-def test_chat_edit_is_json_reliable_only():
-    """Coach edit chain: gemini-first, anthropic fallback, never deepseek."""
+def test_chat_edit_gemini_first_deepseek_fallback():
+    """Coach edit chain mirrors Stepan's local: gemini first (free, best JSON),
+    deepseek the always-available paid fallback when gemini quota is dry."""
     chain = chain_for("chat:edit")
     assert chain[0] == "gemini"
-    assert "deepseek" not in chain
-    assert "anthropic" in chain
+    assert "deepseek" in chain
+    assert chain.index("gemini") < chain.index("deepseek")
 
 
 def test_chat_edit_uses_edit_scope():

@@ -17,7 +17,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
-| `chat:edit` | **gemini → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only — never deepseek. Runs on its own scope so a reserved key is invisible to bot traffic. |
+| `chat:edit` | **gemini → deepseek** | `llm:edit` | Coach editor (Stepan). Mirrors the proven local chain: gemini first (free, best JSON), deepseek the always-available paid fallback when gemini's quota is dry. Runs on its own scope so a reserved key is invisible to bot traffic. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
 | `structured` | cerebras → groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | |
 | `vision` | gemini → anthropic → openai | `llm:vision` | Image input required |
