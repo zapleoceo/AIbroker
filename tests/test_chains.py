@@ -121,7 +121,9 @@ def test_is_known_capability():
 
 
 def test_dead_providers_not_in_any_chain():
-    """sambanova/nvidia/mistral have no DEFAULT_MODEL — must not be routed to."""
+    """Providers without DEFAULT_MODEL entries must not be in any chain.
+    Mistral + cohere were added 2026-06-26 — they have DEFAULT_MODEL coverage
+    so are no longer dead."""
     for cap, chain in CAPABILITY_CHAINS.items():
-        for dead in ("sambanova", "nvidia", "mistral"):
+        for dead in ("sambanova", "nvidia"):
             assert dead not in chain, f"{dead} still routed in {cap}"
