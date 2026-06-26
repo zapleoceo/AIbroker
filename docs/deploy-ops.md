@@ -34,6 +34,38 @@ command="/usr/local/bin/aibroker-deploy",no-port-forwarding,no-X11-forwarding,no
 If this key leaks, the worst an attacker can do is re-run our deploy
 script. No shell, no scp, no port-forward.
 
+## One-shot: import legacy usage from Vera + Stepan
+
+Before the broker existed both projects logged token usage in their own
+`usage_log` tables. To consolidate that history into the broker
+dashboard's per-project drill-down:
+
+```bash
+ssh hetzner-root
+cd /var/www/aibroker
+./infra/migrate_legacy_usage.sh dry-run   # show source counts + sums
+./infra/migrate_legacy_usage.sh apply     # COPY into broker.usage_log
+```
+
+What it does:
+- Resolves `projects.id` in the broker by name (`vera`, `stepan`).
+- `DELETE` any prior `legacy:%`-tagged rows for that project — reruns
+  don't double-count.
+- COPYs from `<source>-postgres` directly into `aibroker-postgres` via
+  a stdout pipe (no intermediate file).
+- Imported rows are tagged `workflow = 'legacy:vera[:original_workflow]'`
+  so they're distinguishable from live broker traffic in the drill-down's
+  capability/workflow breakdown.
+- `api_key_id` is NULL (legacy ids don't map to broker `api_keys`; FK is
+  `ON DELETE SET NULL`).
+- `lease_id` and `http_status` are NULL (legacy schemas lack them).
+- `success` (bool) becomes `status` (`'ok'` / `'error'`).
+- `error_kind` is copied when the source has the column (Vera does;
+  Stepan does not).
+
+Rerun whenever you want a fresh snapshot — old `legacy:%` rows are
+wiped and re-imported, live broker rows are never touched.
+
 ## Manual deploy fallback
 
 ```
