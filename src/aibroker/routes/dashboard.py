@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from html import escape as esc
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -806,7 +806,7 @@ async def dash_create_key(
     label: str = Form(...),
     token: str = Form(...),
     tier: str = Form("free"),
-    scopes: list[str] = Form([]),
+    scopes: Annotated[list[str], Form()] = [],
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
@@ -891,7 +891,7 @@ async def dash_edit_key(
     request: Request,
     label: str = Form(...),
     tier: str = Form("free"),
-    scopes: list[str] = Form([]),
+    scopes: Annotated[list[str], Form()] = [],
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
