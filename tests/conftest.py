@@ -1,28 +1,48 @@
-"""Test fixtures — in-memory SQLite for fast unit tests."""
+"""Test fixtures.
+
+Default: in-memory SQLite (fast, no deps) — used for everything except the
+Postgres-only selector/vending tests, which `skipif` themselves off SQLite.
+
+CI integration job sets DATABASE_URL to a real Postgres; then this fixture
+binds the engine to it and the Postgres-only tests run for real.
+"""
 from __future__ import annotations
 
 import os
 
 # Test-time defaults for env-driven settings (BEFORE any aibroker import).
+# Default DATABASE_URL to SQLite so a bare `pytest` doesn't run the Postgres-only
+# tests against SQLite (their ON_SQLITE/skipif guards read this var). CI overrides
+# it with a real Postgres URL to exercise those tests.
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-prod")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
 
-import pytest_asyncio  # noqa: E402
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import aibroker.db.engine as engine_mod  # noqa: E402
-from aibroker.db.engine import Base  # noqa: E402
+import aibroker.db.engine as engine_mod
+from aibroker.db.engine import Base
+
+_DB_URL = os.environ["DATABASE_URL"]
+_IS_PG = "postgres" in _DB_URL or "asyncpg" in _DB_URL
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def in_memory_db():
-    """Each test gets a fresh in-memory SQLite engine."""
-    e = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def db():
+    """Fresh schema per test. Postgres when DATABASE_URL targets it, else SQLite."""
+    url = _DB_URL if _IS_PG else "sqlite+aiosqlite:///:memory:"
+    e = create_async_engine(url)
     async with e.begin() as conn:
+        if _IS_PG:
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     engine_mod._engine = e
     engine_mod._sessionmaker = async_sessionmaker(e, expire_on_commit=False)
     yield
+    if _IS_PG:
+        async with e.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
     await e.dispose()
     engine_mod._engine = None
     engine_mod._sessionmaker = None

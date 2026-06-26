@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Throwaway test-only secrets (never used against real data). TOKEN_SECRET is a
+# valid Fernet key so crypto round-trips in tests; the rest just satisfy config.
+env:
+  TOKEN_SECRET: ueM0X5-w2TcWVG4gzvh-7oUZPz-YFAm3r4euvEaN1lo=
+  ADMIN_KEY: test-admin-key-not-for-prod-0123456789
+  INTERNAL_SECRET: test-internal-secret
+  SESSION_SECRET: test-session-secret-not-for-prod
+  OWNER_TELEGRAM_ID: "169510539"
+  GLOBAL_DAILY_CAP_USD: "20"
+  UV_LINK_MODE: copy
+
+jobs:
+  unit:
+    name: unit (sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run tests (SQLite)
+        run: uv run --extra dev pytest -q
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///:memory:
+
+  integration:
+    name: integration (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aibroker_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run full suite (Postgres) — selector, reserve-lane, vending run for real
+        run: uv run --extra dev pytest -q
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test

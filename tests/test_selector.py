@@ -6,7 +6,7 @@ neither of which SQLite supports. These tests need a real Postgres to run.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import insert
@@ -14,16 +14,15 @@ from sqlalchemy import insert
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.routing.selector import (
-    SelectionError,
     mark_cooldown,
     mark_dead,
     pick_and_reserve,
     record_usage,
 )
 
-
+_DB = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
-    "sqlite" in os.environ.get("DATABASE_URL", ""),
+    "postgres" not in _DB and "asyncpg" not in _DB,
     reason="Selector uses Postgres-specific JSONB ? operator + FOR UPDATE SKIP LOCKED",
 )
 
@@ -70,7 +69,7 @@ async def test_pick_skips_dead():
 
 
 async def test_pick_skips_in_cooldown():
-    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+    future = datetime.now(UTC) + timedelta(minutes=10)
     await _add_key("cerebras", "x", cooldown_until=future.replace(tzinfo=None))
     result = await pick_and_reserve("cerebras", "llm:chat")
     assert result is None
@@ -93,7 +92,7 @@ async def test_pick_filters_by_scope():
 
 async def test_mark_cooldown_sets_future():
     kid = await _add_key("cerebras", "x")
-    future = datetime.now(timezone.utc) + timedelta(minutes=5)
+    future = datetime.now(UTC) + timedelta(minutes=5)
     await mark_cooldown(kid, future)
     # Subsequent pick should skip it
     result = await pick_and_reserve("cerebras", "llm:chat")
@@ -121,7 +120,7 @@ async def test_reserve_key_picked_only_when_shared_exhausted():
     assert picked.label == "shared"
 
     # Knock the shared key into cooldown → now the reserve is used.
-    await mark_cooldown(shared, datetime.now(timezone.utc) + timedelta(minutes=10))
+    await mark_cooldown(shared, datetime.now(UTC) + timedelta(minutes=10))
     picked = await pick_and_reserve("gemini", "llm:edit")
     assert picked is not None
     assert picked.label == "reserve"

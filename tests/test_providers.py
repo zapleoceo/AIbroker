@@ -1,7 +1,7 @@
 """LiteLLM adapter — model resolution & response parsing."""
 from __future__ import annotations
 
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL, estimate_llm_cost, model_for
+from aibroker.providers.litellm_adapter import estimate_llm_cost, model_for
 
 
 def test_model_for_known_combos():

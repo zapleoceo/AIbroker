@@ -11,7 +11,6 @@ from aibroker.routing.chains import (
     scope_for,
 )
 
-
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
               "nvidia", "mistral", "voyage"}
