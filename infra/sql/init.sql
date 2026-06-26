@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   token_encrypted TEXT NOT NULL,              -- Fernet
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   is_alive BOOLEAN NOT NULL DEFAULT TRUE,     -- set by monitor
+  is_reserve BOOLEAN NOT NULL DEFAULT FALSE,  -- reserved lane: picked last in its group
   daily_limit INT NOT NULL DEFAULT 999999,
   daily_used INT NOT NULL DEFAULT 0,
   daily_cost_cap_usd DOUBLE PRECISION,
@@ -47,7 +48,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   CONSTRAINT uq_api_keys_provider_label UNIQUE (provider, label)
 );
 CREATE INDEX IF NOT EXISTS ix_api_keys_provider_active ON api_keys(provider, is_active, is_alive);
-CREATE INDEX IF NOT EXISTS ix_api_keys_lru ON api_keys(last_used_at NULLS FIRST);
+CREATE INDEX IF NOT EXISTS ix_api_keys_lru ON api_keys(is_reserve, last_used_at NULLS FIRST);
 
 -- ─── Active leases (vending mode: key checked out, not yet reported) ────────
 CREATE TABLE IF NOT EXISTS leases (

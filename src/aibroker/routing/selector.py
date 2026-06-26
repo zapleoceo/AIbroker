@@ -24,11 +24,15 @@ async def pick_and_reserve(
     *,
     require_tier: str | None = None,
 ) -> ApiKeyRow | None:
-    """Pick the LRU-oldest available key for `provider` that supports `scope`.
+    """Pick the best available key for `provider` that supports `scope`.
 
     'Available' = is_active AND is_alive AND not in cooldown AND under per-key
     daily cost cap (if set). Returns None if nothing fits — caller walks the
     capability chain to the next provider.
+
+    Ordering: non-reserve keys first (is_reserve ASC), then LRU-oldest. A
+    reserved key (is_reserve=True) is therefore picked only when every shared
+    key in its (provider, scope) group is exhausted — the Coach safety net.
 
     The returned row already has last_used_at advanced — so concurrent picks
     in another replica will see a different LRU order.
@@ -54,7 +58,7 @@ async def pick_and_reserve(
         WHERE id = (
             SELECT id FROM api_keys
             WHERE {where}
-            ORDER BY last_used_at NULLS FIRST, id
+            ORDER BY is_reserve, last_used_at NULLS FIRST, id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
@@ -76,6 +80,7 @@ async def pick_and_reserve(
         token_encrypted=row["token_encrypted"],
         is_active=row["is_active"],
         is_alive=row["is_alive"],
+        is_reserve=row["is_reserve"],
         daily_limit=row["daily_limit"],
         daily_used=row["daily_used"],
         daily_cost_cap_usd=row["daily_cost_cap_usd"],

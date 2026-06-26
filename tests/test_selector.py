@@ -107,6 +107,33 @@ async def test_mark_dead_skips_subsequent_picks():
     assert result is None
 
 
+async def test_reserve_key_picked_only_when_shared_exhausted():
+    """Reserve key is the safety net: shared edit keys go first; the reserve
+    is picked only once every shared key in the group is unavailable."""
+    shared = await _add_key("gemini", "shared", scopes=["llm:chat", "llm:edit"],
+                            last_used_at=datetime.now() - timedelta(hours=1))
+    await _add_key("gemini", "reserve", scopes=["llm:edit"], is_reserve=True,
+                   last_used_at=datetime.now() - timedelta(hours=5))  # older, but reserve
+
+    # Even though the reserve key is older (LRU would prefer it), the shared key wins.
+    picked = await pick_and_reserve("gemini", "llm:edit")
+    assert picked is not None
+    assert picked.label == "shared"
+
+    # Knock the shared key into cooldown → now the reserve is used.
+    await mark_cooldown(shared, datetime.now(timezone.utc) + timedelta(minutes=10))
+    picked = await pick_and_reserve("gemini", "llm:edit")
+    assert picked is not None
+    assert picked.label == "reserve"
+
+
+async def test_reserve_edit_key_invisible_to_chat_scope():
+    """A key scoped only to llm:edit must never serve bot llm:chat traffic."""
+    await _add_key("gemini", "reserve", scopes=["llm:edit"], is_reserve=True)
+    assert await pick_and_reserve("gemini", "llm:chat") is None
+    assert await pick_and_reserve("gemini", "llm:edit") is not None
+
+
 async def test_record_usage_increments_counters():
     kid = await _add_key("cerebras", "x", tier="free")
     await record_usage(

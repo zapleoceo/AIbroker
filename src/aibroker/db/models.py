@@ -58,6 +58,10 @@ class ApiKeyRow(Base):
     token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Reserved-lane: picked LAST within its (provider, scope) group. A key scoped
+    # only to llm:edit + is_reserve=True is the Coach safety net — used only when
+    # all shared edit keys are exhausted, and invisible to bot llm:chat traffic.
+    is_reserve: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     daily_limit: Mapped[int] = mapped_column(Integer, default=999_999, nullable=False)
     daily_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     daily_cost_cap_usd: Mapped[float | None] = mapped_column(Float)
