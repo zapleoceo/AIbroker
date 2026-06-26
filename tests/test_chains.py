@@ -86,12 +86,22 @@ def test_chain_returns_copy():
 
 
 def test_chat_edit_gemini_first_deepseek_fallback():
-    """Coach edit chain mirrors Stepan's local: gemini first (free, best JSON),
-    deepseek the always-available paid fallback when gemini quota is dry."""
+    """Coach edit chain: gemini first (free, best JSON), 3 free providers
+    in front of paid deepseek + anthropic. cerebras/groq excluded (flaky JSON)."""
     chain = chain_for("chat:edit")
     assert chain[0] == "gemini"
     assert "deepseek" in chain
     assert chain.index("gemini") < chain.index("deepseek")
+    # All free in chat:edit must come before deepseek (paid)
+    deepseek_idx = chain.index("deepseek")
+    free_in_edit = {"gemini", "mistral", "cohere"}
+    for f in free_in_edit:
+        if f in chain:
+            assert chain.index(f) < deepseek_idx, f"{f} (free) must precede deepseek"
+    # cerebras / groq / openrouter must NOT be in chat:edit (unreliable JSON)
+    forbidden = {"cerebras", "groq", "openrouter"}
+    assert not (forbidden & set(chain)), \
+        f"{forbidden & set(chain)} must not be in chat:edit chain"
 
 
 def test_chat_edit_uses_edit_scope():

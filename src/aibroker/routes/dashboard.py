@@ -232,6 +232,15 @@ tr.edit-row {{ display:none; }}
 tr.edit-row.active {{ display:table-row; background:#13161c; }}
 tr.edit-row td {{ padding:14px 12px; }}
 tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
+/* Scope checkboxes */
+.scope-group {{ display:inline-flex; gap:8px; flex-wrap:wrap;
+              padding:4px 8px; border:1px solid #2a2d34; border-radius:6px;
+              background:#0f1115; }}
+.scope-group .scope-cb {{ display:inline-flex; align-items:center; gap:4px;
+                         font-family:ui-monospace,monospace; font-size:11px;
+                         color:#888; cursor:pointer; }}
+.scope-group .scope-cb input {{ margin:0; min-width:0; padding:0; }}
+.scope-group .scope-cb input:checked + * {{ color:#4dabf7; }}
 /* Cap bar */
 .cap-bar {{ display:inline-block; width:80px; height:6px; background:#0f1115;
             border-radius:3px; vertical-align:middle; margin-left:6px; overflow:hidden; }}
@@ -341,8 +350,12 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
       hint.replaceWith(originalHint.cloneNode(true));
       return;
     }}
-    // Auto-set scope from default
-    scope.value = m.default_scope;
+    // Auto-set scope checkboxes: tick default; tick llm:edit too if this
+    // provider is in the chat:edit chain so operator notices the option.
+    const wantEdit = m.capabilities.includes("chat:edit");
+    scope.querySelectorAll('input[type="checkbox"]').forEach(cb => {{
+      cb.checked = (cb.value === m.default_scope) || (wantEdit && cb.value === "llm:edit");
+    }});
 
     const t = langStrings();
     const capChips = m.capabilities.map(c =>
@@ -609,9 +622,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
             f'<input name="label" value="{esc(k.label)}" required>'
             f'<select name="tier">{tier_options}</select>'
-            f'<input name="scopes" value="{esc(scopes_csv)}" style="min-width:160px" '
-            f'data-en-placeholder="scopes (csv)" data-ru-placeholder="scope-ы (csv)" '
-            f'placeholder="scopes (csv)">'
+            f'<span class="scope-group">{_scope_checkboxes(k.scopes or ["llm:chat"])}</span>'
             f'<label class="rsv" title="reserved lane: picked last in its group, '
             f'invisible to other scopes"><input type="checkbox" name="is_reserve" '
             f'value="1"{reserve_checked}> reserve</label>'
@@ -657,10 +668,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
           <option value="paid">paid</option>
           <option value="trial">trial</option>
         </select>
-        <input name="scopes" id="add-key-scope" value="llm:chat" style="min-width:160px"
-               data-en-placeholder="scopes (csv)"
-               data-ru-placeholder="scope-ы (csv)"
-               placeholder="scopes (csv)">
+        <span class="scope-group" id="add-key-scope">{_scope_checkboxes(["llm:chat"])}</span>
         <label class="rsv" title="reserved lane: picked last in its group, invisible to other scopes">
           <input type="checkbox" name="is_reserve" value="1"> reserve</label>
         <input name="daily_cost_cap_usd" type="number" step="0.01" style="min-width:130px"
@@ -757,11 +765,38 @@ _KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit")
 
 
 def _parse_scopes(csv: str) -> list[str] | None:
-    """Parse a comma-separated scope list; None if empty or any scope unknown."""
+    """Parse a comma-separated scope list; None if empty or any scope unknown.
+    Kept for legacy callers (project allowed_scopes form is still CSV)."""
     scopes = [x.strip() for x in csv.split(",") if x.strip()]
     if not scopes or any(s not in _KNOWN_SCOPES for s in scopes):
         return None
     return scopes
+
+
+def _validate_scope_list(scopes: list[str]) -> list[str] | None:
+    """For checkbox-driven forms — strip dups, reject empty / unknown."""
+    seen: list[str] = []
+    for s in scopes:
+        s = s.strip()
+        if not s:
+            continue
+        if s not in _KNOWN_SCOPES:
+            return None
+        if s not in seen:
+            seen.append(s)
+    return seen or None
+
+
+def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
+    """Render the 4 known scopes as checkboxes (multi-select via repeated POST)."""
+    sel = set(selected or [])
+    return "".join(
+        f'<label class="scope-cb">'
+        f'<input type="checkbox" name="{name}" value="{s}"'
+        f'{" checked" if s in sel else ""}> {s}'
+        f'</label>'
+        for s in _KNOWN_SCOPES
+    )
 
 
 @router.post("/dashboard/keys/create")
@@ -771,14 +806,14 @@ async def dash_create_key(
     label: str = Form(...),
     token: str = Form(...),
     tier: str = Form("free"),
-    scopes: str = Form("llm:chat"),
+    scopes: list[str] = Form([]),
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
-    scope_list = _parse_scopes(scopes)
+    scope_list = _validate_scope_list(scopes)
     if scope_list is None:
-        return RedirectResponse("/dashboard?flash=!Bad+scope", status_code=303)
+        return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         existing = (await s.execute(
@@ -856,7 +891,7 @@ async def dash_edit_key(
     request: Request,
     label: str = Form(...),
     tier: str = Form("free"),
-    scopes: str = Form("llm:chat"),
+    scopes: list[str] = Form([]),
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
@@ -864,9 +899,9 @@ async def dash_edit_key(
 ) -> RedirectResponse:
     if tier not in ("free", "paid", "trial"):
         return RedirectResponse("/dashboard?flash=!Bad+tier", status_code=303)
-    scope_list = _parse_scopes(scopes)
+    scope_list = _validate_scope_list(scopes)
     if scope_list is None:
-        return RedirectResponse("/dashboard?flash=!Bad+scope", status_code=303)
+        return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         row = await s.get(ApiKeyRow, key_id)

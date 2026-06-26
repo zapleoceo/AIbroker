@@ -49,7 +49,11 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # available when gemini's free/prepaid quota is exhausted — mirrors Stepan's
     # proven local chain. The JSON validate-retry guards deepseek's occasional
     # malformed output.
-    "chat:edit": ["gemini", "deepseek"],
+    # 2026-06-26: extended from [gemini → deepseek] to a full free chain.
+    # gemini free pool first; mistral + cohere new free fallback; then deepseek
+    # paid (validate-retry handles its occasional bad JSON); anthropic last,
+    # top JSON quality but trial credits only.
+    "chat:edit": ["gemini", "mistral", "cohere", "deepseek", "anthropic"],
     "prefilter": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",

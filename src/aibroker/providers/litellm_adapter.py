@@ -54,6 +54,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     "mistral": {"chat:fast":   "mistral/mistral-small-latest",
                 "chat:smart":  "mistral/mistral-large-latest",
                 "chat:code":   "mistral/codestral-latest",
+                "chat:edit":   "mistral/mistral-small-latest",
                 "prefilter":   "mistral/mistral-small-latest",
                 "structured":  "mistral/mistral-small-latest"},
     # 2026-06-26: command-r/r-plus retired 2025-09-15. command-a-03-2025 is
@@ -61,6 +62,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     "cohere": {"chat:fast":   "cohere/command-r7b-12-2024",
                "chat:smart":  "cohere/command-a-03-2025",
                "chat:code":   "cohere/command-a-03-2025",
+               "chat:edit":   "cohere/command-a-03-2025",
                "prefilter":   "cohere/command-r7b-12-2024",
                "structured":  "cohere/command-r7b-12-2024",
                "embedding":   "cohere/embed-english-v3.0"},

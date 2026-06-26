@@ -36,6 +36,31 @@ def test_login_page_shows_error_param():
     assert "Bad" in r.text and "sig" in r.text
 
 
+def test_validate_scope_list_strips_dups_and_empties():
+    from aibroker.routes.dashboard import _validate_scope_list
+    assert _validate_scope_list(["llm:chat", "llm:edit", "llm:chat"]) == [
+        "llm:chat", "llm:edit"
+    ]
+    assert _validate_scope_list(["llm:chat", "  ", ""]) == ["llm:chat"]
+
+
+def test_validate_scope_list_rejects_unknown():
+    from aibroker.routes.dashboard import _validate_scope_list
+    assert _validate_scope_list(["llm:chat", "admin:write"]) is None
+    assert _validate_scope_list([]) is None
+    assert _validate_scope_list(["", " "]) is None
+
+
+def test_scope_checkboxes_renders_4_options_with_checked_state():
+    from aibroker.routes.dashboard import _scope_checkboxes
+    html = _scope_checkboxes(["llm:chat", "llm:edit"])
+    # All 4 known scopes rendered
+    for s in ("llm:chat", "llm:embed", "llm:vision", "llm:edit"):
+        assert f'value="{s}"' in html
+    # Only the two selected have `checked`
+    assert html.count(" checked") == 2
+
+
 def test_provider_catalogue_lists_known_providers():
     """Helper that drives the add-key dropdown."""
     from aibroker.routes.dashboard import _provider_catalogue
@@ -228,7 +253,35 @@ def test_dashboard_edit_key_with_session_rejects_bad_scope():
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert "Bad+scope" in r.headers["location"]
+    # 2026-06-26: scope form moved from CSV to multi-checkbox; flash unified
+    assert "Bad+or+empty+scope" in r.headers["location"]
+
+
+def test_dashboard_edit_key_with_session_rejects_empty_scopes():
+    """No scope checkboxes ticked → rejected (empty scope list)."""
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"label": "x", "tier": "free"},  # no 'scopes' key at all
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Bad+or+empty+scope" in r.headers["location"]
+
+
+def test_dashboard_edit_key_accepts_multiple_scopes():
+    """Multi-select form sends `scopes=llm:chat&scopes=llm:edit`."""
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data=[("label", "x"), ("tier", "free"),
+              ("scopes", "llm:chat"), ("scopes", "llm:edit")],
+        follow_redirects=False,
+    )
+    # 303 because key 99999 doesn't exist, but multi-scope parsed ok
+    # (would 303 with Bad+or+empty+scope otherwise)
+    assert r.status_code == 303
+    assert "Key+not+found" in r.headers["location"]
 
 
 def test_dashboard_edit_key_404_when_missing():

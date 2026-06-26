@@ -4,6 +4,13 @@
 > Cohere chain now routes through `command-r7b-12-2024` (small/fast) for
 > `chat:fast` / `prefilter` / `structured` and `command-a-03-2025` (flagship)
 > for `chat:smart` / `chat:code`. Embed model `embed-english-v3.0` unchanged.
+>
+> **2026-06-26 (later)**: `chat:edit` chain extended from `[gemini, deepseek]`
+> to `[gemini, mistral, cohere, deepseek, anthropic]` — 3 free providers
+> in front of paid. mistral + cohere DEFAULT_MODEL now have `chat:edit`
+> entries. Existing mistral + cohere keys still need the `llm:edit` scope
+> added in the dashboard (or via the bulk migration described in
+> `dashboard.md`).
 
 ## Capability → provider chain + required scope
 
@@ -17,7 +24,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
-| `chat:edit` | **gemini → deepseek** | `llm:edit` | Coach editor (Stepan). Mirrors the proven local chain: gemini first (free, best JSON), deepseek the always-available paid fallback when gemini's quota is dry. Runs on its own scope so a reserved key is invisible to bot traffic. |
+| `chat:edit` | **gemini → mistral → cohere → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). 3 free providers + 2 paid fallbacks; all JSON-reliable. cerebras/groq/openrouter skipped (unreliable JSON). |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
 | `structured` | cerebras → groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | |
 | `vision` | gemini → anthropic → openai | `llm:vision` | Image input required |
