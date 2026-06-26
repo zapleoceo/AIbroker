@@ -25,6 +25,7 @@ Capability = Literal[
 CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "chat:fast": [
         "cerebras", "groq", "gemini",
+        "mistral", "cohere",
         "deepseek",
         "openrouter",
         "anthropic",
@@ -32,12 +33,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     ],
     "chat:smart": [
         "cerebras", "groq", "gemini",
+        "mistral", "cohere",
         "anthropic",
         "openrouter",
         "openai", "deepseek",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
+        "mistral",
         "anthropic",
         "deepseek", "openai",
     ],
@@ -47,15 +50,18 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "chat:edit": ["gemini", "anthropic"],
     "prefilter": [
         "cerebras", "groq", "gemini",
+        "mistral", "cohere",
         "openrouter",
     ],
     "structured": [
         "cerebras", "groq", "gemini",
+        "mistral", "cohere",
         "openrouter",
         "anthropic", "openai",
     ],
     "vision": ["gemini", "anthropic", "openai"],
-    "embedding": ["voyage"],
+    # voyage stays primary; cohere as fallback for embed when voyage is down.
+    "embedding": ["voyage", "cohere"],
 }
 
 

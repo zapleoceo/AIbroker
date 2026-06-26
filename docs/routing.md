@@ -9,14 +9,14 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
-| `chat:smart` | cerebras → groq → gemini → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
-| `chat:code` | cerebras → groq → openrouter → gemini → anthropic → deepseek → openai | `llm:chat` | |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
+| `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only — never deepseek. Runs on its own scope so a reserved key is invisible to bot traffic. |
-| `prefilter` | cerebras → groq → gemini → openrouter | `llm:chat` | No paid; cheap pre-filter |
-| `structured` | cerebras → groq → gemini → openrouter → anthropic → openai | `llm:chat` | |
+| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
+| `structured` | cerebras → groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | |
 | `vision` | gemini → anthropic → openai | `llm:vision` | Image input required |
-| `embedding` | voyage | `llm:embed` | Single provider |
+| `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 
 `chain_for(cap)` raises `ValueError` on an unknown capability; the proxy rejects
 unknown capabilities with HTTP 400 via `is_known_capability`. `scope_for(cap)`

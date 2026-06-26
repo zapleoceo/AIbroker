@@ -62,9 +62,11 @@ def test_vision_only_vision_providers():
     assert not (set(chain) & forbidden)
 
 
-def test_embedding_only_voyage():
+def test_embedding_chain_voyage_first():
+    """voyage is the primary embedder; cohere is the fallback."""
     chain = chain_for("embedding")
-    assert chain == ["voyage"]
+    assert chain[0] == "voyage"
+    assert "cohere" in chain
 
 
 def test_unknown_capability_raises():
