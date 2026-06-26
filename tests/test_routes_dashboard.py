@@ -45,6 +45,8 @@ def test_provider_catalogue_lists_known_providers():
     assert "gemini" in names
     assert "voyage" in names
     assert "anthropic" in names
+    assert "mistral" in names
+    assert "cohere" in names
     # Order: free-first
     assert names.index("cerebras") < names.index("openai")
     assert names.index("cerebras") < names.index("anthropic")

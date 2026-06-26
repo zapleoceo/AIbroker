@@ -50,6 +50,17 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     "openai": {"chat:fast": "openai/gpt-5-mini", "chat:smart": "openai/gpt-5",
                "chat:code": "openai/gpt-5", "structured": "openai/gpt-5-mini",
                "vision": "openai/gpt-5-mini"},
+    "mistral": {"chat:fast":   "mistral/mistral-small-latest",
+                "chat:smart":  "mistral/mistral-large-latest",
+                "chat:code":   "mistral/codestral-latest",
+                "prefilter":   "mistral/mistral-small-latest",
+                "structured":  "mistral/mistral-small-latest"},
+    "cohere": {"chat:fast":   "cohere/command-r",
+               "chat:smart":  "cohere/command-r-plus",
+               "chat:code":   "cohere/command-r-plus",
+               "prefilter":   "cohere/command-r",
+               "structured":  "cohere/command-r",
+               "embedding":   "cohere/embed-english-v3.0"},
     "voyage": {"embedding": "voyage/voyage-3"},
 }
 

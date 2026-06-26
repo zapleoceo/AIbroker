@@ -40,7 +40,8 @@ def _provider_catalogue() -> list[dict[str, Any]]:
             return "llm:vision"
         return "llm:chat"
 
-    order = ["cerebras", "groq", "gemini", "openrouter", "deepseek",
+    order = ["cerebras", "groq", "gemini", "mistral", "cohere",
+             "openrouter", "deepseek",
              "openai", "anthropic", "voyage"]
     out = []
     for p in order:

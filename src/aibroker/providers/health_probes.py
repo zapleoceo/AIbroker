@@ -78,6 +78,17 @@ _PROBES = {
     "voyage": lambda k: ("POST", "https://api.voyageai.com/v1/embeddings",
                           _bearer(k),
                           {"model": "voyage-3", "input": "."}),
+    "mistral": lambda k: ("POST", "https://api.mistral.ai/v1/chat/completions",
+                           _bearer(k),
+                           {"model": "mistral-small-latest",
+                            "messages": [{"role": "user", "content": "."}],
+                            "max_tokens": 1}),
+    # Cohere v2 uses /v2/chat with a different schema; one user message + max_tokens=1.
+    "cohere": lambda k: ("POST", "https://api.cohere.com/v2/chat",
+                          _bearer(k),
+                          {"model": "command-r",
+                           "messages": [{"role": "user", "content": "."}],
+                           "max_tokens": 1}),
 }
 
 
