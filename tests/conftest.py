@@ -20,6 +20,7 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 import aibroker.db.engine as engine_mod
 from aibroker.db.engine import Base
@@ -30,9 +31,17 @@ _IS_PG = "postgres" in _DB_URL or "asyncpg" in _DB_URL
 
 @pytest_asyncio.fixture(autouse=True)
 async def db():
-    """Fresh schema per test. Postgres when DATABASE_URL targets it, else SQLite."""
-    url = _DB_URL if _IS_PG else "sqlite+aiosqlite:///:memory:"
-    e = create_async_engine(url)
+    """Fresh schema per test. Postgres when DATABASE_URL targets it, else SQLite.
+
+    On Postgres we use NullPool: the sync Starlette TestClient runs requests in
+    its own event-loop portal, and a pooled asyncpg connection bound to the
+    fixture's loop can't be reused there. NullPool opens a fresh connection in
+    whatever loop is current, avoiding 'another operation is in progress'.
+    """
+    if _IS_PG:
+        e = create_async_engine(_DB_URL, poolclass=NullPool)
+    else:
+        e = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with e.begin() as conn:
         if _IS_PG:
             await conn.run_sync(Base.metadata.drop_all)

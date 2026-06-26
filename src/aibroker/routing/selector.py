@@ -6,7 +6,7 @@ to advance the LRU.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 
@@ -99,6 +99,11 @@ async def pick_and_reserve(
 
 
 async def mark_cooldown(api_key_id: int, until: datetime) -> None:
+    # cooldown_until is a naive UTC TIMESTAMP; asyncpg rejects tz-aware values
+    # ("can't subtract offset-naive and offset-aware"). Callers pass UTC-aware
+    # datetimes — normalise to naive UTC here so prod (asyncpg) doesn't blow up.
+    if until.tzinfo is not None:
+        until = until.astimezone(timezone.utc).replace(tzinfo=None)
     async with get_session() as s:
         await s.execute(
             text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1 "
