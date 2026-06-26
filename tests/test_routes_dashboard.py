@@ -330,6 +330,161 @@ def test_range_hours_table_complete():
     assert _RANGE_HOURS["30d"] == 720
 
 
+# ─── Project-detail rendering (unit, no DB) ────────────────────────────────
+
+
+def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
+                       providers: list[tuple] | None = None):
+    """Build the dict that _render_project_detail() consumes — no DB."""
+    from collections import namedtuple
+    from datetime import datetime, timezone
+    from aibroker.db.models import ProjectRow
+
+    project = ProjectRow(
+        id=7, name="stepan", project_key_prefix="aib_prj_xy",
+        project_key_hash="hash", allowed_scopes=["llm:chat", "llm:edit"],
+        daily_cost_cap_usd=2.0, is_active=True, owner_email="x@y", notes="",
+    )
+    Totals = namedtuple("T", "calls spend tin tout avg_lat ok_n err_n")
+    Brk = namedtuple("B", "provider n spend")
+    BrkCap = namedtuple("BC", "cap n spend")
+    BrkModel = namedtuple("BM", "model n spend toks")
+    BrkSt = namedtuple("BS", "status n")
+    Recent = namedtuple("R", "created_at provider model capability tokens_in "
+                              "tokens_out cost_usd latency_ms status http_status "
+                              "error_kind")
+    return {
+        "project": project,
+        "hours": hours,
+        "totals": Totals(calls=4, spend=0.123, tin=1234, tout=567,
+                          avg_lat=345, ok_n=3, err_n=1),
+        "by_provider": providers or [Brk("cerebras", 2, 0.0), Brk("gemini", 2, 0.123)],
+        "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
+        "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
+        "by_status": [BrkSt("ok", 3), BrkSt("rate_limit", 1)],
+        "recent": [
+            Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=timezone.utc),
+                    "cerebras", "cerebras/gpt-oss-120b", "chat:fast",
+                    100, 50, 0.0, 234, "ok", 200, None)
+            for i in range(recent_n)
+        ],
+    }
+
+
+def test_render_project_detail_smoke():
+    from aibroker.routes.dashboard import _render_project_detail
+    r = _render_project_detail(_fake_proj_detail())
+    body = r.body.decode()
+    # KPI values
+    assert "stepan" in body
+    assert "$0.1230" in body                 # spend
+    assert "1,234" in body and "567" in body  # token counts (formatted with comma)
+    assert "345 ms" in body                  # latency
+    # Status mix split shown
+    assert "3 ok" in body and "1 err" in body
+    # Range pills present + 24h active
+    assert 'href="?range=24h"' in body
+    assert 'href="?range=7d"' in body
+    assert 'href="?range=30d"' in body
+    assert 'range=24h" class="active"' in body
+
+
+def test_render_project_detail_sortable_recent_rows():
+    """Bug regression: recent table rows must carry 'data-row' for the JS to sort."""
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail(recent_n=5)).body.decode()
+    assert body.count('tr class="data-row"') >= 5
+    # And each cell that drives a sort must expose data-sort
+    assert 'data-sort="2026-06-26T12:00:00' in body   # iso8601 time
+    assert 'data-sort="150"' in body                   # tokens_in+tokens_out
+    assert 'data-sort="234"' in body                   # latency
+
+
+def test_render_project_detail_handles_no_recent_calls():
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail(recent_n=0)).body.decode()
+    assert "no calls yet" in body
+
+
+def test_render_project_detail_handles_empty_breakdowns():
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail(providers=[])).body.decode()
+    # Empty breakdown card falls back to the no-data line (bilingual)
+    assert "(no data in this range)" in body
+
+
+# ─── Main dashboard render (unit, no DB) ───────────────────────────────────
+
+
+def _fake_main_data(projects=(), keys=()):
+    return {
+        "projects": list(projects),
+        "keys": list(keys),
+        "spend_today": 0.0123,
+        "calls_1h": 42,
+        "provider_summary": [("cerebras", 5, 0, 5), ("gemini", 3, 1, 4)],
+    }
+
+
+def test_main_render_with_empty_db():
+    from aibroker.routes.dashboard import _render
+    r = _render(_fake_main_data())
+    body = r.body.decode()
+    # KPI cards present
+    assert "Spend today" in body and "Calls 1h" in body
+    # provider summary line
+    assert "cerebras" in body and "gemini" in body
+    # tables exist with headers
+    assert ">id<" in body and ">provider<" in body
+    # flash empty area
+    assert 'class="flash"' not in body or "<div " not in body[:200]
+    # sortable JS markers
+    assert 'class="sortable"' in body
+    # bilingual toggle
+    assert 'data-lang="en"' in body and 'data-lang="ru"' in body
+
+
+def test_main_render_renders_key_rows_with_data_row_marker():
+    """Each key row needs class='data-row' for the sorter to pick it up."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    fake_key = ApiKeyRow(
+        id=1, provider="cerebras", label="t", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True,
+    )
+    body = _render(_fake_main_data(keys=[fake_key])).body.decode()
+    assert 'data-row-id="k1"' in body
+    # Edit form partner row also present
+    assert 'data-edit-for="k1"' in body
+    # Scope checkboxes rendered inside the edit row
+    assert 'name="scopes" value="llm:chat"' in body
+
+
+def test_main_render_renders_project_rows_with_drill_link():
+    from aibroker.db.models import ProjectRow
+    from aibroker.routes.dashboard import _render
+    proj = ProjectRow(
+        id=7, name="stepan", project_key_prefix="aib_prj_xy",
+        project_key_hash="hash", allowed_scopes=["llm:chat"],
+        is_active=True, notes="",
+    )
+    body = _render(_fake_main_data(projects=[proj])).body.decode()
+    assert '<a href="/dashboard/projects/7"' in body
+    assert 'data-row-id="p7"' in body
+    assert 'data-edit-for="p7"' in body
+
+
+def test_main_render_shows_new_project_key_flash():
+    """When a project is created the one-time key is rendered prominently."""
+    from aibroker.routes.dashboard import _render
+    body = _render(
+        _fake_main_data(), new_project_key="aib_prj_ABCDEFGH"
+    ).body.decode()
+    assert "aib_prj_ABCDEFGH" in body
+    assert "SAVE this key now" in body
+
+
 def test_dashboard_edit_project_404_when_missing():
     r = client.post(
         "/dashboard/projects/99999/edit",

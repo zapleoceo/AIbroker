@@ -941,15 +941,22 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         lambda r: f'<tr><td class="k status-{esc(r.status)}">{esc(r.status)}</td>'
                   f'<td class="num">{r.n}</td><td></td></tr>')
 
+    # tr.data-row marker is required by the sortable-table JS in _dash_html.
+    # data-sort on the time column uses iso8601 so lexical sort works.
     recent_rows = "".join(
-        f'<tr><td style="color:#888;font-size:11px">'
+        f'<tr class="data-row" data-row-id="u{r.created_at.timestamp()}">'
+        f'<td data-sort="{r.created_at.isoformat()}" '
+        f'style="color:#888;font-size:11px">'
         f'{r.created_at.strftime("%m-%d %H:%M:%S")}</td>'
         f'<td>{esc(r.provider)}</td>'
         f'<td style="color:#888;font-size:11px">{esc((r.model or "—")[:32])}</td>'
         f'<td><span class="pill">{esc(r.capability or "—")}</span></td>'
-        f'<td class="num">{r.tokens_in}/{r.tokens_out}</td>'
-        f'<td class="num">${float(r.cost_usd):.4f}</td>'
-        f'<td class="num">{r.latency_ms or "—"}</td>'
+        f'<td class="num" data-sort="{r.tokens_in + r.tokens_out}">'
+        f'{r.tokens_in}/{r.tokens_out}</td>'
+        f'<td class="num" data-sort="{float(r.cost_usd)}">'
+        f'${float(r.cost_usd):.4f}</td>'
+        f'<td class="num" data-sort="{r.latency_ms or 0}">'
+        f'{r.latency_ms or "—"}</td>'
         f'<td class="status-{esc(r.status)}">{esc(r.status)}</td>'
         f'<td style="color:#888;font-size:11px">{r.http_status or ""} '
         f'{esc(r.error_kind or "")}</td></tr>'
