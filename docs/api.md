@@ -61,5 +61,6 @@ See [routing.md](./routing.md) for the chain per capability.
 | `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
 | `POST` | `/dashboard/projects/create` | HTML form handler |
 | `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
+| `GET` | `/dashboard/projects/{id}?range=24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
 | `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
 | `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |

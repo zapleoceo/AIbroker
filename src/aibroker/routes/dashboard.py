@@ -247,6 +247,33 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 .cap-bar .fill {{ display:block; height:100%; background:#4dabf7; }}
 .cap-bar .fill.warn {{ background:#ffd84a; }}
 .cap-bar .fill.bad  {{ background:#f44336; }}
+/* Project drill-down */
+.proj-link {{ color:#e4e6eb; text-decoration:none; border-bottom:1px dotted #4dabf7; }}
+.proj-link:hover {{ color:#4dabf7; }}
+.breadcrumb {{ font-size:12px; color:#888; margin:6px 0 18px; }}
+.breadcrumb a {{ color:#4dabf7; }}
+.breakdown {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+            gap:12px; margin:8px 0 20px; }}
+.brk-card {{ background:#1a1d24; border:1px solid #2a2d34; border-radius:10px;
+           padding:14px 16px; }}
+.brk-card h3 {{ margin:0 0 10px; font-size:11px; color:#888;
+              text-transform:uppercase; letter-spacing:.05em; font-weight:500; }}
+.brk-card table {{ margin:0; background:none; border-radius:0; }}
+.brk-card td {{ padding:4px 8px 4px 0; border:none; font-size:12px; color:#aaa; }}
+.brk-card td.num {{ color:#e4e6eb; text-align:right; font-family:ui-monospace,monospace; }}
+.brk-card td.k {{ color:#4dabf7; font-family:ui-monospace,monospace; }}
+.brk-card .total-row {{ border-top:1px solid #2a2d34; }}
+.brk-card .total-row td {{ padding-top:6px; color:#e4e6eb; font-weight:600; }}
+.range-pills {{ display:inline-flex; gap:6px; margin-left:10px; vertical-align:middle; }}
+.range-pills a {{ font-size:11px; padding:3px 9px; border-radius:4px;
+               background:#1a1d24; border:1px solid #2a2d34;
+               color:#888; text-decoration:none; font-family:ui-monospace,monospace; }}
+.range-pills a.active {{ background:rgba(77,171,247,.12); color:#4dabf7;
+                       border-color:#4dabf7; }}
+.recent-table td.status-ok {{ color:#4caf50; }}
+.recent-table td.status-error {{ color:#f44336; }}
+.recent-table td.status-rate_limit {{ color:#ffd84a; }}
+.recent-table td.status-auth_fail {{ color:#ff8a00; }}
 /* Provider hint under add-key form */
 .provider-hint {{ margin-top:10px; padding:10px 12px; border-radius:6px;
                 background:#0f1115; border:1px dashed #2a2d34;
@@ -522,7 +549,8 @@ def _render(data: dict[str, Any], *, flash: str = "",
         rows_projects += (
             f'<tr class="data-row" data-row-id="p{p.id}">'
             f'<td data-sort="{p.id}">{p.id}</td>'
-            f'<td>{esc(p.name)}</td>'
+            f'<td><a href="/dashboard/projects/{p.id}" class="proj-link">'
+            f'{esc(p.name)}</a></td>'
             f"<td><span class='pill'>{esc(scopes_csv)}</span></td>"
             f"<td class='{active_class}'>{active_cell}</td>"
             f"<td data-sort=\"{p.daily_cost_cap_usd or 0}\">{cap_disp}</td>"
@@ -756,6 +784,235 @@ async def dashboard(
         return RedirectResponse("/login", status_code=303)
     data = await _gather_data()
     return _render(data, flash=flash)
+
+
+# ─── Project drill-down ─────────────────────────────────────────────────────
+
+_RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+
+
+async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] | None:
+    """Pull aggregates + recent calls for one project over the last `hours`."""
+    async with get_session() as s:
+        project = await s.get(ProjectRow, project_id)
+        if not project:
+            return None
+        bind_ = {"pid": project_id, "h": hours}
+        totals = (await s.execute(text(
+            "SELECT COUNT(*) AS calls, "
+            "       COALESCE(SUM(cost_usd),0) AS spend, "
+            "       COALESCE(SUM(tokens_in),0) AS tin, "
+            "       COALESCE(SUM(tokens_out),0) AS tout, "
+            "       COALESCE(AVG(latency_ms),0) AS avg_lat, "
+            "       COUNT(*) FILTER (WHERE status='ok') AS ok_n, "
+            "       COUNT(*) FILTER (WHERE status<>'ok') AS err_n "
+            "FROM usage_log WHERE project_id=:pid "
+            "  AND created_at > now() - (:h || ' hours')::interval"
+        ), bind_)).one()
+        by_provider = (await s.execute(text(
+            "SELECT provider, COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS spend "
+            "FROM usage_log WHERE project_id=:pid "
+            "  AND created_at > now() - (:h || ' hours')::interval "
+            "GROUP BY provider ORDER BY n DESC"
+        ), bind_)).all()
+        by_model = (await s.execute(text(
+            "SELECT model, COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS spend, "
+            "       COALESCE(SUM(tokens_in+tokens_out),0) AS toks "
+            "FROM usage_log WHERE project_id=:pid AND model IS NOT NULL "
+            "  AND created_at > now() - (:h || ' hours')::interval "
+            "GROUP BY model ORDER BY n DESC LIMIT 12"
+        ), bind_)).all()
+        by_capability = (await s.execute(text(
+            "SELECT COALESCE(capability,'(none)') AS cap, COUNT(*) AS n, "
+            "       COALESCE(SUM(cost_usd),0) AS spend "
+            "FROM usage_log WHERE project_id=:pid "
+            "  AND created_at > now() - (:h || ' hours')::interval "
+            "GROUP BY cap ORDER BY n DESC"
+        ), bind_)).all()
+        by_status = (await s.execute(text(
+            "SELECT status, COUNT(*) AS n FROM usage_log WHERE project_id=:pid "
+            "  AND created_at > now() - (:h || ' hours')::interval "
+            "GROUP BY status ORDER BY n DESC"
+        ), bind_)).all()
+        recent = (await s.execute(text(
+            "SELECT created_at, provider, model, capability, "
+            "       tokens_in, tokens_out, cost_usd, latency_ms, status, "
+            "       http_status, error_kind "
+            "FROM usage_log WHERE project_id=:pid "
+            "ORDER BY created_at DESC LIMIT 50"
+        ), {"pid": project_id})).all()
+        # Active key count by scope intersection (informational)
+    return {
+        "project": project,
+        "hours": hours,
+        "totals": totals,
+        "by_provider": by_provider,
+        "by_model": by_model,
+        "by_capability": by_capability,
+        "by_status": by_status,
+        "recent": recent,
+    }
+
+
+def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
+    p = d["project"]
+    t = d["totals"]
+    err_pct = (t.err_n / t.calls * 100.0) if t.calls else 0.0
+    ok_pct  = (t.ok_n  / t.calls * 100.0) if t.calls else 0.0
+
+    cap_disp = (
+        f"${p.daily_cost_cap_usd:.2f}" if p.daily_cost_cap_usd is not None else "—"
+    )
+
+    range_links = "".join(
+        f'<a href="?range={r}" class="{"active" if d["hours"] == h else ""}">{r}</a>'
+        for r, h in _RANGE_HOURS.items()
+    )
+
+    cards = f"""
+    <div class="cards">
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Calls" data-ru="Вызовов">Calls</div>
+        <div class="card-value">{t.calls}</div>
+        <div class="card-sub">
+          <span class="ok">{t.ok_n} ok</span> ·
+          <span class="bad">{t.err_n} err</span> ({err_pct:.0f}%)
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Spend" data-ru="Потрачено">Spend</div>
+        <div class="card-value">${float(t.spend):.4f}</div>
+        <div class="card-sub" data-i18n
+             data-en="daily cap {cap_disp}" data-ru="суточный лимит {cap_disp}">daily cap {cap_disp}</div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Tokens in / out" data-ru="Токены вх / исх">Tokens in / out</div>
+        <div class="card-value" style="font-size:18px">{t.tin:,} / {t.tout:,}</div>
+      </div>
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Avg latency" data-ru="Средн. задержка">Avg latency</div>
+        <div class="card-value">{int(t.avg_lat or 0)} ms</div>
+        <div class="card-sub">{ok_pct:.0f}% success</div>
+      </div>
+    </div>
+    """
+
+    def _bd_card(title_en: str, title_ru: str, rows: list[tuple],
+                  fmt_row, total_label_en: str = "total",
+                  total_label_ru: str = "итого", total: tuple | None = None) -> str:
+        body = "".join(fmt_row(r) for r in rows) or (
+            '<tr><td colspan="3" style="color:#5a6171" data-i18n '
+            'data-en="(no data in this range)" data-ru="(нет данных за период)">'
+            "(no data in this range)</td></tr>"
+        )
+        total_html = ""
+        if total:
+            total_html = (
+                '<tr class="total-row">'
+                f'<td data-i18n data-en="{total_label_en}" data-ru="{total_label_ru}">'
+                f'{total_label_en}</td>'
+                f'<td class="num">{total[0]}</td><td class="num">{total[1]}</td>'
+                '</tr>'
+            )
+        return (
+            f'<div class="brk-card">'
+            f'<h3 data-i18n data-en="{title_en}" data-ru="{title_ru}">{title_en}</h3>'
+            f'<table><tbody>{body}{total_html}</tbody></table></div>'
+        )
+
+    prov_card = _bd_card("By provider", "По провайдерам", list(d["by_provider"]),
+        lambda r: f'<tr><td class="k">{esc(r.provider)}</td>'
+                  f'<td class="num">{r.n}</td>'
+                  f'<td class="num">${float(r.spend):.4f}</td></tr>',
+        total=(t.calls, f"${float(t.spend):.4f}"))
+
+    cap_card = _bd_card("By capability", "По способностям",
+        list(d["by_capability"]),
+        lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
+                  f'<td class="num">{r.n}</td>'
+                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
+
+    model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
+        lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
+                  f'<td class="num">{r.n}</td>'
+                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
+
+    status_card = _bd_card("Status mix", "Статусы", list(d["by_status"]),
+        lambda r: f'<tr><td class="k status-{esc(r.status)}">{esc(r.status)}</td>'
+                  f'<td class="num">{r.n}</td><td></td></tr>')
+
+    recent_rows = "".join(
+        f'<tr><td style="color:#888;font-size:11px">'
+        f'{r.created_at.strftime("%m-%d %H:%M:%S")}</td>'
+        f'<td>{esc(r.provider)}</td>'
+        f'<td style="color:#888;font-size:11px">{esc((r.model or "—")[:32])}</td>'
+        f'<td><span class="pill">{esc(r.capability or "—")}</span></td>'
+        f'<td class="num">{r.tokens_in}/{r.tokens_out}</td>'
+        f'<td class="num">${float(r.cost_usd):.4f}</td>'
+        f'<td class="num">{r.latency_ms or "—"}</td>'
+        f'<td class="status-{esc(r.status)}">{esc(r.status)}</td>'
+        f'<td style="color:#888;font-size:11px">{r.http_status or ""} '
+        f'{esc(r.error_kind or "")}</td></tr>'
+        for r in d["recent"]
+    ) or '<tr><td colspan="9" style="color:#5a6171">no calls yet</td></tr>'
+
+    body = f"""
+    <div class="breadcrumb">
+      <a href="/dashboard">← dashboard</a> /
+      <span>project {p.id}</span>
+    </div>
+    <h1 style="margin:0 0 4px;font-weight:500">{esc(p.name)}
+      <span class="range-pills">{range_links}</span>
+    </h1>
+    <div style="color:#888;font-size:13px;margin-bottom:18px">
+      <code>{esc(p.project_key_prefix)}…</code> ·
+      scopes <span class="pill">{esc(",".join(p.allowed_scopes))}</span> ·
+      {"active" if p.is_active else "<span class=bad>disabled</span>"}
+      {f" · owner {esc(p.owner_email)}" if p.owner_email else ""}
+    </div>
+
+    {cards}
+
+    <div class="breakdown">
+      {prov_card}
+      {cap_card}
+      {model_card}
+      {status_card}
+    </div>
+
+    <h2 data-i18n data-en="Recent 50 calls" data-ru="Последние 50 вызовов">Recent 50 calls</h2>
+    <table class="recent-table"><thead><tr>
+      <th class="sortable">when</th>
+      <th class="sortable">provider</th>
+      <th class="sortable">model</th>
+      <th class="sortable">cap</th>
+      <th class="sortable" data-type="num">tok in/out</th>
+      <th class="sortable" data-type="num">$</th>
+      <th class="sortable" data-type="num">ms</th>
+      <th class="sortable">status</th>
+      <th>http / err</th>
+    </tr></thead><tbody>{recent_rows}</tbody></table>
+    """
+    return HTMLResponse(_dash_html(body=body))
+
+
+@router.get("/dashboard/projects/{project_id}", response_class=HTMLResponse)
+async def dashboard_project_detail(
+    project_id: int,
+    request: Request,
+    range: str = "24h",
+) -> HTMLResponse:
+    try:
+        require_owner_session(request)
+    except HTTPException:
+        return RedirectResponse("/login", status_code=303)
+    hours = _RANGE_HOURS.get(range, 24)
+    d = await _gather_project_detail(project_id, hours)
+    if d is None:
+        return RedirectResponse(
+            "/dashboard?flash=!Project+not+found", status_code=303
+        )
+    return _render_project_detail(d)
 
 
 # ─── Form handlers ──────────────────────────────────────────────────────────

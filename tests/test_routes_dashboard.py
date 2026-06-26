@@ -306,6 +306,30 @@ def test_dashboard_edit_project_rejects_empty_scopes():
     assert "Need+at+least+one+scope" in r.headers["location"]
 
 
+def test_project_detail_requires_auth():
+    r = client.get("/dashboard/projects/42", follow_redirects=False)
+    assert r.status_code == 303
+    assert "/login" in r.headers["location"]
+
+
+def test_project_detail_404_when_missing():
+    r = client.get(
+        "/dashboard/projects/99999",
+        cookies=_logged_in_cookies(),
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Project+not+found" in r.headers["location"]
+
+
+def test_range_hours_table_complete():
+    """The 24h/7d/30d range pills must all map to valid hour windows."""
+    from aibroker.routes.dashboard import _RANGE_HOURS
+    assert _RANGE_HOURS["24h"] == 24
+    assert _RANGE_HOURS["7d"] == 168
+    assert _RANGE_HOURS["30d"] == 720
+
+
 def test_dashboard_edit_project_404_when_missing():
     r = client.post(
         "/dashboard/projects/99999/edit",
