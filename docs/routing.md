@@ -1,5 +1,10 @@
 # Routing, scopes & cost guard
 
+> **2026-06-26**: Cohere retired `command-r` / `command-r-plus` on 2025-09-15.
+> Cohere chain now routes through `command-r7b-12-2024` (small/fast) for
+> `chat:fast` / `prefilter` / `structured` and `command-a-03-2025` (flagship)
+> for `chat:smart` / `chat:code`. Embed model `embed-english-v3.0` unchanged.
+
 ## Capability → provider chain + required scope
 
 Source of truth: `src/aibroker/routing/chains.py` (`CAPABILITY_CHAINS`,
