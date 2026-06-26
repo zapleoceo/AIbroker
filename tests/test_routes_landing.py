@@ -70,7 +70,8 @@ def test_landing_links_to_dashboard_and_login():
 
 def test_landing_lists_providers():
     r = client.get("/")
-    for p in ["cerebras", "groq", "gemini", "voyage", "openai", "anthropic"]:
+    for p in ["cerebras", "groq", "gemini", "mistral", "cohere",
+               "openrouter", "voyage", "deepseek", "anthropic", "openai"]:
         assert p in r.text
 
 

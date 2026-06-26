@@ -1,11 +1,11 @@
 """Browser admin UI — Telegram login, dashboard, inline forms for CRUD."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from html import escape as esc
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select, text
 
@@ -274,6 +274,28 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 .recent-table td.status-error {{ color:#f44336; }}
 .recent-table td.status-rate_limit {{ color:#ffd84a; }}
 .recent-table td.status-auth_fail {{ color:#ff8a00; }}
+/* Date-range picker on main dashboard */
+.range-form {{ display:flex; align-items:center; gap:8px; margin:0 0 14px;
+              flex-wrap:wrap; font-size:13px; color:#888; }}
+.range-form label {{ font-family:ui-monospace,monospace; font-size:11px;
+                    text-transform:uppercase; letter-spacing:.05em; color:#5a6171; }}
+.range-form input[type="date"] {{ font-family:ui-monospace,monospace;
+                                 font-size:12px; padding:5px 8px; min-width:130px; }}
+.range-form .range-reset {{ color:#4dabf7; font-size:12px; text-decoration:none;
+                           font-family:ui-monospace,monospace; padding:5px 10px;
+                           border:1px solid #2a2d34; border-radius:6px; }}
+.range-form .range-quick {{ margin-left:10px; display:inline-flex; gap:6px; }}
+.range-form .range-quick a {{ font-size:11px; padding:3px 9px; border-radius:4px;
+                             background:#1a1d24; border:1px solid #2a2d34;
+                             color:#888; text-decoration:none;
+                             font-family:ui-monospace,monospace; }}
+.range-form .range-quick a:hover {{ color:#4dabf7; border-color:#4dabf7; }}
+/* Totals row */
+tfoot td {{ background:#0f1115; font-weight:600; color:#e4e6eb;
+           border-top:2px solid #2a2d34; padding:10px 12px; font-size:12px; }}
+tfoot td.k {{ color:#888; text-transform:uppercase; letter-spacing:.05em;
+             font-size:11px; }}
+tfoot td.num {{ font-family:ui-monospace,monospace; color:#4dabf7; }}
 /* Provider hint under add-key form */
 .provider-hint {{ margin-top:10px; padding:10px 12px; border-radius:6px;
                 background:#0f1115; border:1px dashed #2a2d34;
@@ -469,7 +491,27 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 </body></html>"""
 
 
-async def _gather_data() -> dict[str, Any]:
+def _parse_date_range(date_from: str | None, date_to: str | None) -> tuple[date, date]:
+    """Clamp/parse `from` and `to` strings (YYYY-MM-DD). Defaults to today."""
+    today = datetime.now(UTC).date()
+    try:
+        df = date.fromisoformat(date_from) if date_from else today
+    except ValueError:
+        df = today
+    try:
+        dt = date.fromisoformat(date_to) if date_to else today
+    except ValueError:
+        dt = today
+    if dt < df:
+        df, dt = dt, df
+    return df, dt
+
+
+async def _gather_data(date_from: date | None = None,
+                        date_to: date | None = None) -> dict[str, Any]:
+    today = datetime.now(UTC).date()
+    df = date_from or today
+    dt = date_to or today
     async with get_session() as s:
         projects = (await s.execute(
             select(ProjectRow).order_by(ProjectRow.id)
@@ -477,16 +519,26 @@ async def _gather_data() -> dict[str, Any]:
         keys = (await s.execute(
             select(ApiKeyRow).order_by(ApiKeyRow.provider, ApiKeyRow.id)
         )).scalars().all()
-        today = datetime.now(UTC).date()
-        spend_today = float((await s.execute(
-            text("SELECT COALESCE(SUM(cost_usd), 0) FROM usage_log "
-                 "WHERE created_at::date = :d"),
-            {"d": today},
-        )).scalar() or 0.0)
-        calls_1h = int((await s.execute(
-            text("SELECT COUNT(*) FROM usage_log "
-                 "WHERE created_at > now() - interval '1 hour'")
-        )).scalar() or 0)
+        bind_ = {"df": df, "dt": dt}
+        # Range-scoped stats (inclusive of both endpoints)
+        range_stats = (await s.execute(text(
+            "SELECT COUNT(*) AS calls, COALESCE(SUM(cost_usd),0) AS spend, "
+            "       COALESCE(SUM(tokens_in),0) AS tin, "
+            "       COALESCE(SUM(tokens_out),0) AS tout "
+            "FROM usage_log "
+            "WHERE created_at::date BETWEEN :df AND :dt"
+        ), bind_)).one()
+        # Per-project spend in the same range (for totals row + per-row enrichment)
+        proj_spend = dict((await s.execute(text(
+            "SELECT project_id, COALESCE(SUM(cost_usd),0) AS spend FROM usage_log "
+            "WHERE created_at::date BETWEEN :df AND :dt AND project_id IS NOT NULL "
+            "GROUP BY project_id"
+        ), bind_)).all())
+        # Always-on "right now" snapshot
+        calls_1h = int((await s.execute(text(
+            "SELECT COUNT(*) FROM usage_log "
+            "WHERE created_at > now() - interval '1 hour'"
+        ))).scalar() or 0)
         provider_summary = (await s.execute(text(
             "SELECT provider, "
             "COUNT(*) FILTER (WHERE is_active AND is_alive "
@@ -496,7 +548,13 @@ async def _gather_data() -> dict[str, Any]:
         ))).all()
     return {
         "projects": projects, "keys": keys,
-        "spend_today": spend_today, "calls_1h": calls_1h,
+        "date_from": df, "date_to": dt,
+        "range_spend": float(range_stats.spend),
+        "range_calls": int(range_stats.calls),
+        "range_tin": int(range_stats.tin),
+        "range_tout": int(range_stats.tout),
+        "proj_spend": proj_spend,
+        "calls_1h": calls_1h,
         "provider_summary": provider_summary,
     }
 
@@ -505,24 +563,49 @@ def _render(data: dict[str, Any], *, flash: str = "",
              new_project_key: str | None = None) -> HTMLResponse:
     s = get_settings()
 
+    df_str = data["date_from"].isoformat()
+    dt_str = data["date_to"].isoformat()
+    same_day = data["date_from"] == data["date_to"]
+    range_label_en = f"on {df_str}" if same_day else f"{df_str} → {dt_str}"
+    range_label_ru = f"за {df_str}" if same_day else f"{df_str} → {dt_str}"
+
+    range_form = f"""
+    <form method="get" action="/dashboard" class="range-form">
+      <label data-i18n data-en="From" data-ru="С">From</label>
+      <input type="date" name="from" value="{df_str}" max="{date.today().isoformat()}">
+      <label data-i18n data-en="To" data-ru="по">To</label>
+      <input type="date" name="to" value="{dt_str}" max="{date.today().isoformat()}">
+      <button type="submit" data-i18n data-en="apply" data-ru="применить">apply</button>
+      <a href="/dashboard" class="range-reset" data-i18n
+         data-en="today" data-ru="сегодня">today</a>
+      <span class="range-quick">
+        <a href="?from={(date.today() - timedelta(days=6)).isoformat()}&to={date.today().isoformat()}">7d</a>
+        <a href="?from={(date.today() - timedelta(days=29)).isoformat()}&to={date.today().isoformat()}">30d</a>
+      </span>
+    </form>"""
+
     cards = f"""
+    {range_form}
     <div class="cards">
       <div class="card">
-        <div class="card-label" data-i18n data-en="Spend today" data-ru="Сегодня потрачено">Spend today</div>
-        <div class="card-value">${data['spend_today']:.4f}</div>
-        <div class="card-sub"><span data-i18n data-en="cap" data-ru="лимит">cap</span> ${s.GLOBAL_DAILY_CAP_USD}</div>
+        <div class="card-label" data-i18n
+             data-en="Spend ({range_label_en})" data-ru="Потрачено ({range_label_ru})">Spend ({range_label_en})</div>
+        <div class="card-value">${data['range_spend']:.4f}</div>
+        <div class="card-sub"><span data-i18n data-en="global cap" data-ru="общий лимит">global cap</span> ${s.GLOBAL_DAILY_CAP_USD}/day</div>
       </div>
       <div class="card">
-        <div class="card-label" data-i18n data-en="Calls 1h" data-ru="Вызовов за час">Calls 1h</div>
-        <div class="card-value">{data['calls_1h']}</div>
+        <div class="card-label" data-i18n
+             data-en="Calls ({range_label_en})" data-ru="Вызовов ({range_label_ru})">Calls ({range_label_en})</div>
+        <div class="card-value">{data['range_calls']:,}</div>
+        <div class="card-sub">{data['calls_1h']} <span data-i18n data-en="in last 1h" data-ru="за последний час">in last 1h</span></div>
       </div>
       <div class="card">
-        <div class="card-label" data-i18n data-en="Projects" data-ru="Проекты">Projects</div>
-        <div class="card-value">{len(data['projects'])}</div>
+        <div class="card-label" data-i18n data-en="Tokens in / out" data-ru="Токены вх / исх">Tokens in / out</div>
+        <div class="card-value" style="font-size:18px">{data['range_tin']:,} / {data['range_tout']:,}</div>
       </div>
       <div class="card">
-        <div class="card-label" data-i18n data-en="API keys" data-ru="API-ключи">API keys</div>
-        <div class="card-value">{len(data['keys'])}</div>
+        <div class="card-label" data-i18n data-en="Projects · keys" data-ru="Проекты · ключи">Projects · keys</div>
+        <div class="card-value">{len(data['projects'])} · {len(data['keys'])}</div>
       </div>
     </div>"""
 
@@ -539,13 +622,20 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'(not retrievable later):<br><code>{esc(new_project_key)}</code></div>'
         )
 
+    proj_spend = data["proj_spend"]
     rows_projects = ""
+    projects_total_cap = 0.0
+    projects_total_spend = 0.0
     for p in data["projects"]:
         scopes_csv = ",".join(p.allowed_scopes)
         cap_val = p.daily_cost_cap_usd if p.daily_cost_cap_usd is not None else ""
         cap_disp = f"${p.daily_cost_cap_usd:.2f}" if p.daily_cost_cap_usd is not None else "—"
         active_cell = "✓" if p.is_active else "✗"
         active_class = "ok" if p.is_active else "bad"
+        p_spend = float(proj_spend.get(p.id, 0) or 0)
+        projects_total_spend += p_spend
+        if p.daily_cost_cap_usd is not None:
+            projects_total_cap += float(p.daily_cost_cap_usd)
         rows_projects += (
             f'<tr class="data-row" data-row-id="p{p.id}">'
             f'<td data-sort="{p.id}">{p.id}</td>'
@@ -554,12 +644,13 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f"<td><span class='pill'>{esc(scopes_csv)}</span></td>"
             f"<td class='{active_class}'>{active_cell}</td>"
             f"<td data-sort=\"{p.daily_cost_cap_usd or 0}\">{cap_disp}</td>"
+            f"<td data-sort=\"{p_spend}\" class='mono'>${p_spend:.4f}</td>"
             f"<td><code>{esc(p.project_key_prefix)}…</code></td>"
             f'<td><button type="button" data-edit-toggle="p{p.id}" data-i18n '
             f'data-en="edit" data-ru="ред.">edit</button></td>'
             f"</tr>"
             # ── inline edit form row ──
-            f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="7">'
+            f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="8">'
             f'<form method="post" action="/dashboard/projects/{p.id}/edit" class="row-form">'
             f'<input name="name" value="{esc(p.name)}" required>'
             f'<input name="allowed_scopes" value="{esc(scopes_csv)}" style="min-width:240px">'
@@ -580,7 +671,19 @@ def _render(data: dict[str, Any], *, flash: str = "",
 
     now = datetime.now(UTC).replace(tzinfo=None)
     rows_keys = ""
+    keys_total_used = 0
+    keys_total_spent = 0.0
+    keys_total_cap = 0.0
+    keys_total_errs = 0
+    keys_alive = 0
     for k in data["keys"]:
+        keys_total_used += k.daily_used or 0
+        keys_total_spent += float(k.daily_cost_used_usd or 0)
+        if k.daily_cost_cap_usd is not None:
+            keys_total_cap += float(k.daily_cost_cap_usd)
+        keys_total_errs += k.error_count or 0
+        if k.is_alive and not (k.cooldown_until and k.cooldown_until > now):
+            keys_alive += 1
         in_cd = k.cooldown_until and k.cooldown_until > now
         status_label = (
             "alive" if (k.is_alive and not in_cd)
@@ -752,9 +855,19 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <th class="sortable" data-i18n data-en="scopes" data-ru="права">scopes</th>
       <th class="sortable" data-i18n data-en="act" data-ru="акт">act</th>
       <th class="sortable" data-type="num" data-i18n data-en="daily cap" data-ru="суточный лимит">daily cap</th>
+      <th class="sortable" data-type="num" data-i18n
+          data-en="spend in range" data-ru="потрачено за период">spend in range</th>
       <th class="sortable" data-i18n data-en="key prefix" data-ru="префикс ключа">key prefix</th>
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
-    </tr></thead><tbody>{rows_projects}</tbody></table>
+    </tr></thead><tbody>{rows_projects}</tbody>
+    <tfoot><tr>
+      <td colspan="3" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
+      <td>{len(data['projects'])}</td>
+      <td class="num">${projects_total_cap:.2f}</td>
+      <td class="num">${projects_total_spend:.4f}</td>
+      <td colspan="2"></td>
+    </tr></tfoot>
+    </table>
 
     <h2 data-i18n data-en="API keys" data-ru="API-ключи">API keys</h2>
     {add_key_form}
@@ -768,7 +881,16 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <th class="sortable" data-type="num" data-i18n data-en="$/cap" data-ru="$/лимит">$/cap</th>
       <th class="sortable" data-type="num" data-i18n data-en="errs" data-ru="ошибки">errs</th>
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
-    </tr></thead><tbody>{rows_keys}</tbody></table>
+    </tr></thead><tbody>{rows_keys}</tbody>
+    <tfoot><tr>
+      <td colspan="4" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
+      <td><span data-i18n data-en="{keys_alive} alive" data-ru="{keys_alive} живых">{keys_alive} alive</span> / {len(data['keys'])}</td>
+      <td class="num">{keys_total_used:,}</td>
+      <td class="num">${keys_total_spent:.4f} / ${keys_total_cap:.2f}</td>
+      <td class="num">{keys_total_errs}</td>
+      <td></td>
+    </tr></tfoot>
+    </table>
     """
     return HTMLResponse(_dash_html(body=body, flash=flash))
 
@@ -777,12 +899,15 @@ def _render(data: dict[str, Any], *, flash: str = "",
 async def dashboard(
     request: Request,
     flash: str = "",
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
 ) -> HTMLResponse:
     try:
         require_owner_session(request)
     except HTTPException:
         return RedirectResponse("/login", status_code=303)
-    data = await _gather_data()
+    df, dt = _parse_date_range(from_, to)
+    data = await _gather_data(df, dt)
     return _render(data, flash=flash)
 
 

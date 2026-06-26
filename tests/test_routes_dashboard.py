@@ -322,6 +322,37 @@ def test_project_detail_404_when_missing():
     assert "Project+not+found" in r.headers["location"]
 
 
+def test_parse_date_range_defaults_to_today():
+    from datetime import datetime, UTC
+    from aibroker.routes.dashboard import _parse_date_range
+    df, dt = _parse_date_range(None, None)
+    today = datetime.now(UTC).date()
+    assert df == today and dt == today
+
+
+def test_parse_date_range_parses_valid_iso():
+    from datetime import date
+    from aibroker.routes.dashboard import _parse_date_range
+    df, dt = _parse_date_range("2026-06-01", "2026-06-10")
+    assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
+
+
+def test_parse_date_range_swaps_inverted_range():
+    """If user passes from>to, swap them rather than throw."""
+    from datetime import date
+    from aibroker.routes.dashboard import _parse_date_range
+    df, dt = _parse_date_range("2026-06-10", "2026-06-01")
+    assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
+
+
+def test_parse_date_range_falls_back_on_garbage():
+    from datetime import datetime, UTC
+    from aibroker.routes.dashboard import _parse_date_range
+    df, dt = _parse_date_range("not-a-date", "also-not")
+    today = datetime.now(UTC).date()
+    assert df == today and dt == today
+
+
 def test_range_hours_table_complete():
     """The 24h/7d/30d range pills must all map to valid hour windows."""
     from aibroker.routes.dashboard import _RANGE_HOURS
@@ -421,12 +452,21 @@ def test_render_project_detail_handles_empty_breakdowns():
 # ─── Main dashboard render (unit, no DB) ───────────────────────────────────
 
 
-def _fake_main_data(projects=(), keys=()):
+def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
+                     range_spend: float = 0.0123, range_calls: int = 42):
+    from datetime import date as _date
+    today = _date(2026, 6, 26)
     return {
         "projects": list(projects),
         "keys": list(keys),
-        "spend_today": 0.0123,
-        "calls_1h": 42,
+        "date_from": today,
+        "date_to": today,
+        "range_spend": range_spend,
+        "range_calls": range_calls,
+        "range_tin": 12345,
+        "range_tout": 6789,
+        "proj_spend": proj_spend or {},
+        "calls_1h": 7,
         "provider_summary": [("cerebras", 5, 0, 5), ("gemini", 3, 1, 4)],
     }
 
@@ -435,18 +475,24 @@ def test_main_render_with_empty_db():
     from aibroker.routes.dashboard import _render
     r = _render(_fake_main_data())
     body = r.body.decode()
-    # KPI cards present
-    assert "Spend today" in body and "Calls 1h" in body
+    # KPI cards present (new range-driven labels)
+    assert "Spend (" in body and "Calls (" in body
+    assert "Tokens in / out" in body
+    assert "12,345" in body and "6,789" in body  # comma-formatted tokens
+    # Date range form present
+    assert 'name="from"' in body and 'name="to"' in body
+    assert 'value="2026-06-26"' in body
     # provider summary line
     assert "cerebras" in body and "gemini" in body
     # tables exist with headers
     assert ">id<" in body and ">provider<" in body
-    # flash empty area
-    assert 'class="flash"' not in body or "<div " not in body[:200]
     # sortable JS markers
     assert 'class="sortable"' in body
     # bilingual toggle
     assert 'data-lang="en"' in body and 'data-lang="ru"' in body
+    # Totals rows
+    assert "<tfoot>" in body
+    assert "TOTAL" in body
 
 
 def test_main_render_renders_key_rows_with_data_row_marker():
@@ -464,6 +510,52 @@ def test_main_render_renders_key_rows_with_data_row_marker():
     assert 'data-edit-for="k1"' in body
     # Scope checkboxes rendered inside the edit row
     assert 'name="scopes" value="llm:chat"' in body
+
+
+def test_main_render_keys_totals_row():
+    """tfoot must sum the daily_used, daily_cost_used_usd, error_count cells."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    keys = [
+        ApiKeyRow(id=1, provider="cerebras", label="a", tier="free",
+                   scopes=["llm:chat"], token_encrypted="x",
+                   is_active=True, is_alive=True,
+                   daily_used=120, daily_cost_used_usd=0.0,
+                   daily_cost_cap_usd=2.0, error_count=1),
+        ApiKeyRow(id=2, provider="cerebras", label="b", tier="paid",
+                   scopes=["llm:chat"], token_encrypted="x",
+                   is_active=True, is_alive=True,
+                   daily_used=380, daily_cost_used_usd=0.123,
+                   daily_cost_cap_usd=5.0, error_count=3),
+    ]
+    body = _render(_fake_main_data(keys=keys)).body.decode()
+    # 120 + 380 = 500 used
+    assert ">500<" in body or ">500 <" in body
+    # 0 + 0.123 = $0.1230, cap 2 + 5 = $7.00
+    assert "$0.1230 / $7.00" in body
+    # error totals 1 + 3
+    assert ">4<" in body or ">4 <" in body
+    # 2/2 alive
+    assert "2 alive" in body
+
+
+def test_main_render_projects_spend_in_range_column():
+    """Each project row shows its spend in the active range; total = sum."""
+    from aibroker.db.models import ProjectRow
+    from aibroker.routes.dashboard import _render
+    p1 = ProjectRow(id=2, name="vera", project_key_prefix="aib_prj_a",
+                     project_key_hash="h", allowed_scopes=["llm:chat"],
+                     is_active=True, daily_cost_cap_usd=10.0, notes="")
+    p2 = ProjectRow(id=3, name="stepan", project_key_prefix="aib_prj_b",
+                     project_key_hash="h", allowed_scopes=["llm:chat"],
+                     is_active=True, daily_cost_cap_usd=5.0, notes="")
+    body = _render(_fake_main_data(
+        projects=[p1, p2], proj_spend={2: 9.2798, 3: 0.5910}
+    )).body.decode()
+    assert "$9.2798" in body and "$0.5910" in body
+    # Project totals row
+    assert "$15.00" in body                  # cap sum
+    assert f"${9.2798 + 0.5910:.4f}" in body  # spend sum
 
 
 def test_main_render_renders_project_rows_with_drill_link():

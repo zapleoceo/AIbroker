@@ -220,7 +220,7 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
       <a href="/docs" class="btn" data-i18n="hero.cta2" data-en="API reference" data-ru="Документация API"></a>
     </div>
     <div class="hero-stats">
-      <div class="stat"><div class="num">8+</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
+      <div class="stat"><div class="num">10</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
       <div class="stat"><div class="num">2</div><div class="lbl" data-i18n="hero.s2" data-en="Modes" data-ru="Режима"></div></div>
       <div class="stat"><div class="num">~$0</div><div class="lbl" data-i18n="hero.s3" data-en="Avg cost / call" data-ru="Средн. стоим. вызова"></div></div>
       <div class="stat"><div class="num">100%</div><div class="lbl" data-i18n="hero.s4" data-en="Open source" data-ru="Открытый код"></div></div>
@@ -383,8 +383,8 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
   <div class="container">
     <div class="eyebrow" data-i18n="prov.eyebrow" data-en="Providers" data-ru="Провайдеры"></div>
     <h2 data-i18n="prov.title"
-        data-en="Eight providers. Add more in one row of code."
-        data-ru="Восемь провайдеров. Добавить ещё — одна строка кода."></h2>
+        data-en="Ten providers. Add more in one row of code."
+        data-ru="Десять провайдеров. Добавить ещё — одна строка кода."></h2>
     <p class="section-intro" data-i18n="prov.intro"
        data-en="Built on LiteLLM, so any of its 100+ providers can be plugged in. The free-first chain is configurable per capability."
        data-ru="Построено на LiteLLM — можно подключить любой из его 100+ провайдеров. Free-first цепочка настраивается на каждую способность."></p>
@@ -392,11 +392,13 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
       <div class="prov">cerebras <span class="badge">free</span></div>
       <div class="prov">groq <span class="badge">free</span></div>
       <div class="prov">gemini <span class="badge">free</span></div>
-      <div class="prov">deepseek <span class="badge">free</span></div>
-      <div class="prov">voyage <span class="badge">free</span></div>
-      <div class="prov">openai <span class="badge paid">paid</span></div>
-      <div class="prov">anthropic <span class="badge paid">paid</span></div>
+      <div class="prov">mistral <span class="badge">free</span></div>
+      <div class="prov">cohere <span class="badge">free</span></div>
       <div class="prov">openrouter <span class="badge">free</span></div>
+      <div class="prov">voyage <span class="badge">free</span></div>
+      <div class="prov">deepseek <span class="badge paid">paid</span></div>
+      <div class="prov">anthropic <span class="badge paid">paid</span></div>
+      <div class="prov">openai <span class="badge paid">paid</span></div>
     </div>
   </div>
 </section>
