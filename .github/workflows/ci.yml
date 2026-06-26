@@ -25,7 +25,7 @@ jobs:
       - name: Run tests (SQLite)
         run: uv run --extra dev pytest -q
         env:
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
 
   integration:
     name: integration (postgres)
@@ -50,4 +50,4 @@ jobs:
       - name: Run full suite (Postgres) — selector, reserve-lane, vending run for real
         run: uv run --extra dev pytest -q
         env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test"
