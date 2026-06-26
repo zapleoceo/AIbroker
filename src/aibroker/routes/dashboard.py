@@ -20,7 +20,48 @@ from aibroker.config import get_settings
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
+from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.telemetry import audit
+
+
+# ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
+
+
+def _provider_catalogue() -> list[dict[str, Any]]:
+    """One entry per known provider: name, capabilities, default scope.
+
+    Sorted by free-first usefulness: cerebras/groq/gemini/openrouter/deepseek
+    first (free or cheap), then paid (openai/anthropic), then voyage (embed-only).
+    """
+    # capability → scope mapping; voyage embeddings → llm:embed, everything else → llm:chat
+    def scope_for(caps: list[str]) -> str:
+        if "embedding" in caps:
+            return "llm:embed"
+        if "vision" in caps and len(caps) == 1:
+            return "llm:vision"
+        return "llm:chat"
+
+    order = ["cerebras", "groq", "gemini", "openrouter", "deepseek",
+             "openai", "anthropic", "voyage"]
+    out = []
+    for p in order:
+        caps = list(DEFAULT_MODEL.get(p, {}).keys())
+        if not caps:
+            continue
+        out.append({
+            "provider": p,
+            "capabilities": caps,
+            "default_scope": scope_for(caps),
+            "models": DEFAULT_MODEL[p],
+        })
+    return out
+
+
+def _provider_meta_json() -> str:
+    """Compact JSON for the in-page <script> — what JS reads on provider change."""
+    import json
+    return json.dumps({p["provider"]: p for p in _provider_catalogue()},
+                       separators=(",", ":"))
 
 router = APIRouter(tags=["dashboard"])
 
@@ -197,6 +238,17 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
 .cap-bar .fill {{ display:block; height:100%; background:#4dabf7; }}
 .cap-bar .fill.warn {{ background:#ffd84a; }}
 .cap-bar .fill.bad  {{ background:#f44336; }}
+/* Provider hint under add-key form */
+.provider-hint {{ margin-top:10px; padding:10px 12px; border-radius:6px;
+                background:#0f1115; border:1px dashed #2a2d34;
+                color:#888; font-size:12px; line-height:1.55; }}
+.provider-hint b {{ color:#4dabf7; font-family:ui-monospace,monospace; font-weight:500; }}
+.provider-hint .cap-tag {{ display:inline-block; margin:2px 4px 2px 0; padding:1px 7px;
+                         font-family:ui-monospace,monospace; font-size:11px;
+                         background:#1a1d24; color:#4dabf7; border-radius:3px; }}
+.provider-hint table {{ width:auto; background:none; margin:6px 0 0; border-radius:0; overflow:visible; }}
+.provider-hint td {{ padding:2px 12px 2px 0; border:none; font-size:12px; color:#aaa; }}
+.provider-hint td.mono {{ font-family:ui-monospace,monospace; color:#4dabf7; }}
 /* Lang toggle */
 .lang-toggle {{ display:inline-flex; background:#1a1d24; border:1px solid #2a2d34;
               border-radius:6px; overflow:hidden; font-family:ui-monospace,monospace;
@@ -261,6 +313,58 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
     b.addEventListener("click", () => apply(b.dataset.lang));
   }});
   apply(lang);
+}})();
+</script>
+<script>
+// Provider → scope + models hint, driven by JSON inlined into the page.
+(function() {{
+  const metaEl = document.getElementById("provider-meta");
+  const sel    = document.getElementById("add-key-provider");
+  const scope  = document.getElementById("add-key-scope");
+  const hint   = document.getElementById("provider-hint");
+  if (!metaEl || !sel || !scope || !hint) return;
+  const META = JSON.parse(metaEl.textContent);
+
+  // Stash original hint so we can restore it
+  const originalHint = hint.cloneNode(true);
+
+  function langStrings() {{
+    const l = document.documentElement.lang || "en";
+    return l === "ru"
+      ? {{ chosen: "Выбран:", scope: "scope:", models: "модели, которые будет вызывать брокер:", capabilities: "способности:" }}
+      : {{ chosen: "Picked:",  scope: "scope:", models: "models the broker will route through this key:", capabilities: "capabilities:" }};
+  }}
+
+  function render(provider) {{
+    const m = META[provider];
+    if (!m) {{
+      hint.replaceWith(originalHint.cloneNode(true));
+      return;
+    }}
+    // Auto-set scope from default
+    scope.value = m.default_scope;
+
+    const t = langStrings();
+    const capChips = m.capabilities.map(c =>
+      '<span class="cap-tag">' + c + '</span>').join("");
+    const modelRows = Object.entries(m.models).map(([cap, model]) =>
+      '<tr><td>' + cap + '</td><td class="mono">' + model + '</td></tr>').join("");
+
+    hint.innerHTML =
+      '<div>' + t.chosen + ' <b>' + provider + '</b> · ' +
+      t.scope + ' <code>' + m.default_scope + '</code></div>' +
+      '<div style="margin-top:6px">' + t.capabilities + ' ' + capChips + '</div>' +
+      '<div style="margin-top:8px">' + t.models + '</div>' +
+      '<table>' + modelRows + '</table>';
+  }}
+
+  sel.addEventListener("change", () => render(sel.value));
+  // Re-render on lang toggle so labels follow EN/RU
+  document.querySelectorAll(".lang-toggle button").forEach(b => {{
+    b.addEventListener("click", () => {{
+      if (sel.value) setTimeout(() => render(sel.value), 0);
+    }});
+  }});
 }})();
 </script>
 <script>
@@ -524,17 +628,24 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'</form></td></tr>'
         )
 
-    add_key_form = """
+    provider_options = "".join(
+        f'<option value="{p["provider"]}" data-scope="{p["default_scope"]}">'
+        f'{p["provider"]}</option>'
+        for p in _provider_catalogue()
+    )
+
+    add_key_form = f"""
     <fieldset><legend data-i18n data-en="Add API key" data-ru="Добавить API-ключ">Add API key</legend>
-      <form method="post" action="/dashboard/keys/create" class="row-form">
-        <input name="provider" required
-               data-en-placeholder="provider (cerebras, …)"
-               data-ru-placeholder="провайдер (cerebras, …)"
-               placeholder="provider (cerebras, …)">
+      <form method="post" action="/dashboard/keys/create" class="row-form" id="add-key-form">
+        <select name="provider" id="add-key-provider" required>
+          <option value="" disabled selected hidden
+                  data-i18n data-en="— provider —" data-ru="— провайдер —">— provider —</option>
+          {provider_options}
+        </select>
         <input name="label" required
-               data-en-placeholder="label"
-               data-ru-placeholder="ярлык"
-               placeholder="label">
+               data-en-placeholder="label (your handle, project, …)"
+               data-ru-placeholder="ярлык (ваш handle, проект, …)"
+               placeholder="label (your handle, project, …)">
         <input name="token" type="password" required style="min-width:280px"
                data-en-placeholder="raw token"
                data-ru-placeholder="токен"
@@ -544,7 +655,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
           <option value="paid">paid</option>
           <option value="trial">trial</option>
         </select>
-        <select name="scope">
+        <select name="scope" id="add-key-scope">
           <option value="llm:chat">llm:chat</option>
           <option value="llm:embed">llm:embed</option>
           <option value="llm:vision">llm:vision</option>
@@ -555,6 +666,12 @@ def _render(data: dict[str, Any], *, flash: str = "",
                placeholder="cap (optional)">
         <button type="submit" data-i18n data-en="add" data-ru="добавить">add</button>
       </form>
+      <div id="provider-hint" class="provider-hint"
+           data-i18n
+           data-en="Pick a provider — the form will set the right scope and show which models the broker will route through this key."
+           data-ru="Выберите провайдера — форма проставит нужный scope и покажет, какие модели брокер будет вызывать через этот ключ.">
+        Pick a provider — the form will set the right scope and show which models the broker will route through this key.
+      </div>
     </fieldset>"""
 
     add_project_form = """
@@ -581,6 +698,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
     </fieldset>"""
 
     body = f"""
+    <script id="provider-meta" type="application/json">{_provider_meta_json()}</script>
     {show_new_key}
     {cards}
 

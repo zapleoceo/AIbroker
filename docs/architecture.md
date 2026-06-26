@@ -82,6 +82,28 @@ All form posts go through `require_owner_session`; an unauth POST returns
 401. Every mutation writes an `audit_log` row through
 `telemetry.audit()`.
 
+### Add-key form is provider-driven
+
+The `<select>` for `provider` in the Add-key form is built from
+`_provider_catalogue()`, which reads `providers.litellm_adapter.DEFAULT_MODEL`
+— there is **one source of truth** for "what providers we support."
+Adding a provider/model entry there immediately surfaces it in the
+dashboard dropdown; no separate frontend list to keep in sync.
+
+When the operator picks a provider:
+
+- the `scope` select auto-flips to `llm:embed` for voyage and
+  `llm:chat` for chat-style providers (`default_scope` field)
+- a hint panel under the form lists every capability the broker will
+  route to this provider (`chat:fast`, `chat:smart`, `vision`, …) and
+  the exact model id used per capability
+- on EN↔RU toggle the hint re-renders in the new language
+
+JSON describing the catalogue is inlined into `/dashboard` as
+`<script type="application/json" id="provider-meta">`; the form JS reads
+it and drives all the linked behaviour client-side. No round-trip per
+keystroke.
+
 ### Bilingual UI (EN/RU)
 
 The login page and the dashboard both ship every visible label in both

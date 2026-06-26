@@ -37,6 +37,42 @@ def test_login_page_shows_error_param():
     assert "Bad" in r.text and "sig" in r.text
 
 
+def test_provider_catalogue_lists_known_providers():
+    """Helper that drives the add-key dropdown."""
+    from aibroker.routes.dashboard import _provider_catalogue
+    cat = _provider_catalogue()
+    names = [p["provider"] for p in cat]
+    assert "cerebras" in names
+    assert "gemini" in names
+    assert "voyage" in names
+    assert "anthropic" in names
+    # Order: free-first
+    assert names.index("cerebras") < names.index("openai")
+    assert names.index("cerebras") < names.index("anthropic")
+    # voyage is embed-only → default_scope
+    voy = next(p for p in cat if p["provider"] == "voyage")
+    assert voy["default_scope"] == "llm:embed"
+    # chat providers default to llm:chat
+    cer = next(p for p in cat if p["provider"] == "cerebras")
+    assert cer["default_scope"] == "llm:chat"
+    # Every entry exposes its model map
+    for p in cat:
+        assert p["models"], f"{p['provider']} should have at least one model"
+
+
+def test_provider_meta_json_is_parseable():
+    import json
+    from aibroker.routes.dashboard import _provider_meta_json
+    meta = json.loads(_provider_meta_json())
+    assert "cerebras" in meta
+    assert meta["voyage"]["default_scope"] == "llm:embed"
+    # Each provider's models is a dict capability → model id
+    for p, m in meta.items():
+        assert isinstance(m["models"], dict)
+        for cap, model in m["models"].items():
+            assert model.startswith(p + "/") or "/" in model
+
+
 def test_login_page_has_lang_toggle():
     r = client.get("/login")
     assert 'data-lang="en"' in r.text
