@@ -29,7 +29,7 @@ async def test_tick_marks_alive_to_alive_clears_error_count():
             provider="cerebras", label="t1",
             token_encrypted=encrypt("test-token"),
             tier="free", is_active=True, is_alive=True,
-            error_count=3, allowed_scopes=["llm:chat"],
+            error_count=3, scopes=["llm:chat"],
         ).returning(ApiKeyRow.id))
         kid = r.scalar_one()
     fake_results = {kid: ("alive", 200, "ok")}
@@ -50,7 +50,7 @@ async def test_tick_marks_dead_alerts_and_bumps_error_count():
             provider="cerebras", label="t2",
             token_encrypted=encrypt("test-token-2"),
             tier="free", is_active=True, is_alive=True,
-            error_count=0, allowed_scopes=["llm:chat"],
+            error_count=0, scopes=["llm:chat"],
         ).returning(ApiKeyRow.id))
         kid = r.scalar_one()
     fake_results = {kid: ("dead", 401, "auth fail")}
@@ -70,7 +70,7 @@ async def test_tick_marks_cooldown_sets_expiry():
             provider="cerebras", label="t3",
             token_encrypted=encrypt("test-token-3"),
             tier="free", is_active=True, is_alive=True,
-            error_count=0, allowed_scopes=["llm:chat"],
+            error_count=0, scopes=["llm:chat"],
         ).returning(ApiKeyRow.id))
         kid = r.scalar_one()
     fake_results = {kid: ("cooldown", 429, "rate limited")}
@@ -95,7 +95,7 @@ async def test_tick_recover_called_when_dead_becomes_alive():
             provider="cerebras", label="t4",
             token_encrypted=encrypt("test-token-4"),
             tier="free", is_active=True, is_alive=False,   # ← was dead
-            error_count=5, allowed_scopes=["llm:chat"],
+            error_count=5, scopes=["llm:chat"],
         ).returning(ApiKeyRow.id))
         kid = r.scalar_one()
     fake_results = {kid: ("alive", 200, "ok")}
@@ -112,7 +112,7 @@ async def test_tick_skips_keys_missing_from_results():
             provider="cerebras", label="t5",
             token_encrypted=encrypt("xyz"),
             tier="free", is_active=True, is_alive=True,
-            allowed_scopes=["llm:chat"],
+            scopes=["llm:chat"],
         ))
     with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})):
         await tick()   # no crash even if results dict is empty
