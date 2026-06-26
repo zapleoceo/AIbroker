@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -17,12 +18,11 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy import JSON
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 
 # JSONB on Postgres, plain JSON on SQLite (for tests). Same Python API.
 JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from aibroker.db.engine import Base
 
@@ -58,6 +58,10 @@ class ApiKeyRow(Base):
     token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_alive: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Reserved-lane: picked LAST within its (provider, scope) group. A key scoped
+    # only to llm:edit + is_reserve=True is the Coach safety net — used only when
+    # all shared edit keys are exhausted, and invisible to bot llm:chat traffic.
+    is_reserve: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     daily_limit: Mapped[int] = mapped_column(Integer, default=999_999, nullable=False)
     daily_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     daily_cost_cap_usd: Mapped[float | None] = mapped_column(Float)

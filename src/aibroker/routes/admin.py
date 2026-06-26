@@ -1,8 +1,6 @@
 """Admin API — CRUD over projects + api_keys. X-Admin-Key required."""
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -106,6 +104,7 @@ class ApiKeyCreate(BaseModel):
     token: str = Field(min_length=8, description="plaintext token; encrypted before storage")
     tier: str = Field(default="free", pattern="^(free|paid|trial)$")
     scopes: list[str] = Field(default_factory=lambda: ["llm:chat"])
+    is_reserve: bool = False
     daily_cost_cap_usd: float | None = None
     monthly_cost_cap_usd: float | None = None
     notes: str = ""
@@ -117,6 +116,7 @@ class ApiKeyOut(BaseModel):
     label: str
     tier: str
     scopes: list[str]
+    is_reserve: bool
     is_active: bool
     is_alive: bool
     daily_used: int
@@ -142,6 +142,7 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
             existing.token_encrypted = encrypt(body.token)
             existing.tier = body.tier
             existing.scopes = body.scopes
+            existing.is_reserve = body.is_reserve
             existing.daily_cost_cap_usd = body.daily_cost_cap_usd
             existing.monthly_cost_cap_usd = body.monthly_cost_cap_usd
             existing.notes = body.notes
@@ -152,7 +153,7 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
         else:
             row = ApiKeyRow(
                 provider=body.provider, label=body.label, tier=body.tier,
-                scopes=body.scopes,
+                scopes=body.scopes, is_reserve=body.is_reserve,
                 token_encrypted=encrypt(body.token),
                 daily_cost_cap_usd=body.daily_cost_cap_usd,
                 monthly_cost_cap_usd=body.monthly_cost_cap_usd,
@@ -206,7 +207,8 @@ async def delete_key(key_id: int, request: Request) -> dict:
 def _key_out(row: ApiKeyRow) -> ApiKeyOut:
     return ApiKeyOut(
         id=row.id, provider=row.provider, label=row.label, tier=row.tier,
-        scopes=row.scopes, is_active=row.is_active, is_alive=row.is_alive,
+        scopes=row.scopes, is_reserve=row.is_reserve,
+        is_active=row.is_active, is_alive=row.is_alive,
         daily_used=row.daily_used,
         daily_cost_used_usd=row.daily_cost_used_usd,
         daily_cost_cap_usd=row.daily_cost_cap_usd,

@@ -14,27 +14,42 @@ import litellm
 
 log = logging.getLogger(__name__)
 
-# Map: provider name → default model for each capability.
-# Used when caller doesn't pin a model.
+# Map: provider name → default model per capability. Used when the caller
+# doesn't pin a model. Every (provider, capability) that appears in a routing
+# chain MUST have an entry here — otherwise the provider is silently skipped.
+# Enforced by tests/test_providers.py::test_every_chain_pair_resolves_to_a_model.
+_OSS = "gpt-oss-120b"
 DEFAULT_MODEL: dict[str, dict[str, str]] = {
-    "cerebras": {"chat:fast": "cerebras/gpt-oss-120b",
-                 "chat:smart": "cerebras/gpt-oss-120b",
-                 "chat:code": "cerebras/gpt-oss-120b"},
-    "groq": {"chat:fast": "groq/openai/gpt-oss-120b",
-             "chat:smart": "groq/openai/gpt-oss-120b"},
+    "cerebras": {"chat:fast": f"cerebras/{_OSS}", "chat:smart": f"cerebras/{_OSS}",
+                 "chat:code": f"cerebras/{_OSS}", "prefilter": f"cerebras/{_OSS}",
+                 "structured": f"cerebras/{_OSS}"},
+    "groq": {"chat:fast": f"groq/openai/{_OSS}", "chat:smart": f"groq/openai/{_OSS}",
+             "chat:code": f"groq/openai/{_OSS}", "prefilter": f"groq/openai/{_OSS}",
+             "structured": f"groq/openai/{_OSS}"},
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
                "chat:smart": "gemini/gemini-2.5-pro",
-               "vision":     "gemini/gemini-2.5-flash"},
+               "chat:code": "gemini/gemini-2.5-flash",
+               "chat:edit": "gemini/gemini-2.5-flash",
+               "prefilter": "gemini/gemini-2.5-flash",
+               "structured": "gemini/gemini-2.5-flash",
+               "vision": "gemini/gemini-2.5-flash"},
     "deepseek": {"chat:fast": "deepseek/deepseek-chat",
+                 "chat:smart": "deepseek/deepseek-chat",
                  "chat:code": "deepseek/deepseek-coder"},
-    "openrouter": {"chat:fast": "openrouter/openai/gpt-oss-120b:free",
-                   "chat:smart": "openrouter/openai/gpt-oss-120b:free"},
+    "openrouter": {"chat:fast": f"openrouter/openai/{_OSS}:free",
+                   "chat:smart": f"openrouter/openai/{_OSS}:free",
+                   "chat:code": f"openrouter/openai/{_OSS}:free",
+                   "prefilter": f"openrouter/openai/{_OSS}:free",
+                   "structured": f"openrouter/openai/{_OSS}:free"},
     "anthropic": {"chat:fast": "anthropic/claude-haiku-4-5",
                   "chat:smart": "anthropic/claude-sonnet-4-6",
-                  "chat:code":  "anthropic/claude-sonnet-4-6",
-                  "vision":     "anthropic/claude-sonnet-4-6"},
-    "openai": {"chat:fast": "openai/gpt-5-mini",
-               "chat:smart": "openai/gpt-5"},
+                  "chat:code": "anthropic/claude-sonnet-4-6",
+                  "chat:edit": "anthropic/claude-haiku-4-5",
+                  "structured": "anthropic/claude-haiku-4-5",
+                  "vision": "anthropic/claude-sonnet-4-6"},
+    "openai": {"chat:fast": "openai/gpt-5-mini", "chat:smart": "openai/gpt-5",
+               "chat:code": "openai/gpt-5", "structured": "openai/gpt-5-mini",
+               "vision": "openai/gpt-5-mini"},
     "voyage": {"embedding": "voyage/voyage-3"},
 }
 
@@ -79,6 +94,14 @@ async def call_llm(
     }
     if response_format:
         kwargs["response_format"] = response_format
+        # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat
+        # the whole budget and truncate the object mid-string. Disable thinking
+        # so the JSON fits (mirrors Stepan's thinkingBudget=0). Other providers
+        # ignore reasoning_effort=disable, so gate it to gemini.
+        if model.startswith("gemini/") and response_format.get("type") in (
+            "json_object", "json_schema"
+        ):
+            kwargs["reasoning_effort"] = "disable"
     if extra:
         kwargs.update(extra)
 

@@ -6,7 +6,7 @@ neither of which SQLite supports. These tests need a real Postgres to run.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import insert
@@ -14,16 +14,15 @@ from sqlalchemy import insert
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.routing.selector import (
-    SelectionError,
     mark_cooldown,
     mark_dead,
     pick_and_reserve,
     record_usage,
 )
 
-
+_DB = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
-    "sqlite" in os.environ.get("DATABASE_URL", ""),
+    "postgres" not in _DB and "asyncpg" not in _DB,
     reason="Selector uses Postgres-specific JSONB ? operator + FOR UPDATE SKIP LOCKED",
 )
 
@@ -70,7 +69,7 @@ async def test_pick_skips_dead():
 
 
 async def test_pick_skips_in_cooldown():
-    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+    future = datetime.now(UTC) + timedelta(minutes=10)
     await _add_key("cerebras", "x", cooldown_until=future.replace(tzinfo=None))
     result = await pick_and_reserve("cerebras", "llm:chat")
     assert result is None
@@ -93,7 +92,7 @@ async def test_pick_filters_by_scope():
 
 async def test_mark_cooldown_sets_future():
     kid = await _add_key("cerebras", "x")
-    future = datetime.now(timezone.utc) + timedelta(minutes=5)
+    future = datetime.now(UTC) + timedelta(minutes=5)
     await mark_cooldown(kid, future)
     # Subsequent pick should skip it
     result = await pick_and_reserve("cerebras", "llm:chat")
@@ -105,6 +104,33 @@ async def test_mark_dead_skips_subsequent_picks():
     await mark_dead(kid)
     result = await pick_and_reserve("cerebras", "llm:chat")
     assert result is None
+
+
+async def test_reserve_key_picked_only_when_shared_exhausted():
+    """Reserve key is the safety net: shared edit keys go first; the reserve
+    is picked only once every shared key in the group is unavailable."""
+    shared = await _add_key("gemini", "shared", scopes=["llm:chat", "llm:edit"],
+                            last_used_at=datetime.now() - timedelta(hours=1))
+    await _add_key("gemini", "reserve", scopes=["llm:edit"], is_reserve=True,
+                   last_used_at=datetime.now() - timedelta(hours=5))  # older, but reserve
+
+    # Even though the reserve key is older (LRU would prefer it), the shared key wins.
+    picked = await pick_and_reserve("gemini", "llm:edit")
+    assert picked is not None
+    assert picked.label == "shared"
+
+    # Knock the shared key into cooldown → now the reserve is used.
+    await mark_cooldown(shared, datetime.now(UTC) + timedelta(minutes=10))
+    picked = await pick_and_reserve("gemini", "llm:edit")
+    assert picked is not None
+    assert picked.label == "reserve"
+
+
+async def test_reserve_edit_key_invisible_to_chat_scope():
+    """A key scoped only to llm:edit must never serve bot llm:chat traffic."""
+    await _add_key("gemini", "reserve", scopes=["llm:edit"], is_reserve=True)
+    assert await pick_and_reserve("gemini", "llm:chat") is None
+    assert await pick_and_reserve("gemini", "llm:edit") is not None
 
 
 async def test_record_usage_increments_counters():

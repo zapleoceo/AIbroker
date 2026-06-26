@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert
 
@@ -16,7 +15,6 @@ from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.main import app
-
 
 client = TestClient(app)
 
@@ -76,7 +74,7 @@ async def test_chat_validates_capability():
 async def test_chat_503_when_no_key_available():
     """pick_and_reserve returns None for every provider → 503."""
     plain, _ = await _make_project(["llm:chat"])
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=None)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
@@ -94,12 +92,12 @@ async def test_chat_happy_path_returns_response():
         "tokens_in": 12, "tokens_out": 8,
         "cost_usd": 0.0, "latency_ms": 234,
     }
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.check_caps", AsyncMock()), \
-         patch("aibroker.routes.proxy.call_llm",
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("hello dima", fake_meta))), \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -111,6 +109,7 @@ async def test_chat_happy_path_returns_response():
     assert data["provider"] == "cerebras"
     assert data["tokens_in"] == 12
     assert data["tokens_out"] == 8
+    assert data["key_label"] == "t"  # surfaced for the Stepan UI chip
 
 
 async def test_chat_falls_back_on_cap_block():
@@ -129,13 +128,13 @@ async def test_chat_falls_back_on_cap_block():
         "cost_usd": 0.0, "latency_ms": 100,
     }
 
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.check_caps", side_effect=fake_check), \
-         patch("aibroker.routes.proxy.call_llm",
+         patch("aibroker.services.llm_service.check_caps", side_effect=fake_check), \
+         patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("ok", fake_meta))), \
-         patch("aibroker.routes.proxy.audit", AsyncMock()), \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.audit", AsyncMock()), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -158,12 +157,12 @@ async def test_chat_call_llm_failure_records_and_falls_back():
             "cost_usd": 0.0, "latency_ms": 10,
         })
 
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.check_caps", AsyncMock()), \
-         patch("aibroker.routes.proxy.call_llm", side_effect=fake_call_llm), \
-         patch("aibroker.routes.proxy.mark_cooldown", AsyncMock()) as cd, \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()) as cd, \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -180,12 +179,12 @@ async def test_chat_auth_error_marks_key_dead():
     async def fake_call_llm(*a, **kw):
         raise RuntimeError("401 unauthorized")
 
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.check_caps", AsyncMock()), \
-         patch("aibroker.routes.proxy.call_llm", side_effect=fake_call_llm), \
-         patch("aibroker.routes.proxy.mark_dead", AsyncMock()) as md, \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.mark_dead", AsyncMock()) as md, \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -195,12 +194,41 @@ async def test_chat_auth_error_marks_key_dead():
     md.assert_awaited()
 
 
+async def test_chat_invalid_json_falls_through_to_next_provider():
+    """JSON request: a provider that returns unparseable JSON is skipped."""
+    plain, _ = await _make_project(["llm:chat"])
+    call_count = {"n": 0}
+
+    async def fake_call_llm(*a, **kw):
+        call_count["n"] += 1
+        meta = {"model": "x", "tokens_in": 1, "tokens_out": 1,
+                "cost_usd": 0.0, "latency_ms": 1}
+        if call_count["n"] == 1:
+            return ("{ broken json", meta)   # unparseable → skip
+        return ('{"ok": true}', meta)        # valid → win
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+        r = client.post(
+            "/v1/chat?capability=chat:fast",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "response_format": {"type": "json_object"}},
+        )
+    assert r.status_code == 200
+    assert r.json()["text"] == '{"ok": true}'
+    assert call_count["n"] >= 2  # first (broken JSON) was skipped
+
+
 # ─── /v1/embed ─────────────────────────────────────────────────────────────
 
 
 async def test_embed_503_when_no_key():
     plain, _ = await _make_project(["llm:embed"])
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=None)):
         r = client.post(
             "/v1/embed?provider=voyage",
@@ -215,11 +243,11 @@ async def test_embed_happy_path():
     fake_meta = {
         "tokens_in": 5, "cost_usd": 0.0001, "latency_ms": 42,
     }
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.embed",
+         patch("aibroker.services.llm_service.embed",
                 AsyncMock(return_value=([[0.1, 0.2, 0.3]], fake_meta))), \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/embed?provider=voyage",
             headers={"X-Project-Key": plain},
@@ -238,10 +266,10 @@ async def test_embed_502_on_provider_failure():
     async def fake_embed(*a, **kw):
         raise RuntimeError("boom")
 
-    with patch("aibroker.routes.proxy.pick_and_reserve",
+    with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.routes.proxy.embed", side_effect=fake_embed), \
-         patch("aibroker.routes.proxy.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.embed", side_effect=fake_embed), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
         r = client.post(
             "/v1/embed?provider=voyage",
             headers={"X-Project-Key": plain},

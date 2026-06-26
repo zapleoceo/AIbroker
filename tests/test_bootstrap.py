@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -13,10 +14,22 @@ from aibroker.db.models import ProjectRow
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 
+def _use_test_engine():
+    """bootstrap.main() owns its engine lifecycle (init/close); in tests the
+    conftest fixture already provides one, so no-op init/close and reuse it."""
+    from aibroker.scripts import bootstrap
+    return (
+        patch.object(bootstrap, "init_engine", AsyncMock()),
+        patch.object(bootstrap, "close_engine", AsyncMock()),
+    )
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
 async def test_bootstrap_creates_admin_ops_project():
     from aibroker.scripts.bootstrap import main
-    rc = await main()
+    init_p, close_p = _use_test_engine()
+    with init_p, close_p:
+        rc = await main()
     assert rc == 0
     async with get_session() as s:
         row = (await s.execute(
@@ -32,8 +45,12 @@ async def test_bootstrap_creates_admin_ops_project():
 async def test_bootstrap_re_rotates_when_already_exists():
     """Running bootstrap twice rotates the key, not duplicate row."""
     from aibroker.scripts.bootstrap import main
-    rc1 = await main()
-    rc2 = await main()
+    init_p, close_p = _use_test_engine()
+    with init_p, close_p:
+        rc1 = await main()
+    init_p, close_p = _use_test_engine()
+    with init_p, close_p:
+        rc2 = await main()
     assert rc1 == 0 and rc2 == 0
     async with get_session() as s:
         count = (await s.execute(
