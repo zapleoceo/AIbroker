@@ -1,62 +1,89 @@
-"""providers.quotas — per-provider daily quota math + severity coloring."""
+"""providers.quotas — per-provider daily quotas (request- or token-metered)."""
 from __future__ import annotations
 
 from aibroker.providers.quotas import (
-    PROVIDER_DAILY_QUOTA,
+    PROVIDER_QUOTAS,
+    bar_label,
     percent_used,
     quota_for,
     severity_class,
 )
 
 
-def test_quota_for_returns_known_providers():
-    assert quota_for("cerebras") == 14_400
-    assert quota_for("gemini") == 1_500
-    assert quota_for("mistral") == 86_400
+def test_quota_for_known_provider():
+    q = quota_for("cerebras")
+    assert q.req_per_day == 14_400
+    # 2026-06-28: verified against user's '90% free tokens' alert
+    assert q.tok_per_day == 1_000_000
+    assert q.doc.startswith("https://")
 
 
-def test_quota_for_paid_returns_none():
-    """Paid providers have no meaningful daily quota for a progress bar."""
+def test_quota_for_paid_returns_empty():
+    """Paid providers have empty Quota — no bar drawn."""
     for p in ("deepseek", "anthropic", "openai"):
-        assert quota_for(p) is None
+        q = quota_for(p)
+        assert q.req_per_day is None
+        assert q.tok_per_day is None
 
 
-def test_quota_for_unknown_returns_none():
-    assert quota_for("brand-new-llm") is None
+def test_quota_for_unknown_returns_empty():
+    assert quota_for("brand-new-llm").req_per_day is None
 
 
 def test_every_routed_provider_has_a_quota_entry():
-    """Regression guard: chains.py providers MUST be present in quota table.
-    Either with a number (free-tier known) or None (paid). Missing entry =
-    dashboard hides the bar silently — confusing."""
+    """Drift guard: every provider routed in chains MUST have a Quota."""
     from aibroker.routing.chains import CAPABILITY_CHAINS
     routed = {p for chain in CAPABILITY_CHAINS.values() for p in chain}
     for p in routed:
-        assert p in PROVIDER_DAILY_QUOTA, (
-            f"{p!r} routed in chains but missing from PROVIDER_DAILY_QUOTA"
+        assert p in PROVIDER_QUOTAS, (
+            f"{p!r} routed in chains but missing from PROVIDER_QUOTAS"
         )
 
 
-def test_percent_used_basic():
-    assert percent_used(0, "cerebras") == 0
-    assert percent_used(7_200, "cerebras") == 50    # half of 14_400
-    assert percent_used(14_400, "cerebras") == 100
+def test_percent_used_returns_max_axis():
+    """When both axes apply, the bar shows whichever is closer to its cap."""
+    # cerebras: 14400 req/day, 1M tok/day.
+    # 0 req, 500k tok = 50% on token axis → bar shows 50.
+    assert percent_used(0, 500_000, "cerebras") == 50
+    # 7200 req (50% req), 100k tok (10% tok) → bar shows 50.
+    assert percent_used(7_200, 100_000, "cerebras") == 50
+    # both maxed
+    assert percent_used(14_400, 1_000_000, "cerebras") == 100
 
 
 def test_percent_used_caps_at_100():
-    """Overage doesn't blow past 100%."""
-    assert percent_used(50_000, "cerebras") == 100
-    assert percent_used(10_000, "gemini") == 100    # 10k on 1.5k quota
+    """Over-quota doesn't blow past 100 — clamp guards UI width."""
+    assert percent_used(0, 5_000_000, "cerebras") == 100   # 5× tokens cap
+    assert percent_used(100_000, 0, "cerebras") == 100
 
 
 def test_percent_used_returns_none_for_paid():
-    assert percent_used(100, "anthropic") is None
-    assert percent_used(100, "openai") is None
-    assert percent_used(100, "unknown-provider") is None
+    assert percent_used(100, 1_000_000, "anthropic") is None
+    assert percent_used(100, 1_000_000, "openai") is None
+    assert percent_used(100, 1_000_000, "unknown-provider") is None
+
+
+def test_gemini_is_request_metered_only():
+    """Gemini has per-day request limit but no per-day token cap."""
+    # 750 req on 1500 RPD → 50%; token axis ignored
+    assert percent_used(750, 99_999_999, "gemini") == 50
+
+
+def test_bar_label_picks_dominant_axis():
+    """When token usage is higher %, show 'tok' label; otherwise show req."""
+    # cerebras: 500k tok (50%) vs 100 req (0%) → show token label
+    label = bar_label(100, 500_000, "cerebras")
+    assert "tok" in label
+    assert "500k" in label
+    # cerebras: 7200 req (50%) vs 0 tok (0%) → show req label
+    label = bar_label(7_200, 0, "cerebras")
+    assert label == "7200/14400"
+    # gemini: token-axis disabled, always show req
+    label = bar_label(100, 999_999, "gemini")
+    assert "100/1500" == label
 
 
 def test_severity_class_thresholds():
-    """Blue (default empty class) <70%, yellow 70-89%, red 90+."""
     assert severity_class(0) == ""
     assert severity_class(69) == ""
     assert severity_class(70) == "warn"
@@ -64,3 +91,9 @@ def test_severity_class_thresholds():
     assert severity_class(90) == "bad"
     assert severity_class(100) == "bad"
     assert severity_class(None) == ""
+
+
+def test_doc_url_present_for_every_quota():
+    """Each provider entry must link to its rate-limit docs for verification."""
+    for p, q in PROVIDER_QUOTAS.items():
+        assert q.doc.startswith("https://"), f"{p} missing doc URL"

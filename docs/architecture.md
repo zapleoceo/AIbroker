@@ -129,15 +129,29 @@ keystroke.
 
 The keys table's `daily %` column shows where each key sits against its
 provider's free-tier daily quota. Driven by `providers/quotas.py`:
-`PROVIDER_DAILY_QUOTA` lists requests-per-day per provider (Cerebras 14400,
-Gemini 1500, Mistral 86400, Cohere 1000, OpenRouter 200, Voyage ~unlimited),
-`None` for paid (DeepSeek/Anthropic/OpenAI). A drift test asserts every
-provider in any routing chain has an entry — missing entry = silently
-hidden bar.
+each `Quota` carries `req_per_day`, `tok_per_day`, and a `doc` URL to the
+provider's rate-limit page (for verification — these numbers drift).
 
-Render: `daily_used / quota` text + a small bar coloured by `severity_class()`
-(blue <70 %, yellow 70-89 %, red ≥90 %). Sortable by percentage via
-`data-sort`; paid keys get the sentinel `-1` so they cluster at one end.
+Both axes apply at once for providers that meter both (e.g. Cerebras:
+14,400 req/day AND 1M tokens/day). `percent_used(req, tok, provider)`
+returns the **max** of the two — whichever you'll hit first wins.
+Token usage is summed live from `usage_log` (today UTC) per `api_key_id`,
+so the bar reflects real consumption, not stale counters.
+
+Discovered by hard experience: my first version only counted requests,
+and the dashboard happily showed Cerebras at 6 % while three keys were
+already past 100 % of the token quota (Cerebras emailed user a
+'90 % free tokens' alert before the dashboard caught up). Fixed
+2026-06-28; regression test `test_main_render_keys_show_token_axis_when_dominant`
+locks it in.
+
+Render: `bar_label()` shows whichever axis dominates — `'525/14400'`
+(requests) or `'1.4M/1M tok'` (tokens). Bar coloured by
+`severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %). Tooltip
+exposes both axes (`'97 % · 525 req · 1,356,576 tok'`) for debugging.
+
+Sortable by combined percentage via `data-sort`; paid keys get the
+sentinel `-1` so they cluster at one end.
 
 ### Bilingual UI (EN/RU)
 

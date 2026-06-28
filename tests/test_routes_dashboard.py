@@ -493,7 +493,8 @@ def test_render_project_detail_handles_empty_breakdowns():
 
 def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
                      range_spend: float = 0.0123, range_calls: int = 42,
-                     date_from=None, date_to=None):
+                     date_from=None, date_to=None,
+                     tokens_today: dict | None = None):
     """date_from/date_to default to None = all-time view (no date filter)."""
     return {
         "projects": list(projects),
@@ -505,6 +506,7 @@ def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
         "range_tin": 12345,
         "range_tout": 6789,
         "proj_spend": proj_spend or {},
+        "tokens_today": tokens_today or {},
         "calls_1h": 7,
         "provider_summary": [("cerebras", 5, 0, 5), ("gemini", 3, 1, 4)],
     }
@@ -555,21 +557,40 @@ def test_main_render_renders_key_rows_with_data_row_marker():
     assert 'name="scopes" value="llm:chat"' in body
 
 
-def test_main_render_keys_show_daily_quota_progress_bar():
-    """A free-tier key with known quota shows used/quota text + bar with %."""
+def test_main_render_keys_show_request_axis_when_dominant():
+    """Gemini is request-metered (no token quota) — shows req axis."""
     from aibroker.db.models import ApiKeyRow
     from aibroker.routes.dashboard import _render
-    # gemini quota = 1500. 750 used → 50%.
+    # gemini 1500 RPD. 750 req → 50% (token axis disabled for gemini).
     k = ApiKeyRow(
         id=7, provider="gemini", label="t", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
         is_active=True, is_alive=True, daily_used=750,
     )
     body = _render(_fake_main_data(keys=[k])).body.decode()
-    assert "750/1500" in body              # used/quota text
-    assert "title='50%'" in body            # tooltip on bar wrapper
-    assert "style='width:50%'" in body      # visual bar width
-    assert "data-sort='50'" in body         # sortable by percentage
+    assert "750/1500" in body
+    assert "style='width:50%'" in body
+    assert "data-sort='50'" in body
+
+
+def test_main_render_keys_show_token_axis_when_dominant():
+    """Cerebras: 525 req (~4 % of 14400) vs 1.36M tok (>100 % of 1M)
+    — bar takes token axis, hits red."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=10, provider="cerebras", label="shaboldas1", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=525,
+    )
+    body = _render(_fake_main_data(
+        keys=[k], tokens_today={10: 1_356_576}
+    )).body.decode()
+    assert "tok" in body                     # token-axis label
+    assert "fill bad" in body                # red (≥90%)
+    assert "style='width:100%'" in body      # clamped
+    # tooltip exposes both axes for debugging
+    assert "525 req" in body and "1,356,576 tok" in body
 
 
 def test_main_render_keys_paid_provider_no_bar():
@@ -583,24 +604,7 @@ def test_main_render_keys_paid_provider_no_bar():
     )
     body = _render(_fake_main_data(keys=[k])).body.decode()
     assert ">42<" in body
-    assert "cap-bar" not in body or "anthropic" not in body.split("cap-bar")[0].split(">42<")[-1]
-    # paid sorts last via -1 sentinel
     assert "data-sort='-1'" in body
-
-
-def test_main_render_keys_at_or_above_quota_shows_red_bar():
-    from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
-    # cohere quota = 1000. 1200 used → capped at 100% with severity 'bad'.
-    k = ApiKeyRow(
-        id=9, provider="cohere", label="t", tier="free",
-        scopes=["llm:chat"], token_encrypted="x",
-        is_active=True, is_alive=True, daily_used=1200,
-    )
-    body = _render(_fake_main_data(keys=[k])).body.decode()
-    assert "1200/1000" in body
-    assert "fill bad" in body                # red severity
-    assert "style='width:100%'" in body      # clamped to 100%
 
 
 def test_keys_table_header_renamed_daily_pct():

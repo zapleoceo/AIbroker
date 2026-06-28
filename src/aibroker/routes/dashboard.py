@@ -563,6 +563,15 @@ async def _gather_data(date_from: date | None = None,
             "SELECT COUNT(*) FROM usage_log "
             "WHERE created_at > now() - interval '1 hour'"
         ))).scalar() or 0)
+        # Per-key token consumption today (UTC) — drives the daily-quota bar
+        # for token-metered providers (Cerebras, Mistral, Voyage…).
+        tokens_today = dict((await s.execute(text(
+            "SELECT api_key_id, COALESCE(SUM(tokens_in + tokens_out), 0) AS toks "
+            "FROM usage_log "
+            "WHERE api_key_id IS NOT NULL "
+            "  AND created_at::date = (now() AT TIME ZONE 'UTC')::date "
+            "GROUP BY api_key_id"
+        ))).all())
         provider_summary = (await s.execute(text(
             "SELECT provider, "
             "COUNT(*) FILTER (WHERE is_active AND is_alive "
@@ -578,6 +587,7 @@ async def _gather_data(date_from: date | None = None,
         "range_tin": int(range_stats.tin),
         "range_tout": int(range_stats.tout),
         "proj_spend": proj_spend,
+        "tokens_today": tokens_today,
         "calls_1h": calls_1h,
         "provider_summary": provider_summary,
     }
@@ -731,19 +741,21 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
         )
 
-        # Daily-quota progress bar (used vs provider's known free-tier quota).
-        # For paid/unknown providers we just show the raw count and sort by
-        # absolute used.
+        # Daily-quota progress bar — request-OR-token-metered (whichever
+        # axis is closer to its cap wins). Token usage pulled live from
+        # usage_log (today UTC) so it reflects reality, not stale counters.
         from aibroker.providers.quotas import (
-            percent_used, quota_for, severity_class,
+            bar_label, percent_used, severity_class,
         )
-        used_pct = percent_used(k.daily_used or 0, k.provider)
-        quota = quota_for(k.provider)
-        if used_pct is not None and quota:
+        tok_today = int(data["tokens_today"].get(k.id, 0))
+        used_pct = percent_used(k.daily_used or 0, tok_today, k.provider)
+        if used_pct is not None:
             bar_fill = severity_class(used_pct)
+            label = bar_label(k.daily_used or 0, tok_today, k.provider)
             used_html = (
-                f"<span class='mono'>{k.daily_used}/{quota}</span>"
-                f"<span class='cap-bar' title='{used_pct}%'>"
+                f"<span class='mono'>{label}</span>"
+                f"<span class='cap-bar' title='{used_pct}% · {k.daily_used} req · "
+                f"{tok_today:,} tok'>"
                 f"<span class='fill {bar_fill}' style='width:{used_pct}%'></span></span>"
             )
         else:
