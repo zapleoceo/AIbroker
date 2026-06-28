@@ -7,7 +7,7 @@ on first paint (useful for sharing); ?lang=en forces EN.
 from __future__ import annotations
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from aibroker import __version__
 
@@ -19,8 +19,101 @@ _HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIbroker — one key, every LLM provider</title>
-<meta name="description" content="Centralized LLM key broker. Free-first routing, cost caps, health monitoring. One API, many providers.">
+<title>AIbroker — one API key, every LLM provider · free-first routing, cost guard, self-hosted</title>
+<meta name="description" content="Open-source LLM key broker. One API for Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage. Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
+<meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Mistral Cohere OpenRouter DeepSeek Anthropic Voyage">
+<meta name="author" content="zapleoceo">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://aib.zapleo.com/">
+<link rel="alternate" hreflang="en" href="https://aib.zapleo.com/?lang=en">
+<link rel="alternate" hreflang="ru" href="https://aib.zapleo.com/?lang=ru">
+<link rel="alternate" hreflang="x-default" href="https://aib.zapleo.com/">
+
+<!-- Open Graph (Facebook, LinkedIn, iMessage, Telegram link previews) -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://aib.zapleo.com/">
+<meta property="og:title" content="AIbroker — one API key, every LLM provider">
+<meta property="og:description" content="Open-source LLM key broker. Free-first routing across 10 providers, cost caps, health monitoring. Self-host on any VPS.">
+<meta property="og:site_name" content="AIbroker">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="ru_RU">
+
+<!-- Twitter / X card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AIbroker — one API key, every LLM provider">
+<meta name="twitter:description" content="Open-source LLM key broker · free-first across 10 providers · cost guard · self-hosted.">
+
+<!-- Schema.org structured data — picked up by Google rich-results AND by
+     LLM crawlers (Perplexity, ChatGPT browse, Claude search). Two graphs:
+     SoftwareApplication for the broker itself, FAQPage for the FAQ section. -->
+<script type="application/ld+json">
+{{
+  "@context": "https://schema.org",
+  "@graph": [
+    {{
+      "@type": "SoftwareApplication",
+      "name": "AIbroker",
+      "url": "https://aib.zapleo.com/",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux / Docker",
+      "description": "Open-source LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI and Voyage — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
+      "softwareVersion": "{version}",
+      "license": "https://opensource.org/licenses/MIT",
+      "offers": {{"@type": "Offer", "price": "0", "priceCurrency": "USD"}},
+      "codeRepository": "https://github.com/zapleoceo/AIbroker",
+      "programmingLanguage": "Python",
+      "featureList": [
+        "Free-tier-first routing across 10 LLM providers",
+        "Adaptive per-provider cooldowns with exponential backoff",
+        "Per-key, per-project and global daily cost caps",
+        "Atomic SELECT FOR UPDATE SKIP LOCKED key selection",
+        "Background health monitor with Telegram alerts",
+        "Fernet-encrypted provider tokens at rest",
+        "Telegram-login dashboard with per-project usage drill-down",
+        "Two operating modes: proxy (broker holds keys) and vending (broker leases keys)"
+      ]
+    }},
+    {{
+      "@type": "FAQPage",
+      "mainEntity": [
+        {{
+          "@type": "Question",
+          "name": "Does AIbroker store my prompts?",
+          "acceptedAnswer": {{
+            "@type": "Answer",
+            "text": "No. Only metadata is logged (provider, model, capability, tokens, cost, latency, status). Message bodies pass through and are forgotten."
+          }}
+        }},
+        {{
+          "@type": "Question",
+          "name": "What happens if all keys for a provider fail?",
+          "acceptedAnswer": {{
+            "@type": "Answer",
+            "text": "The capability chain falls back to the next provider. If every provider in the chain is exhausted, /v1/chat returns HTTP 503."
+          }}
+        }},
+        {{
+          "@type": "Question",
+          "name": "How is the dashboard secured?",
+          "acceptedAnswer": {{
+            "@type": "Answer",
+            "text": "Telegram Login Widget signs in only OWNER_TELEGRAM_ID. Session cookie is HMAC-signed. An X-Admin-Key header is the fallback for ops scripts."
+          }}
+        }},
+        {{
+          "@type": "Question",
+          "name": "Can I rotate provider tokens?",
+          "acceptedAnswer": {{
+            "@type": "Answer",
+            "text": "Yes. Add a new key via dashboard or POST /admin/keys, then disable the old one. Active leases finish; new ones use the new key."
+          }}
+        }}
+      ]
+    }}
+  ]
+}}
+</script>
+
 <style>
 :root {{
   --bg:#0b0d11; --panel:#13161c; --panel2:#191d25; --line:#262a33;
@@ -615,3 +708,107 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
 async def landing() -> HTMLResponse:
     """Public landing — bilingual EN/RU, default EN."""
     return HTMLResponse(_HTML.format(version=__version__))
+
+
+# ─── Discovery endpoints (SEO + LLM crawlers) ──────────────────────────────
+
+
+_ROBOTS_TXT = """User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /dashboard
+Disallow: /api/
+
+Sitemap: https://aib.zapleo.com/sitemap.xml
+"""
+
+
+_SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://aib.zapleo.com/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="https://aib.zapleo.com/?lang=en"/>
+    <xhtml:link rel="alternate" hreflang="ru" href="https://aib.zapleo.com/?lang=ru"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://aib.zapleo.com/"/>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://aib.zapleo.com/docs</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://aib.zapleo.com/openapi.json</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.5</priority>
+  </url>
+</urlset>
+"""
+
+
+# llms.txt — proposed standard (Jeremy Howard, 2024) for LLM-friendly site
+# discovery. Plain markdown; crawlers like Perplexity / ChatGPT browse use it
+# as a hint of what content is worth ingesting + how to structure it.
+_LLMS_TXT = """# AIbroker
+
+> Open-source centralized LLM key broker. One API endpoint routes calls across
+> 10 LLM providers (Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter,
+> DeepSeek, Anthropic, OpenAI, Voyage) with free-tier-first ordering, paid
+> fallback, per-key and per-project cost caps, automatic health probing, and
+> Fernet-encrypted token storage at rest. Self-host on any VPS.
+
+## Key concepts
+
+- **Two operating modes**: `proxy` (broker calls the provider with its own
+  stored key and returns the response — client never sees credentials) and
+  `vending` (broker hands the client a short-lived lease + plaintext key
+  for direct provider calls).
+- **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
+  `chat:code`, `chat:edit`, `embedding`, `vision`, `prefilter`, `structured`.
+  Each maps to an ordered provider chain (free-first) and a required scope.
+- **Scopes**: every project key carries a list of allowed scopes
+  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`). Mismatch → HTTP 403.
+- **Adaptive cooldown**: per-provider base wait (Gemini 60s, Mistral 10s,
+  OpenRouter 5min, etc.) with exponential backoff per consecutive 429.
+- **Reserved lane**: a key marked `is_reserve=true` is picked last in its
+  group — the safety net behind the shared pool.
+
+## Endpoints
+
+- [/](https://aib.zapleo.com/) — bilingual EN/RU landing page (this page)
+- [/docs](https://aib.zapleo.com/docs) — Swagger UI, full API reference
+- [/openapi.json](https://aib.zapleo.com/openapi.json) — OpenAPI 3 schema
+- [/healthz](https://aib.zapleo.com/healthz) — liveness probe
+- [/v1/health](https://aib.zapleo.com/v1/health) — per-provider key health
+- `POST /v1/chat?capability=chat:fast` — proxy mode chat (needs `X-Project-Key`)
+- `POST /v1/embed?provider=voyage` — proxy mode embed
+- `POST /v1/key` — vending mode (returns lease + plaintext key)
+
+## Code
+
+- GitHub: https://github.com/zapleoceo/AIbroker
+- License: MIT-style
+- Stack: FastAPI · SQLAlchemy 2 async · asyncpg · LiteLLM · Postgres · Docker
+"""
+
+
+@router.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt() -> PlainTextResponse:
+    """Allow indexing of public pages; block admin / dashboard / api callbacks."""
+    return PlainTextResponse(_ROBOTS_TXT)
+
+
+@router.get("/sitemap.xml")
+async def sitemap_xml() -> Response:
+    """Standard XML sitemap with hreflang alternates for EN/RU."""
+    return Response(content=_SITEMAP_XML, media_type="application/xml")
+
+
+@router.get("/llms.txt", response_class=PlainTextResponse)
+async def llms_txt() -> PlainTextResponse:
+    """LLM-friendly site descriptor (Jeremy Howard's proposed /llms.txt).
+    Plain markdown — crawlers like Perplexity, ChatGPT browse, Claude search
+    use it as a hint of what content matters and how it's structured."""
+    return PlainTextResponse(_LLMS_TXT)

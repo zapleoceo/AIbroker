@@ -8,7 +8,10 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Public bilingual (EN/RU) landing page — product overview |
+| `GET` | `/` | Public bilingual (EN/RU) landing page — product overview, OG/Twitter/Schema.org metadata |
+| `GET` | `/robots.txt` | Crawler policy — index everything except `/admin/`, `/dashboard`, `/api/` |
+| `GET` | `/sitemap.xml` | XML sitemap with hreflang EN/RU alternates |
+| `GET` | `/llms.txt` | LLM-friendly site descriptor (Jeremy Howard proposal) — markdown summary for Perplexity / ChatGPT browse / Claude search |
 | `GET` | `/healthz` | `{ok: true, service, ts}` — liveness probe |
 | `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts |
 | `GET` | `/login` | Telegram Login Widget for `/dashboard` |

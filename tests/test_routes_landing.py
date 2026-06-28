@@ -75,6 +75,99 @@ def test_landing_lists_providers():
         assert p in r.text
 
 
+def test_landing_has_open_graph_tags():
+    r = client.get("/")
+    assert 'property="og:type"' in r.text
+    assert 'property="og:url"' in r.text and "aib.zapleo.com" in r.text
+    assert 'property="og:title"' in r.text
+    assert 'property="og:description"' in r.text
+    assert 'property="og:site_name" content="AIbroker"' in r.text
+
+
+def test_landing_has_twitter_card():
+    r = client.get("/")
+    assert 'name="twitter:card"' in r.text
+    assert 'name="twitter:title"' in r.text
+
+
+def test_landing_has_schema_org_jsonld():
+    """Structured data for Google rich-results + LLM crawlers."""
+    import json
+    import re
+    r = client.get("/")
+    m = re.search(
+        r'<script type="application/ld\+json">\s*(\{.+?\})\s*</script>',
+        r.text, re.DOTALL,
+    )
+    assert m, "JSON-LD block missing"
+    data = json.loads(m.group(1))
+    assert data["@context"] == "https://schema.org"
+    graph = data["@graph"]
+    types = {item["@type"] for item in graph}
+    assert {"SoftwareApplication", "FAQPage"} <= types
+    sw = next(i for i in graph if i["@type"] == "SoftwareApplication")
+    assert sw["name"] == "AIbroker"
+    assert sw["codeRepository"].startswith("https://github.com/")
+    assert sw["offers"]["price"] == "0"
+    # FAQ has the 4 questions
+    faq = next(i for i in graph if i["@type"] == "FAQPage")
+    assert len(faq["mainEntity"]) == 4
+
+
+def test_landing_has_canonical_and_hreflang():
+    r = client.get("/")
+    assert '<link rel="canonical" href="https://aib.zapleo.com/">' in r.text
+    assert 'hreflang="en"' in r.text and 'hreflang="ru"' in r.text
+    assert 'hreflang="x-default"' in r.text
+
+
+def test_landing_has_robots_meta_index():
+    r = client.get("/")
+    assert 'name="robots" content="index, follow"' in r.text
+
+
+def test_robots_txt_served():
+    r = client.get("/robots.txt")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    assert "User-agent: *" in r.text
+    assert "Allow: /" in r.text
+    # Sensitive paths blocked
+    assert "Disallow: /admin/" in r.text
+    assert "Disallow: /dashboard" in r.text
+    # Sitemap link
+    assert "Sitemap: https://aib.zapleo.com/sitemap.xml" in r.text
+
+
+def test_sitemap_xml_served():
+    r = client.get("/sitemap.xml")
+    assert r.status_code == 200
+    assert "application/xml" in r.headers["content-type"]
+    assert "<urlset" in r.text
+    # Landing URL listed with hreflang alternates
+    assert "<loc>https://aib.zapleo.com/</loc>" in r.text
+    assert 'hreflang="en"' in r.text and 'hreflang="ru"' in r.text
+    # /docs surfaced
+    assert "<loc>https://aib.zapleo.com/docs</loc>" in r.text
+
+
+def test_llms_txt_served():
+    """Jeremy Howard's proposed /llms.txt — LLM-friendly site descriptor."""
+    r = client.get("/llms.txt")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    # Standard markdown structure: # title + > summary + sections
+    assert r.text.startswith("# AIbroker")
+    assert "> Open-source" in r.text
+    # Key concepts documented
+    for kw in ("Two operating modes", "Capabilities", "Scopes",
+               "Adaptive cooldown", "Reserved lane"):
+        assert kw in r.text
+    # GitHub repo + license
+    assert "github.com/zapleoceo/AIbroker" in r.text
+    assert "License: MIT" in r.text
+
+
 def test_landing_shows_version():
     """{version} placeholder is interpolated."""
     from aibroker import __version__
