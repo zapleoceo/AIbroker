@@ -43,7 +43,7 @@ def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate from message chars. ~4 chars/token for English;
     Russian is denser (~2-3) so this under-counts a bit — we compare against
     a 90%-discounted ceiling to keep a cushion on the safe side."""
-    chars = sum(len(str(m.get("content", ""))) for m in messages)
+    chars = sum(len(m.get("content") or "") for m in messages)
     return chars // 4
 
 

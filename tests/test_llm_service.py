@@ -34,8 +34,8 @@ async def test_run_chat_skips_groq_for_oversize_prompt(monkeypatch):
     picked: list[str] = []
 
     async def fake_pick(provider, scope, **kw):
+        # no key → walk to next provider; we only care who's tried
         picked.append(provider)
-        return None  # no key → walk to next provider; we only care who's tried
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr(svc, "chain_for",
@@ -64,7 +64,6 @@ async def test_run_chat_keeps_groq_for_small_prompt(monkeypatch):
 
     async def fake_pick(provider, scope, **kw):
         picked.append(provider)
-        return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "groq"])
