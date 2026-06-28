@@ -2,18 +2,39 @@
 
 ## Auto-deploy
 
-Push to `master` → `.github/workflows/deploy.yml` runs **three jobs** in
-this order:
+Push to `master` → `.github/workflows/deploy.yml` runs **four jobs**:
 
-1. **`docs` job** — fails if any change under `src/`, `infra/`, `services/`
-   or `monitor/` lands without a matching change under `docs/`. Opt-out
-   per commit: literal `docs-not-needed` in the commit message.
-2. **`test` job** — `pytest`, must pass. Coverage gate currently **58%**
+1. **`docs` job** — any file under `src/`, `infra/`, `services/`, or
+   `monitor/` changed must be matched by a `docs/` change. Opt-out per
+   commit: literal `docs-not-needed`.
+2. **`test` job** — `pytest`, must pass. Repo-wide coverage gate **70%**
    on `aibroker` package (stair-step; never drops).
-3. **`deploy` job** — `needs: [docs, test]`. SSH to `aib.zapleo.com`; the
-   key on the server is wired to `command="/usr/local/bin/aibroker-deploy"`
-   in `authorized_keys`. Wrapper does `git pull → docker compose build
-   → up -d → poll healthz for up to 60s`.
+3. **`quality` job** — strict static analysis on the diff:
+   - **Ruff** with `E,F,W,I,B,UP,SIM,C4,RET` (simplify, comprehensions,
+     unreachable-after-return). E501/E402 ignored (no formatter; tests
+     set env before import). Diff-only: legacy code is grandfathered,
+     strict rules apply to whatever this push touched.
+   - **Vulture** `--min-confidence 80` on changed files — surfaces dead
+     funcs/classes ruff's F401/F841 doesn't see.
+   - **Diff-cover** — every changed line ≥75% covered by tests in this
+     push (separate from the 70% repo gate). Catches "new function
+     without a test".
+   - **Docs name-sync** — extract every public def/class from the diff
+     (skip `_private`, `test_*`). **Added** symbols must appear in
+     `docs/*.md`; **removed** symbols must NOT remain there. Opt-out:
+     `docs-not-needed`.
+4. **`deploy` job** — `needs: [docs, test, quality]`. SSH to
+   `aib.zapleo.com`; key on the server is wired to
+   `command="/usr/local/bin/aibroker-deploy"` in `authorized_keys`.
+   Wrapper does `git pull → docker compose build → up -d → poll
+   healthz for up to 60s`.
+
+### What this guarantees
+
+Anything that reaches production has: passing tests, ≥75% coverage on
+the actual diff, no dead code in the touched files, no syntax/import
+issues, every public name documented, no orphan refs to removed code.
+If any gate fails, deploy is blocked.
 
 If any step fails, Telegram alert goes to `OWNER_TELEGRAM_ID` from
 `@aibzapleo_bot`. A separate `docs-check.yml` workflow runs the docs gate

@@ -60,9 +60,6 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e .[dev]
-      - name: Ruff
-        continue-on-error: true
-        run: ruff check src tests
       - name: Pytest
         env:
           ADMIN_KEY: admin_test_key_for_ci_only
@@ -79,10 +76,150 @@ jobs:
           # 2026-06-26: 61 → 70 after dashboard render unit tests (198 passed, 70.88%)
           PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=70
 
-  # ─── 3. Deploy ───────────────────────────────────────────────────────────
-  # Hard-gated: both docs AND tests must pass.
+  # ─── 3. Quality gate ─────────────────────────────────────────────────────
+  # Strict static analysis on the diff:
+  #   (a) Ruff with extended ruleset (E,F,W,I,B,UP,SIM,C4,RET) — only on
+  #       files this push touched. Legacy code grandfathered. E501/E402
+  #       ignored (no formatter on project; tests set env before import).
+  #   (b) Vulture — flags dead code in changed files (min-confidence 80).
+  #   (c) Diff-cover — ≥75% line coverage on the diff itself.
+  #   (d) Docs-name sync — every newly-added public symbol (def foo /
+  #       class Bar) must appear in docs/*.md; every removed symbol
+  #       must NOT remain there. Opt-out: `docs-not-needed`.
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          pip install -e .[dev]
+          pip install vulture==2.13 diff-cover==9.2.0 ruff==0.7.4
+
+      - name: Compute diff base
+        id: base
+        shell: bash
+        run: |
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+          if [ -z "${BASE:-}" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="$(git rev-parse "${HEAD}~1" 2>/dev/null || echo "$HEAD")"
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "Diff base: $BASE → $HEAD"
+
+      - name: Ruff (strict, changed files only)
+        shell: bash
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          HEAD="${{ steps.base.outputs.head }}"
+          CHANGED="$(git diff --name-only --diff-filter=AM "$BASE" "$HEAD" \
+                      | grep -E '^(src|tests)/.*\.py$' || true)"
+          if [ -z "$CHANGED" ]; then
+            echo "No changed .py files — skip ruff"
+            exit 0
+          fi
+          echo "Linting:"; echo "$CHANGED"
+          echo "$CHANGED" | xargs ruff check \
+            --select E,F,W,I,B,UP,SIM,C4,RET --ignore E501,E402 --statistics
+
+      - name: Vulture (dead-code on changed files)
+        shell: bash
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          HEAD="${{ steps.base.outputs.head }}"
+          CHANGED="$(git diff --name-only --diff-filter=AM "$BASE" "$HEAD" \
+                      | grep -E '^src/.*\.py$' || true)"
+          if [ -z "$CHANGED" ]; then
+            echo "No Python changes under src/ — skip."
+            exit 0
+          fi
+          echo "Scanning:"; echo "$CHANGED"
+          echo "$CHANGED" | xargs vulture --min-confidence 80 \
+            --exclude '*/tests/*,*/__init__.py' || {
+              echo "::warning::Vulture found suspected dead code — see above."
+              exit 1
+            }
+
+      - name: Diff-cover (≥75% on new lines)
+        shell: bash
+        env:
+          ADMIN_KEY: admin_test_key_for_ci_only
+          INTERNAL_SECRET: internal_test_secret
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          OWNER_TELEGRAM_ID: "169510539"
+          SESSION_SECRET: test-session-secret-not-for-prod
+        run: |
+          BASE="${{ steps.base.outputs.base }}"
+          HEAD="${{ steps.base.outputs.head }}"
+          if ! git diff --name-only "$BASE" "$HEAD" | grep -qE '^src/.*\.py$'; then
+            echo "No src/ .py changes — skip diff-cover"
+            exit 0
+          fi
+          export TOKEN_SECRET=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          PYTHONPATH=src pytest -q --no-header \
+            --cov=aibroker --cov-report=xml:coverage.xml \
+            -p no:cacheprovider || { echo "pytest exit $?"; exit 1; }
+          diff-cover coverage.xml \
+            --compare-branch="$BASE" \
+            --fail-under=75
+
+      - name: Docs name-sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.base.outputs.base }}"
+          HEAD="${{ steps.base.outputs.head }}"
+          if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -qiF "docs-not-needed"; then
+            echo "::notice::'docs-not-needed' marker — skip docs name-sync"
+            exit 0
+          fi
+          NAME_RE='^[+-](async )?def [a-z][a-z0-9_]*\(|^[+-]class [A-Z][A-Za-z0-9_]*[\(:]'
+          DIFF="$(git diff "$BASE" "$HEAD" -- 'src/**/*.py' || true)"
+          ADDED="$(echo "$DIFF" | grep -E "^\+" | grep -E "$NAME_RE" \
+                    | sed -E 's/^\+(async )?def ([a-z][a-z0-9_]*)\(.*/\2/;
+                              s/^\+class ([A-Z][A-Za-z0-9_]*).*/\1/' \
+                    | grep -vE '^test_|^_' | sort -u || true)"
+          REMOVED="$(echo "$DIFF" | grep -E "^-" | grep -E "$NAME_RE" \
+                      | sed -E 's/^-(async )?def ([a-z][a-z0-9_]*)\(.*/\2/;
+                                s/^-class ([A-Z][A-Za-z0-9_]*).*/\1/' \
+                      | grep -vE '^test_|^_' | sort -u || true)"
+          NET_ADDED="$(comm -23 <(echo "$ADDED") <(echo "$REMOVED") | grep -v '^$' || true)"
+          NET_REMOVED="$(comm -23 <(echo "$REMOVED") <(echo "$ADDED") | grep -v '^$' || true)"
+          fail=0
+          if [ -n "$NET_ADDED" ]; then
+            echo "Added public names: $NET_ADDED"
+            for name in $NET_ADDED; do
+              if ! grep -rqF -- "$name" docs/ 2>/dev/null; then
+                echo "::error::Added public symbol '$name' not mentioned anywhere in docs/"
+                fail=1
+              fi
+            done
+          fi
+          if [ -n "$NET_REMOVED" ]; then
+            echo "Removed public names: $NET_REMOVED"
+            for name in $NET_REMOVED; do
+              if grep -rqF -- "$name" docs/ 2>/dev/null; then
+                echo "::error::Removed symbol '$name' still referenced in docs/ (orphan)"
+                fail=1
+              fi
+            done
+          fi
+          [ "$fail" -eq 0 ] && echo "docs name-sync passed"
+          exit $fail
+
+  # ─── 4. Deploy ───────────────────────────────────────────────────────────
+  # Hard-gated: docs + tests + quality must ALL pass.
   deploy:
-    needs: [docs, test]
+    needs: [docs, test, quality]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
