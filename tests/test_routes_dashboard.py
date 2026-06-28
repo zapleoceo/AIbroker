@@ -366,14 +366,18 @@ def test_parse_date_range_swaps_inverted_range():
 
 
 def test_parse_date_range_falls_back_on_garbage_when_partial():
-    """When at least one input is given, garbage on either side → today."""
-    from datetime import datetime, UTC
+    """Garbage on one side becomes today; swap then puts the older one first."""
+    from datetime import date, datetime, UTC
     from aibroker.routes.dashboard import _parse_date_range
     today = datetime.now(UTC).date()
+    # garbage 'from' → today; given to=2026-06-10 (older than today) → swap
     df, dt = _parse_date_range("not-a-date", "2026-06-10")
-    assert df == today
+    assert {df, dt} == {today, date(2026, 6, 10)}
+    assert df <= dt
+    # mirror
     df, dt = _parse_date_range("2026-06-10", "also-not")
-    assert dt == today
+    assert {df, dt} == {today, date(2026, 6, 10)}
+    assert df <= dt
 
 
 def test_parse_date_range_one_sided_inputs():
