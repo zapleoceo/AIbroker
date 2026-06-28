@@ -75,6 +75,24 @@ def test_landing_lists_providers():
         assert p in r.text
 
 
+def test_landing_has_github_link_in_header():
+    """Octocat icon in nav-right links to the repo."""
+    r = client.get("/")
+    assert 'class="gh-link"' in r.text
+    assert 'href="https://github.com/zapleoceo/AIbroker"' in r.text
+    assert 'aria-label="GitHub repository"' in r.text
+
+
+def test_landing_hero_has_three_ctas_including_github():
+    """Hero shows Get started + API reference + Star on GitHub."""
+    r = client.get("/")
+    assert 'data-i18n="hero.cta1"' in r.text   # Get started
+    assert 'data-i18n="hero.cta2"' in r.text   # API reference
+    assert 'data-i18n="hero.cta3"' in r.text   # ★ Star on GitHub
+    assert "★ Star on GitHub" in r.text
+    assert "Star на GitHub" in r.text
+
+
 def test_landing_has_open_graph_tags():
     r = client.get("/")
     assert 'property="og:type"' in r.text
