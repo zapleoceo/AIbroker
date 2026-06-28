@@ -125,6 +125,20 @@ JSON describing the catalogue is inlined into `/dashboard` as
 it and drives all the linked behaviour client-side. No round-trip per
 keystroke.
 
+### Per-key daily-quota progress bar
+
+The keys table's `daily %` column shows where each key sits against its
+provider's free-tier daily quota. Driven by `providers/quotas.py`:
+`PROVIDER_DAILY_QUOTA` lists requests-per-day per provider (Cerebras 14400,
+Gemini 1500, Mistral 86400, Cohere 1000, OpenRouter 200, Voyage ~unlimited),
+`None` for paid (DeepSeek/Anthropic/OpenAI). A drift test asserts every
+provider in any routing chain has an entry — missing entry = silently
+hidden bar.
+
+Render: `daily_used / quota` text + a small bar coloured by `severity_class()`
+(blue <70 %, yellow 70-89 %, red ≥90 %). Sortable by percentage via
+`data-sort`; paid keys get the sentinel `-1` so they cluster at one end.
+
 ### Bilingual UI (EN/RU)
 
 The login page and the dashboard both ship every visible label in both

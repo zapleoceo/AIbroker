@@ -555,6 +555,62 @@ def test_main_render_renders_key_rows_with_data_row_marker():
     assert 'name="scopes" value="llm:chat"' in body
 
 
+def test_main_render_keys_show_daily_quota_progress_bar():
+    """A free-tier key with known quota shows used/quota text + bar with %."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    # gemini quota = 1500. 750 used → 50%.
+    k = ApiKeyRow(
+        id=7, provider="gemini", label="t", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=750,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert "750/1500" in body              # used/quota text
+    assert "title='50%'" in body            # tooltip on bar wrapper
+    assert "style='width:50%'" in body      # visual bar width
+    assert "data-sort='50'" in body         # sortable by percentage
+
+
+def test_main_render_keys_paid_provider_no_bar():
+    """Paid providers (no quota) just show the count, no bar, sort sentinel -1."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=8, provider="anthropic", label="t", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=42,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert ">42<" in body
+    assert "cap-bar" not in body or "anthropic" not in body.split("cap-bar")[0].split(">42<")[-1]
+    # paid sorts last via -1 sentinel
+    assert "data-sort='-1'" in body
+
+
+def test_main_render_keys_at_or_above_quota_shows_red_bar():
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    # cohere quota = 1000. 1200 used → capped at 100% with severity 'bad'.
+    k = ApiKeyRow(
+        id=9, provider="cohere", label="t", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=1200,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert "1200/1000" in body
+    assert "fill bad" in body                # red severity
+    assert "style='width:100%'" in body      # clamped to 100%
+
+
+def test_keys_table_header_renamed_daily_pct():
+    """Column header should read 'daily %' (not 'used') after this change."""
+    from aibroker.routes.dashboard import _render
+    body = _render(_fake_main_data()).body.decode()
+    assert 'data-en="daily %"' in body
+    assert 'data-ru="% дня"' in body
+
+
 def test_main_render_keys_totals_row():
     """tfoot must sum the daily_used, daily_cost_used_usd, error_count cells."""
     from aibroker.db.models import ApiKeyRow

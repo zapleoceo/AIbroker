@@ -731,6 +731,26 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
         )
 
+        # Daily-quota progress bar (used vs provider's known free-tier quota).
+        # For paid/unknown providers we just show the raw count and sort by
+        # absolute used.
+        from aibroker.providers.quotas import (
+            percent_used, quota_for, severity_class,
+        )
+        used_pct = percent_used(k.daily_used or 0, k.provider)
+        quota = quota_for(k.provider)
+        if used_pct is not None and quota:
+            bar_fill = severity_class(used_pct)
+            used_html = (
+                f"<span class='mono'>{k.daily_used}/{quota}</span>"
+                f"<span class='cap-bar' title='{used_pct}%'>"
+                f"<span class='fill {bar_fill}' style='width:{used_pct}%'></span></span>"
+            )
+        else:
+            # paid / unknown — no quota, just the count
+            used_html = f"<span class='mono'>{k.daily_used}</span>"
+            # Sort paid keys after quota'd keys (use -1 sentinel in data-sort)
+
         used = float(k.daily_cost_used_usd or 0)
         cap_v = k.daily_cost_cap_usd
         if cap_v:
@@ -761,7 +781,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f"<td>{esc(k.label)}</td>"
             f"<td data-sort='{esc(k.tier)}'><span class='pill'>{esc(k.tier)}</span></td>"
             f"<td data-sort='{status_label}'>{status_html}</td>"
-            f"<td data-sort='{k.daily_used}'>{k.daily_used}</td>"
+            f"<td data-sort='{used_pct if used_pct is not None else -1}'>{used_html}</td>"
             f"<td data-sort='{cap_sort}'>{cap_html}</td>"
             f"<td data-sort='{k.error_count}'>{k.error_count}</td>"
             f"<td>"
@@ -911,7 +931,8 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <th class="sortable" data-i18n data-en="label" data-ru="ярлык">label</th>
       <th class="sortable" data-i18n data-en="tier" data-ru="тариф">tier</th>
       <th class="sortable" data-i18n data-en="status" data-ru="статус">status</th>
-      <th class="sortable" data-type="num" data-i18n data-en="used" data-ru="исп.">used</th>
+      <th class="sortable" data-type="num" data-i18n
+          data-en="daily %" data-ru="% дня">daily %</th>
       <th class="sortable" data-type="num" data-i18n data-en="$/cap" data-ru="$/лимит">$/cap</th>
       <th class="sortable" data-type="num" data-i18n data-en="errs" data-ru="ошибки">errs</th>
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
