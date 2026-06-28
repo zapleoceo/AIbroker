@@ -140,6 +140,25 @@ Three independent daily caps: per-key, per-project (live SUM from `usage_log`),
 global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`). Free-tier keys with `cost == 0`
 skip the check.
 
+## Size-aware provider filter (2026-06-28)
+
+Before walking the chain, `run_chat` estimates the prompt size
+(`providers/context_limits.estimate_prompt_tokens`, ≈chars/4) and drops any
+provider whose single-request token ceiling can't fit it
+(`PROVIDER_MAX_REQUEST_TOKENS`). Today only **groq** has a ceiling (8k —
+its free TPM); a 24k-token Coach prompt 413s on groq 100% of the time, so
+sending it is a guaranteed wasted call that just delays the request until
+the chain falls through to a provider that can serve it.
+
+This is a **pure efficiency win, zero quality change**: the request lands
+on exactly the provider it would have reached after the failures, so the
+answer is identical — it just skips the wasted attempts. Measured impact:
+~108 guaranteed-failing groq calls/day on chat:smart eliminated.
+
+Safety: if *every* provider in a chain gets size-skipped (impossible today
+since big-context providers have no ceiling), it falls back to the full
+chain so a request is never starved.
+
 ## Failure → next key → next provider
 
 The orchestration lives in `services/llm_service.run_chat` (routes stay thin).

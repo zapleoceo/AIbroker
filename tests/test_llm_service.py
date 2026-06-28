@@ -18,3 +18,62 @@ def test_classify_auth():
 def test_classify_generic_error():
     assert classify_provider_error(RuntimeError("boom")) == "error"
     assert classify_provider_error(ValueError("connection reset by peer")) == "error"
+
+
+# ─── size-aware provider filter in run_chat ──────────────────────────────────
+
+
+async def test_run_chat_skips_groq_for_oversize_prompt(monkeypatch):
+    """A 24k-token prompt must never be offered to groq (8k ceiling).
+    We record every provider pick_and_reserve is called with and assert groq
+    is absent — without needing a real DB (pick returns None → chain walks)."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picked.append(provider)
+        return None  # no key → walk to next provider; we only care who's tried
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for",
+                         lambda cap: ["cerebras", "groq", "gemini", "mistral"])
+
+    big = [{"role": "user", "content": "x" * 100_000}]  # ~25k tokens
+    project = SimpleNamespace(id=1, name="stepan")
+    out = await svc.run_chat(
+        project=project, capability="chat:smart", messages=big,
+        model=None, max_tokens=512, temperature=0.7,
+        response_format=None, workflow="stepan",
+    )
+    assert out is None                 # no keys available in this mock
+    assert "groq" not in picked        # size-skipped
+    assert "cerebras" in picked        # big-context providers still tried
+    assert "mistral" in picked
+
+
+async def test_run_chat_keeps_groq_for_small_prompt(monkeypatch):
+    """A tiny prompt fits groq's ceiling → groq stays in the chain."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picked.append(provider)
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "groq"])
+
+    small = [{"role": "user", "content": "привет"}]
+    project = SimpleNamespace(id=1, name="vera")
+    await svc.run_chat(
+        project=project, capability="chat:fast", messages=small,
+        model=None, max_tokens=128, temperature=0.7,
+        response_format=None, workflow="vera",
+    )
+    assert "groq" in picked

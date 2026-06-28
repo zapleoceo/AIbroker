@@ -108,7 +108,23 @@ async def run_chat(
     through — so one rate-limited free key doesn't sink the whole request.
     """
     scope = scope_for(capability)
-    for provider in chain_for(capability):
+    # Size-aware provider filter: drop providers whose single-request token
+    # ceiling can't fit this prompt (e.g. groq @8k getting a 24k Coach prompt
+    # — a guaranteed 413). The request still reaches a provider that CAN
+    # serve it, so quality is identical; we just skip the wasted failures.
+    # If EVERY provider gets size-skipped (unlikely — big-context providers
+    # have no ceiling), fall back to the full chain so we never starve.
+    from aibroker.providers.context_limits import estimate_prompt_tokens, fits_context
+    est_tokens = estimate_prompt_tokens(messages)
+    full_chain = chain_for(capability)
+    sized_chain = [p for p in full_chain if fits_context(p, est_tokens)]
+    chain = sized_chain or full_chain
+    if len(sized_chain) < len(full_chain):
+        log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
+                 capability, est_tokens,
+                 [p for p in full_chain if p not in sized_chain])
+
+    for provider in chain:
         for _ in range(_MAX_KEYS_PER_PROVIDER):
             key = await pick_and_reserve(provider, scope=scope)
             if key is None:
