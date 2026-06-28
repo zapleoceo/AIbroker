@@ -11,6 +11,33 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from aibroker import __version__
 
+
+# SVG favicon — hub-and-spokes: central node = broker, 4 satellites = providers
+# being routed. 32×32 viewBox; scales cleanly to 16×16 in tab strips.
+# Embedded as a module-level string so tests + multiple routes can reuse it.
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="6" fill="#0b0d11"/>'
+    '<line x1="16" y1="10" x2="16" y2="6"  stroke="#4dabf7" stroke-width="1.5" opacity=".6"/>'
+    '<line x1="22" y1="16" x2="26" y2="16" stroke="#4dabf7" stroke-width="1.5" opacity=".6"/>'
+    '<line x1="16" y1="22" x2="16" y2="26" stroke="#4dabf7" stroke-width="1.5" opacity=".6"/>'
+    '<line x1="10" y1="16" x2="6"  y2="16" stroke="#4dabf7" stroke-width="1.5" opacity=".6"/>'
+    '<circle cx="16" cy="5"  r="2.2" fill="#4dabf7" opacity=".75"/>'
+    '<circle cx="27" cy="16" r="2.2" fill="#4dabf7" opacity=".75"/>'
+    '<circle cx="16" cy="27" r="2.2" fill="#4dabf7" opacity=".75"/>'
+    '<circle cx="5"  cy="16" r="2.2" fill="#4dabf7" opacity=".75"/>'
+    '<circle cx="16" cy="16" r="6"   fill="#4dabf7"/>'
+    '</svg>'
+)
+
+# Common <head> include — every page imports this so the favicon binding
+# stays in lock-step with the SVG above (single source of truth).
+FAVICON_LINKS = (
+    '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
+    '<link rel="alternate icon" href="/favicon.ico">'
+    '<link rel="apple-touch-icon" href="/favicon.svg">'
+)
+
 router = APIRouter(tags=["landing"])
 
 
@@ -19,6 +46,7 @@ _HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+{favicon}
 <title>AIbroker — one API key, every LLM provider · free-first routing, cost guard, self-hosted</title>
 <meta name="description" content="Open-source LLM key broker. One API for Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage. Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
 <meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Mistral Cohere OpenRouter DeepSeek Anthropic Voyage">
@@ -723,7 +751,23 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
 @router.get("/", response_class=HTMLResponse)
 async def landing() -> HTMLResponse:
     """Public landing — bilingual EN/RU, default EN."""
-    return HTMLResponse(_HTML.format(version=__version__))
+    return HTMLResponse(_HTML.format(version=__version__, favicon=FAVICON_LINKS))
+
+
+@router.get("/favicon.svg")
+async def favicon_svg() -> Response:
+    """SVG favicon — modern browsers prefer this for crisp tab-strip rendering."""
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml",
+                     headers={"Cache-Control": "public, max-age=86400"})
+
+
+@router.get("/favicon.ico")
+async def favicon_ico() -> Response:
+    """Browsers that request /favicon.ico by default — serve the same SVG.
+    Modern browsers (2020+) accept image/svg+xml at any path. Avoids the
+    404 in dev consoles and keeps one source of truth for the icon."""
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml",
+                     headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ─── Discovery endpoints (SEO + LLM crawlers) ──────────────────────────────

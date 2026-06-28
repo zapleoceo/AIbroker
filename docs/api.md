@@ -12,6 +12,8 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 | `GET` | `/robots.txt` | Crawler policy — index everything except `/admin/`, `/dashboard`, `/api/` |
 | `GET` | `/sitemap.xml` | XML sitemap with hreflang EN/RU alternates |
 | `GET` | `/llms.txt` | LLM-friendly site descriptor (Jeremy Howard proposal) — markdown summary for Perplexity / ChatGPT browse / Claude search |
+| `GET` | `/favicon.svg` | Brand favicon (hub-and-spokes, brand colours). Cache 24h. |
+| `GET` | `/favicon.ico` | Same SVG served at the legacy default path — keeps dev consoles 404-free. |
 | `GET` | `/healthz` | `{ok: true, service, ts}` — liveness probe |
 | `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts |
 | `GET` | `/login` | Telegram Login Widget for `/dashboard` |

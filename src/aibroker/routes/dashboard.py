@@ -71,6 +71,8 @@ router = APIRouter(tags=["dashboard"])
 
 _LOGIN_HTML = """<!doctype html><html><head>
 <meta charset="utf-8"><title>AIbroker — login</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
 <style>
   body { font-family:-apple-system, sans-serif; background:#0f1115; color:#e4e6eb;
          display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
@@ -180,6 +182,8 @@ async def logout() -> RedirectResponse:
 def _dash_html(*, body: str, flash: str = "") -> str:
     return f"""<!doctype html><html><head>
 <meta charset="utf-8"><title>AIbroker</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
 <style>
 body {{ font-family:-apple-system, sans-serif; background:#0f1115; color:#e4e6eb;
        margin:0; padding:24px; max-width:1280px; margin-inline:auto; }}

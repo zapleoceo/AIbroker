@@ -100,6 +100,18 @@ def test_provider_meta_json_is_parseable():
             assert model.startswith(p + "/") or "/" in model
 
 
+def test_login_page_links_to_favicon():
+    r = client.get("/login")
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in r.text
+
+
+def test_dashboard_html_links_to_favicon():
+    """_dash_html wrapper used by /dashboard + /dashboard/projects/{id} drill-down."""
+    from aibroker.routes.dashboard import _dash_html
+    html = _dash_html(body="<p>x</p>")
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in html
+
+
 def test_login_page_has_no_literal_double_braces():
     """Regression: _LOGIN_HTML is rendered via .replace() not .format() —
     leftover `{{`/`}}` from f-string template would break CSS + JS in the

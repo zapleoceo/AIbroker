@@ -75,6 +75,39 @@ def test_landing_lists_providers():
         assert p in r.text
 
 
+def test_favicon_svg_served():
+    r = client.get("/favicon.svg")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/svg+xml"
+    assert r.text.startswith("<svg ")
+    # Brand colours present
+    assert "#4dabf7" in r.text
+    assert "#0b0d11" in r.text
+
+
+def test_favicon_ico_served_as_svg_fallback():
+    """Browsers requesting /favicon.ico by default — same content, modern
+    browsers accept image/svg+xml at any path."""
+    r = client.get("/favicon.ico")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/svg+xml"
+    assert r.text.startswith("<svg ")
+
+
+def test_favicon_cached_24h():
+    """Cache-Control header set so browsers don't re-fetch on every page."""
+    r = client.get("/favicon.svg")
+    assert "max-age=86400" in r.headers.get("cache-control", "")
+
+
+def test_landing_links_to_favicon():
+    """Landing <head> includes the favicon refs (modern + fallback + apple)."""
+    r = client.get("/")
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in r.text
+    assert '<link rel="alternate icon" href="/favicon.ico">' in r.text
+    assert '<link rel="apple-touch-icon" href="/favicon.svg">' in r.text
+
+
 def test_landing_has_github_link_in_header():
     """Octocat icon in nav-right links to the repo."""
     r = client.get("/")
