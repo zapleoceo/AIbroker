@@ -138,6 +138,17 @@ returns the **max** of the two — whichever you'll hit first wins.
 Token usage is summed live from `usage_log` (today UTC) per `api_key_id`,
 so the bar reflects real consumption, not stale counters.
 
+**Per-key auto-discovery** (2026-06-28): when a key is created via
+`POST /admin/keys` or the dashboard add form, the broker probes it once
+and parses the response's rate-limit headers
+(`x-ratelimit-limit-requests-day`, `anthropic-ratelimit-tokens-limit`,
+etc. — provider-specific map in `providers/health_probes.extract_quota_headers`).
+Real numbers are stored on `api_keys.discovered_req_limit /
+discovered_tok_limit / limits_discovered_at`, and `quota_for_key()`
+prefers them over the static `PROVIDER_QUOTAS` defaults. Bar tooltip
+shows `' · discovered'` vs `' · default est.'` so the operator knows
+which source drove the percentage.
+
 Discovered by hard experience: my first version only counted requests,
 and the dashboard happily showed Cerebras at 6 % while three keys were
 already past 100 % of the token quota (Cerebras emailed user a

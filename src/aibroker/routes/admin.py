@@ -166,7 +166,17 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
                     target=f"{body.provider}/{body.label}",
                     metadata={"tier": body.tier, "scopes": body.scopes},
                     ip=_ip(request))
-        return _key_out(row)
+        new_id = row.id
+    # Auto-discover real free-tier limits from response headers (best-effort).
+    # Outside the txn so a probe failure can't roll back the key.
+    from aibroker.providers.auto_discover import discover_and_store
+    try:
+        await discover_and_store(new_id, body.provider, body.token)
+    except Exception:
+        pass
+    async with get_session() as s:
+        refreshed = await s.get(ApiKeyRow, new_id)
+        return _key_out(refreshed)
 
 
 @router.get("/keys", response_model=list[ApiKeyOut])

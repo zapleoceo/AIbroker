@@ -93,6 +93,54 @@ def test_severity_class_thresholds():
     assert severity_class(None) == ""
 
 
+def test_quota_for_key_uses_discovered_when_set():
+    """Per-key discovered limits override PROVIDER_QUOTAS defaults."""
+    from types import SimpleNamespace
+    from aibroker.providers.quotas import quota_for_key
+    # cerebras default: req=14400, tok=1M. Key was probed → real cap is half.
+    k = SimpleNamespace(provider="cerebras",
+                         discovered_req_limit=7200,
+                         discovered_tok_limit=500_000)
+    q = quota_for_key(k)
+    assert q.req_per_day == 7200
+    assert q.tok_per_day == 500_000
+
+
+def test_quota_for_key_falls_back_to_defaults():
+    """When discovery hasn't happened yet, defaults still kick in."""
+    from types import SimpleNamespace
+    from aibroker.providers.quotas import quota_for_key
+    k = SimpleNamespace(provider="cerebras",
+                         discovered_req_limit=None,
+                         discovered_tok_limit=None)
+    q = quota_for_key(k)
+    assert q.req_per_day == 14_400
+    assert q.tok_per_day == 1_000_000
+
+
+def test_quota_for_key_one_sided_discovery():
+    """If only one axis was discovered, the other still uses the default."""
+    from types import SimpleNamespace
+    from aibroker.providers.quotas import quota_for_key
+    # Only token quota came back in headers; req still uses default
+    k = SimpleNamespace(provider="cerebras",
+                         discovered_req_limit=None,
+                         discovered_tok_limit=2_000_000)
+    q = quota_for_key(k)
+    assert q.req_per_day == 14_400      # default
+    assert q.tok_per_day == 2_000_000   # discovered
+
+
+def test_percent_used_for_key_uses_discovered():
+    from types import SimpleNamespace
+    from aibroker.providers.quotas import percent_used_for_key
+    k = SimpleNamespace(provider="cerebras",
+                         discovered_req_limit=1000,   # tiny, easier to hit
+                         discovered_tok_limit=None)
+    # 500 req on discovered 1000 = 50%; default cerebras would give 3%
+    assert percent_used_for_key(500, 0, k) == 50
+
+
 def test_doc_url_present_for_every_quota():
     """Each provider entry must link to its rate-limit docs for verification."""
     for p, q in PROVIDER_QUOTAS.items():

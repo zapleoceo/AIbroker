@@ -745,17 +745,18 @@ def _render(data: dict[str, Any], *, flash: str = "",
         # axis is closer to its cap wins). Token usage pulled live from
         # usage_log (today UTC) so it reflects reality, not stale counters.
         from aibroker.providers.quotas import (
-            bar_label, percent_used, severity_class,
+            bar_label_for_key, percent_used_for_key, severity_class,
         )
         tok_today = int(data["tokens_today"].get(k.id, 0))
-        used_pct = percent_used(k.daily_used or 0, tok_today, k.provider)
+        used_pct = percent_used_for_key(k.daily_used or 0, tok_today, k)
         if used_pct is not None:
             bar_fill = severity_class(used_pct)
-            label = bar_label(k.daily_used or 0, tok_today, k.provider)
+            label = bar_label_for_key(k.daily_used or 0, tok_today, k)
+            src_hint = "discovered" if k.limits_discovered_at else "default est."
             used_html = (
                 f"<span class='mono'>{label}</span>"
                 f"<span class='cap-bar' title='{used_pct}% · {k.daily_used} req · "
-                f"{tok_today:,} tok'>"
+                f"{tok_today:,} tok · {src_hint}'>"
                 f"<span class='fill {bar_fill}' style='width:{used_pct}%'></span></span>"
             )
         else:
@@ -1271,6 +1272,7 @@ async def dash_create_key(
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    new_id: int | None = None
     async with get_session() as s:
         existing = (await s.execute(
             select(ApiKeyRow).where(
@@ -1286,18 +1288,29 @@ async def dash_create_key(
             existing.is_active = True
             existing.is_alive = True
             verb = "updated"
+            new_id = existing.id
         else:
-            s.add(ApiKeyRow(
+            fresh = ApiKeyRow(
                 provider=provider, label=label, tier=tier,
                 scopes=scope_list, is_reserve=is_reserve,
                 token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
-            ))
+            )
+            s.add(fresh)
+            await s.flush()
+            new_id = fresh.id
             verb = "added"
     await audit(actor="dashboard", action=f"key.{verb}",
                 target=f"{provider}/{label}",
                 metadata={"scopes": scope_list, "is_reserve": is_reserve},
                 ip=_ip(request))
+    # Auto-discover free-tier limits from response headers (best-effort).
+    if new_id is not None:
+        from aibroker.providers.auto_discover import discover_and_store
+        try:
+            await discover_and_store(new_id, provider, token)
+        except Exception:
+            pass
     return RedirectResponse(
         f"/dashboard?flash=Key+{provider}/{label}+{verb}", status_code=303
     )

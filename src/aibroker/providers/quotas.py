@@ -66,8 +66,52 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
 
 
 def quota_for(provider: str) -> Quota:
-    """Returns the Quota for this provider; empty Quota for unknown."""
+    """Returns the Quota for this provider; empty Quota for unknown.
+    Static defaults only — use quota_for_key() when you have an ApiKeyRow,
+    so per-key discovered limits override these guesses."""
     return PROVIDER_QUOTAS.get(provider, Quota())
+
+
+def quota_for_key(key) -> Quota:
+    """Per-key Quota: discovered (from probe headers) takes priority,
+    then PROVIDER_QUOTAS defaults. `key` is any object with .provider,
+    .discovered_req_limit, .discovered_tok_limit attributes — ApiKeyRow
+    is the prod caller; tests pass SimpleNamespace."""
+    base = quota_for(key.provider)
+    dr = getattr(key, "discovered_req_limit", None)
+    dt = getattr(key, "discovered_tok_limit", None)
+    if dr is None and dt is None:
+        return base
+    return Quota(
+        req_per_day=dr if dr is not None else base.req_per_day,
+        tok_per_day=dt if dt is not None else base.tok_per_day,
+        doc=base.doc,
+    )
+
+
+def percent_used_for_key(requests_today: int, tokens_today: int, key) -> int | None:
+    """Same math as percent_used() but uses per-key discovered limits if set."""
+    q = quota_for_key(key)
+    pcts: list[int] = []
+    if q.req_per_day:
+        pcts.append(min(100, int(requests_today / q.req_per_day * 100)))
+    if q.tok_per_day:
+        pcts.append(min(100, int(tokens_today / q.tok_per_day * 100)))
+    if not pcts:
+        return None
+    return max(pcts)
+
+
+def bar_label_for_key(requests_today: int, tokens_today: int, key) -> str:
+    """Same as bar_label() but uses per-key discovered limits if set."""
+    q = quota_for_key(key)
+    req_pct = (requests_today / q.req_per_day) if q.req_per_day else 0
+    tok_pct = (tokens_today / q.tok_per_day) if q.tok_per_day else 0
+    if q.tok_per_day and tok_pct >= req_pct:
+        return f"{_humanize(tokens_today)}/{_humanize(q.tok_per_day)} tok"
+    if q.req_per_day:
+        return f"{requests_today}/{q.req_per_day}"
+    return str(requests_today)
 
 
 def percent_used(

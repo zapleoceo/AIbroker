@@ -74,6 +74,12 @@ class ApiKeyRow(Base):
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_alive_check_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Discovered free-tier limits — populated from response headers at
+    # first probe (admin/dashboard key-create flows). NULL ⇒ fall back to
+    # PROVIDER_QUOTAS defaults in providers/quotas.py.
+    discovered_req_limit: Mapped[int | None] = mapped_column(BigInteger)
+    discovered_tok_limit: Mapped[int | None] = mapped_column(BigInteger)
+    limits_discovered_at: Mapped[datetime | None] = mapped_column(DateTime)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
