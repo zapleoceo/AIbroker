@@ -491,8 +491,18 @@ tfoot td.num {{ font-family:ui-monospace,monospace; color:#4dabf7; }}
 </body></html>"""
 
 
-def _parse_date_range(date_from: str | None, date_to: str | None) -> tuple[date, date]:
-    """Clamp/parse `from` and `to` strings (YYYY-MM-DD). Defaults to today."""
+def _parse_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[date | None, date | None]:
+    """Parse `from` and `to` strings (YYYY-MM-DD).
+
+    Returns `(None, None)` when both inputs are missing — caller treats that
+    as 'all-time, no date filter'. If only one side is given, the other
+    defaults to today. Inverted ranges are swapped. Garbage strings fall back
+    to today on that side (so a typo doesn't widen the window unexpectedly).
+    """
+    if not date_from and not date_to:
+        return None, None
     today = datetime.now(UTC).date()
     try:
         df = date.fromisoformat(date_from) if date_from else today
@@ -509,9 +519,25 @@ def _parse_date_range(date_from: str | None, date_to: str | None) -> tuple[date,
 
 async def _gather_data(date_from: date | None = None,
                         date_to: date | None = None) -> dict[str, Any]:
-    today = datetime.now(UTC).date()
-    df = date_from or today
-    dt = date_to or today
+    # all-time when both None; date-clamped only when at least one is provided
+    where_clause = ""
+    bind_: dict[str, Any] = {}
+    if date_from is not None and date_to is not None:
+        where_clause = "WHERE created_at::date BETWEEN :df AND :dt"
+        bind_ = {"df": date_from, "dt": date_to}
+    elif date_from is not None:
+        where_clause = "WHERE created_at::date >= :df"
+        bind_ = {"df": date_from}
+    elif date_to is not None:
+        where_clause = "WHERE created_at::date <= :dt"
+        bind_ = {"dt": date_to}
+
+    proj_where = where_clause
+    if proj_where:
+        proj_where += " AND project_id IS NOT NULL"
+    else:
+        proj_where = "WHERE project_id IS NOT NULL"
+
     async with get_session() as s:
         projects = (await s.execute(
             select(ProjectRow).order_by(ProjectRow.id)
@@ -519,20 +545,18 @@ async def _gather_data(date_from: date | None = None,
         keys = (await s.execute(
             select(ApiKeyRow).order_by(ApiKeyRow.provider, ApiKeyRow.id)
         )).scalars().all()
-        bind_ = {"df": df, "dt": dt}
-        # Range-scoped stats (inclusive of both endpoints)
+        # Range-scoped (or all-time) stats
         range_stats = (await s.execute(text(
-            "SELECT COUNT(*) AS calls, COALESCE(SUM(cost_usd),0) AS spend, "
-            "       COALESCE(SUM(tokens_in),0) AS tin, "
-            "       COALESCE(SUM(tokens_out),0) AS tout "
-            "FROM usage_log "
-            "WHERE created_at::date BETWEEN :df AND :dt"
+            f"SELECT COUNT(*) AS calls, COALESCE(SUM(cost_usd),0) AS spend, "
+            f"       COALESCE(SUM(tokens_in),0) AS tin, "
+            f"       COALESCE(SUM(tokens_out),0) AS tout "
+            f"FROM usage_log {where_clause}"
         ), bind_)).one()
-        # Per-project spend in the same range (for totals row + per-row enrichment)
+        # Per-project spend in the same range
         proj_spend = dict((await s.execute(text(
-            "SELECT project_id, COALESCE(SUM(cost_usd),0) AS spend FROM usage_log "
-            "WHERE created_at::date BETWEEN :df AND :dt AND project_id IS NOT NULL "
-            "GROUP BY project_id"
+            f"SELECT project_id, COALESCE(SUM(cost_usd),0) AS spend FROM usage_log "
+            f"{proj_where} "
+            f"GROUP BY project_id"
         ), bind_)).all())
         # Always-on "right now" snapshot
         calls_1h = int((await s.execute(text(
@@ -548,7 +572,7 @@ async def _gather_data(date_from: date | None = None,
         ))).all()
     return {
         "projects": projects, "keys": keys,
-        "date_from": df, "date_to": dt,
+        "date_from": date_from, "date_to": date_to,
         "range_spend": float(range_stats.spend),
         "range_calls": int(range_stats.calls),
         "range_tin": int(range_stats.tin),
@@ -563,24 +587,34 @@ def _render(data: dict[str, Any], *, flash: str = "",
              new_project_key: str | None = None) -> HTMLResponse:
     s = get_settings()
 
-    df_str = data["date_from"].isoformat()
-    dt_str = data["date_to"].isoformat()
-    same_day = data["date_from"] == data["date_to"]
-    range_label_en = f"on {df_str}" if same_day else f"{df_str} → {dt_str}"
-    range_label_ru = f"за {df_str}" if same_day else f"{df_str} → {dt_str}"
+    df, dt = data["date_from"], data["date_to"]
+    df_str = df.isoformat() if df else ""
+    dt_str = dt.isoformat() if dt else ""
+    all_time = df is None and dt is None
+    if all_time:
+        range_label_en = "all time"
+        range_label_ru = "за всё время"
+    elif df == dt:
+        range_label_en = f"on {df_str}"
+        range_label_ru = f"за {df_str}"
+    else:
+        range_label_en = f"{df_str or '…'} → {dt_str or '…'}"
+        range_label_ru = f"{df_str or '…'} → {dt_str or '…'}"
 
+    today_iso = date.today().isoformat()
     range_form = f"""
     <form method="get" action="/dashboard" class="range-form">
       <label data-i18n data-en="From" data-ru="С">From</label>
-      <input type="date" name="from" value="{df_str}" max="{date.today().isoformat()}">
+      <input type="date" name="from" value="{df_str}" max="{today_iso}">
       <label data-i18n data-en="To" data-ru="по">To</label>
-      <input type="date" name="to" value="{dt_str}" max="{date.today().isoformat()}">
+      <input type="date" name="to" value="{dt_str}" max="{today_iso}">
       <button type="submit" data-i18n data-en="apply" data-ru="применить">apply</button>
-      <a href="/dashboard" class="range-reset" data-i18n
-         data-en="today" data-ru="сегодня">today</a>
+      <a href="/dashboard" class="range-reset{' active' if all_time else ''}" data-i18n
+         data-en="all time" data-ru="за всё">all time</a>
       <span class="range-quick">
-        <a href="?from={(date.today() - timedelta(days=6)).isoformat()}&to={date.today().isoformat()}">7d</a>
-        <a href="?from={(date.today() - timedelta(days=29)).isoformat()}&to={date.today().isoformat()}">30d</a>
+        <a href="?from={today_iso}&to={today_iso}">today</a>
+        <a href="?from={(date.today() - timedelta(days=6)).isoformat()}&to={today_iso}">7d</a>
+        <a href="?from={(date.today() - timedelta(days=29)).isoformat()}&to={today_iso}">30d</a>
       </span>
     </form>"""
 

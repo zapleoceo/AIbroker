@@ -343,12 +343,11 @@ def test_project_detail_404_when_missing():
     assert "Project+not+found" in r.headers["location"]
 
 
-def test_parse_date_range_defaults_to_today():
-    from datetime import datetime, UTC
+def test_parse_date_range_defaults_to_all_time_when_both_missing():
+    """Empty inputs ⇒ (None, None) so _gather_data drops the WHERE clause."""
     from aibroker.routes.dashboard import _parse_date_range
-    df, dt = _parse_date_range(None, None)
-    today = datetime.now(UTC).date()
-    assert df == today and dt == today
+    assert _parse_date_range(None, None) == (None, None)
+    assert _parse_date_range("", "") == (None, None)
 
 
 def test_parse_date_range_parses_valid_iso():
@@ -366,12 +365,27 @@ def test_parse_date_range_swaps_inverted_range():
     assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
 
 
-def test_parse_date_range_falls_back_on_garbage():
+def test_parse_date_range_falls_back_on_garbage_when_partial():
+    """When at least one input is given, garbage on either side → today."""
     from datetime import datetime, UTC
     from aibroker.routes.dashboard import _parse_date_range
-    df, dt = _parse_date_range("not-a-date", "also-not")
     today = datetime.now(UTC).date()
-    assert df == today and dt == today
+    df, dt = _parse_date_range("not-a-date", "2026-06-10")
+    assert df == today
+    df, dt = _parse_date_range("2026-06-10", "also-not")
+    assert dt == today
+
+
+def test_parse_date_range_one_sided_inputs():
+    from datetime import date, datetime, UTC
+    from aibroker.routes.dashboard import _parse_date_range
+    today = datetime.now(UTC).date()
+    # only from → to = today
+    df, dt = _parse_date_range("2026-06-01", None)
+    assert df == date(2026, 6, 1) and dt == today
+    # only to → from = today (and swapped if needed; today > 2026-06-01 so swap happens)
+    df, dt = _parse_date_range(None, "2026-06-01")
+    assert dt == today
 
 
 def test_range_hours_table_complete():
@@ -474,14 +488,14 @@ def test_render_project_detail_handles_empty_breakdowns():
 
 
 def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
-                     range_spend: float = 0.0123, range_calls: int = 42):
-    from datetime import date as _date
-    today = _date(2026, 6, 26)
+                     range_spend: float = 0.0123, range_calls: int = 42,
+                     date_from=None, date_to=None):
+    """date_from/date_to default to None = all-time view (no date filter)."""
     return {
         "projects": list(projects),
         "keys": list(keys),
-        "date_from": today,
-        "date_to": today,
+        "date_from": date_from,
+        "date_to": date_to,
         "range_spend": range_spend,
         "range_calls": range_calls,
         "range_tin": 12345,
@@ -500,9 +514,13 @@ def test_main_render_with_empty_db():
     assert "Spend (" in body and "Calls (" in body
     assert "Tokens in / out" in body
     assert "12,345" in body and "6,789" in body  # comma-formatted tokens
-    # Date range form present
+    # Date range form present, empty values when all-time
     assert 'name="from"' in body and 'name="to"' in body
-    assert 'value="2026-06-26"' in body
+    assert 'value=""' in body
+    # all-time pill active by default
+    assert 'range-reset active' in body
+    # All-time label rendered (EN literal in default-EN paint)
+    assert "Spend (all time)" in body
     # provider summary line
     assert "cerebras" in body and "gemini" in body
     # tables exist with headers
