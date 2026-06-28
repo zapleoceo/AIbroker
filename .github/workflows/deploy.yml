@@ -128,8 +128,11 @@ jobs:
             exit 0
           fi
           echo "Linting:"; echo "$CHANGED"
+          # B008 ignored: function-call-in-default-argument is THE idiomatic
+          # FastAPI pattern (Form()/Depends()/Query() in param defaults) and
+          # ruff's own docs recommend ignoring it for FastAPI projects.
           echo "$CHANGED" | xargs ruff check \
-            --select E,F,W,I,B,UP,SIM,C4,RET --ignore E501,E402 --statistics
+            --select E,F,W,I,B,UP,SIM,C4,RET --ignore E501,E402,B008 --statistics
 
       - name: Vulture (dead-code on changed files)
         shell: bash

@@ -96,7 +96,7 @@ def test_provider_meta_json_is_parseable():
     # Each provider's models is a dict capability → model id
     for p, m in meta.items():
         assert isinstance(m["models"], dict)
-        for cap, model in m["models"].items():
+        for model in m["models"].values():
             assert model.startswith(p + "/") or "/" in model
 
 
