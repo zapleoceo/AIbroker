@@ -105,6 +105,8 @@ async def pick_and_reserve(
             WHERE {where}
             ORDER BY
                 k.is_reserve,
+                -- Soft saturation skip: keys at ≥95% of either axis pushed
+                -- to the back of the queue, used only if all peers also full.
                 CASE
                   WHEN COALESCE(t.reqs, 0) >=
                        COALESCE(k.discovered_req_limit, d.req_def, 999999999) * 0.95
@@ -112,10 +114,13 @@ async def pick_and_reserve(
                        COALESCE(k.discovered_tok_limit, d.tok_def, 999999999999) * 0.95
                   THEN 1 ELSE 0
                 END,
-                -- Bucket recent_errors into groups of 3 (0-2 / 3-5 / …) so
-                -- a single 'cleanest' key doesn't monopolise; random() then
-                -- distributes across the whole healthy bucket evenly.
-                COALESCE(r.n, 0) / 3,
+                -- Pure random within the healthy bucket. Errors are already
+                -- reflected in is_alive (auth fails → mark_dead) and
+                -- cooldown_until (429 → adaptive_cooldown). The earlier
+                -- recent_errors sort caused a single 'cleanest' key to
+                -- monopolise traffic while peers sat idle — bucketing didn't
+                -- help when one key was in its own bucket. random() now
+                -- distributes uniformly across every healthy peer.
                 random()
             LIMIT 1
             FOR UPDATE OF k SKIP LOCKED
