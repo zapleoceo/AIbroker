@@ -15,7 +15,13 @@ from typing import Any
 from aibroker.crypto import decrypt
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
+from aibroker.providers.context_limits import (
+    estimate_prompt_tokens,
+    fits_context,
+    is_too_large_error,
+)
 from aibroker.providers.litellm_adapter import embed, model_for
+from aibroker.providers.observations import learned_ceilings, record_too_large
 from aibroker.routing import (
     CostGuardError,
     chain_for,
@@ -115,12 +121,6 @@ async def run_chat(
     # so quality is identical; we just skip the wasted failures. If EVERY
     # provider is size-skipped (impossible today — big-context providers have
     # no ceiling), fall back to the full chain so we never starve.
-    from aibroker.providers.context_limits import (
-        estimate_prompt_tokens,
-        fits_context,
-        is_too_large_error,
-    )
-    from aibroker.providers.observations import learned_ceilings, record_too_large
     est_tokens = estimate_prompt_tokens(messages)
     learned = await learned_ceilings()
     full_chain = chain_for(capability)

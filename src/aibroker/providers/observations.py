@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -29,7 +29,7 @@ async def record_too_large(provider: str, est_tokens: int) -> None:
     size we know fails), bump the sample counter. Upsert, best-effort."""
     if est_tokens <= 0:
         return
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     try:
         async with get_session() as s:
             await s.execute(text(
