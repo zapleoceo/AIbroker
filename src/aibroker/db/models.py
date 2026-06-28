@@ -135,6 +135,17 @@ class UsageLogRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class ProviderObservationRow(Base):
+    """Self-learned, provider-level facts from real responses — so hardcoded
+    constants are only seeds, overridden once reality is observed."""
+    __tablename__ = "provider_observations"
+
+    provider: Mapped[str] = mapped_column(String(50), primary_key=True)
+    learned_max_request_tokens: Mapped[int | None] = mapped_column(BigInteger)
+    learned_at: Mapped[datetime | None] = mapped_column(DateTime)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class AuditLogRow(Base):
     __tablename__ = "audit_log"
 

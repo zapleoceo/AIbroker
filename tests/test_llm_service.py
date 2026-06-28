@@ -76,3 +76,59 @@ async def test_run_chat_keeps_groq_for_small_prompt(monkeypatch):
         response_format=None, workflow="vera",
     )
     assert "groq" in picked
+
+
+async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
+    """When a provider 413s a prompt, run_chat records the size and jumps to
+    the next provider instead of burning all 5 key retries."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    recorded: list[tuple[str, int]] = []
+
+    fake_key = SimpleNamespace(id=1, label="k", provider="cerebras",
+                               token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return fake_key if provider == "cerebras" else None
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        raise RuntimeError("Error: maximum context length exceeded")
+
+    async def fake_record_too_large(provider, est):
+        recorded.append((provider, est))
+
+    async def fake_penalize(key, exc):
+        return "error"
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "record_too_large", fake_record_too_large)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "mistral"])
+
+    big = [{"role": "user", "content": "x" * 60_000}]   # ~15k tokens
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
+        messages=big, model=None, max_tokens=512, temperature=0.7,
+        response_format=None, workflow="stepan",
+    )
+    assert out is None
+    # cerebras 413'd → recorded its ceiling once, then moved on (not 5 retries)
+    assert recorded and recorded[0][0] == "cerebras"
+    assert picks.count("cerebras") == 1     # broke after the too-large error
+    assert "mistral" in picks               # advanced to next provider
+
+
+async def _noop():
+    return None

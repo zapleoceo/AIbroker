@@ -140,24 +140,54 @@ Three independent daily caps: per-key, per-project (live SUM from `usage_log`),
 global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`). Free-tier keys with `cost == 0`
 skip the check.
 
-## Size-aware provider filter (2026-06-28)
+## Selection policy — the whole picture (refactored 2026-06-28)
 
-Before walking the chain, `run_chat` estimates the prompt size
-(`providers/context_limits.estimate_prompt_tokens`, ≈chars/4) and drops any
-provider whose single-request token ceiling can't fit it
-(`PROVIDER_MAX_REQUEST_TOKENS`). Today only **groq** has a ceiling (8k —
-its free TPM); a 24k-token Coach prompt 413s on groq 100% of the time, so
-sending it is a guaranteed wasted call that just delays the request until
-the chain falls through to a provider that can serve it.
+Choosing which key serves a request is **deterministic, self-calibrating
+rules** — no ML, no LLM-judge, and no hardcoded number as a *sole* source
+of truth. Every provider-specific constant is a **seed** that real
+observations override.
 
-This is a **pure efficiency win, zero quality change**: the request lands
-on exactly the provider it would have reached after the failures, so the
-answer is identical — it just skips the wasted attempts. Measured impact:
-~108 guaranteed-failing groq calls/day on chat:smart eliminated.
+### Resolution tiers (highest wins)
 
-Safety: if *every* provider in a chain gets size-skipped (impossible today
-since big-context providers have no ceiling), it falls back to the full
-chain so a request is never starved.
+| Signal | manual (operator) | learned (observed) | seed (code) |
+|---|---|---|---|
+| daily req/tok/in/out quota | `manual_*_limit` | `discovered_*` (response headers) | `PROVIDER_QUOTAS` |
+| single-request size ceiling | — | `provider_observations` (from 413s) | `SEED_MAX_REQUEST_TOKENS` |
+| cooldown duration | — | adaptive exponential backoff | `COOLDOWN_BASE_S` |
+
+A seed that's overridden by reality is a legitimate bootstrap, not a
+crutch: it's used only until the provider teaches us the real value.
+
+### Per request
+
+1. **Size filter** — `run_chat` estimates prompt tokens (≈chars/4) and
+   drops providers whose effective ceiling (`min(learned, seed)`) can't fit
+   it. groq (free TPM ≈8k) won't be offered a 24k Coach prompt. The request
+   still reaches a provider that CAN serve it, so **the answer and its
+   quality are identical** — only the guaranteed-failing attempts are
+   skipped. If every provider is too small, it falls back to the full chain
+   (never starves).
+
+2. **Availability filter** (selector SQL `WHERE`) — active, alive, scope
+   match, not in cooldown, under hard cost caps.
+
+3. **Saturation soft-skip** (selector `ORDER BY`) — keys ≥95% on any quota
+   axis (req/tok/in/out, resolved manual>discovered>seed) sink to the back;
+   used only if every peer is also full.
+
+4. **Fair rotation** — `random()` among the healthy bucket so no key is
+   burned first while peers idle.
+
+### Self-learning the size ceiling
+
+When a provider rejects a request as too large (`is_too_large_error`:
+413 / context length / "request too large"), `run_chat` records the prompt
+size into `provider_observations` (min of all rejections) and jumps to the
+next provider — no wasted key retries. Next time, any prompt ≥ that size
+skips the provider automatically. So if groq's tier changes, the broker
+recalibrates from one rejection instead of waiting for someone to edit a
+constant. Measured impact at rollout: ~108 guaranteed-failing groq calls/day
+on chat:smart eliminated.
 
 ## Failure → next key → next provider
 

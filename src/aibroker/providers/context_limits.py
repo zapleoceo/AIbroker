@@ -1,28 +1,30 @@
-"""Per-provider single-request token ceiling + prompt-size estimation.
+"""Self-calibrating per-provider single-request size ceiling.
 
-Some providers can't serve a single request above a hard token ceiling on
-our tier — Groq's free TPM (~8k tokens/min) means a 24k-token prompt 413s
-or 429s 100% of the time. Sending it anyway is a guaranteed wasted call
-that delays the request until the chain falls through to a provider that
-can handle it.
+A provider can't serve a single request above a hard token ceiling on our
+tier (e.g. Groq's free TPM ≈8k → a 24k-token prompt 413s/429s every time).
+Sending it is a guaranteed wasted call that just delays the request until
+the chain falls through to a provider that can handle it.
 
-Skipping such a provider for an over-ceiling prompt is a PURE efficiency
-win: the request lands on exactly the same provider it would have reached
-after the wasted failures, so the answer (and its quality) is identical —
-it just gets there faster and without burning a failed attempt.
+Design (no hardcoded sole-source):
+  - SEED_MAX_REQUEST_TOKENS is a bootstrap guess used ONLY until the provider
+    teaches us its real ceiling.
+  - When a provider rejects a request as "too large" (413 / context length /
+    request-too-large), `is_too_large_error` flags it and the orchestrator
+    records the prompt's token estimate into provider_observations. From then
+    on the LEARNED value (min of all observed rejections) overrides the seed.
 
-Only set a ceiling where we're confident. None ⇒ no skip (provider handles
-large context fine, e.g. cerebras gpt-oss-120b, gemini, mistral-large).
+So the effective ceiling = min(learned, seed). Skipping an over-ceiling
+provider is a pure efficiency win — the request still reaches a provider
+that CAN serve it, so the answer (and its quality) is identical.
 """
 from __future__ import annotations
 
 from typing import Any
 
-# Hard single-request token ceiling per provider on our tier. Conservative:
-# only populated where over-ceiling prompts are KNOWN to fail every time.
-PROVIDER_MAX_REQUEST_TOKENS: dict[str, int | None] = {
+# Bootstrap seeds — used only until a real rejection is observed per provider.
+# None ⇒ no known ceiling (large-context providers: cerebras, gemini, mistral…).
+SEED_MAX_REQUEST_TOKENS: dict[str, int | None] = {
     "groq": 8_000,        # free TPM ≈ 8k → a single bigger request always 413/429
-    # everyone else: large context, no per-request size skip
     "cerebras": None,
     "gemini": None,
     "mistral": None,
@@ -34,23 +36,54 @@ PROVIDER_MAX_REQUEST_TOKENS: dict[str, int | None] = {
     "voyage": None,
 }
 
-# A safety margin so we don't send a prompt that just barely fits and then
-# overflows once the model's own output + overhead is added.
+# Safety margin so a prompt that just barely fits doesn't overflow once the
+# model's own output + overhead is added.
 _FIT_MARGIN = 0.90
+
+# Substrings that mean "this prompt is physically too big for this provider"
+# (as opposed to a transient rate-limit). Lower-cased match against the error.
+_TOO_LARGE_MARKERS = (
+    "context length",
+    "context_length",
+    "maximum context",
+    "too large",
+    "too many tokens",
+    "request too large",
+    "reduce the length",
+    "413",
+    "string too long",
+)
 
 
 def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
-    """Rough token estimate from message chars. ~4 chars/token for English;
-    Russian is denser (~2-3) so this under-counts a bit — we compare against
-    a 90%-discounted ceiling to keep a cushion on the safe side."""
+    """Rough token estimate from message chars. ~4 chars/token (English);
+    Russian is denser so this under-counts — compensated by the 90% margin."""
     chars = sum(len(m.get("content") or "") for m in messages)
     return chars // 4
 
 
-def fits_context(provider: str, est_tokens: int) -> bool:
-    """True if `provider` can serve a single request of ~est_tokens.
-    Providers with no configured ceiling always fit."""
-    cap = PROVIDER_MAX_REQUEST_TOKENS.get(provider)
+def is_too_large_error(exc: Exception) -> bool:
+    """True if the provider rejected the request for being too big (not a
+    transient rate-limit). Drives the self-learning of the size ceiling."""
+    msg = str(exc).lower()
+    # A bare 429 is rate-limit, not size — exclude it unless paired with a
+    # size marker. 413 is unambiguously payload-too-large.
+    return any(m in msg for m in _TOO_LARGE_MARKERS)
+
+
+def effective_ceiling(provider: str, learned: int | None) -> int | None:
+    """min(learned, seed) — whichever is the tighter known ceiling.
+    None ⇒ no ceiling known from either source (provider handles large
+    context fine)."""
+    seed = SEED_MAX_REQUEST_TOKENS.get(provider)
+    candidates = [c for c in (learned, seed) if c is not None]
+    return min(candidates) if candidates else None
+
+
+def fits_context(provider: str, est_tokens: int, learned: int | None = None) -> bool:
+    """True if `provider` can serve a single request of ~est_tokens, given the
+    effective ceiling (learned overrides seed). Uncapped providers always fit."""
+    cap = effective_ceiling(provider, learned)
     if cap is None:
         return True
     return est_tokens <= int(cap * _FIT_MARGIN)

@@ -109,15 +109,24 @@ async def run_chat(
     """
     scope = scope_for(capability)
     # Size-aware provider filter: drop providers whose single-request token
-    # ceiling can't fit this prompt (e.g. groq @8k getting a 24k Coach prompt
-    # — a guaranteed 413). The request still reaches a provider that CAN
-    # serve it, so quality is identical; we just skip the wasted failures.
-    # If EVERY provider gets size-skipped (unlikely — big-context providers
-    # have no ceiling), fall back to the full chain so we never starve.
-    from aibroker.providers.context_limits import estimate_prompt_tokens, fits_context
+    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt —
+    # a guaranteed 413). The ceiling is self-learned per provider (overrides
+    # the code seed). The request still reaches a provider that CAN serve it,
+    # so quality is identical; we just skip the wasted failures. If EVERY
+    # provider is size-skipped (impossible today — big-context providers have
+    # no ceiling), fall back to the full chain so we never starve.
+    from aibroker.providers.context_limits import (
+        estimate_prompt_tokens,
+        fits_context,
+        is_too_large_error,
+    )
+    from aibroker.providers.observations import learned_ceilings, record_too_large
     est_tokens = estimate_prompt_tokens(messages)
+    learned = await learned_ceilings()
     full_chain = chain_for(capability)
-    sized_chain = [p for p in full_chain if fits_context(p, est_tokens)]
+    sized_chain = [
+        p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
+    ]
     chain = sized_chain or full_chain
     if len(sized_chain) < len(full_chain):
         log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
@@ -147,6 +156,14 @@ async def run_chat(
                 )
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
                 kind = await _penalize(key, e)
+                # Self-learn the size ceiling: if the provider rejected the
+                # prompt for being too big, remember it so we skip this
+                # provider for prompts ≥ this size next time (no hardcoded cap).
+                if is_too_large_error(e):
+                    await record_too_large(provider, est_tokens)
+                    log.info("learned: %s rejects ~%d tok prompts",
+                             provider, est_tokens)
+                    break  # bigger keys won't help — go straight to next provider
                 await record_usage(
                     api_key_id=key.id, project_id=project.id, lease_id=None,
                     provider=provider, model=use_model, capability=capability,
