@@ -72,21 +72,21 @@ router = APIRouter(tags=["dashboard"])
 _LOGIN_HTML = """<!doctype html><html><head>
 <meta charset="utf-8"><title>AIbroker — login</title>
 <style>
-  body {{ font-family:-apple-system, sans-serif; background:#0f1115; color:#e4e6eb;
-         display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }}
-  .box {{ background:#1a1d24; padding:48px 40px; border-radius:14px; max-width:420px;
-          text-align:center; border:1px solid #2a2d34; position:relative; }}
-  h1 {{ font-weight:500; font-size:28px; margin:0 0 8px; }}
-  p {{ color:#888; margin:6px 0 24px; font-size:14px; }}
-  .err {{ color:#f44336; margin-top:18px; font-size:13px; }}
-  .lang-toggle {{ position:absolute; top:14px; right:14px;
+  body { font-family:-apple-system, sans-serif; background:#0f1115; color:#e4e6eb;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+  .box { background:#1a1d24; padding:48px 40px; border-radius:14px; max-width:420px;
+          text-align:center; border:1px solid #2a2d34; position:relative; }
+  h1 { font-weight:500; font-size:28px; margin:0 0 8px; }
+  p { color:#888; margin:6px 0 24px; font-size:14px; }
+  .err { color:#f44336; margin-top:18px; font-size:13px; }
+  .lang-toggle { position:absolute; top:14px; right:14px;
                 display:inline-flex; background:#0f1115; border:1px solid #2a2d34;
                 border-radius:6px; overflow:hidden;
-                font-family:ui-monospace,monospace; font-size:11px; }}
-  .lang-toggle button {{ background:none; border:none; color:#888;
+                font-family:ui-monospace,monospace; font-size:11px; }
+  .lang-toggle button { background:none; border:none; color:#888;
                        padding:5px 10px; cursor:pointer;
-                       font-family:ui-monospace,monospace; font-size:11px; }}
-  .lang-toggle button.active {{ background:rgba(77,171,247,.12); color:#4dabf7; }}
+                       font-family:ui-monospace,monospace; font-size:11px; }
+  .lang-toggle button.active { background:rgba(77,171,247,.12); color:#4dabf7; }
 </style></head><body>
 <div class="box">
   <span class="lang-toggle">
@@ -106,7 +106,7 @@ _LOGIN_HTML = """<!doctype html><html><head>
   __ERR__
 </div>
 <script>
-(function() {{
+(function() {
   const KEY = "aib_lang";
   const params = new URLSearchParams(location.search);
   const fromQuery = params.get("lang");
@@ -114,22 +114,22 @@ _LOGIN_HTML = """<!doctype html><html><head>
   let lang = (fromQuery === "ru" || fromQuery === "en") ? fromQuery
             : (fromStore === "ru" || fromStore === "en") ? fromStore
             : "en";
-  function apply(l) {{
+  function apply(l) {
     document.documentElement.lang = l;
-    document.querySelectorAll("[data-i18n]").forEach(el => {{
+    document.querySelectorAll("[data-i18n]").forEach(el => {
       const txt = el.getAttribute("data-" + l);
       if (txt !== null) el.textContent = txt;
-    }});
-    document.querySelectorAll(".lang-toggle button").forEach(b => {{
+    });
+    document.querySelectorAll(".lang-toggle button").forEach(b => {
       b.classList.toggle("active", b.dataset.lang === l);
-    }});
+    });
     localStorage.setItem(KEY, l);
-  }}
-  document.querySelectorAll(".lang-toggle button").forEach(b => {{
+  }
+  document.querySelectorAll(".lang-toggle button").forEach(b => {
     b.addEventListener("click", () => apply(b.dataset.lang));
-  }});
+  });
   apply(lang);
-}})();
+})();
 </script>
 </body></html>"""
 

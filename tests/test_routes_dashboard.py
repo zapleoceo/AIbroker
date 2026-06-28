@@ -100,6 +100,27 @@ def test_provider_meta_json_is_parseable():
             assert model.startswith(p + "/") or "/" in model
 
 
+def test_login_page_has_no_literal_double_braces():
+    """Regression: _LOGIN_HTML is rendered via .replace() not .format() —
+    leftover `{{`/`}}` from f-string template would break CSS + JS in the
+    browser (CSS rule silently dropped, JS SyntaxError on the IIFE,
+    Telegram widget button never shown).
+    Bug observed 2026-06-28: dashboard.py:75 had `body {{ ... }}` etc.
+    """
+    r = client.get("/login")
+    body = r.text
+    assert "{{" not in body, "literal {{ leaked from f-string template"
+    assert "}}" not in body, "literal }} leaked from f-string template"
+
+
+def test_login_page_telegram_widget_well_formed():
+    """Defensive check: widget <script> tag carries the 4 required data-* attrs."""
+    r = client.get("/login")
+    for attr in ("data-telegram-login=", "data-size=", "data-radius=",
+                  "data-auth-url=", "telegram-widget.js"):
+        assert attr in r.text, f"missing {attr} in login HTML"
+
+
 def test_login_page_has_lang_toggle():
     r = client.get("/login")
     assert 'data-lang="en"' in r.text
