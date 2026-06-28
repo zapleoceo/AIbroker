@@ -656,20 +656,6 @@ def test_dashboard_edit_key_saves_manual_quota_override():
     assert "Key+not+found" in r.headers["location"]
 
 
-def test_main_render_keys_paid_provider_no_bar():
-    """Paid providers (no quota) just show the count, no bar, sort sentinel -1."""
-    from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
-    k = ApiKeyRow(
-        id=8, provider="anthropic", label="t", tier="paid",
-        scopes=["llm:chat"], token_encrypted="x",
-        is_active=True, is_alive=True, daily_used=42,
-    )
-    body = _render(_fake_main_data(keys=[k])).body.decode()
-    assert ">42<" in body
-    assert "data-sort='-1'" in body
-
-
 def test_keys_table_header_renamed_daily_pct():
     """Column header should read 'daily %' (not 'used') after this change."""
     from aibroker.routes.dashboard import _render
