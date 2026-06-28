@@ -80,6 +80,13 @@ class ApiKeyRow(Base):
     discovered_req_limit: Mapped[int | None] = mapped_column(BigInteger)
     discovered_tok_limit: Mapped[int | None] = mapped_column(BigInteger)
     limits_discovered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Manual per-key quota override — highest priority. Set when the operator
+    # knows the real cap (e.g. a corporate Gemini key: 3M in / 80k out). NULL
+    # on any axis ⇒ defer to discovered_*, then PROVIDER_QUOTAS default.
+    manual_req_limit: Mapped[int | None] = mapped_column(BigInteger)
+    manual_tok_limit: Mapped[int | None] = mapped_column(BigInteger)
+    manual_tok_in_limit: Mapped[int | None] = mapped_column(BigInteger)
+    manual_tok_out_limit: Mapped[int | None] = mapped_column(BigInteger)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 

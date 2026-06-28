@@ -1,11 +1,19 @@
-"""Per-provider free-tier daily quotas.
+"""Per-key daily quota resolution + saturation math.
 
-Some providers meter free tier by REQUESTS/day, others by TOKENS/day, some
-by both — bar shows whichever you'll hit first. Sourced from each
-provider's docs as of 2026-06-28. Verify in your provider console — these
-drift; the bar is for situational awareness, not billing accuracy.
+A key can be capped on four independent axes per day:
+  - requests
+  - total tokens (in + out)
+  - input tokens
+  - output tokens
 
-Schema: {provider: {"req_per_day": int|None, "tok_per_day": int|None, "doc": url}}
+For each axis the effective limit is resolved by priority:
+  1. manual_*      — operator-set override (e.g. corporate Gemini 3M in / 80k out)
+  2. discovered_*  — parsed from provider response headers at key creation
+  3. PROVIDER_QUOTAS default — static guess from provider docs
+
+Whichever axis is closest to its cap drives the dashboard bar and the
+selector's saturation skip. Sourced from provider docs as of 2026-06-28;
+verify in the provider console — defaults drift, manual override is exact.
 """
 from __future__ import annotations
 
@@ -14,51 +22,31 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class Quota:
+    """Effective per-day caps. None on an axis ⇒ that axis is uncapped."""
     req_per_day: int | None = None
-    tok_per_day: int | None = None
+    tok_per_day: int | None = None       # total in+out
+    tok_in_per_day: int | None = None
+    tok_out_per_day: int | None = None
     doc: str = ""
 
 
-# 2026-06-28 confirmed against user's Cerebras "90% free tokens" notification:
-# Cerebras free tier is 1M TOKENS/day (not 14k requests). User was burning
-# 1.36M tokens on one key with only 525 requests — explains the alert.
+# Static provider defaults (req + total-tokens only; in/out split is rare in
+# free-tier docs, so left None — manual override fills it for corp keys).
 PROVIDER_QUOTAS: dict[str, Quota] = {
-    "cerebras": Quota(
-        req_per_day=14_400,
-        tok_per_day=1_000_000,
-        doc="https://inference-docs.cerebras.ai/support/rate-limits",
-    ),
-    "groq": Quota(
-        req_per_day=14_400,
-        tok_per_day=500_000,            # gpt-oss-120b free tier ≈500k/day
-        doc="https://console.groq.com/docs/rate-limits",
-    ),
-    "gemini": Quota(
-        req_per_day=1_500,              # gemini-2.5-flash free
-        tok_per_day=None,               # not daily-token-metered (TPM only)
-        doc="https://ai.google.dev/gemini-api/docs/rate-limits",
-    ),
-    "mistral": Quota(
-        req_per_day=86_400,             # 1 RPS sustained
-        tok_per_day=500_000,            # roughly — free tier
-        doc="https://docs.mistral.ai/deployment/laplateforme/tier/",
-    ),
-    "cohere": Quota(
-        req_per_day=1_000,              # trial: 1k calls/month — pessimistic daily
-        tok_per_day=None,
-        doc="https://docs.cohere.com/v2/docs/rate-limits",
-    ),
-    "openrouter": Quota(
-        req_per_day=200,                # ":free" models conservative
-        tok_per_day=None,
-        doc="https://openrouter.ai/docs/api-reference/limits",
-    ),
-    "voyage": Quota(
-        req_per_day=None,               # rate-based, not daily-capped
-        tok_per_day=200_000_000,        # 200M tokens/mo ÷ 30 ≈ 6.6M/day; lenient
-        doc="https://docs.voyageai.com/docs/pricing",
-    ),
-    # paid / no meaningful free quota:
+    "cerebras": Quota(req_per_day=14_400, tok_per_day=1_000_000,
+                       doc="https://inference-docs.cerebras.ai/support/rate-limits"),
+    "groq": Quota(req_per_day=14_400, tok_per_day=500_000,
+                   doc="https://console.groq.com/docs/rate-limits"),
+    "gemini": Quota(req_per_day=1_500,
+                     doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
+    "mistral": Quota(req_per_day=86_400, tok_per_day=500_000,
+                      doc="https://docs.mistral.ai/deployment/laplateforme/tier/"),
+    "cohere": Quota(req_per_day=1_000,
+                     doc="https://docs.cohere.com/v2/docs/rate-limits"),
+    "openrouter": Quota(req_per_day=200,
+                         doc="https://openrouter.ai/docs/api-reference/limits"),
+    "voyage": Quota(tok_per_day=200_000_000,
+                     doc="https://docs.voyageai.com/docs/pricing"),
     "deepseek":  Quota(doc="https://api-docs.deepseek.com/quick_start/pricing"),
     "anthropic": Quota(doc="https://docs.claude.com/en/docs/about-claude/usage-limits"),
     "openai":    Quota(doc="https://platform.openai.com/docs/guides/rate-limits"),
@@ -66,77 +54,87 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
 
 
 def quota_for(provider: str) -> Quota:
-    """Returns the Quota for this provider; empty Quota for unknown.
-    Static defaults only — use quota_for_key() when you have an ApiKeyRow,
-    so per-key discovered limits override these guesses."""
+    """Static provider default; empty Quota for unknown providers."""
     return PROVIDER_QUOTAS.get(provider, Quota())
 
 
 def quota_for_key(key) -> Quota:
-    """Per-key Quota: discovered (from probe headers) takes priority,
-    then PROVIDER_QUOTAS defaults. `key` is any object with .provider,
-    .discovered_req_limit, .discovered_tok_limit attributes — ApiKeyRow
-    is the prod caller; tests pass SimpleNamespace."""
-    base = quota_for(key.provider)
-    dr = getattr(key, "discovered_req_limit", None)
-    dt = getattr(key, "discovered_tok_limit", None)
-    if dr is None and dt is None:
-        return base
+    """Effective per-key Quota, resolving manual > discovered > default per axis.
+    `key` is any object exposing the column attrs (ApiKeyRow in prod;
+    SimpleNamespace in tests)."""
+    base = quota_for(getattr(key, "provider", ""))
+
+    def pick(*vals: int | None) -> int | None:
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
     return Quota(
-        req_per_day=dr if dr is not None else base.req_per_day,
-        tok_per_day=dt if dt is not None else base.tok_per_day,
+        req_per_day=pick(
+            getattr(key, "manual_req_limit", None),
+            getattr(key, "discovered_req_limit", None),
+            base.req_per_day,
+        ),
+        tok_per_day=pick(
+            getattr(key, "manual_tok_limit", None),
+            getattr(key, "discovered_tok_limit", None),
+            base.tok_per_day,
+        ),
+        tok_in_per_day=pick(getattr(key, "manual_tok_in_limit", None),
+                             base.tok_in_per_day),
+        tok_out_per_day=pick(getattr(key, "manual_tok_out_limit", None),
+                              base.tok_out_per_day),
         doc=base.doc,
     )
 
 
-def percent_used_for_key(requests_today: int, tokens_today: int, key) -> int | None:
-    """Same math as percent_used() but uses per-key discovered limits if set."""
-    q = quota_for_key(key)
-    pcts: list[int] = []
+def _axis_pcts(q: Quota, reqs: int, toks: int, toks_in: int, toks_out: int) -> list[int]:
+    out: list[int] = []
     if q.req_per_day:
-        pcts.append(min(100, int(requests_today / q.req_per_day * 100)))
+        out.append(min(100, int(reqs / q.req_per_day * 100)))
     if q.tok_per_day:
-        pcts.append(min(100, int(tokens_today / q.tok_per_day * 100)))
-    if not pcts:
-        return None
-    return max(pcts)
+        out.append(min(100, int(toks / q.tok_per_day * 100)))
+    if q.tok_in_per_day:
+        out.append(min(100, int(toks_in / q.tok_in_per_day * 100)))
+    if q.tok_out_per_day:
+        out.append(min(100, int(toks_out / q.tok_out_per_day * 100)))
+    return out
 
 
-def bar_label_for_key(requests_today: int, tokens_today: int, key) -> str:
-    """Same as bar_label() but uses per-key discovered limits if set."""
-    q = quota_for_key(key)
-    req_pct = (requests_today / q.req_per_day) if q.req_per_day else 0
-    tok_pct = (tokens_today / q.tok_per_day) if q.tok_per_day else 0
-    if q.tok_per_day and tok_pct >= req_pct:
-        return f"{_humanize(tokens_today)}/{_humanize(q.tok_per_day)} tok"
-    if q.req_per_day:
-        return f"{requests_today}/{q.req_per_day}"
-    return str(requests_today)
-
-
-def percent_used(
-    requests_today: int,
-    tokens_today: int,
-    provider: str,
+def percent_used_for_key(
+    reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
 ) -> int | None:
-    """How burned today — whichever axis hits first wins.
+    """Highest axis usage % for this key today. None when no axis is capped."""
+    pcts = _axis_pcts(quota_for_key(key), reqs, toks, toks_in, toks_out)
+    return max(pcts) if pcts else None
 
-    Returns the higher of req-pct and tok-pct, capped at 100. None when the
-    provider has neither metering (paid).
-    """
-    q = quota_for(provider)
-    pcts: list[int] = []
+
+def bar_label_for_key(
+    reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
+) -> str:
+    """'X/Y' label for whichever axis is closest to its cap."""
+    q = quota_for_key(key)
+    candidates: list[tuple[float, str]] = []
     if q.req_per_day:
-        pcts.append(min(100, int(requests_today / q.req_per_day * 100)))
+        candidates.append((reqs / q.req_per_day, f"{reqs}/{q.req_per_day}"))
     if q.tok_per_day:
-        pcts.append(min(100, int(tokens_today / q.tok_per_day * 100)))
-    if not pcts:
-        return None
-    return max(pcts)
+        candidates.append((toks / q.tok_per_day,
+                            f"{_humanize(toks)}/{_humanize(q.tok_per_day)} tok"))
+    if q.tok_in_per_day:
+        candidates.append((toks_in / q.tok_in_per_day,
+                            f"{_humanize(toks_in)}/{_humanize(q.tok_in_per_day)} in"))
+    if q.tok_out_per_day:
+        candidates.append((toks_out / q.tok_out_per_day,
+                            f"{_humanize(toks_out)}/{_humanize(q.tok_out_per_day)} out"))
+    if not candidates:
+        return str(reqs)
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    return candidates[0][1]
 
 
 def severity_class(pct: int | None) -> str:
-    """CSS class for the bar fill: blue < 70 → yellow < 90 → red ≥ 90."""
+    """Bar fill class: blue < 70 → yellow < 90 → red ≥ 90."""
     if pct is None:
         return ""
     if pct >= 90:
@@ -146,26 +144,9 @@ def severity_class(pct: int | None) -> str:
     return ""
 
 
-def bar_label(
-    requests_today: int,
-    tokens_today: int,
-    provider: str,
-) -> str:
-    """Human-readable 'X/Y' label — picks the axis that's closer to its cap.
-    'requests' axis shown as plain integer; 'tokens' shown as `Nk` / `NM`."""
-    q = quota_for(provider)
-    req_pct = (requests_today / q.req_per_day) if q.req_per_day else 0
-    tok_pct = (tokens_today / q.tok_per_day) if q.tok_per_day else 0
-    if q.tok_per_day and tok_pct >= req_pct:
-        return f"{_humanize(tokens_today)}/{_humanize(q.tok_per_day)} tok"
-    if q.req_per_day:
-        return f"{requests_today}/{q.req_per_day}"
-    return str(requests_today)
-
-
 def _humanize(n: int) -> str:
     if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M".rstrip("0").rstrip(".") + "M" if False else f"{n / 1_000_000:.1f}M"
+        return f"{n / 1_000_000:.1f}M"
     if n >= 1_000:
         return f"{n / 1_000:.0f}k"
     return str(n)

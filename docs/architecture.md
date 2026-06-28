@@ -138,6 +138,17 @@ returns the **max** of the two — whichever you'll hit first wins.
 Token usage is summed live from `usage_log` (today UTC) per `api_key_id`,
 so the bar reflects real consumption, not stale counters.
 
+**Per-key manual quota override** (2026-06-28): the dashboard key-edit form
+exposes four number inputs — `req/day`, `tok/day`, `in/day`, `out/day`.
+These set `api_keys.manual_*_limit`. Resolution per axis is
+**manual > discovered > PROVIDER_QUOTAS default** (`quota_for_key`). The
+in/out split exists specifically for asymmetric corporate keys — e.g. a
+Gemini key capped at 3M input / 80k output tokens per day: its 80k output
+axis saturates long before the 3M input axis, and the selector + bar both
+track each axis independently. The selector's saturation `CASE` checks all
+four axes; ≥95 % on **any** axis pushes the key to the back of its bucket.
+The bar tooltip tags the source: `manual` / `discovered` / `default est.`.
+
 **Per-key auto-discovery** (2026-06-28): when a key is created via
 `POST /admin/keys` or the dashboard add form, the broker probes it once
 and parses the response's rate-limit headers

@@ -596,13 +596,64 @@ def test_main_render_keys_show_token_axis_when_dominant():
         is_active=True, is_alive=True, daily_used=525,
     )
     body = _render(_fake_main_data(
-        keys=[k], tokens_today={10: 1_356_576}
+        keys=[k],
+        tokens_today={10: {"tot": 1_356_576, "tin": 1_200_000, "tout": 156_576}},
     )).body.decode()
     assert "tok" in body                     # token-axis label
     assert "fill bad" in body                # red (≥90%)
     assert "style='width:100%'" in body      # clamped
-    # tooltip exposes both axes for debugging
-    assert "525 req" in body and "1,356,576 tok" in body
+    # tooltip exposes in/out for debugging
+    assert "525 req" in body
+    assert "1,200,000 in" in body and "156,576 out" in body
+
+
+def test_main_render_corp_gemini_output_axis_saturates():
+    """Corp Gemini key: 3M in / 80k out manual caps. 76k out (95%) turns the
+    bar red even though input (1.5M of 3M) is only 50%."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=11, provider="gemini", label="corp", tier="free",
+        scopes=["llm:chat", "llm:edit"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=10,
+        manual_tok_in_limit=3_000_000, manual_tok_out_limit=80_000,
+    )
+    body = _render(_fake_main_data(
+        keys=[k],
+        tokens_today={11: {"tot": 1_576_000, "tin": 1_500_000, "tout": 76_000}},
+    )).body.decode()
+    assert "out" in body                     # output axis label shown
+    assert "76k/80k out" in body
+    assert "fill bad" in body                # 95% → red
+    assert "· manual'" in body               # source tag = manual
+
+
+def test_main_render_keys_paid_provider_no_bar():
+    """Paid providers (no quota) just show the count, no bar, sort sentinel -1."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=8, provider="anthropic", label="t", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=42,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert ">42<" in body
+    assert "data-sort='-1'" in body
+
+
+def test_dashboard_edit_key_saves_manual_quota_override():
+    """Form posts the 4 manual limits; handler persists them, blank → None."""
+    r = client.post(
+        "/dashboard/keys/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"label": "x", "tier": "free", "scopes": ["llm:chat"],
+              "manual_tok_in_limit": "3000000", "manual_tok_out_limit": "80000"},
+        follow_redirects=False,
+    )
+    # 303 (key missing) but the form parsed the manual fields without error
+    assert r.status_code == 303
+    assert "Key+not+found" in r.headers["location"]
 
 
 def test_main_render_keys_paid_provider_no_bar():

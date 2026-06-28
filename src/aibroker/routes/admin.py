@@ -107,6 +107,12 @@ class ApiKeyCreate(BaseModel):
     is_reserve: bool = False
     daily_cost_cap_usd: float | None = None
     monthly_cost_cap_usd: float | None = None
+    # Manual per-key daily quota override (highest priority over discovered/default).
+    # Corp keys with known caps, e.g. Gemini 3M in / 80k out.
+    manual_req_limit: int | None = None
+    manual_tok_limit: int | None = None
+    manual_tok_in_limit: int | None = None
+    manual_tok_out_limit: int | None = None
     notes: str = ""
 
 
@@ -145,6 +151,10 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
             existing.is_reserve = body.is_reserve
             existing.daily_cost_cap_usd = body.daily_cost_cap_usd
             existing.monthly_cost_cap_usd = body.monthly_cost_cap_usd
+            existing.manual_req_limit = body.manual_req_limit
+            existing.manual_tok_limit = body.manual_tok_limit
+            existing.manual_tok_in_limit = body.manual_tok_in_limit
+            existing.manual_tok_out_limit = body.manual_tok_out_limit
             existing.notes = body.notes
             existing.is_active = True
             existing.is_alive = True
@@ -157,6 +167,10 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
                 token_encrypted=encrypt(body.token),
                 daily_cost_cap_usd=body.daily_cost_cap_usd,
                 monthly_cost_cap_usd=body.monthly_cost_cap_usd,
+                manual_req_limit=body.manual_req_limit,
+                manual_tok_limit=body.manual_tok_limit,
+                manual_tok_in_limit=body.manual_tok_in_limit,
+                manual_tok_out_limit=body.manual_tok_out_limit,
                 notes=body.notes,
             )
             s.add(row)

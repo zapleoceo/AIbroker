@@ -74,6 +74,12 @@ async def pick_and_reserve(
         for p, q in PROVIDER_QUOTAS.items()
     )
 
+    # Saturation per axis = today's usage ≥ 95% of the effective cap, where
+    # the effective cap = manual_* > discovered_* > provider default. Four
+    # axes: requests, total tokens, input tokens, output tokens. The corp
+    # Gemini case (3M in / 80k out) is exactly why in/out are separate — its
+    # 80k output cap saturates long before the 3M input cap.
+    _INF = "999999999999"
     stmt = text(
         f"""
         WITH defaults(provider, req_def, tok_def) AS (VALUES
@@ -90,6 +96,8 @@ async def pick_and_reserve(
         toks_today AS MATERIALIZED (
             SELECT api_key_id,
                    COALESCE(SUM(tokens_in + tokens_out), 0) AS toks,
+                   COALESCE(SUM(tokens_in), 0)  AS toks_in,
+                   COALESCE(SUM(tokens_out), 0) AS toks_out,
                    COUNT(*) AS reqs
             FROM usage_log
             WHERE created_at::date = (now() AT TIME ZONE 'UTC')::date
@@ -105,13 +113,17 @@ async def pick_and_reserve(
             WHERE {where}
             ORDER BY
                 k.is_reserve,
-                -- Soft saturation skip: keys at ≥95% of either axis pushed
-                -- to the back of the queue, used only if all peers also full.
+                -- Soft saturation skip across all 4 axes. Pushed to back when
+                -- ≥95% on ANY axis; used only if every peer is also full.
                 CASE
                   WHEN COALESCE(t.reqs, 0) >=
-                       COALESCE(k.discovered_req_limit, d.req_def, 999999999) * 0.95
+                       COALESCE(k.manual_req_limit, k.discovered_req_limit, d.req_def, {_INF}) * 0.95
                     OR COALESCE(t.toks, 0) >=
-                       COALESCE(k.discovered_tok_limit, d.tok_def, 999999999999) * 0.95
+                       COALESCE(k.manual_tok_limit, k.discovered_tok_limit, d.tok_def, {_INF}) * 0.95
+                    OR COALESCE(t.toks_in, 0) >=
+                       COALESCE(k.manual_tok_in_limit, {_INF}) * 0.95
+                    OR COALESCE(t.toks_out, 0) >=
+                       COALESCE(k.manual_tok_out_limit, {_INF}) * 0.95
                   THEN 1 ELSE 0
                 END,
                 -- Pure random within the healthy bucket. Errors are already

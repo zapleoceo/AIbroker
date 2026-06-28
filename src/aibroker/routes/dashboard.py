@@ -245,6 +245,11 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
                          color:#888; cursor:pointer; }}
 .scope-group .scope-cb input {{ margin:0; min-width:0; padding:0; }}
 .scope-group .scope-cb input:checked + * {{ color:#4dabf7; }}
+/* Manual quota override cluster (4 narrow number inputs) */
+.quota-override {{ display:inline-flex; gap:4px; align-items:center;
+                 padding:3px 6px; border:1px dashed #2a2d34; border-radius:6px; }}
+.quota-override input {{ width:78px; min-width:0; font-size:11px;
+                       font-family:ui-monospace,monospace; padding:4px 6px; }}
 /* Cap bar */
 .cap-bar {{ display:inline-block; width:80px; height:6px; background:#0f1115;
             border-radius:3px; vertical-align:middle; margin-left:6px; overflow:hidden; }}
@@ -567,15 +572,22 @@ async def _gather_data(date_from: date | None = None,
             "SELECT COUNT(*) FROM usage_log "
             "WHERE created_at > now() - interval '1 hour'"
         ))).scalar() or 0)
-        # Per-key token consumption today (UTC) — drives the daily-quota bar
-        # for token-metered providers (Cerebras, Mistral, Voyage…).
-        tokens_today = dict((await s.execute(text(
-            "SELECT api_key_id, COALESCE(SUM(tokens_in + tokens_out), 0) AS toks "
-            "FROM usage_log "
-            "WHERE api_key_id IS NOT NULL "
-            "  AND created_at::date = (now() AT TIME ZONE 'UTC')::date "
-            "GROUP BY api_key_id"
-        ))).all())
+        # Per-key token consumption today (UTC) — drives the daily-quota bar.
+        # Split in/out so manual-override caps (e.g. corp Gemini 3M in / 80k
+        # out) can be tracked on each axis independently.
+        tokens_today = {
+            r.api_key_id: {"tot": int(r.tot), "tin": int(r.tin), "tout": int(r.tout)}
+            for r in (await s.execute(text(
+                "SELECT api_key_id, "
+                "  COALESCE(SUM(tokens_in + tokens_out), 0) AS tot, "
+                "  COALESCE(SUM(tokens_in), 0)  AS tin, "
+                "  COALESCE(SUM(tokens_out), 0) AS tout "
+                "FROM usage_log "
+                "WHERE api_key_id IS NOT NULL "
+                "  AND created_at::date = (now() AT TIME ZONE 'UTC')::date "
+                "GROUP BY api_key_id"
+            ))).all()
+        }
         provider_summary = (await s.execute(text(
             "SELECT provider, "
             "COUNT(*) FILTER (WHERE is_active AND is_alive "
@@ -751,16 +763,27 @@ def _render(data: dict[str, Any], *, flash: str = "",
         from aibroker.providers.quotas import (
             bar_label_for_key, percent_used_for_key, severity_class,
         )
-        tok_today = int(data["tokens_today"].get(k.id, 0))
-        used_pct = percent_used_for_key(k.daily_used or 0, tok_today, k)
+        tt = data["tokens_today"].get(k.id, {})
+        tok_today = int(tt.get("tot", 0))
+        tin_today = int(tt.get("tin", 0))
+        tout_today = int(tt.get("tout", 0))
+        used_pct = percent_used_for_key(
+            k.daily_used or 0, tok_today, k,
+            toks_in=tin_today, toks_out=tout_today,
+        )
         if used_pct is not None:
             bar_fill = severity_class(used_pct)
-            label = bar_label_for_key(k.daily_used or 0, tok_today, k)
-            src_hint = "discovered" if k.limits_discovered_at else "default est."
+            label = bar_label_for_key(
+                k.daily_used or 0, tok_today, k,
+                toks_in=tin_today, toks_out=tout_today,
+            )
+            src = ("manual" if (k.manual_req_limit or k.manual_tok_limit
+                                or k.manual_tok_in_limit or k.manual_tok_out_limit)
+                   else "discovered" if k.limits_discovered_at else "default est.")
             used_html = (
                 f"<span class='mono'>{label}</span>"
                 f"<span class='cap-bar' title='{used_pct}% · {k.daily_used} req · "
-                f"{tok_today:,} tok · {src_hint}'>"
+                f"{tin_today:,} in / {tout_today:,} out · {src}'>"
                 f"<span class='fill {bar_fill}' style='width:{used_pct}%'></span></span>"
             )
         else:
@@ -837,6 +860,17 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en-placeholder="new token (leave blank to keep)" '
             f'data-ru-placeholder="новый токен (пусто = оставить)" '
             f'placeholder="new token (leave blank to keep)">'
+            f'<span class="quota-override" title="Manual daily quota override — '
+            f'blank = use discovered/default. For corp keys (e.g. Gemini 3M in / 80k out).">'
+            f'<input name="manual_req_limit" type="number" min="0" value="{k.manual_req_limit or ""}" '
+            f'data-en-placeholder="req/day" data-ru-placeholder="запр/день" placeholder="req/day">'
+            f'<input name="manual_tok_limit" type="number" min="0" value="{k.manual_tok_limit or ""}" '
+            f'data-en-placeholder="tok/day" data-ru-placeholder="ток/день" placeholder="tok/day">'
+            f'<input name="manual_tok_in_limit" type="number" min="0" value="{k.manual_tok_in_limit or ""}" '
+            f'data-en-placeholder="in/day" data-ru-placeholder="вх/день" placeholder="in/day">'
+            f'<input name="manual_tok_out_limit" type="number" min="0" value="{k.manual_tok_out_limit or ""}" '
+            f'data-en-placeholder="out/day" data-ru-placeholder="исх/день" placeholder="out/day">'
+            f'</span>'
             f'<button type="submit" data-i18n data-en="save" data-ru="сохранить">save</button>'
             f'<button type="button" data-edit-toggle="k{k.id}" data-i18n '
             f'data-en="cancel" data-ru="отмена">cancel</button>'
@@ -1368,6 +1402,10 @@ async def dash_edit_key(
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
+    manual_req_limit: str = Form(""),
+    manual_tok_limit: str = Form(""),
+    manual_tok_in_limit: str = Form(""),
+    manual_tok_out_limit: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
     if tier not in ("free", "paid", "trial"):
@@ -1376,6 +1414,17 @@ async def dash_edit_key(
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+
+    def _int_or_none(v: str) -> int | None:
+        v = v.strip()
+        if not v:
+            return None
+        try:
+            n = int(v)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+
     async with get_session() as s:
         row = await s.get(ApiKeyRow, key_id)
         if not row:
@@ -1385,12 +1434,20 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
+        row.manual_req_limit = _int_or_none(manual_req_limit)
+        row.manual_tok_limit = _int_or_none(manual_tok_limit)
+        row.manual_tok_in_limit = _int_or_none(manual_tok_in_limit)
+        row.manual_tok_out_limit = _int_or_none(manual_tok_out_limit)
         if token.strip():
             row.token_encrypted = encrypt(token.strip())
         target = f"{row.provider}/{row.label}"
     await audit(actor="dashboard", action="key.edit", target=target,
                 metadata={"tier": tier, "scopes": scope_list, "is_reserve": is_reserve,
-                          "cap": cap_v, "token_rotated": bool(token.strip())},
+                          "cap": cap_v, "token_rotated": bool(token.strip()),
+                          "manual_req": row.manual_req_limit,
+                          "manual_tok": row.manual_tok_limit,
+                          "manual_tok_in": row.manual_tok_in_limit,
+                          "manual_tok_out": row.manual_tok_out_limit},
                 ip=_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{target}+updated", status_code=303
