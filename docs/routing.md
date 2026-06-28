@@ -97,30 +97,34 @@ WHERE id = (
       AND (cooldown_until IS NULL OR cooldown_until < now())
       AND (daily_cost_cap_usd IS NULL OR daily_cost_used_usd < daily_cost_cap_usd)
       AND (daily_limit = 0 OR daily_used < daily_limit)
-    ORDER BY k.is_reserve,
-             COALESCE(e.recent_errors, 0),   -- prefer keys with fewer 15-min errors
-             k.daily_used,                     -- spread today's load evenly
-             k.last_used_at NULLS FIRST,       -- classic LRU tie-break
-             random()                          -- jitter against fingerprinting
+    ORDER BY
+      k.is_reserve,
+      <saturation_case>,            -- over-quota keys pushed to back
+      COALESCE(r.n, 0),              -- recent-error penalty
+      random()                       -- pure random rotation within bucket
     LIMIT 1
-    FOR UPDATE SKIP LOCKED
+    FOR UPDATE OF k SKIP LOCKED
 )
-RETURNING *
 ```
 
-(Plus a `LEFT JOIN` against `usage_log` rolled up by 15-min `recent_errors`.)
+(Plus `LEFT JOIN`s against `recent` (15-min error count), `toks_today`
+(today's per-key req + token sum), and a `defaults` VALUES CTE built from
+`PROVIDER_QUOTAS` so the saturation check sees the right quota even when
+auto-discover hasn't populated `discovered_*_limit` yet.)
 
 Why each column matters:
-1. `is_reserve` — non-reserve keys first; reserved Coach safety net is last.
-2. `recent_errors` — a key that 5×429'd in the last 15 min waits until clean
-   keys are exhausted.
-3. `daily_used` — spreads today's volume across keys so quota headroom drains
-   evenly. No single key gets burned first while others sit idle.
-4. `last_used_at NULLS FIRST` — fresh keys onboarded today get traffic
-   immediately, then classic LRU.
-5. `random()` — tiny jitter at the same (errors, used, LRU) bucket so the
-   ordering isn't a deterministic round-robin that providers could
-   fingerprint as automation.
+1. **`is_reserve`** — non-reserve keys first; reserved Coach safety net is last.
+2. **saturation case** — a key whose today's tokens/requests ≥ 95% of its cap
+   (per-key `discovered_*` or `PROVIDER_QUOTAS` default) gets a `1`; clean
+   peers get `0`. Soft sort, not a hard filter: when **every** peer is
+   saturated the picker still returns one rather than fail the request.
+3. **recent_errors** — a key that 5× 429'd in the last 15 min waits until
+   clean keys are exhausted (within the same saturation bucket).
+4. **random()** — true random rotation. Replaced the LRU+`daily_used`
+   ordering after we caught one workload-class (Coach JSON-heavy edits)
+   monopolising the same handful of cerebras keys to token saturation
+   while peers sat idle. Random distributes the next pick uniformly across
+   eligible peers.
 
 Atomic, race-free across replicas, advances LRU in one go. Postgres-only
 (JSONB `?` + SKIP LOCKED + `random()`); exercised by the Postgres CI job.

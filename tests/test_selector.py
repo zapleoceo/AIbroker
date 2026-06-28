@@ -48,12 +48,74 @@ async def test_pick_none_when_no_keys():
     assert result is None
 
 
-async def test_pick_returns_lru_oldest_first():
-    await _add_key("cerebras", "a", last_used_at=datetime.now() - timedelta(hours=2))
-    await _add_key("cerebras", "b", last_used_at=datetime.now() - timedelta(hours=1))
+async def test_pick_distributes_randomly_across_eligible_keys():
+    """2026-06-28: LRU replaced by random() — over 100 picks both keys get
+    real share of traffic instead of one monopolising. Reset last_used_at
+    each iteration so neither becomes 'oldest'."""
+    from sqlalchemy import update
+    a = await _add_key("cerebras", "a")
+    b = await _add_key("cerebras", "b")
+    counts = {"a": 0, "b": 0}
+    for _ in range(100):
+        picked = await pick_and_reserve("cerebras", "llm:chat")
+        assert picked is not None
+        counts[picked.label] += 1
+        # reset both back so neither dominates by LRU; only random() decides
+        async with get_session() as s:
+            await s.execute(update(ApiKeyRow).values(last_used_at=None))
+    # With random rotation, expect roughly 50/50 ± 30 over 100 picks
+    assert 20 <= counts["a"] <= 80, f"distribution skewed: {counts}"
+    assert 20 <= counts["b"] <= 80, f"distribution skewed: {counts}"
+
+
+async def test_pick_pushes_over_quota_key_to_back():
+    """A key already burned >=95% of today's token quota should not be picked
+    while a clean peer is eligible. Cerebras default tok_per_day=1_000_000;
+    seed today's usage_log to push key 'hot' over the threshold."""
+    from sqlalchemy import insert as sql_insert
+    cold = await _add_key("cerebras", "cold")
+    hot = await _add_key("cerebras", "hot")
+    # 1.1M tokens today on 'hot' → > 95% of 1M default cap
+    async with get_session() as s:
+        from aibroker.db.models import UsageLogRow
+        await s.execute(sql_insert(UsageLogRow), [{
+            "api_key_id": hot, "provider": "cerebras", "tokens_in": 1_100_000,
+            "tokens_out": 0, "cost_usd": 0.0, "status": "ok",
+        }])
+    # 20 picks — none should land on 'hot' while 'cold' is alive
+    cold_count = hot_count = 0
+    from sqlalchemy import update
+    for _ in range(20):
+        picked = await pick_and_reserve("cerebras", "llm:chat")
+        assert picked is not None
+        if picked.label == "cold":
+            cold_count += 1
+        else:
+            hot_count += 1
+        async with get_session() as s:
+            await s.execute(update(ApiKeyRow).values(last_used_at=None))
+    assert hot_count == 0, f"saturated key still picked {hot_count} times"
+    assert cold_count == 20
+
+
+async def test_pick_falls_back_to_saturated_when_all_saturated():
+    """When every alive peer is over-quota, picker still returns one
+    (it's a soft-sort, not a hard exclude — better a maybe-throttled call
+    than no call)."""
+    from sqlalchemy import insert as sql_insert
+    from aibroker.db.models import UsageLogRow
+    a = await _add_key("cerebras", "a")
+    b = await _add_key("cerebras", "b")
+    async with get_session() as s:
+        await s.execute(sql_insert(UsageLogRow), [
+            {"api_key_id": a, "provider": "cerebras", "tokens_in": 2_000_000,
+             "tokens_out": 0, "cost_usd": 0.0, "status": "ok"},
+            {"api_key_id": b, "provider": "cerebras", "tokens_in": 2_000_000,
+             "tokens_out": 0, "cost_usd": 0.0, "status": "ok"},
+        ])
     picked = await pick_and_reserve("cerebras", "llm:chat")
     assert picked is not None
-    assert picked.label == "a"  # oldest used
+    assert picked.label in ("a", "b")
 
 
 async def test_pick_skips_inactive():

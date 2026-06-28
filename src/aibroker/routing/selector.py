@@ -52,41 +52,68 @@ async def pick_and_reserve(
         params["tier"] = require_tier
 
     where = " AND ".join(conds)
-    # 2026-06-26: smarter ordering.
-    #   1. is_reserve — non-reserve keys first (Coach safety net last).
-    #   2. recent_errors  — penalise keys that failed 15 min ago, even if LRU.
-    #   3. daily_used     — spread today's volume across keys so quota
-    #                       headroom drains evenly, never one-key-first.
-    #   4. last_used_at   — classic LRU tie-break.
-    #   5. random()       — final jitter, so the same trio of keys at the
-    #                       same LRU stamp doesn't form a deterministic
-    #                       round-robin pattern (mild anti-fingerprint).
-    # Postgres rejects `FOR UPDATE` over a SELECT that contains `GROUP BY`
-    # ('FOR UPDATE is not allowed with GROUP BY clause'). Two tricks together:
-    #   1. The aggregate lives in a MATERIALIZED CTE so it's a separate scan,
-    #      not part of the locked SELECT.
-    #   2. `FOR UPDATE OF k` names the api_keys-only lock target explicitly,
-    #      so PG doesn't try to lock the CTE rows.
+    # 2026-06-28: pure random rotation + soft skip of over-quota keys.
+    #   1. is_reserve         — non-reserve first; Coach reserve last.
+    #   2. is_quota_saturated — keys at ≥95% of their daily token/request
+    #      quota are pushed to the back of the queue. They still get picked
+    #      if every healthy peer is also saturated (fallback, not hard cut).
+    #   3. recent_errors      — failures in the last 15 min push the key back.
+    #   4. random()           — true random rotation within the bucket. No
+    #      LRU, no daily_used sort — those caused one key per workload to
+    #      monopolise its slot while others sat idle.
+    #
+    # Quota source priority per key:
+    #   - discovered_*_limit (parsed from provider response headers)
+    #   - PROVIDER_QUOTAS default (Python config, baked into VALUES CTE)
+    #   - effective ∞ when neither knows (paid / unknown provider)
+    from aibroker.providers.quotas import PROVIDER_QUOTAS
+    def _q(v: int | None) -> str:
+        return str(int(v)) if v else "NULL"
+    quota_rows = ",\n          ".join(
+        f"('{p}', {_q(q.req_per_day)}, {_q(q.tok_per_day)})"
+        for p, q in PROVIDER_QUOTAS.items()
+    )
+
     stmt = text(
         f"""
-        WITH recent AS MATERIALIZED (
+        WITH defaults(provider, req_def, tok_def) AS (VALUES
+          {quota_rows}
+        ),
+        recent AS MATERIALIZED (
             SELECT api_key_id, COUNT(*) AS n
             FROM usage_log
             WHERE created_at > now() - INTERVAL '15 minutes'
               AND status <> 'ok'
               AND api_key_id IS NOT NULL
             GROUP BY api_key_id
+        ),
+        toks_today AS MATERIALIZED (
+            SELECT api_key_id,
+                   COALESCE(SUM(tokens_in + tokens_out), 0) AS toks,
+                   COUNT(*) AS reqs
+            FROM usage_log
+            WHERE created_at::date = (now() AT TIME ZONE 'UTC')::date
+              AND api_key_id IS NOT NULL
+            GROUP BY api_key_id
         )
         UPDATE api_keys SET last_used_at = now()
         WHERE id = (
             SELECT k.id FROM api_keys k
-            LEFT JOIN recent r ON r.api_key_id = k.id
+            LEFT JOIN recent r      ON r.api_key_id = k.id
+            LEFT JOIN toks_today t  ON t.api_key_id = k.id
+            LEFT JOIN defaults d    ON d.provider   = k.provider
             WHERE {where}
-            ORDER BY k.is_reserve,
-                     COALESCE(r.n, 0),
-                     k.daily_used,
-                     k.last_used_at NULLS FIRST,
-                     random()
+            ORDER BY
+                k.is_reserve,
+                CASE
+                  WHEN COALESCE(t.reqs, 0) >=
+                       COALESCE(k.discovered_req_limit, d.req_def, 999999999) * 0.95
+                    OR COALESCE(t.toks, 0) >=
+                       COALESCE(k.discovered_tok_limit, d.tok_def, 999999999999) * 0.95
+                  THEN 1 ELSE 0
+                END,
+                COALESCE(r.n, 0),
+                random()
             LIMIT 1
             FOR UPDATE OF k SKIP LOCKED
         )
