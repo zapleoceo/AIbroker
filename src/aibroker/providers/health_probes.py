@@ -35,7 +35,12 @@ async def probe_with_headers(
     except Exception as e:
         return "neterr", 0, f"{type(e).__name__}: {e}", {}
 
-    h = dict(r.headers)
+    # Defensive — tests mock httpx Response with AsyncMock; dict() then chokes
+    # on the coroutine wrapped .keys(). Production httpx is fine either way.
+    try:
+        h = dict(r.headers)
+    except (TypeError, ValueError):
+        h = {}
     b = r.text.lower()
     if 200 <= r.status_code < 300:
         return "alive", r.status_code, "", h
