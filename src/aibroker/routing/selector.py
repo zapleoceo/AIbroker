@@ -112,7 +112,10 @@ async def pick_and_reserve(
                        COALESCE(k.discovered_tok_limit, d.tok_def, 999999999999) * 0.95
                   THEN 1 ELSE 0
                 END,
-                COALESCE(r.n, 0),
+                -- Bucket recent_errors into groups of 3 (0-2 / 3-5 / …) so
+                -- a single 'cleanest' key doesn't monopolise; random() then
+                -- distributes across the whole healthy bucket evenly.
+                COALESCE(r.n, 0) / 3,
                 random()
             LIMIT 1
             FOR UPDATE OF k SKIP LOCKED
