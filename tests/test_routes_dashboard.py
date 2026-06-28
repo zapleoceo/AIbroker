@@ -364,6 +364,7 @@ def test_parse_date_range_defaults_to_all_time_when_both_missing():
 
 def test_parse_date_range_parses_valid_iso():
     from datetime import date
+
     from aibroker.routes.dashboard import _parse_date_range
     df, dt = _parse_date_range("2026-06-01", "2026-06-10")
     assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
@@ -372,6 +373,7 @@ def test_parse_date_range_parses_valid_iso():
 def test_parse_date_range_swaps_inverted_range():
     """If user passes from>to, swap them rather than throw."""
     from datetime import date
+
     from aibroker.routes.dashboard import _parse_date_range
     df, dt = _parse_date_range("2026-06-10", "2026-06-01")
     assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
@@ -379,7 +381,8 @@ def test_parse_date_range_swaps_inverted_range():
 
 def test_parse_date_range_falls_back_on_garbage_when_partial():
     """Garbage on one side becomes today; swap then puts the older one first."""
-    from datetime import date, datetime, UTC
+    from datetime import UTC, date, datetime
+
     from aibroker.routes.dashboard import _parse_date_range
     today = datetime.now(UTC).date()
     # garbage 'from' → today; given to=2026-06-10 (older than today) → swap
@@ -393,7 +396,8 @@ def test_parse_date_range_falls_back_on_garbage_when_partial():
 
 
 def test_parse_date_range_one_sided_inputs():
-    from datetime import date, datetime, UTC
+    from datetime import UTC, date, datetime
+
     from aibroker.routes.dashboard import _parse_date_range
     today = datetime.now(UTC).date()
     # only from → to = today
@@ -419,7 +423,8 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
                        providers: list[tuple] | None = None):
     """Build the dict that _render_project_detail() consumes — no DB."""
     from collections import namedtuple
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
+
     from aibroker.db.models import ProjectRow
 
     project = ProjectRow(
@@ -445,7 +450,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
         "by_status": [BrkSt("ok", 3), BrkSt("rate_limit", 1)],
         "recent": [
-            Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=timezone.utc),
+            Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
                     "cerebras", "cerebras/gpt-oss-120b", "chat:fast",
                     100, 50, 0.0, 234, "ok", 200, None)
             for i in range(recent_n)
