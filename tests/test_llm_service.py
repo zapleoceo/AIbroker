@@ -9,6 +9,21 @@ def test_classify_rate_limit():
     assert classify_provider_error(Exception("provider rate_limit exceeded")) == "rate_limit"
 
 
+def test_classify_camelcase_and_quota_shapes():
+    """REGRESSION (2026-06-29): cerebras 'RateLimitError - Tokens per day limit
+    exceeded' lower-cases to 'ratelimiterror ... tokens per day' — no
+    'rate_limit' underscore, no '429'. The old classifier returned 'error' so
+    the key was never cooled → infinite retry storm. All these must be
+    rate_limit now."""
+    for msg in (
+        "litellm.RateLimitError: CerebrasException - Tokens per day limit exceeded",
+        "RESOURCE_EXHAUSTED: free_tier quota exceeded",
+        "GeminiException: too many requests",
+        "Tokens per minute (TPM) limit",
+    ):
+        assert classify_provider_error(RuntimeError(msg)) == "rate_limit", msg
+
+
 def test_classify_auth():
     assert classify_provider_error(RuntimeError("401 Unauthorized")) == "auth"
     assert classify_provider_error(Exception("403 forbidden")) == "auth"

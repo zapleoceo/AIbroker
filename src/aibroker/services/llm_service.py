@@ -40,13 +40,32 @@ _COOLDOWN = timedelta(minutes=5)
 _MAX_KEYS_PER_PROVIDER = 5
 
 
+# Substrings (lower-cased) that mean a provider throttled us — covers the
+# many shapes: '429', 'rate_limit' (underscore), 'ratelimiterror' (CamelCase
+# from litellm/cerebras), Google's 'resource_exhausted', and the quota
+# phrasings ('quota', 'tokens per day', 'too many tokens'). Missing any of
+# these meant cerebras 'RateLimitError - Tokens per day' fell through to
+# 'error' and the key was never cooled → infinite retry storm.
+_RATE_LIMIT_SIGNS = (
+    "rate_limit",
+    "ratelimit",
+    "429",
+    "resource_exhausted",
+    "quota",
+    "tokens per day",
+    "tokens per minute",
+    "too many tokens",
+    "too many requests",
+)
+
+
 def classify_provider_error(exc: Exception) -> str:
     """Map a provider exception to one of: 'rate_limit', 'auth', 'error'.
 
     Single source of truth — both chat and embed paths classify the same way.
     """
     emsg = str(exc).lower()
-    if "rate_limit" in emsg or "429" in emsg:
+    if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
         return "rate_limit"
     if "401" in emsg or "403" in emsg or "auth" in emsg:
         return "auth"
