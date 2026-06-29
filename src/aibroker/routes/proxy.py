@@ -28,7 +28,10 @@ log = logging.getLogger(__name__)
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    # str for plain text; list[dict] for OpenAI-style multimodal content
+    # blocks (e.g. [{"type":"text",...}, {"type":"image_url",...}]). LiteLLM
+    # passes both shapes through to vision-capable models natively.
+    content: str | list[dict[str, Any]]
 
 
 class ChatRequest(BaseModel):

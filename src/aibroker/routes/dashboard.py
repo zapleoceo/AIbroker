@@ -23,6 +23,11 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.auto_discover import discover_and_store
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.providers.quotas import (
+    bar_label_for_key,
+    percent_used_for_key,
+    severity_class,
+)
 from aibroker.telemetry import audit
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
@@ -768,9 +773,6 @@ def _render(data: dict[str, Any], *, flash: str = "",
         # Daily-quota progress bar — request-OR-token-metered (whichever
         # axis is closer to its cap wins). Token usage pulled live from
         # usage_log (today UTC) so it reflects reality, not stale counters.
-        from aibroker.providers.quotas import (
-            bar_label_for_key, percent_used_for_key, severity_class,
-        )
         tt = data["tokens_today"].get(k.id, {})
         tok_today = int(tt.get("tot", 0))
         tin_today = int(tt.get("tin", 0))
