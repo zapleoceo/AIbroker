@@ -1326,6 +1326,17 @@ def _positive_int_or_none(v: str) -> int | None:
     return n if n > 0 else None
 
 
+def _apply_manual_limits(key: ApiKeyRow, *, req: str, tok: str,
+                         tok_in: str, tok_out: str) -> None:
+    """Set the four manual daily-quota overrides on a key from raw form
+    strings (parsed via _positive_int_or_none). Shared by add-create, upsert
+    and edit so the four axes stay in lock-step everywhere."""
+    key.manual_req_limit = _positive_int_or_none(req)
+    key.manual_tok_limit = _positive_int_or_none(tok)
+    key.manual_tok_in_limit = _positive_int_or_none(tok_in)
+    key.manual_tok_out_limit = _positive_int_or_none(tok_out)
+
+
 def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
     """Render the 4 known scopes as checkboxes (multi-select via repeated POST)."""
     sel = set(selected or [])
@@ -1358,10 +1369,8 @@ async def dash_create_key(
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
-    m_req = _positive_int_or_none(manual_req_limit)
-    m_tok = _positive_int_or_none(manual_tok_limit)
-    m_in = _positive_int_or_none(manual_tok_in_limit)
-    m_out = _positive_int_or_none(manual_tok_out_limit)
+    limits = {"req": manual_req_limit, "tok": manual_tok_limit,
+              "tok_in": manual_tok_in_limit, "tok_out": manual_tok_out_limit}
     new_id: int | None = None
     async with get_session() as s:
         existing = (await s.execute(
@@ -1375,10 +1384,7 @@ async def dash_create_key(
             existing.scopes = scope_list
             existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
-            existing.manual_req_limit = m_req
-            existing.manual_tok_limit = m_tok
-            existing.manual_tok_in_limit = m_in
-            existing.manual_tok_out_limit = m_out
+            _apply_manual_limits(existing, **limits)
             existing.is_active = True
             existing.is_alive = True
             verb = "updated"
@@ -1389,9 +1395,8 @@ async def dash_create_key(
                 scopes=scope_list, is_reserve=is_reserve,
                 token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
-                manual_req_limit=m_req, manual_tok_limit=m_tok,
-                manual_tok_in_limit=m_in, manual_tok_out_limit=m_out,
             )
+            _apply_manual_limits(fresh, **limits)
             s.add(fresh)
             await s.flush()
             new_id = fresh.id
@@ -1399,8 +1404,8 @@ async def dash_create_key(
     await audit(actor="dashboard", action=f"key.{verb}",
                 target=f"{provider}/{label}",
                 metadata={"scopes": scope_list, "is_reserve": is_reserve,
-                          "manual_req": m_req, "manual_tok": m_tok,
-                          "manual_tok_in": m_in, "manual_tok_out": m_out},
+                          "manual_limits": {k: _positive_int_or_none(v)
+                                            for k, v in limits.items()}},
                 ip=_ip(request))
     # Auto-discover free-tier limits from response headers (best-effort).
     if new_id is not None:
@@ -1481,10 +1486,8 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
-        row.manual_req_limit = _positive_int_or_none(manual_req_limit)
-        row.manual_tok_limit = _positive_int_or_none(manual_tok_limit)
-        row.manual_tok_in_limit = _positive_int_or_none(manual_tok_in_limit)
-        row.manual_tok_out_limit = _positive_int_or_none(manual_tok_out_limit)
+        _apply_manual_limits(row, req=manual_req_limit, tok=manual_tok_limit,
+                             tok_in=manual_tok_in_limit, tok_out=manual_tok_out_limit)
         if token.strip():
             row.token_encrypted = encrypt(token.strip())
         target = f"{row.provider}/{row.label}"

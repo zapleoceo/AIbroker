@@ -46,6 +46,67 @@ def test_positive_int_or_none():
     assert _positive_int_or_none("abc") is None
 
 
+def test_apply_manual_limits_sets_all_four_axes():
+    """Shared helper used by add-create, upsert and edit — parses raw form
+    strings into the four manual_* columns (blank/0/garbage → None)."""
+    from types import SimpleNamespace
+
+    from aibroker.routes.dashboard import _apply_manual_limits
+    key = SimpleNamespace()
+    _apply_manual_limits(key, req="500", tok="", tok_in="3000000", tok_out="0")
+    assert key.manual_req_limit == 500
+    assert key.manual_tok_limit is None        # blank → no cap
+    assert key.manual_tok_in_limit == 3_000_000
+    assert key.manual_tok_out_limit is None    # 0 → no cap
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
+def test_create_and_edit_key_persist_manual_limits():
+    """Full loop: add a key with all 4 manual limits via the dashboard form,
+    then edit them, and assert each axis round-trips into the DB. Covers the
+    create / upsert / edit persistence branches."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    # 1. create with manual in/out caps (corp-Gemini shape)
+    r = client.post(
+        "/dashboard/keys/create", cookies=_logged_in_cookies(),
+        data={"provider": "gemini", "label": "corp",
+              "token": "g-fake-token-1234567890",
+              "scopes": ["llm:chat", "llm:vision"],
+              "manual_tok_in_limit": "3000000", "manual_tok_out_limit": "80000"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+    async def _read():
+        async with get_session() as s:
+            return (await s.execute(
+                select(ApiKeyRow).where(ApiKeyRow.label == "corp")
+            )).scalar_one()
+
+    row = asyncio.get_event_loop().run_until_complete(_read())
+    assert row.manual_tok_in_limit == 3_000_000
+    assert row.manual_tok_out_limit == 80_000
+    assert row.manual_req_limit is None      # blank → no cap
+
+    # 2. edit: tighten req cap, clear the out cap
+    r = client.post(
+        f"/dashboard/keys/{row.id}/edit", cookies=_logged_in_cookies(),
+        data={"label": "corp", "tier": "free", "scopes": ["llm:chat"],
+              "manual_req_limit": "500", "manual_tok_out_limit": ""},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    row2 = asyncio.get_event_loop().run_until_complete(_read())
+    assert row2.manual_req_limit == 500
+    assert row2.manual_tok_out_limit is None   # cleared
+
+
 def test_add_key_form_has_four_manual_limit_fields():
     """The ADD-key form must expose all four optional quota overrides
     (regression: it only had the $ cost cap)."""
