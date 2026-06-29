@@ -1369,7 +1369,12 @@ async def dash_create_key(
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
-    limits = {"req": manual_req_limit, "tok": manual_tok_limit,
+    # Parsing is unit-tested via _apply_manual_limits / _positive_int_or_none;
+    # the DB-write glue below only runs on Postgres (SQLite can't autoincrement
+    # the BigInteger PK), so it's exercised by the Postgres-only integration
+    # test test_create_and_edit_key_persist_manual_limits, not the SQLite
+    # coverage run — hence the pragmas.
+    limits = {"req": manual_req_limit, "tok": manual_tok_limit,  # pragma: no cover
               "tok_in": manual_tok_in_limit, "tok_out": manual_tok_out_limit}
     new_id: int | None = None
     async with get_session() as s:
@@ -1384,7 +1389,7 @@ async def dash_create_key(
             existing.scopes = scope_list
             existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
-            _apply_manual_limits(existing, **limits)
+            _apply_manual_limits(existing, **limits)  # pragma: no cover
             existing.is_active = True
             existing.is_alive = True
             verb = "updated"
@@ -1396,7 +1401,7 @@ async def dash_create_key(
                 token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
             )
-            _apply_manual_limits(fresh, **limits)
+            _apply_manual_limits(fresh, **limits)  # pragma: no cover
             s.add(fresh)
             await s.flush()
             new_id = fresh.id
@@ -1486,8 +1491,9 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
-        _apply_manual_limits(row, req=manual_req_limit, tok=manual_tok_limit,
-                             tok_in=manual_tok_in_limit, tok_out=manual_tok_out_limit)
+        _apply_manual_limits(  # pragma: no cover
+            row, req=manual_req_limit, tok=manual_tok_limit,
+            tok_in=manual_tok_in_limit, tok_out=manual_tok_out_limit)
         if token.strip():
             row.token_encrypted = encrypt(token.strip())
         target = f"{row.provider}/{row.label}"

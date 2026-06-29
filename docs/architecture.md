@@ -141,8 +141,10 @@ so the bar reflects real consumption, not stale counters.
 **Per-key manual quota override** (2026-06-28, add-form 2026-06-29): both
 the dashboard **add-key** and **edit-key** forms expose four number inputs —
 `req/day`, `tok/day`, `in/day`, `out/day` — alongside the `$ cap`.
-These set `api_keys.manual_*_limit` (parsed by the shared
-`_positive_int_or_none`: blank / 0 / negative → NULL = no cap on that axis).
+These set `api_keys.manual_*_limit` via one shared writer,
+`_apply_manual_limits(key, req, tok, tok_in, tok_out)` (each axis parsed by
+`_positive_int_or_none`: blank / 0 / negative → NULL = no cap), called from
+add-create, upsert and edit so the four axes stay in lock-step everywhere.
 Resolution per axis is
 **manual > discovered > PROVIDER_QUOTAS default** (`quota_for_key`). The
 in/out split exists specifically for asymmetric corporate keys — e.g. a
