@@ -201,10 +201,7 @@ async def transcribe(
     resp = await litellm.atranscription(model=model, file=buf, api_key=api_key)
     latency_ms = int((time.time() - t0) * 1000)
     # Response is an object with .text (or a dict)
-    if isinstance(resp, dict):
-        text = resp.get("text", "")
-    else:
-        text = getattr(resp, "text", "") or ""
+    text = resp.get("text", "") if isinstance(resp, dict) else (getattr(resp, "text", "") or "")
     meta = {
         "model": model,
         # Whisper bills per audio-second, not tokens; cost left to caller/usage.
