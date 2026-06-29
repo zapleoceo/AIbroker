@@ -1,6 +1,7 @@
 """Browser admin UI — Telegram login, dashboard, inline forms for CRUD."""
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, date, datetime, timedelta
 from html import escape as esc
 from typing import Annotated, Any
@@ -20,6 +21,7 @@ from aibroker.config import get_settings
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
+from aibroker.providers.auto_discover import discover_and_store
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.telemetry import audit
 
@@ -1307,12 +1309,12 @@ async def dash_create_key(
     label: str = Form(...),
     token: str = Form(...),
     tier: str = Form("free"),
-    scopes: Annotated[list[str], Form()] = [],
+    scopes: Annotated[list[str] | None, Form()] = None,
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
-    scope_list = _validate_scope_list(scopes)
+    scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
@@ -1350,11 +1352,8 @@ async def dash_create_key(
                 ip=_ip(request))
     # Auto-discover free-tier limits from response headers (best-effort).
     if new_id is not None:
-        from aibroker.providers.auto_discover import discover_and_store
-        try:
+        with contextlib.suppress(Exception):
             await discover_and_store(new_id, provider, token)
-        except Exception:
-            pass
     return RedirectResponse(
         f"/dashboard?flash=Key+{provider}/{label}+{verb}", status_code=303
     )
@@ -1404,7 +1403,7 @@ async def dash_edit_key(
     request: Request,
     label: str = Form(...),
     tier: str = Form("free"),
-    scopes: Annotated[list[str], Form()] = [],
+    scopes: Annotated[list[str] | None, Form()] = None,
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
@@ -1416,7 +1415,7 @@ async def dash_edit_key(
 ) -> RedirectResponse:
     if tier not in ("free", "paid", "trial"):
         return RedirectResponse("/dashboard?flash=!Bad+tier", status_code=303)
-    scope_list = _validate_scope_list(scopes)
+    scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
