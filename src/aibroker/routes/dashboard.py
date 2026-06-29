@@ -927,9 +927,19 @@ def _render(data: dict[str, Any], *, flash: str = "",
         <label class="rsv" title="reserved lane: picked last in its group, invisible to other scopes">
           <input type="checkbox" name="is_reserve" value="1"> reserve</label>
         <input name="daily_cost_cap_usd" type="number" step="0.01" style="min-width:130px"
-               data-en-placeholder="cap (optional)"
-               data-ru-placeholder="лимит (опц.)"
-               placeholder="cap (optional)">
+               data-en-placeholder="$ cap (optional)"
+               data-ru-placeholder="$ лимит (опц.)"
+               placeholder="$ cap (optional)">
+        <span class="quota-override" title="Optional daily quota override — blank = use discovered/default. For known caps (e.g. corp Gemini 3M in / 80k out).">
+          <input name="manual_req_limit" type="number" min="0"
+                 data-en-placeholder="req/day" data-ru-placeholder="запр/день" placeholder="req/day">
+          <input name="manual_tok_limit" type="number" min="0"
+                 data-en-placeholder="tok/day" data-ru-placeholder="ток/день" placeholder="tok/day">
+          <input name="manual_tok_in_limit" type="number" min="0"
+                 data-en-placeholder="in/day" data-ru-placeholder="вх/день" placeholder="in/day">
+          <input name="manual_tok_out_limit" type="number" min="0"
+                 data-en-placeholder="out/day" data-ru-placeholder="исх/день" placeholder="out/day">
+        </span>
         <button type="submit" data-i18n data-en="add" data-ru="добавить">add</button>
       </form>
       <div id="provider-hint" class="provider-hint"
@@ -1303,6 +1313,19 @@ def _validate_scope_list(scopes: list[str]) -> list[str] | None:
     return seen or None
 
 
+def _positive_int_or_none(v: str) -> int | None:
+    """Parse an optional positive-int form field. Blank/garbage/≤0 → None
+    (no manual override on that axis). Used by both add- and edit-key forms."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        n = int(v)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
 def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
     """Render the 4 known scopes as checkboxes (multi-select via repeated POST)."""
     sel = set(selected or [])
@@ -1325,12 +1348,20 @@ async def dash_create_key(
     scopes: Annotated[list[str] | None, Form()] = None,
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
+    manual_req_limit: str = Form(""),
+    manual_tok_limit: str = Form(""),
+    manual_tok_in_limit: str = Form(""),
+    manual_tok_out_limit: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
     scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    m_req = _positive_int_or_none(manual_req_limit)
+    m_tok = _positive_int_or_none(manual_tok_limit)
+    m_in = _positive_int_or_none(manual_tok_in_limit)
+    m_out = _positive_int_or_none(manual_tok_out_limit)
     new_id: int | None = None
     async with get_session() as s:
         existing = (await s.execute(
@@ -1344,6 +1375,10 @@ async def dash_create_key(
             existing.scopes = scope_list
             existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
+            existing.manual_req_limit = m_req
+            existing.manual_tok_limit = m_tok
+            existing.manual_tok_in_limit = m_in
+            existing.manual_tok_out_limit = m_out
             existing.is_active = True
             existing.is_alive = True
             verb = "updated"
@@ -1354,6 +1389,8 @@ async def dash_create_key(
                 scopes=scope_list, is_reserve=is_reserve,
                 token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
+                manual_req_limit=m_req, manual_tok_limit=m_tok,
+                manual_tok_in_limit=m_in, manual_tok_out_limit=m_out,
             )
             s.add(fresh)
             await s.flush()
@@ -1361,7 +1398,9 @@ async def dash_create_key(
             verb = "added"
     await audit(actor="dashboard", action=f"key.{verb}",
                 target=f"{provider}/{label}",
-                metadata={"scopes": scope_list, "is_reserve": is_reserve},
+                metadata={"scopes": scope_list, "is_reserve": is_reserve,
+                          "manual_req": m_req, "manual_tok": m_tok,
+                          "manual_tok_in": m_in, "manual_tok_out": m_out},
                 ip=_ip(request))
     # Auto-discover free-tier limits from response headers (best-effort).
     if new_id is not None:
@@ -1433,16 +1472,6 @@ async def dash_edit_key(
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
 
-    def _int_or_none(v: str) -> int | None:
-        v = v.strip()
-        if not v:
-            return None
-        try:
-            n = int(v)
-            return n if n > 0 else None
-        except ValueError:
-            return None
-
     async with get_session() as s:
         row = await s.get(ApiKeyRow, key_id)
         if not row:
@@ -1452,10 +1481,10 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
-        row.manual_req_limit = _int_or_none(manual_req_limit)
-        row.manual_tok_limit = _int_or_none(manual_tok_limit)
-        row.manual_tok_in_limit = _int_or_none(manual_tok_in_limit)
-        row.manual_tok_out_limit = _int_or_none(manual_tok_out_limit)
+        row.manual_req_limit = _positive_int_or_none(manual_req_limit)
+        row.manual_tok_limit = _positive_int_or_none(manual_tok_limit)
+        row.manual_tok_in_limit = _positive_int_or_none(manual_tok_in_limit)
+        row.manual_tok_out_limit = _positive_int_or_none(manual_tok_out_limit)
         if token.strip():
             row.token_encrypted = encrypt(token.strip())
         target = f"{row.provider}/{row.label}"

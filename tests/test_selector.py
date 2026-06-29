@@ -29,14 +29,14 @@ pytestmark = pytest.mark.skipif(
 
 async def _add_key(provider: str, label: str, **kw) -> int:
     """Insert one row, return its id."""
-    defaults = dict(
-        provider=provider, label=label, tier="free",
-        scopes=["llm:chat"], token_encrypted="dummy",
-        is_active=True, is_alive=True,
-        daily_limit=999999, daily_used=0,
-        daily_cost_used_usd=0.0, monthly_cost_used_usd=0.0, total_cost_usd=0.0,
-        error_count=0, notes="",
-    )
+    defaults = {
+        "provider": provider, "label": label, "tier": "free",
+        "scopes": ["llm:chat"], "token_encrypted": "dummy",
+        "is_active": True, "is_alive": True,
+        "daily_limit": 999999, "daily_used": 0,
+        "daily_cost_used_usd": 0.0, "monthly_cost_used_usd": 0.0,
+        "total_cost_usd": 0.0, "error_count": 0, "notes": "",
+    }
     defaults.update(kw)
     async with get_session() as s:
         r = await s.execute(insert(ApiKeyRow).returning(ApiKeyRow.id), defaults)
@@ -53,8 +53,8 @@ async def test_pick_distributes_randomly_across_eligible_keys():
     real share of traffic instead of one monopolising. Reset last_used_at
     each iteration so neither becomes 'oldest'."""
     from sqlalchemy import update
-    a = await _add_key("cerebras", "a")
-    b = await _add_key("cerebras", "b")
+    await _add_key("cerebras", "a")
+    await _add_key("cerebras", "b")
     counts = {"a": 0, "b": 0}
     for _ in range(100):
         picked = await pick_and_reserve("cerebras", "llm:chat")
@@ -73,7 +73,7 @@ async def test_pick_pushes_over_quota_key_to_back():
     while a clean peer is eligible. Cerebras default tok_per_day=1_000_000;
     seed today's usage_log to push key 'hot' over the threshold."""
     from sqlalchemy import insert as sql_insert
-    cold = await _add_key("cerebras", "cold")
+    await _add_key("cerebras", "cold")
     hot = await _add_key("cerebras", "hot")
     # 1.1M tokens today on 'hot' → > 95% of 1M default cap
     async with get_session() as s:
@@ -98,11 +98,45 @@ async def test_pick_pushes_over_quota_key_to_back():
     assert cold_count == 20
 
 
+async def test_pick_respects_manual_tok_out_limit():
+    """A key with a manual OUTPUT-token cap (e.g. corp Gemini 80k out) is
+    skipped once today's tokens_out ≥95% of it — even though its total/in
+    usage and provider defaults are nowhere near saturated. Proves the
+    manual in/out axis is honoured in rotation."""
+    from sqlalchemy import insert as sql_insert
+    from sqlalchemy import update
+
+    from aibroker.db.models import UsageLogRow
+    await _add_key("gemini", "cold", scopes=["llm:chat"])
+    hot = await _add_key("gemini", "hot", scopes=["llm:chat"],
+                          manual_tok_out_limit=80_000)
+    # 'hot' used 76k output today = 95% of its 80k manual out-cap.
+    # tokens_in tiny, total tiny — only the OUT axis trips.
+    async with get_session() as s:
+        await s.execute(sql_insert(UsageLogRow), [{
+            "api_key_id": hot, "provider": "gemini", "tokens_in": 100,
+            "tokens_out": 76_000, "cost_usd": 0.0, "status": "ok",
+        }])
+    cold_count = hot_count = 0
+    for _ in range(20):
+        picked = await pick_and_reserve("gemini", "llm:chat")
+        assert picked is not None
+        if picked.label == "cold":
+            cold_count += 1
+        else:
+            hot_count += 1
+        async with get_session() as s:
+            await s.execute(update(ApiKeyRow).values(last_used_at=None))
+    assert hot_count == 0, f"out-saturated key still picked {hot_count} times"
+    assert cold_count == 20
+
+
 async def test_pick_falls_back_to_saturated_when_all_saturated():
     """When every alive peer is over-quota, picker still returns one
     (it's a soft-sort, not a hard exclude — better a maybe-throttled call
     than no call)."""
     from sqlalchemy import insert as sql_insert
+
     from aibroker.db.models import UsageLogRow
     a = await _add_key("cerebras", "a")
     b = await _add_key("cerebras", "b")

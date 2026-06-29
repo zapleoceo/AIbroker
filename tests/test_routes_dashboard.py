@@ -36,6 +36,28 @@ def test_login_page_shows_error_param():
     assert "Bad" in r.text and "sig" in r.text
 
 
+def test_positive_int_or_none():
+    from aibroker.routes.dashboard import _positive_int_or_none
+    assert _positive_int_or_none("3000000") == 3_000_000
+    assert _positive_int_or_none("") is None
+    assert _positive_int_or_none("  ") is None
+    assert _positive_int_or_none("0") is None       # 0 = no cap, not "block all"
+    assert _positive_int_or_none("-5") is None
+    assert _positive_int_or_none("abc") is None
+
+
+def test_add_key_form_has_four_manual_limit_fields():
+    """The ADD-key form must expose all four optional quota overrides
+    (regression: it only had the $ cost cap)."""
+    from aibroker.routes.dashboard import _render
+    body = _render(_fake_main_data()).body.decode()
+    # add-key form id present
+    assert 'id="add-key-form"' in body
+    for field in ("manual_req_limit", "manual_tok_limit",
+                   "manual_tok_in_limit", "manual_tok_out_limit"):
+        assert f'name="{field}"' in body, f"add form missing {field}"
+
+
 def test_validate_scope_list_strips_dups_and_empties():
     from aibroker.routes.dashboard import _validate_scope_list
     assert _validate_scope_list(["llm:chat", "llm:edit", "llm:chat"]) == [
