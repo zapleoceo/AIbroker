@@ -65,6 +65,11 @@ def _provider_meta_json() -> str:
 
 router = APIRouter(tags=["dashboard"])
 
+# Authenticated, always-fresh admin pages must never be cached — without this
+# Chrome heuristic-caches the HTML (CF already serves it DYNAMIC) and shows a
+# stale key list. Applied to every dashboard/login HTMLResponse.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
 
 # ─── Login ──────────────────────────────────────────────────────────────────
 
@@ -144,7 +149,8 @@ async def login_page(error: str | None = None) -> HTMLResponse:
     return HTMLResponse(
         _LOGIN_HTML.replace("__BOT__", bot)
                    .replace("__HOST__", s.PUBLIC_HOST)
-                   .replace("__ERR__", err_html)
+                   .replace("__ERR__", err_html),
+        headers=_NO_STORE,
     )
 
 
@@ -998,7 +1004,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
     </tr></tfoot>
     </table>
     """
-    return HTMLResponse(_dash_html(body=body, flash=flash))
+    return HTMLResponse(_dash_html(body=body, flash=flash), headers=_NO_STORE)
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -1231,7 +1237,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
       <th>http / err</th>
     </tr></thead><tbody>{recent_rows}</tbody></table>
     """
-    return HTMLResponse(_dash_html(body=body))
+    return HTMLResponse(_dash_html(body=body), headers=_NO_STORE)
 
 
 @router.get("/dashboard/projects/{project_id}", response_class=HTMLResponse)
