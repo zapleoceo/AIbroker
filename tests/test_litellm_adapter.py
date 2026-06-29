@@ -10,6 +10,7 @@ from aibroker.providers.litellm_adapter import (
     embed,
     estimate_llm_cost,
     model_for,
+    transcribe,
 )
 
 # ─── model_for ────────────────────────────────────────────────────────────
@@ -283,3 +284,50 @@ async def test_embed_empty_data_returns_empty_vectors():
             model="voyage/voyage-3", texts=[], api_key="k",
         )
     assert vectors == []
+
+
+# ─── transcribe — mocked LiteLLM ──────────────────────────────────────────
+
+
+def test_model_for_transcription():
+    assert model_for("groq", "transcription") == "groq/whisper-large-v3-turbo"
+    assert model_for("openai", "transcription") == "openai/whisper-1"
+
+
+async def test_transcribe_object_response():
+    fake_resp = SimpleNamespace(text="  привет мир  ")
+    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+                AsyncMock(return_value=fake_resp)):
+        text, meta = await transcribe(
+            model="groq/whisper-large-v3-turbo",
+            audio=b"oggbytes", filename="v.ogg", api_key="k",
+        )
+    assert text == "привет мир"   # stripped
+    assert meta["model"] == "groq/whisper-large-v3-turbo"
+    assert "latency_ms" in meta
+
+
+async def test_transcribe_dict_response():
+    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+                AsyncMock(return_value={"text": "hello"})):
+        text, _ = await transcribe(
+            model="groq/whisper-large-v3-turbo",
+            audio=b"x", filename="a.mp3", api_key="k",
+        )
+    assert text == "hello"
+
+
+async def test_transcribe_passes_filename_as_buffer_name():
+    """The format is inferred from the file's .name — verify we set it."""
+    captured = {}
+
+    async def fake_atranscription(*, model, file, api_key):
+        captured["name"] = getattr(file, "name", None)
+        captured["model"] = model
+        return SimpleNamespace(text="ok")
+
+    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+                side_effect=fake_atranscription):
+        await transcribe(model="groq/whisper-large-v3-turbo",
+                         audio=b"data", filename="voice.ogg", api_key="k")
+    assert captured["name"] == "voice.ogg"

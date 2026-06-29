@@ -17,6 +17,7 @@ Capability = Literal[
     "chat:edit",
     "structured",
     "vision",
+    "transcription",
     "embedding",
     "prefilter",
 ]
@@ -66,6 +67,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "anthropic", "openai",
     ],
     "vision": ["gemini", "anthropic", "openai"],
+    # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
+    "transcription": ["groq", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.
     "embedding": ["voyage", "cohere"],
 }
@@ -82,6 +85,7 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "structured": "llm:chat",
     "prefilter": "llm:chat",
     "vision": "llm:vision",
+    "transcription": "llm:audio",
     "embedding": "llm:embed",
 }
 

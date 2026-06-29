@@ -20,7 +20,7 @@ from aibroker.providers.context_limits import (
     fits_context,
     is_too_large_error,
 )
-from aibroker.providers.litellm_adapter import embed, model_for
+from aibroker.providers.litellm_adapter import embed, model_for, transcribe
 from aibroker.providers.observations import learned_ceilings, record_too_large
 from aibroker.routing import (
     CostGuardError,
@@ -259,3 +259,74 @@ async def run_embed(
         tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
         latency_ms=meta["latency_ms"], key_label=key.label,
     )
+
+
+@dataclass
+class TranscribeOutcome:
+    text: str
+    provider: str
+    model: str
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+
+
+class TranscribeFailed(Exception):
+    """All transcription providers in the chain failed — route maps to 502."""
+
+
+async def run_transcribe(
+    *,
+    project: ProjectRow,
+    audio: bytes,
+    filename: str,
+    workflow: str | None,
+) -> TranscribeOutcome | None:
+    """Audio → text, walking the 'transcription' chain (groq → openai).
+
+    None → no key anywhere (503); TranscribeFailed → every provider errored (502).
+    """
+    scope = scope_for("transcription")
+    last_exc: Exception | None = None
+    any_key_seen = False
+
+    for provider in chain_for("transcription"):
+        key = await pick_and_reserve(provider, scope=scope)
+        if key is None:
+            continue
+        any_key_seen = True
+        use_model = model_for(provider, "transcription")
+        if not use_model:
+            continue
+        plain = decrypt(key.token_encrypted)
+        try:
+            text, meta = await transcribe(
+                model=use_model, audio=audio, filename=filename, api_key=plain,
+            )
+        except Exception as e:
+            last_exc = e
+            await _penalize(key, e)
+            await record_usage(
+                api_key_id=key.id, project_id=project.id, lease_id=None,
+                provider=provider, model=use_model, capability="transcription",
+                workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+                latency_ms=None, status="error", error_kind=type(e).__name__,
+                http_status=None,
+            )
+            continue
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model, capability="transcription",
+            workflow=workflow, tokens_in=0, tokens_out=0,
+            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+            status="ok", error_kind=None, http_status=200,
+        )
+        return TranscribeOutcome(
+            text=text, provider=provider, model=use_model,
+            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+            key_label=key.label,
+        )
+
+    if not any_key_seen:
+        return None
+    raise TranscribeFailed(str(last_exc) if last_exc else "all providers failed")

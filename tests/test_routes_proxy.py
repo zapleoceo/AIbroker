@@ -328,3 +328,125 @@ async def test_embed_requires_llm_embed_scope():
         json={"input": ["x"]},
     )
     assert r.status_code == 403
+
+
+# ─── Vision (multimodal chat content) ──────────────────────────────────────
+
+
+async def test_chat_accepts_multimodal_content():
+    """content as a list of blocks (text + image_url) must validate and reach
+    the provider unchanged — this is what media-worker sends for vision."""
+    plain, _ = await _make_project(["llm:vision"])
+    captured = {}
+
+    async def fake_call_llm(*, model, messages, api_key, **kw):
+        captured["messages"] = messages
+        return "это кот на диване", {
+            "model": model, "tokens_in": 10, "tokens_out": 5,
+            "cost_usd": 0.0, "latency_ms": 30,
+        }
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+        r = client.post(
+            "/v1/chat?capability=vision",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": [
+                {"type": "text", "text": "что на фото?"},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/jpeg;base64,/9j/xxx"}},
+            ]}]},
+        )
+    assert r.status_code == 200
+    assert r.json()["text"] == "это кот на диване"
+    # multimodal list survived round-trip to the provider call
+    assert isinstance(captured["messages"][0]["content"], list)
+    assert captured["messages"][0]["content"][0]["type"] == "text"
+
+
+async def test_chat_vision_requires_llm_vision_scope():
+    plain, _ = await _make_project(["llm:chat"])
+    r = client.post(
+        "/v1/chat?capability=vision",
+        headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "x"}]},
+    )
+    assert r.status_code == 403
+
+
+# ─── Transcription (audio → text) ──────────────────────────────────────────
+
+
+async def test_transcribe_requires_llm_audio_scope():
+    plain, _ = await _make_project(["llm:chat"])
+    r = client.post(
+        "/v1/transcribe",
+        headers={"X-Project-Key": plain},
+        files={"file": ("v.ogg", b"fakeaudio", "audio/ogg")},
+    )
+    assert r.status_code == 403
+
+
+async def test_transcribe_rejects_empty_file():
+    plain, _ = await _make_project(["llm:audio"])
+    r = client.post(
+        "/v1/transcribe",
+        headers={"X-Project-Key": plain},
+        files={"file": ("v.ogg", b"", "audio/ogg")},
+    )
+    assert r.status_code == 400
+
+
+async def test_transcribe_503_when_no_key():
+    plain, _ = await _make_project(["llm:audio"])
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=None)):
+        r = client.post(
+            "/v1/transcribe",
+            headers={"X-Project-Key": plain},
+            files={"file": ("v.ogg", b"fakeaudio", "audio/ogg")},
+        )
+    assert r.status_code == 503
+
+
+async def test_transcribe_happy_path():
+    plain, _ = await _make_project(["llm:audio"])
+    fake_meta = {"model": "groq/whisper-large-v3-turbo",
+                 "cost_usd": 0.0, "latency_ms": 120}
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.transcribe",
+                AsyncMock(return_value=("привет это голосовое", fake_meta))), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+        r = client.post(
+            "/v1/transcribe?workflow=media",
+            headers={"X-Project-Key": plain},
+            files={"file": ("v.ogg", b"fakeaudiobytes", "audio/ogg")},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["text"] == "привет это голосовое"
+    assert data["provider"] == "groq"   # first in transcription chain
+
+
+async def test_transcribe_502_when_all_providers_fail():
+    plain, _ = await _make_project(["llm:audio"])
+
+    async def boom(*a, **kw):
+        raise RuntimeError("groq 500")
+
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.transcribe", side_effect=boom), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock()), \
+         patch("aibroker.services.llm_service._penalize", AsyncMock()):
+        r = client.post(
+            "/v1/transcribe",
+            headers={"X-Project-Key": plain},
+            files={"file": ("v.ogg", b"fakeaudiobytes", "audio/ogg")},
+        )
+    assert r.status_code == 502

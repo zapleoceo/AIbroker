@@ -25,7 +25,8 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                  "structured": f"cerebras/{_OSS}"},
     "groq": {"chat:fast": f"groq/openai/{_OSS}", "chat:smart": f"groq/openai/{_OSS}",
              "chat:code": f"groq/openai/{_OSS}", "prefilter": f"groq/openai/{_OSS}",
-             "structured": f"groq/openai/{_OSS}"},
+             "structured": f"groq/openai/{_OSS}",
+             "transcription": "groq/whisper-large-v3-turbo"},
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
                "chat:smart": "gemini/gemini-2.5-pro",
                "chat:code": "gemini/gemini-2.5-flash",
@@ -50,7 +51,8 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                   "vision": "anthropic/claude-sonnet-4-6"},
     "openai": {"chat:fast": "openai/gpt-5-mini", "chat:smart": "openai/gpt-5",
                "chat:code": "openai/gpt-5", "structured": "openai/gpt-5-mini",
-               "vision": "openai/gpt-5-mini"},
+               "vision": "openai/gpt-5-mini",
+               "transcription": "openai/whisper-1"},
     "mistral": {"chat:fast":   "mistral/mistral-small-latest",
                 "chat:smart":  "mistral/mistral-large-latest",
                 "chat:code":   "mistral/codestral-latest",
@@ -182,3 +184,33 @@ async def embed(
         "latency_ms": latency_ms,
     }
     return vectors, meta
+
+
+async def transcribe(
+    *, model: str, audio: bytes, filename: str, api_key: str,
+) -> tuple[str, dict[str, Any]]:
+    """Audio → text via LiteLLM atranscription (Whisper). Returns (text, meta).
+
+    `audio` is raw bytes; `filename` carries the extension so the provider
+    infers the format (.ogg/.mp3/.m4a/.wav)."""
+    import io
+
+    t0 = time.time()
+    buf = io.BytesIO(audio)
+    buf.name = filename   # litellm/openai SDK reads .name for the format
+    resp = await litellm.atranscription(model=model, file=buf, api_key=api_key)
+    latency_ms = int((time.time() - t0) * 1000)
+    # Response is an object with .text (or a dict)
+    if isinstance(resp, dict):
+        text = resp.get("text", "")
+    else:
+        text = getattr(resp, "text", "") or ""
+    meta = {
+        "model": model,
+        # Whisper bills per audio-second, not tokens; cost left to caller/usage.
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0,
+        "latency_ms": latency_ms,
+    }
+    return text.strip(), meta

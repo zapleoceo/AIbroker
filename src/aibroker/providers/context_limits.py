@@ -55,10 +55,30 @@ _TOO_LARGE_MARKERS = (
 )
 
 
+def _content_chars(content: Any) -> int:
+    """Char count of a message's content — handles plain str and
+    OpenAI-style multimodal block lists. Image blocks count as a flat
+    ~1000-char proxy (vision tokens aren't text-linear, but this keeps
+    the cap math from under-counting a request to near-zero)."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                total += len(block.get("text") or "")
+            else:
+                total += 1000   # image/audio block proxy
+        return total
+    return 0
+
+
 def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate from message chars. ~4 chars/token (English);
     Russian is denser so this under-counts — compensated by the 90% margin."""
-    chars = sum(len(m.get("content") or "") for m in messages)
+    chars = sum(_content_chars(m.get("content")) for m in messages)
     return chars // 4
 
 

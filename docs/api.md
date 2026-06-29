@@ -26,22 +26,35 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 |---|---|---|---|
 | `POST` | `/v1/chat?capability=<cap>` | `ChatRequest` | `ChatResponse` |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` |
+| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` |
 | `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key) |
 | `POST` | `/v1/usage` | `UsageReport` | `{recorded: true}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
 
 ### Capabilities for `/v1/chat`
 
-`chat:fast`, `chat:smart`, `chat:code`, `prefilter`, `structured`, `vision`.
+`chat:fast`, `chat:smart`, `chat:code`, `chat:edit`, `prefilter`,
+`structured`, `vision`.
 
-See [routing.md](./routing.md) for the chain per capability.
+`vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
+may be a plain string **or** a list of blocks, e.g.
+`[{"type":"text","text":"что на фото?"}, {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}]`.
+LiteLLM forwards both shapes to vision-capable models (gemini → anthropic → openai).
+
+### `/v1/transcribe` (audio → text)
+
+Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
+`?workflow=` query tag. Chain: `groq` whisper-large-v3-turbo (free) →
+`openai` whisper-1. Returns `{text, provider, model, cost_usd, latency_ms, key_label}`.
 
 ### Scopes a project must hold
 
 | Endpoint | Required scope |
 |---|---|
-| `/v1/chat` | `llm:chat` |
+| `/v1/chat` (chat:*) | `llm:chat` |
+| `/v1/chat?capability=vision` | `llm:vision` |
 | `/v1/embed` | `llm:embed` |
+| `/v1/transcribe` | `llm:audio` |
 | `/v1/key` | the scope passed in the body |
 
 ## Admin (X-Admin-Key required)

@@ -11,12 +11,18 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.routing import is_known_capability, scope_for
-from aibroker.services import EmbedFailed, run_chat, run_embed
+from aibroker.services import (
+    EmbedFailed,
+    TranscribeFailed,
+    run_chat,
+    run_embed,
+    run_transcribe,
+)
 
 router = APIRouter(tags=["proxy"])
 
@@ -134,4 +140,51 @@ async def embed_endpoint(
         embeddings=outcome.embeddings, provider=outcome.provider, model=outcome.model,
         tokens_in=outcome.tokens_in, cost_usd=outcome.cost_usd,
         latency_ms=outcome.latency_ms, key_label=outcome.key_label,
+    )
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    provider: str
+    model: str
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+
+
+# 25 MB — Whisper's hard limit at both Groq and OpenAI.
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+@router.post("/transcribe", response_model=TranscribeResponse)
+async def transcribe_endpoint(
+    file: UploadFile = File(...),
+    workflow: str | None = Query(None),
+    ctx: ProjectCtx = Depends(require_project),
+) -> TranscribeResponse:
+    """Audio → text. Multipart upload `file`. Chain: groq whisper → openai."""
+    _require_capability_scope(ctx, scope_for("transcription"))
+
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(400, "empty audio file")
+    if len(audio) > _MAX_AUDIO_BYTES:
+        raise HTTPException(413, f"audio exceeds {_MAX_AUDIO_BYTES // (1024 * 1024)} MB")
+
+    try:
+        outcome = await run_transcribe(
+            project=ctx.project, audio=audio,
+            filename=file.filename or "audio.ogg", workflow=workflow,
+        )
+    except TranscribeFailed as e:
+        raise HTTPException(502, f"transcription failed: {e}") from e
+    if outcome is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="no transcription key available",
+        )
+    return TranscribeResponse(
+        text=outcome.text, provider=outcome.provider, model=outcome.model,
+        cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
+        key_label=outcome.key_label,
     )
