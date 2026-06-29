@@ -318,6 +318,13 @@ tfoot td {{ background:#0f1115; font-weight:600; color:#e4e6eb;
 tfoot td.k {{ color:#888; text-transform:uppercase; letter-spacing:.05em;
              font-size:11px; }}
 tfoot td.num {{ font-family:ui-monospace,monospace; color:#4dabf7; }}
+/* Row number — CSS counter so it stays correct after client-side re-sort.
+   id is the DB identifier (has gaps from deletions); # is the visible count. */
+tbody {{ counter-reset: rownum; }}
+tr.data-row {{ counter-increment: rownum; }}
+td.rownum {{ width:30px; text-align:right; color:#5a6171;
+           font-family:ui-monospace,monospace; font-size:11px; }}
+td.rownum::before {{ content: counter(rownum); }}
 /* Provider hint under add-key form */
 .provider-hint {{ margin-top:10px; padding:10px 12px; border-radius:6px;
                 background:#0f1115; border:1px dashed #2a2d34;
@@ -711,6 +718,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             projects_total_cap += float(p.daily_cost_cap_usd)
         rows_projects += (
             f'<tr class="data-row" data-row-id="p{p.id}">'
+            f'<td class="rownum"></td>'
             f'<td data-sort="{p.id}">{p.id}</td>'
             f'<td><a href="/dashboard/projects/{p.id}" class="proj-link">'
             f'{esc(p.name)}</a></td>'
@@ -723,7 +731,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en="edit" data-ru="ред.">edit</button></td>'
             f"</tr>"
             # ── inline edit form row ──
-            f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="8">'
+            f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="9">'
             f'<form method="post" action="/dashboard/projects/{p.id}/edit" class="row-form">'
             f'<input name="name" value="{esc(p.name)}" required>'
             f'<input name="allowed_scopes" value="{esc(scopes_csv)}" style="min-width:240px">'
@@ -826,6 +834,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
 
         rows_keys += (
             f'<tr class="data-row" data-row-id="k{k.id}">'
+            f'<td class="rownum"></td>'
             f'<td data-sort="{k.id}">{k.id}</td>'
             f"<td>{esc(k.provider)}</td>"
             f"<td>{esc(k.label)}</td>"
@@ -853,7 +862,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'</form>'
             f"</td></tr>"
             # ── inline edit form row ──
-            f'<tr class="edit-row" data-edit-for="k{k.id}"><td colspan="9">'
+            f'<tr class="edit-row" data-edit-for="k{k.id}"><td colspan="10">'
             f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
             f'<input name="label" value="{esc(k.label)}" required>'
             f'<select name="tier">{tier_options}</select>'
@@ -965,6 +974,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
     <h2 data-i18n data-en="Projects" data-ru="Проекты">Projects</h2>
     {add_project_form}
     <table><thead><tr>
+      <th>#</th>
       <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
       <th class="sortable" data-i18n data-en="name" data-ru="имя">name</th>
       <th class="sortable" data-i18n data-en="scopes" data-ru="права">scopes</th>
@@ -976,7 +986,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_projects}</tbody>
     <tfoot><tr>
-      <td colspan="3" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
+      <td colspan="4" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
       <td>{len(data['projects'])}</td>
       <td class="num">${projects_total_cap:.2f}</td>
       <td class="num">${projects_total_spend:.4f}</td>
@@ -987,6 +997,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
     <h2 data-i18n data-en="API keys" data-ru="API-ключи">API keys</h2>
     {add_key_form}
     <table><thead><tr>
+      <th>#</th>
       <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
       <th class="sortable" data-i18n data-en="provider" data-ru="провайдер">provider</th>
       <th class="sortable" data-i18n data-en="label" data-ru="ярлык">label</th>
@@ -999,7 +1010,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_keys}</tbody>
     <tfoot><tr>
-      <td colspan="4" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
+      <td colspan="5" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
       <td><span data-i18n data-en="{keys_alive} alive" data-ru="{keys_alive} живых">{keys_alive} alive</span> / {len(data['keys'])}</td>
       <td class="num">{keys_total_used:,}</td>
       <td class="num">${keys_total_spent:.4f} / ${keys_total_cap:.2f}</td>

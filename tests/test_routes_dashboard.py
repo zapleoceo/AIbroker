@@ -678,6 +678,30 @@ def test_dashboard_edit_key_saves_manual_quota_override():
     assert "Key+not+found" in r.headers["location"]
 
 
+def test_tables_have_row_number_column():
+    """Both tables show a '#' row-number column (CSS counter) so the visible
+    count isn't confused with the DB id (which has gaps from deletions —
+    e.g. 51 rows but max id 77)."""
+    from aibroker.db.models import ApiKeyRow, ProjectRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(id=77, provider="cerebras", label="t", tier="free",
+                   scopes=["llm:chat"], token_encrypted="x",
+                   is_active=True, is_alive=True, daily_used=0)
+    p = ProjectRow(id=4, name="stepan2", project_key_prefix="aib_prj_x",
+                    project_key_hash="h", allowed_scopes=["llm:chat"],
+                    is_active=True, notes="")
+    body = _render(_fake_main_data(keys=[k], projects=[p])).body.decode()
+    # # header in both tables (counter renders the actual number via CSS)
+    assert "<th>#</th>" in body
+    # each data row carries the rownum cell
+    assert '<td class="rownum"></td>' in body
+    # CSS counter wired
+    assert "counter-increment: rownum" in body
+    assert "counter(rownum)" in body
+    # id column still present (id 77 shown literally, distinct from row #)
+    assert 'data-sort="77"' in body
+
+
 def test_keys_table_header_renamed_daily_pct():
     """Column header should read 'daily %' (not 'used') after this change."""
     from aibroker.routes.dashboard import _render

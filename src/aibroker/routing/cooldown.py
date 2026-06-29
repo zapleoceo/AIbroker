@@ -9,7 +9,8 @@ key keeps tripping within a window.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime, time, timedelta, timezone
 
 from sqlalchemy import text
 
@@ -45,6 +46,67 @@ def cooldown_seconds(provider: str, recent_cooldowns: int) -> int:
     base = COOLDOWN_BASE_S.get(provider, DEFAULT_COOLDOWN_S)
     # 0 prior cooldowns → base; 1 → base*2; 2 → base*4; cap at MAX_COOLDOWN_S.
     return min(base * (2 ** max(0, recent_cooldowns)), MAX_COOLDOWN_S)
+
+
+# A key that hit its DAILY quota won't recover until the provider's day rolls
+# over (UTC midnight for the ones we use). Parking it 60 s just causes a retry
+# storm — it 429s again immediately. Markers below mean "daily exhaustion".
+_DAILY_QUOTA_MARKERS = (
+    "per day",
+    "per-day",
+    "tokens per day",
+    "daily limit",
+    "requests per day",
+    "tpd",
+    "rpd",
+)
+
+# Providers tell us exactly how long to wait via a retry hint — honour it
+# instead of guessing. Covers Gemini "Please retry in 24.5s", OpenAI-style
+# "retry after 30", Google "retryDelay: 24s".
+_RETRY_AFTER_RE = re.compile(
+    r"(?:retry(?:[ -]?after| in)|retrydelay)\D{0,4}?(\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
+
+
+def parse_retry_after(msg: str) -> float | None:
+    """Seconds the provider asked us to wait, if it said so. None otherwise."""
+    m = _RETRY_AFTER_RE.search(msg)
+    if not m:
+        return None
+    try:
+        secs = float(m.group(1))
+    except ValueError:
+        return None
+    return secs if 0 < secs <= MAX_COOLDOWN_S else None
+
+
+def is_daily_quota_error(msg: str) -> bool:
+    """True if the error is a per-DAY quota exhaustion (not a per-minute limit)."""
+    m = msg.lower()
+    return any(marker in m for marker in _DAILY_QUOTA_MARKERS)
+
+
+def next_utc_midnight(now: datetime | None = None) -> datetime:
+    """First instant of the next UTC day — when daily quotas reset."""
+    now = now or datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).date()
+    return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
+
+
+async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> datetime:
+    """Resolve the cooldown end for a rate-limited call, most-authoritative first:
+      1. provider's own retry-after hint  → wait exactly that
+      2. daily-quota exhaustion (no hint)  → wait until UTC midnight
+      3. otherwise                         → adaptive per-provider backoff
+    """
+    retry = parse_retry_after(error_msg)
+    if retry is not None:
+        return datetime.now(timezone.utc) + timedelta(seconds=retry)
+    if is_daily_quota_error(error_msg):
+        return next_utc_midnight()
+    return await adaptive_cooldown(api_key_id, provider)
 
 
 async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:

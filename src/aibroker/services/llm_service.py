@@ -57,11 +57,14 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
     kind = classify_provider_error(exc)
     if kind == "rate_limit":
-        # 2026-06-26: per-provider adaptive cooldown + exp backoff (cooldown.py).
-        # Falls back to flat _COOLDOWN if the lookup raises (e.g. tests).
+        # 2026-06-29: cooldown resolved by the provider's own signal —
+        # retry-after hint > daily-quota (until UTC midnight) > adaptive
+        # backoff. Stops the retry storm where a daily-exhausted key
+        # (cerebras "tokens per day limit exceeded") got a 60 s cooldown,
+        # recovered, got hammered, re-failed — looping until midnight.
         try:
-            from aibroker.routing.cooldown import adaptive_cooldown
-            until = await adaptive_cooldown(key.id, key.provider)
+            from aibroker.routing.cooldown import cooldown_until
+            until = await cooldown_until(key.id, key.provider, str(exc))
         except Exception:
             until = datetime.now(UTC) + _COOLDOWN
         await mark_cooldown(key.id, until)
