@@ -93,6 +93,22 @@ def test_plain_rate_limit_is_not_too_large():
     assert is_too_large_error(RuntimeError("rate_limit exceeded")) is False
 
 
+def test_groq_tpm_message_is_rate_limit_not_size():
+    """REGRESSION (2026-06-29): Groq's TPM 429 contains 'request too large'
+    but is transient. Misclassifying it taught a ~210-token ceiling that made
+    the broker skip cerebras/groq/gemini on every real prompt → everything
+    fell to mistral. Rate-limit signature must win over the size marker."""
+    groq_tpm = (
+        "litellm.RateLimitError: RateLimitError - Request too large for "
+        "model `whisper` in organization org_x on tokens per minute (TPM): "
+        "Limit 6000, Requested 7000. Please try again."
+    )
+    assert is_too_large_error(RuntimeError(groq_tpm)) is False
+
+    # Real size errors (no rate-limit words) still detected
+    assert is_too_large_error(RuntimeError("maximum context length exceeded")) is True
+
+
 def test_seed_table_groq_only():
     """Regression: groq is the only provider we seed; rest learn or stay open."""
     assert SEED_MAX_REQUEST_TOKENS["groq"] == 8_000

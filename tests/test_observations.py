@@ -36,5 +36,22 @@ async def test_record_ignores_nonpositive():
     assert "groq" not in m   # nothing stored
 
 
+async def test_record_ignores_below_floor():
+    """REGRESSION (2026-06-29): a 'too large' under MIN_LEARNABLE_CEILING is a
+    misclassified transient — never learn it. Previously these tiny values
+    (e.g. 210) became the ceiling and broke routing."""
+    await record_too_large("groq", 210)
+    await record_too_large("cerebras", 3999)
+    m = await learned_ceilings()
+    assert "groq" not in m
+    assert "cerebras" not in m
+
+
+async def test_record_accepts_at_floor():
+    await record_too_large("groq", 4000)   # exactly the floor → learned
+    m = await learned_ceilings()
+    assert m["groq"] == 4000
+
+
 async def test_read_empty_when_none_learned():
     assert await learned_ceilings() == {}

@@ -189,6 +189,21 @@ recalibrates from one rejection instead of waiting for someone to edit a
 constant. Measured impact at rollout: ~108 guaranteed-failing groq calls/day
 on chat:smart eliminated.
 
+**Two guards against learning garbage** (added 2026-06-29 after a real
+incident):
+
+1. **Rate-limit ≠ size.** Groq's TPM 429 literally reads *"Request too
+   large for model … tokens per minute (TPM)"*. `is_too_large_error`
+   checks `_RATE_LIMIT_MARKERS` first and returns `False` if any match —
+   a transient rate-limit must never teach a permanent size ceiling.
+2. **Floor.** `record_too_large` refuses to store any ceiling below
+   `MIN_LEARNABLE_CEILING` (4 000 tokens) — no real model rejects a
+   200-token prompt for size. Without this, `LEAST()` had converged the
+   learned ceilings of cerebras/groq/gemini down to ~210 tokens, so the
+   broker skipped its three best free providers on essentially every
+   prompt and dumped all traffic on mistral. Resetting the bogus rows and
+   adding the floor restored free-first routing.
+
 ## Failure → next key → next provider
 
 The orchestration lives in `services/llm_service.run_chat` (routes stay thin).

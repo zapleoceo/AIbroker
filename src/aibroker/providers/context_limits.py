@@ -54,6 +54,28 @@ _TOO_LARGE_MARKERS = (
     "string too long",
 )
 
+# Rate-limit signatures. Groq's TPM 429 says "Request too large for model …
+# tokens per minute (TPM): Limit X, Requested Y" — it contains "request too
+# large" but is TRANSIENT, not a real size ceiling. If any of these appear,
+# the error is a rate-limit and must NOT teach a size ceiling.
+_RATE_LIMIT_MARKERS = (
+    "per minute",
+    "per day",
+    "tpm",
+    "rpm",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "quota",
+    "429",
+)
+
+# Floor for a learned ceiling. No real model rejects a prompt this small for
+# SIZE — a "too large" at/under this many tokens is a misclassified transient
+# (rate-limit / quota), so we refuse to learn it. Protects against the
+# convergence-to-garbage bug where LEAST() drove ceilings down to ~210.
+MIN_LEARNABLE_CEILING = 4_000
+
 
 def _content_chars(content: Any) -> int:
     """Char count of a message's content — handles plain str and
@@ -83,11 +105,15 @@ def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def is_too_large_error(exc: Exception) -> bool:
-    """True if the provider rejected the request for being too big (not a
-    transient rate-limit). Drives the self-learning of the size ceiling."""
+    """True if the provider rejected the request for being too big (a real
+    size ceiling), NOT a transient rate-limit. Drives the self-learning.
+
+    Rate-limit takes precedence: Groq's TPM 429 literally contains "request
+    too large", so if any rate-limit signature is present we treat it as
+    transient and refuse to learn a size ceiling from it."""
     msg = str(exc).lower()
-    # A bare 429 is rate-limit, not size — exclude it unless paired with a
-    # size marker. 413 is unambiguously payload-too-large.
+    if any(m in msg for m in _RATE_LIMIT_MARKERS):
+        return False
     return any(m in msg for m in _TOO_LARGE_MARKERS)
 
 

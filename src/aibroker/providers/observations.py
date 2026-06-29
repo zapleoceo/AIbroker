@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import text
 
 from aibroker.db import get_session
+from aibroker.providers.context_limits import MIN_LEARNABLE_CEILING
 
 log = logging.getLogger(__name__)
 
@@ -26,8 +27,13 @@ async def learned_ceilings() -> dict[str, int]:
 async def record_too_large(provider: str, est_tokens: int) -> None:
     """A request of ~est_tokens was rejected as too large by `provider`.
     Store the MIN observed rejection size as the learned ceiling (the tightest
-    size we know fails), bump the sample counter. Upsert, best-effort."""
-    if est_tokens <= 0:
+    size we know fails), bump the sample counter. Upsert, best-effort.
+
+    Refuses to learn a ceiling below MIN_LEARNABLE_CEILING — a "too large"
+    that small is a misclassified transient (rate-limit/quota), not a real
+    size limit. Without this guard LEAST() converged ceilings to ~210 tokens
+    and the broker skipped its best free providers on every real prompt."""
+    if est_tokens < MIN_LEARNABLE_CEILING:
         return
     now = datetime.now(UTC).replace(tzinfo=None)
     try:
