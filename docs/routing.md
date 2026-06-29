@@ -59,6 +59,25 @@ has driven every shared gemini key into cooldown — and we never pinned a key t
 a project. Set it up in the dashboard: edit the key, scopes = `llm:edit`, tick
 **reserve**.
 
+## Cooldown resolution — provider-signal first (2026-06-29)
+
+When a call rate-limits, `cooldown_until(key_id, provider, error_msg)` picks
+the parking duration most-authoritative-first:
+
+1. **Provider retry-after hint** — if the error carries "Please retry in
+   24.5s" / "retry after 30s" / "retryDelay: 24s" (Gemini, OpenAI, Google),
+   honour it exactly. The provider knows its own window.
+2. **Daily-quota exhaustion** — if the error says "tokens per day" /
+   "per day" / "daily limit" (Cerebras "Tokens per day limit exceeded")
+   and gave no hint, park the key until **UTC midnight** when the daily
+   quota resets.
+3. **Otherwise** — the adaptive per-provider backoff below.
+
+Why: a daily-exhausted key used to get the flat 60 s adaptive cooldown,
+recover, get picked again, fail again — a retry storm (~290 wasted calls
+every 2 minutes on Cerebras) looping until midnight. Now it's parked once
+until reset, so the selector skips it entirely and the storm is gone.
+
 ## Adaptive cooldown (2026-06-26)
 
 The 429 cooldown is no longer a flat 5 min. `routing/cooldown.py` exposes:

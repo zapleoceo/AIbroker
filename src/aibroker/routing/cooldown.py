@@ -10,12 +10,11 @@ key keeps tripping within a window.
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 
 from sqlalchemy import text
 
 from aibroker.db.engine import get_session
-
 
 # Base cooldown in seconds, picked from each provider's published rate-limit
 # reset interval. Conservative for paid (we don't want to spam paid keys).
@@ -90,9 +89,9 @@ def is_daily_quota_error(msg: str) -> bool:
 
 def next_utc_midnight(now: datetime | None = None) -> datetime:
     """First instant of the next UTC day — when daily quotas reset."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     tomorrow = (now + timedelta(days=1)).date()
-    return datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
+    return datetime.combine(tomorrow, time.min, tzinfo=UTC)
 
 
 async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> datetime:
@@ -103,7 +102,7 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
-        return datetime.now(timezone.utc) + timedelta(seconds=retry)
+        return datetime.now(UTC) + timedelta(seconds=retry)
     if is_daily_quota_error(error_msg):
         return next_utc_midnight()
     return await adaptive_cooldown(api_key_id, provider)
@@ -125,5 +124,4 @@ async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:
             {"id": api_key_id, "w": BACKOFF_WINDOW_S},
         )).scalar() or 0)
     secs = cooldown_seconds(provider, recent)
-    until = datetime.now(timezone.utc) + timedelta(seconds=secs)
-    return until
+    return datetime.now(UTC) + timedelta(seconds=secs)
