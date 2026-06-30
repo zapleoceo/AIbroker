@@ -23,11 +23,7 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.auto_discover import discover_and_store
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
-from aibroker.providers.quotas import (
-    bar_label_for_key,
-    percent_used_for_key,
-    severity_class,
-)
+from aibroker.providers.quotas import axes_for_key, severity_class
 from aibroker.telemetry import audit
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
@@ -778,34 +774,38 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
         )
 
-        # Daily-quota progress bar — request-OR-token-metered (whichever
-        # axis is closer to its cap wins). Token usage pulled live from
-        # usage_log (today UTC) so it reflects reality, not stale counters.
+        # Daily-quota usage — show ALL capped axes (req / tok / in / out) so
+        # it's obvious every key of a provider shares the SAME caps and only
+        # the fill differs. Bar width/colour follows the dominant axis.
+        # Token usage pulled live from usage_log (today UTC).
         tt = data["tokens_today"].get(k.id, {})
         tok_today = int(tt.get("tot", 0))
         tin_today = int(tt.get("tin", 0))
         tout_today = int(tt.get("tout", 0))
-        used_pct = percent_used_for_key(
+        axes = axes_for_key(
             k.daily_used or 0, tok_today, k,
             toks_in=tin_today, toks_out=tout_today,
         )
-        if used_pct is not None:
+        if axes:
+            used_pct = axes[0]["pct"]   # dominant axis drives bar + sort
             bar_fill = severity_class(used_pct)
-            label = bar_label_for_key(
-                k.daily_used or 0, tok_today, k,
-                toks_in=tin_today, toks_out=tout_today,
-            )
             src = ("manual" if (k.manual_req_limit or k.manual_tok_limit
                                 or k.manual_tok_in_limit or k.manual_tok_out_limit)
                    else "discovered" if k.limits_discovered_at else "default est.")
+            # Compact per-axis chips: "84% tok · 15% req"
+            chips = " · ".join(f"{a['pct']}% {a['short']}" for a in axes)
+            # Tooltip spells out used/cap on every axis + source of the cap.
+            detail = " · ".join(
+                f"{a['used']:,}/{a['cap']:,} {a['short']}" for a in axes
+            )
             used_html = (
-                f"<span class='mono'>{label}</span>"
-                f"<span class='cap-bar' title='{used_pct}% · {k.daily_used} req · "
-                f"{tin_today:,} in / {tout_today:,} out · {src}'>"
+                f"<span class='mono'>{chips}</span>"
+                f"<span class='cap-bar' title='{detail} · {src}'>"
                 f"<span class='fill {bar_fill}' style='width:{used_pct}%'></span></span>"
             )
         else:
             # paid / unknown — no quota, just the count
+            used_pct = None
             used_html = f"<span class='mono'>{k.daily_used}</span>"
             # Sort paid keys after quota'd keys (use -1 sentinel in data-sort)
 

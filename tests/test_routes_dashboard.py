@@ -675,7 +675,7 @@ def test_main_render_renders_key_rows_with_data_row_marker():
 
 
 def test_main_render_keys_show_request_axis_when_dominant():
-    """Gemini is request-metered (no token quota) — shows req axis."""
+    """Gemini is request-metered (no token quota) — shows the req axis chip."""
     from aibroker.db.models import ApiKeyRow
     from aibroker.routes.dashboard import _render
     # gemini 1500 RPD. 750 req → 50% (token axis disabled for gemini).
@@ -685,14 +685,15 @@ def test_main_render_keys_show_request_axis_when_dominant():
         is_active=True, is_alive=True, daily_used=750,
     )
     body = _render(_fake_main_data(keys=[k])).body.decode()
-    assert "750/1500" in body
+    assert "50% req" in body                 # chip
+    assert "750/1,500 req" in body           # tooltip used/cap
     assert "style='width:50%'" in body
     assert "data-sort='50'" in body
 
 
-def test_main_render_keys_show_token_axis_when_dominant():
-    """Cerebras: 525 req (~4 % of 14400) vs 1.36M tok (>100 % of 1M)
-    — bar takes token axis, hits red."""
+def test_main_render_keys_show_both_axes_for_cerebras():
+    """Cerebras has BOTH req + tok caps — both chips shown, tok dominant.
+    Demonstrates same-cap visibility: tooltip spells out used/cap per axis."""
     from aibroker.db.models import ApiKeyRow
     from aibroker.routes.dashboard import _render
     k = ApiKeyRow(
@@ -704,17 +705,18 @@ def test_main_render_keys_show_token_axis_when_dominant():
         keys=[k],
         tokens_today={10: {"tot": 1_356_576, "tin": 1_200_000, "tout": 156_576}},
     )).body.decode()
-    assert "tok" in body                     # token-axis label
+    assert "100% tok" in body                # token axis dominant (clamped)
+    assert "3% req" in body                  # request axis also shown
     assert "fill bad" in body                # red (≥90%)
-    assert "style='width:100%'" in body      # clamped
-    # tooltip exposes in/out for debugging
-    assert "525 req" in body
-    assert "1,200,000 in" in body and "156,576 out" in body
+    assert "style='width:100%'" in body
+    # tooltip spells out used/cap on both axes (default cerebras caps)
+    assert "1,356,576/1,000,000 tok" in body
+    assert "525/14,400 req" in body
 
 
 def test_main_render_corp_gemini_output_axis_saturates():
-    """Corp Gemini key: 3M in / 80k out manual caps. 76k out (95%) turns the
-    bar red even though input (1.5M of 3M) is only 50%."""
+    """Corp Gemini key: 3M in / 80k out manual caps. 76k out (95%) is the
+    dominant chip + red bar even though input (1.5M of 3M) is only 50%."""
     from aibroker.db.models import ApiKeyRow
     from aibroker.routes.dashboard import _render
     k = ApiKeyRow(
@@ -727,9 +729,11 @@ def test_main_render_corp_gemini_output_axis_saturates():
         keys=[k],
         tokens_today={11: {"tot": 1_576_000, "tin": 1_500_000, "tout": 76_000}},
     )).body.decode()
-    assert "out" in body                     # output axis label shown
-    assert "76k/80k out" in body
+    assert "95% out" in body                 # output axis dominant chip
+    assert "50% in" in body                  # input axis also shown
+    assert "76,000/80,000 out" in body       # tooltip used/cap
     assert "fill bad" in body                # 95% → red
+    assert "style='width:95%'" in body
     assert "· manual'" in body               # source tag = manual
 
 

@@ -133,6 +133,36 @@ def bar_label_for_key(
     return candidates[0][1]
 
 
+def axes_for_key(
+    reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
+) -> list[dict]:
+    """Per-axis breakdown for the dashboard so the operator sees every cap
+    that applies (not just the dominant one) — makes clear that, e.g., all
+    cerebras keys share the SAME 2400 req / 1M tok caps and only the fill
+    differs. Returns [{name, short, used, cap, pct}] for each capped axis,
+    sorted by pct desc (dominant axis first)."""
+    q = quota_for_key(key)
+    rows: list[dict] = []
+    if q.req_per_day:
+        rows.append({"name": "requests", "short": "req",
+                     "used": reqs, "cap": q.req_per_day,
+                     "pct": min(100, int(reqs / q.req_per_day * 100))})
+    if q.tok_per_day:
+        rows.append({"name": "tokens", "short": "tok",
+                     "used": toks, "cap": q.tok_per_day,
+                     "pct": min(100, int(toks / q.tok_per_day * 100))})
+    if q.tok_in_per_day:
+        rows.append({"name": "input", "short": "in",
+                     "used": toks_in, "cap": q.tok_in_per_day,
+                     "pct": min(100, int(toks_in / q.tok_in_per_day * 100))})
+    if q.tok_out_per_day:
+        rows.append({"name": "output", "short": "out",
+                     "used": toks_out, "cap": q.tok_out_per_day,
+                     "pct": min(100, int(toks_out / q.tok_out_per_day * 100))})
+    rows.sort(key=lambda r: r["pct"], reverse=True)
+    return rows
+
+
 def severity_class(pct: int | None) -> str:
     """Bar fill class: blue < 70 → yellow < 90 → red ≥ 90."""
     if pct is None:
