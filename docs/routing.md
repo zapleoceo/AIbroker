@@ -166,6 +166,14 @@ Three independent daily caps: per-key, per-project (live SUM from `usage_log`),
 global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`). Free-tier keys with `cost == 0`
 skip the check.
 
+**Cost source** (`providers/litellm_adapter.py:estimate_llm_cost`): LiteLLM's
+`cost_per_token(model, prompt_tokens, completion_tokens)` pricing map, summed.
+Unpriced models return 0 and are logged **once per model** — the guard must
+never silently zero costs. (It did: `completion_cost(prompt_tokens=…)` lost that
+kwarg in a LiteLLM bump on 2026-06-27, so every cost read 0 and all $-caps went
+blind until 2026-07-01. The one-shot warning + a "known model costs > 0" test
+now guard the regression.)
+
 ## Selection policy — the whole picture (refactored 2026-06-28)
 
 Choosing which key serves a request is **deterministic, self-calibrating

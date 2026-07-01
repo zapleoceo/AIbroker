@@ -78,15 +78,23 @@ def model_for(provider: str, capability: str) -> str | None:
     return DEFAULT_MODEL.get(provider, {}).get(capability)
 
 
+_pricing_warned: set[str] = set()
+
+
 def estimate_llm_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    """LiteLLM exposes accurate per-model pricing — use it for cap math."""
+    """Real per-model cost from LiteLLM's pricing map. Returns 0.0 only when the
+    model is genuinely unpriced — and logs that once per model so a silent
+    pricing break can't hide (a `completion_cost` signature change zeroed every
+    cost for days before we noticed, blinding the cost guard)."""
     try:
-        return float(
-            litellm.completion_cost(
-                model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out
-            )
+        p_cost, c_cost = litellm.cost_per_token(
+            model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out
         )
-    except Exception:
+        return float(p_cost + c_cost)
+    except Exception as e:
+        if model not in _pricing_warned:
+            _pricing_warned.add(model)
+            log.warning("no LiteLLM pricing for %s (%s) — cost recorded as 0", model, e)
         return 0.0
 
 

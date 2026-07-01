@@ -31,10 +31,19 @@ def test_every_chain_pair_resolves_to_a_model():
     assert not missing, f"providers with no model for their capability: {missing}"
 
 
-def test_estimate_llm_cost_returns_float():
-    cost = estimate_llm_cost("openai/gpt-5", 100, 50)
+def test_estimate_llm_cost_prices_known_model():
+    """cost_per_token maps real pricing — a known model must cost > 0.
+    Guards the completion_cost→cost_per_token signature regression that
+    silently zeroed every cost and blinded the cost guard for days."""
+    cost = estimate_llm_cost("openai/gpt-5", 1_000_000, 1_000_000)
     assert isinstance(cost, float)
-    assert cost >= 0
+    assert cost > 0
+
+
+def test_estimate_llm_cost_scales_with_tokens():
+    small = estimate_llm_cost("deepseek/deepseek-chat", 1_000, 1_000)
+    big = estimate_llm_cost("deepseek/deepseek-chat", 1_000_000, 1_000_000)
+    assert 0 < small < big
 
 
 def test_estimate_llm_cost_zero_for_unknown_model():
