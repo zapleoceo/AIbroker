@@ -5,12 +5,12 @@
 > `chat:fast` / `prefilter` / `structured` and `command-a-03-2025` (flagship)
 > for `chat:smart` / `chat:code`. Embed model `embed-english-v3.0` unchanged.
 >
-> **2026-06-26 (later)**: `chat:edit` chain extended from `[gemini, deepseek]`
-> to `[gemini, mistral, cohere, deepseek, anthropic]` — 3 free providers
-> in front of paid. mistral + cohere DEFAULT_MODEL now have `chat:edit`
-> entries. Existing mistral + cohere keys still need the `llm:edit` scope
-> added in the dashboard (or via the bulk migration described in
-> `dashboard.md`).
+> **2026-07-01**: `chat:edit` narrowed to JSON-reliable providers only —
+> `[gemini, deepseek, anthropic]`. mistral / cohere were dropped (and their
+> `chat:edit` DEFAULT_MODEL entries removed): when gemini was on cooldown they
+> returned Bahasa-drifted and torn JSON that broke Coach. The `llm:edit` scope
+> on existing mistral/cohere keys is now inert — harmless, no cleanup needed.
+> Supersedes the 2026-06-26 free-breadth extension.
 >
 > **2026-07-01**: cerebras quota is TOKENS-only (1M/day). The `req/day` axis
 > was dropped from `PROVIDER_QUOTAS` and auto-discover no longer ingests
@@ -29,7 +29,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
-| `chat:edit` | **gemini → mistral → cohere → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). 3 free providers + 2 paid fallbacks; all JSON-reliable. cerebras/groq/openrouter skipped (unreliable JSON). |
+| `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | cerebras → groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | |

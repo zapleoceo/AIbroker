@@ -46,16 +46,16 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "anthropic",
         "deepseek", "openai",
     ],
-    # Coach editor (Stepan): JSON-reliable providers only. gemini first
-    # (thinking disabled for JSON), deepseek as the paid fallback that stays
-    # available when gemini's free/prepaid quota is exhausted — mirrors Stepan's
-    # proven local chain. The JSON validate-retry guards deepseek's occasional
-    # malformed output.
-    # 2026-06-26: extended from [gemini → deepseek] to a full free chain.
-    # gemini free pool first; mistral + cohere new free fallback; then deepseek
-    # paid (validate-retry handles its occasional bad JSON); anthropic last,
-    # top JSON quality but trial credits only.
-    "chat:edit": ["gemini", "mistral", "cohere", "deepseek", "anthropic"],
+    # Coach editor (Stepan): JSON-reliable providers ONLY. gemini first
+    # (thinking disabled → JSON fits), deepseek the paid fallback that stays
+    # available when gemini's quota is exhausted (validate-retry guards its
+    # occasional bad JSON), anthropic last (top JSON quality, trial credits).
+    # 2026-07-01: narrowed back from [gemini, mistral, cohere, deepseek,
+    # anthropic]. mistral-small / cohere-r7b returned Bahasa-drifted and torn
+    # JSON when gemini was on cooldown, breaking Coach; the free breadth isn't
+    # worth a malformed edit. cerebras/groq/openrouter stay excluded for the
+    # same reason.
+    "chat:edit": ["gemini", "deepseek", "anthropic"],
     "prefilter": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",

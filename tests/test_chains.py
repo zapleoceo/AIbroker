@@ -85,23 +85,18 @@ def test_chain_returns_copy():
 # ─── chat:edit — Coach lane ──────────────────────────────────────────────────
 
 
-def test_chat_edit_gemini_first_deepseek_fallback():
-    """Coach edit chain: gemini first (free, best JSON), 3 free providers
-    in front of paid deepseek + anthropic. cerebras/groq excluded (flaky JSON)."""
+def test_chat_edit_json_reliable_only():
+    """Coach edit chain: JSON-reliable providers ONLY —
+    gemini (free) → deepseek → anthropic (paid). Providers that returned
+    malformed/Bahasa-drifted JSON (mistral, cohere) or reasoning JSON
+    (cerebras, groq, openrouter) are excluded — a bad edit breaks Coach."""
     chain = chain_for("chat:edit")
+    assert chain == ["gemini", "deepseek", "anthropic"]
     assert chain[0] == "gemini"
-    assert "deepseek" in chain
     assert chain.index("gemini") < chain.index("deepseek")
-    # All free in chat:edit must come before deepseek (paid)
-    deepseek_idx = chain.index("deepseek")
-    free_in_edit = {"gemini", "mistral", "cohere"}
-    for f in free_in_edit:
-        if f in chain:
-            assert chain.index(f) < deepseek_idx, f"{f} (free) must precede deepseek"
-    # cerebras / groq / openrouter must NOT be in chat:edit (unreliable JSON)
-    forbidden = {"cerebras", "groq", "openrouter"}
-    assert not (forbidden & set(chain)), \
-        f"{forbidden & set(chain)} must not be in chat:edit chain"
+    flaky_json = {"mistral", "cohere", "cerebras", "groq", "openrouter"}
+    assert not (flaky_json & set(chain)), \
+        f"{flaky_json & set(chain)} produce unreliable JSON — must not serve chat:edit"
 
 
 def test_chat_edit_uses_edit_scope():
