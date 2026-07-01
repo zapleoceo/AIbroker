@@ -113,11 +113,12 @@ timestamp most-authoritative-first:
 
 1. **retry-after hint** in the message → wait exactly that.
 2. **per-day cap** (`tokens per day`, `rpd`, …) → until UTC midnight.
-3. **per-hour cap** (cerebras `Requests per hour limit exceeded`, 2026-07-01)
-   → top of the next UTC hour. Parking 60s just re-hit the wall and climbed
-   the adaptive backoff one 429 at a time; the hour boundary parks a
-   meaningful amount on the first hit. Self-calibrating off the provider's own
-   message — no hard-coded per-hour rate.
+3. **per-hour cap** — `is_hourly_quota_error()` (cerebras `Requests per hour
+   limit exceeded`, 2026-07-01) → `next_hour_boundary()`, the top of the next
+   UTC hour. Parking 60s just re-hit the wall and climbed the adaptive backoff
+   one 429 at a time; the hour boundary parks a meaningful amount on the first
+   hit. Self-calibrating off the provider's own message — no hard-coded
+   per-hour rate.
 4. **otherwise** → adaptive per-provider backoff (table above).
 
 `services/llm_service.py` calls it on every rate-limit error. Vending mode
