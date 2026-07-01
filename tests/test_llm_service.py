@@ -147,3 +147,109 @@ async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
 
 async def _noop():
     return None
+
+
+# ─── free-tier keys must never bill a real $ cost ───────────────────────────
+
+
+def test_billed_cost_zeroes_free_tier():
+    """REGRESSION (2026-07-01): LiteLLM's cost_per_token prices by MODEL, with
+    no concept of 'this key is on a free plan' — a free cerebras/gemini/mistral
+    key calling a real-priced model got billed the same nominal cost a paid
+    caller would pay, even though the free plan absorbs it at $0 to us. This
+    inflated `daily_cost_used_usd` for every free key ($5.26 across 51 keys in
+    a few hours) and made the dashboard show 'spend' on tokens that cost
+    nothing."""
+    from types import SimpleNamespace
+
+    from aibroker.services.llm_service import _billed_cost
+
+    free_key = SimpleNamespace(tier="free")
+    paid_key = SimpleNamespace(tier="paid")
+    meta = {"cost_usd": 2.80}
+
+    assert _billed_cost(free_key, meta) == 0.0
+    assert _billed_cost(paid_key, meta) == 2.80
+
+
+async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):
+    """End-to-end through run_chat: a free-tier key's real LiteLLM-priced cost
+    must be zeroed before it reaches record_usage / the returned outcome."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    recorded_costs: list[float] = []
+    fake_key = SimpleNamespace(id=1, label="k", tier="free", provider="gemini",
+                                token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return fake_key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "hello", {"model": "gemini/gemini-2.5-flash", "tokens_in": 100,
+                          "tokens_out": 50, "cost_usd": 2.80, "latency_ms": 200}
+
+    def fake_record_usage(**kw):
+        recorded_costs.append(kw["cost_usd"])
+        return _noop()
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="vera",
+    )
+    assert out.cost_usd == 0.0          # outcome reflects the billed (zeroed) cost
+    assert recorded_costs == [0.0]      # record_usage got the zeroed cost too
+
+
+async def test_run_chat_keeps_real_cost_for_paid_tier_key(monkeypatch):
+    """A paid-tier key's real cost must pass through unchanged."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    recorded_costs: list[float] = []
+    fake_key = SimpleNamespace(id=2, label="k", tier="paid", provider="deepseek",
+                                token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return fake_key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "hello", {"model": "deepseek/deepseek-chat", "tokens_in": 100,
+                          "tokens_out": 50, "cost_usd": 0.70, "latency_ms": 200}
+
+    def fake_record_usage(**kw):
+        recorded_costs.append(kw["cost_usd"])
+        return _noop()
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="vera",
+    )
+    assert out.cost_usd == 0.70
+    assert recorded_costs == [0.70]

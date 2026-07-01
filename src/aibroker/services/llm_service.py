@@ -106,6 +106,18 @@ def _is_valid_json(text: str) -> bool:
     return True
 
 
+def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
+    """What we actually owe the provider for this call.
+
+    `estimate_llm_cost` (LiteLLM's pricing map) prices by MODEL — it has no
+    concept of "this specific key is on a free plan". A free-tier key calling
+    e.g. gemini-2.5-flash gets the same nominal per-token price a paid caller
+    would pay, even though the free plan absorbs it at $0 real cost to us.
+    Free-tier keys must always bill $0, whatever the model's list price is.
+    """
+    return 0.0 if key.tier == "free" else meta["cost_usd"]
+
+
 @dataclass
 class ChatOutcome:
     text: str
@@ -176,6 +188,7 @@ async def run_chat(
                     max_tokens=max_tokens, temperature=temperature,
                     response_format=response_format,
                 )
+                meta["cost_usd"] = _billed_cost(key, meta)
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
                 kind = await _penalize(key, e)
                 # Self-learn the size ceiling: if the provider rejected the
@@ -259,6 +272,7 @@ async def run_embed(
     plain = decrypt(key.token_encrypted)
     try:
         vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
+        meta["cost_usd"] = _billed_cost(key, meta)
     except Exception as e:
         await _penalize(key, e)
         await record_usage(
@@ -325,6 +339,7 @@ async def run_transcribe(
             text, meta = await transcribe(
                 model=use_model, audio=audio, filename=filename, api_key=plain,
             )
+            meta["cost_usd"] = _billed_cost(key, meta)
         except Exception as e:
             last_exc = e
             await _penalize(key, e)

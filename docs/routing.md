@@ -190,6 +190,21 @@ kwarg in a LiteLLM bump on 2026-06-27, so every cost read 0 and all $-caps went
 blind until 2026-07-01. The one-shot warning + a "known model costs > 0" test
 now guard the regression.)
 
+**Free-tier keys always bill $0** (`services/llm_service.py:_billed_cost`).
+`estimate_llm_cost` prices by MODEL — it has no idea whether the specific key
+that served the call is on a free plan. A free cerebras/gemini/mistral key
+calling e.g. `gemini-2.5-flash` gets the same nominal per-token price LiteLLM
+would quote a paid caller, even though the free plan absorbs it at $0 real
+cost. `_billed_cost(key, meta)` zeroes `meta["cost_usd"]` whenever
+`key.tier == "free"`, applied once right after each provider call
+(`run_chat`/`run_embed`/`run_transcribe`) so every downstream use — `usage_log`,
+the dashboard's per-key/per-project spend, `daily_cost_used_usd` — sees the
+real (zero) cost. (Regression: restoring real pricing in the fix above made
+free-tier keys show non-zero "spend" for the first time — $5.26 accrued
+across 51 free keys in a few hours before this landed. One-time prod cleanup:
+zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
+`monthly_cost_used_usd` / `total_cost_usd` for tier='free' keys.)
+
 **Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`): DeepSeek
 charges 2x during peak UTC hours (01:00–04:00 and 06:00–10:00) from mid-July
 2026. `estimate_llm_cost` multiplies the base price by that factor, so the
