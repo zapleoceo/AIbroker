@@ -13,7 +13,7 @@ from aibroker.routing.chains import (
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
-              "nvidia", "mistral", "voyage"}
+              "nvidia", "mistral", "cohere", "voyage"}
 
 
 @pytest.mark.parametrize("capability", list(CAPABILITY_CHAINS.keys()))

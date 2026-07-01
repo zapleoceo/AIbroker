@@ -20,6 +20,7 @@ Capability = Literal[
     "transcription",
     "embedding",
     "prefilter",
+    "translate",
 ]
 
 
@@ -60,6 +61,15 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
     ],
+    # Trivial utility task (message translation): does NOT need premium/reasoning
+    # models. Put SMALL FAST non-reasoning models FIRST — cerebras/groq gpt-oss is a
+    # REASONING model that "thinks" for ~16s even on one short phrase (starved the
+    # 15s client timeout → translate button failed). cohere-r7b / mistral-small /
+    # gemini-flash answer in ~1-2s. Also uses the models the bot's reply chains reach
+    # LAST, so translation barely competes with live replies for keys.
+    "translate": [
+        "cohere", "mistral", "gemini", "groq",
+    ],
     "structured": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
@@ -84,6 +94,7 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "chat:edit": "llm:edit",
     "structured": "llm:chat",
     "prefilter": "llm:chat",
+    "translate": "llm:chat",
     "vision": "llm:vision",
     "transcription": "llm:audio",
     "embedding": "llm:embed",

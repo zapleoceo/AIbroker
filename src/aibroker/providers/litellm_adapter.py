@@ -26,6 +26,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     "groq": {"chat:fast": f"groq/openai/{_OSS}", "chat:smart": f"groq/openai/{_OSS}",
              "chat:code": f"groq/openai/{_OSS}", "prefilter": f"groq/openai/{_OSS}",
              "structured": f"groq/openai/{_OSS}",
+             "translate": f"groq/openai/{_OSS}",
              "transcription": "groq/whisper-large-v3-turbo"},
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
                "chat:smart": "gemini/gemini-2.5-pro",
@@ -33,6 +34,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "chat:edit": "gemini/gemini-2.5-flash",
                "prefilter": "gemini/gemini-2.5-flash",
                "structured": "gemini/gemini-2.5-flash",
+               "translate": "gemini/gemini-2.5-flash",
                "vision": "gemini/gemini-2.5-flash"},
     "deepseek": {"chat:fast": "deepseek/deepseek-chat",
                  "chat:smart": "deepseek/deepseek-chat",
@@ -58,7 +60,8 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                 "chat:code":   "mistral/codestral-latest",
                 "chat:edit":   "mistral/mistral-small-latest",
                 "prefilter":   "mistral/mistral-small-latest",
-                "structured":  "mistral/mistral-small-latest"},
+                "structured":  "mistral/mistral-small-latest",
+                "translate":   "mistral/mistral-small-latest"},
     # 2026-06-26: command-r/r-plus retired 2025-09-15. command-a-03-2025 is
     # flagship; command-r7b-12-2024 is the small/fast model.
     "cohere": {"chat:fast":   "cohere/command-r7b-12-2024",
@@ -67,6 +70,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "chat:edit":   "cohere/command-a-03-2025",
                "prefilter":   "cohere/command-r7b-12-2024",
                "structured":  "cohere/command-r7b-12-2024",
+               "translate":   "cohere/command-r7b-12-2024",
                "embedding":   "cohere/embed-english-v3.0"},
     "voyage": {"embedding": "voyage/voyage-3"},
 }

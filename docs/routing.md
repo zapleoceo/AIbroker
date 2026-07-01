@@ -26,6 +26,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → mistral → cohere → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). 3 free providers + 2 paid fallbacks; all JSON-reliable. cerebras/groq/openrouter skipped (unreliable JSON). |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
+| `translate` | cohere → mistral → gemini → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (cohere-r7b / mistral-small / gemini-flash ~1-2s). cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits the models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | cerebras → groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | |
 | `vision` | gemini → anthropic → openai | `llm:vision` | Image input required |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
