@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 import litellm
+
+from aibroker.providers.peak_pricing import peak_multiplier
 
 log = logging.getLogger(__name__)
 
@@ -81,21 +84,26 @@ def model_for(provider: str, capability: str) -> str | None:
 _pricing_warned: set[str] = set()
 
 
-def estimate_llm_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    """Real per-model cost from LiteLLM's pricing map. Returns 0.0 only when the
-    model is genuinely unpriced — and logs that once per model so a silent
-    pricing break can't hide (a `completion_cost` signature change zeroed every
-    cost for days before we noticed, blinding the cost guard)."""
+def estimate_llm_cost(
+    model: str, tokens_in: int, tokens_out: int, *, at: datetime | None = None
+) -> float:
+    """Real per-model cost from LiteLLM's pricing map, times any time-of-day
+    surcharge (DeepSeek peak/valley). Returns 0.0 only when the model is
+    genuinely unpriced — and logs that once per model so a silent pricing break
+    can't hide (a `completion_cost` signature change zeroed every cost for days
+    before we noticed, blinding the cost guard). `at` overrides the clock in
+    tests; production passes None (= now, UTC)."""
     try:
         p_cost, c_cost = litellm.cost_per_token(
             model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out
         )
-        return float(p_cost + c_cost)
+        base = float(p_cost + c_cost)
     except Exception as e:
         if model not in _pricing_warned:
             _pricing_warned.add(model)
             log.warning("no LiteLLM pricing for %s (%s) — cost recorded as 0", model, e)
         return 0.0
+    return base * peak_multiplier(model.split("/", 1)[0], at)
 
 
 async def call_llm(

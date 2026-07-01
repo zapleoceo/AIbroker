@@ -16,6 +16,10 @@
 > was dropped from `PROVIDER_QUOTAS` and auto-discover no longer ingests
 > cerebras' `x-ratelimit-limit-requests-day` header — a single key logged
 > 4,866 req against its 2,400 header without a 429, so it was never a hard cap.
+>
+> **2026-07-01**: cost tracking restored (`cost_per_token`; `completion_cost`
+> had silently zeroed all costs since 2026-06-27) and DeepSeek peak/valley
+> pricing added (2x in peak UTC hours from mid-July). See **Cost guard**.
 
 ## Capability → provider chain + required scope
 
@@ -173,6 +177,16 @@ never silently zero costs. (It did: `completion_cost(prompt_tokens=…)` lost th
 kwarg in a LiteLLM bump on 2026-06-27, so every cost read 0 and all $-caps went
 blind until 2026-07-01. The one-shot warning + a "known model costs > 0" test
 now guard the regression.)
+
+**Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`): DeepSeek
+charges 2x during peak UTC hours (01:00–04:00 and 06:00–10:00) from mid-July
+2026. `estimate_llm_cost` multiplies the base price by that factor, so the
+recorded cost and every $-cap reflect the real peak bill — the same daily budget
+buys half as many peak deepseek tokens, and per-key/global caps trip 2x faster in
+peak, throttling paid deepseek use without any routing change. Dormant until
+`DEEPSEEK_PEAK_FROM` (set the confirmed date when DeepSeek announces it). If peak
+deepseek volume ever grows material, the next lever is off-peak backfill
+(client-side) or a peak-hours chain demotion — not built yet.
 
 ## Selection policy — the whole picture (refactored 2026-06-28)
 
