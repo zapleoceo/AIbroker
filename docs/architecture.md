@@ -101,12 +101,17 @@ floor on master.
 
 **Project drill-down** (`/dashboard/projects/{id}?range=24h|7d|30d`): KPI cards
 (calls, spend, tokens, avg latency + success %), breakdown cards by
-provider / capability / model / status, and a **latency-distribution
-histogram** (calls per latency bucket: `<250ms … >30s`, bars scaled to the
-busiest bucket). **Every aggregate is scoped to the selected range** — only the
-"recent 50 calls" table ignores it. The histogram surfaces a slow tail that a
-single average hides (e.g. an avg of 6 s that is really fast calls plus a fat
-`>30s` timeout bucket).
+provider / capability / model, and a **latency-distribution histogram** (calls
+per latency bucket: `<250ms … >30s`, bars scaled to the busiest bucket).
+**Every aggregate is scoped to the selected range** — only the "recent 50
+calls" table ignores it. The histogram surfaces a slow tail that a single
+average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`
+timeout bucket).
+
+There is no separate "status mix" breakdown: `usage_log.status` only ever
+takes two values (`ok`/`error`), so a per-status GROUP BY would just duplicate
+the ok/err split already on the Calls KPI card — via a second query, no less.
+Removed 2026-07-01 rather than kept as a redundant tile.
 
 All form posts go through `require_owner_session`; an unauth POST returns
 401. Every mutation writes an `audit_log` row through

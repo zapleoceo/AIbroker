@@ -1109,11 +1109,6 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY cap ORDER BY n DESC"
         ), bind_)).all()
-        by_status = (await s.execute(text(
-            "SELECT status, COUNT(*) AS n FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
-            "GROUP BY status ORDER BY n DESC"
-        ), bind_)).all()
         lat_hist_rows = (await s.execute(text(
             f"SELECT width_bucket(latency_ms, {_LAT_SQL_ARRAY}) AS b, "
             "       COUNT(*) AS n "
@@ -1136,7 +1131,6 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         "by_provider": by_provider,
         "by_model": by_model,
         "by_capability": by_capability,
-        "by_status": by_status,
         "lat_hist": _lat_hist_counts(list(lat_hist_rows)),
         "recent": recent,
     }
@@ -1225,10 +1219,6 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
                   f'<td class="num">{r.n}</td>'
                   f'<td class="num">${float(r.spend):.4f}</td></tr>')
 
-    status_card = _bd_card("Status mix", "Статусы", list(d["by_status"]),
-        lambda r: f'<tr><td class="k status-{esc(r.status)}">{esc(r.status)}</td>'
-                  f'<td class="num">{r.n}</td><td></td></tr>')
-
     # Latency histogram: count of calls per latency bucket (same period), bars
     # scaled to the busiest bucket. Reuses the cap-bar/fill quota-bar styling.
     lat_counts = d["lat_hist"]
@@ -1290,7 +1280,6 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
       {prov_card}
       {cap_card}
       {model_card}
-      {status_card}
       {lat_card}
     </div>
 

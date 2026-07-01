@@ -537,7 +537,6 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
     Brk = namedtuple("B", "provider n spend")
     BrkCap = namedtuple("BC", "cap n spend")
     BrkModel = namedtuple("BM", "model n spend toks")
-    BrkSt = namedtuple("BS", "status n")
     Recent = namedtuple("R", "created_at provider model capability tokens_in "
                               "tokens_out cost_usd latency_ms status http_status "
                               "error_kind")
@@ -549,7 +548,6 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         "by_provider": providers or [Brk("cerebras", 2, 0.0), Brk("gemini", 2, 0.123)],
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
-        "by_status": [BrkSt("ok", 3), BrkSt("rate_limit", 1)],
         "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
             Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
@@ -569,7 +567,8 @@ def test_render_project_detail_smoke():
     assert "$0.1230" in body                 # spend
     assert "1,234" in body and "567" in body  # token counts (formatted with comma)
     assert "345 ms" in body                  # latency
-    # Status mix split shown
+    # Calls KPI card shows the ok/err split (Status mix tile was removed —
+    # it duplicated this exact split via a second query)
     assert "3 ok" in body and "1 err" in body
     # Range pills present + 24h active
     assert 'href="?range=24h"' in body
@@ -595,13 +594,22 @@ def test_render_project_detail_handles_no_recent_calls():
     assert "no calls yet" in body
 
 
+def test_render_project_detail_no_status_mix_tile():
+    """Status mix tile was removed — usage_log only ever has status
+    ok/error, so it duplicated the Calls KPI card's ok/err split via a
+    second query. The split still lives in the KPI card only."""
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail()).body.decode()
+    assert "Status mix" not in body
+    assert "Статусы" not in body
+
+
 def test_render_project_detail_handles_empty_breakdowns():
     from aibroker.routes.dashboard import _render_project_detail
     d = _fake_proj_detail()
     d["by_provider"] = []
     d["by_capability"] = []
     d["by_model"] = []
-    d["by_status"] = []
     body = _render_project_detail(d).body.decode()
     # Empty breakdown card falls back to the no-data line (bilingual)
     assert "(no data in this range)" in body
