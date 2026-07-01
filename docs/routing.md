@@ -108,10 +108,21 @@ Exponential backoff: each consecutive 429 on the same key within a 1h
 window doubles the wait (60 → 120 → 240 → 480 …) capped at 30 min.
 Counter resets when the key has gone 1h without a 429.
 
-`adaptive_cooldown(api_key_id, provider)` queries `usage_log` for recent
-429s and returns the right `until` timestamp. `services/llm_service.py`
-calls it on every rate-limit error. Vending mode honours the client's
-`retry_after_s` instead — the client knows its provider best.
+`cooldown_until(api_key_id, provider, error_msg)` resolves the `until`
+timestamp most-authoritative-first:
+
+1. **retry-after hint** in the message → wait exactly that.
+2. **per-day cap** (`tokens per day`, `rpd`, …) → until UTC midnight.
+3. **per-hour cap** (cerebras `Requests per hour limit exceeded`, 2026-07-01)
+   → top of the next UTC hour. Parking 60s just re-hit the wall and climbed
+   the adaptive backoff one 429 at a time; the hour boundary parks a
+   meaningful amount on the first hit. Self-calibrating off the provider's own
+   message — no hard-coded per-hour rate.
+4. **otherwise** → adaptive per-provider backoff (table above).
+
+`services/llm_service.py` calls it on every rate-limit error. Vending mode
+honours the client's `retry_after_s` instead — the client knows its provider
+best.
 
 ## Selector — fair, anti-fingerprint ordering
 

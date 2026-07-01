@@ -87,6 +87,24 @@ def is_daily_quota_error(msg: str) -> bool:
     return any(marker in m for marker in _DAILY_QUOTA_MARKERS)
 
 
+# A per-HOUR request cap (cerebras free: "Requests per hour limit exceeded").
+# Distinct from per-minute (recovers in ~60s → adaptive) and per-day (waits to
+# UTC midnight). Parking 60s just re-hits the wall and climbs the adaptive
+# backoff one 429 at a time; park to the top of the next hour on the first hit.
+_HOURLY_QUOTA_MARKERS = (
+    "per hour",
+    "per-hour",
+    "requests per hour",
+    "hourly limit",
+)
+
+
+def is_hourly_quota_error(msg: str) -> bool:
+    """True if the error is a per-HOUR request cap (not per-minute or per-day)."""
+    m = msg.lower()
+    return any(marker in m for marker in _HOURLY_QUOTA_MARKERS)
+
+
 def next_utc_midnight(now: datetime | None = None) -> datetime:
     """First instant of the next UTC day — when daily quotas reset."""
     now = now or datetime.now(UTC)
@@ -94,17 +112,26 @@ def next_utc_midnight(now: datetime | None = None) -> datetime:
     return datetime.combine(tomorrow, time.min, tzinfo=UTC)
 
 
+def next_hour_boundary(now: datetime | None = None) -> datetime:
+    """Top of the next UTC hour — a safe wait for a per-hour request cap."""
+    now = now or datetime.now(UTC)
+    return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+
 async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> datetime:
     """Resolve the cooldown end for a rate-limited call, most-authoritative first:
       1. provider's own retry-after hint  → wait exactly that
       2. daily-quota exhaustion (no hint)  → wait until UTC midnight
-      3. otherwise                         → adaptive per-provider backoff
+      3. hourly request cap (no hint)      → wait to the top of the next hour
+      4. otherwise                         → adaptive per-provider backoff
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
         return datetime.now(UTC) + timedelta(seconds=retry)
     if is_daily_quota_error(error_msg):
         return next_utc_midnight()
+    if is_hourly_quota_error(error_msg):
+        return next_hour_boundary()
     return await adaptive_cooldown(api_key_id, provider)
 
 

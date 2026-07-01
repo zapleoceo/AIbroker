@@ -9,6 +9,8 @@ from aibroker.routing.cooldown import (
     MAX_COOLDOWN_S,
     cooldown_seconds,
     is_daily_quota_error,
+    is_hourly_quota_error,
+    next_hour_boundary,
     next_utc_midnight,
     parse_retry_after,
 )
@@ -130,3 +132,39 @@ async def test_cooldown_until_daily_goes_to_midnight():
     # Must be the next UTC midnight, far more than a 60s adaptive cooldown
     assert until == next_utc_midnight()
     assert (until - datetime.now(UTC)).total_seconds() > 120
+
+
+# ─── per-hour request cap (2026-07-01: cerebras "Requests per hour") ──────────
+
+
+def test_is_hourly_quota_error_detects_cerebras():
+    assert is_hourly_quota_error("CerebrasException - Requests per hour limit exceeded")
+    assert is_hourly_quota_error("hourly limit reached")
+
+
+def test_is_hourly_quota_error_false_for_minute_and_day():
+    assert not is_hourly_quota_error("requests per minute exceeded")
+    assert not is_hourly_quota_error("Tokens per day limit exceeded")
+    assert not is_hourly_quota_error("429 Too Many Requests")
+
+
+def test_next_hour_boundary_is_top_of_next_hour():
+    base = datetime(2026, 7, 1, 8, 38, 25, tzinfo=UTC)
+    assert next_hour_boundary(base) == datetime(2026, 7, 1, 9, 0, 0, tzinfo=UTC)
+
+
+def test_next_hour_boundary_rolls_past_day():
+    base = datetime(2026, 7, 1, 23, 30, tzinfo=UTC)
+    assert next_hour_boundary(base) == datetime(2026, 7, 2, 0, 0, 0, tzinfo=UTC)
+
+
+async def test_cooldown_until_hourly_goes_to_next_hour():
+    """Per-hour cap with no retry hint → cool to the top of the next hour, not
+    a 60s adaptive step that re-hits the wall."""
+    from aibroker.routing.cooldown import cooldown_until
+    until = await cooldown_until(1, "cerebras",
+                                 "CerebrasException - Requests per hour limit exceeded")
+    assert until == next_hour_boundary()
+    # Between 0 and 60 min out — always more than the 60s first adaptive step
+    delta = (until - datetime.now(UTC)).total_seconds()
+    assert 0 < delta <= 3600
