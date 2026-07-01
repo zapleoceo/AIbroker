@@ -33,7 +33,11 @@ class Quota:
 # Static provider defaults (req + total-tokens only; in/out split is rare in
 # free-tier docs, so left None — manual override fills it for corp keys).
 PROVIDER_QUOTAS: dict[str, Quota] = {
-    "cerebras": Quota(req_per_day=14_400, tok_per_day=1_000_000,
+    # cerebras enforces the free tier on TOKENS/day, not requests/day: a single
+    # gpt-oss-120b key logged 4,866 req against its 2,400 req-day header without
+    # a 429 — the request header isn't a hard cap, so it's not a saturation
+    # signal. req axis dropped (None); auto-discover no longer ingests it either.
+    "cerebras": Quota(tok_per_day=1_000_000,
                        doc="https://inference-docs.cerebras.ai/support/rate-limits"),
     "groq": Quota(req_per_day=14_400, tok_per_day=500_000,
                    doc="https://console.groq.com/docs/rate-limits"),
@@ -138,7 +142,7 @@ def axes_for_key(
 ) -> list[dict]:
     """Per-axis breakdown for the dashboard so the operator sees every cap
     that applies (not just the dominant one) — makes clear that, e.g., all
-    cerebras keys share the SAME 2400 req / 1M tok caps and only the fill
+    groq keys share the SAME 14.4k req / 500k tok caps and only the fill
     differs. Returns [{name, short, used, cap, pct}] for each capped axis,
     sorted by pct desc (dominant axis first)."""
     q = quota_for_key(key)

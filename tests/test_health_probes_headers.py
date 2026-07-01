@@ -4,15 +4,17 @@ from __future__ import annotations
 from aibroker.providers.health_probes import extract_quota_headers
 
 
-def test_cerebras_x_ratelimit_day_variants():
-    """Cerebras returns x-ratelimit-limit-*-day on free tier."""
+def test_cerebras_token_axis_only():
+    """Cerebras exposes both -day headers, but its requests-day value isn't a
+    hard cap (a key logged 4,866 req against a 2,400 header), so we ingest only
+    the token axis to avoid a false dashboard saturation."""
     headers = {
-        "x-ratelimit-limit-requests-day": "14400",
+        "x-ratelimit-limit-requests-day": "2400",
         "x-ratelimit-limit-tokens-day": "1000000",
         "content-type": "application/json",
     }
     req, tok = extract_quota_headers("cerebras", headers)
-    assert req == 14_400
+    assert req is None
     assert tok == 1_000_000
 
 
@@ -56,7 +58,7 @@ def test_garbage_headers_dont_raise():
 def test_header_lookup_is_case_insensitive():
     """HTTP headers are case-insensitive — httpx preserves source casing."""
     headers = {"X-RateLimit-Limit-Requests-Day": "14400"}
-    req, _ = extract_quota_headers("cerebras", headers)
+    req, _ = extract_quota_headers("groq", headers)
     assert req == 14_400
 
 

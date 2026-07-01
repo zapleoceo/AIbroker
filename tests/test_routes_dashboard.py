@@ -691,27 +691,47 @@ def test_main_render_keys_show_request_axis_when_dominant():
     assert "data-sort='50'" in body
 
 
-def test_main_render_keys_show_both_axes_for_cerebras():
-    """Cerebras has BOTH req + tok caps — both chips shown, tok dominant.
+def test_main_render_keys_show_both_axes_for_groq():
+    """Groq has BOTH req + tok caps — both chips shown, tok dominant.
     Demonstrates same-cap visibility: tooltip spells out used/cap per axis."""
     from aibroker.db.models import ApiKeyRow
     from aibroker.routes.dashboard import _render
     k = ApiKeyRow(
-        id=10, provider="cerebras", label="shaboldas1", tier="free",
+        id=10, provider="groq", label="shaboldas1", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
         is_active=True, is_alive=True, daily_used=525,
     )
     body = _render(_fake_main_data(
         keys=[k],
-        tokens_today={10: {"tot": 1_356_576, "tin": 1_200_000, "tout": 156_576}},
+        tokens_today={10: {"tot": 678_288, "tin": 600_000, "tout": 78_288}},
     )).body.decode()
     assert "100% tok" in body                # token axis dominant (clamped)
     assert "3% req" in body                  # request axis also shown
     assert "fill bad" in body                # red (≥90%)
     assert "style='width:100%'" in body
-    # tooltip spells out used/cap on both axes (default cerebras caps)
-    assert "1,356,576/1,000,000 tok" in body
+    # tooltip spells out used/cap on both axes (default groq caps)
+    assert "678,288/500,000 tok" in body
     assert "525/14,400 req" in body
+
+
+def test_main_render_cerebras_token_axis_only():
+    """Cerebras is token-metered — its req-day header isn't a hard cap, so the
+    req axis is dropped. Only the tok chip shows (no req chip)."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=10, provider="cerebras", label="shaboldas1", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=5_000,
+    )
+    body = _render(_fake_main_data(
+        keys=[k],
+        tokens_today={10: {"tot": 500_000, "tin": 450_000, "tout": 50_000}},
+    )).body.decode()
+    assert "50% tok" in body                 # 500k / 1M cerebras tok cap
+    assert "500,000/1,000,000 tok" in body
+    assert "% req" not in body               # no request axis at all
+    assert "/14,400 req" not in body
 
 
 def test_main_render_corp_gemini_output_axis_saturates():

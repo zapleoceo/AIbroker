@@ -15,12 +15,12 @@ from aibroker.providers.quotas import (
 
 def _key(**kw):
     """Build a fake key row with all quota attrs defaulting to None."""
-    base = dict(
-        provider="cerebras",
-        discovered_req_limit=None, discovered_tok_limit=None,
-        manual_req_limit=None, manual_tok_limit=None,
-        manual_tok_in_limit=None, manual_tok_out_limit=None,
-    )
+    base = {
+        "provider": "cerebras",
+        "discovered_req_limit": None, "discovered_tok_limit": None,
+        "manual_req_limit": None, "manual_tok_limit": None,
+        "manual_tok_in_limit": None, "manual_tok_out_limit": None,
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -30,9 +30,10 @@ def _key(**kw):
 
 def test_quota_for_known_provider():
     q = quota_for("cerebras")
-    assert q.req_per_day == 14_400
+    assert q.req_per_day is None          # cerebras is token-metered only
     assert q.tok_per_day == 1_000_000
     assert q.doc.startswith("https://")
+    assert quota_for("groq").req_per_day == 14_400   # a req-metered provider
 
 
 def test_quota_for_paid_returns_empty():
@@ -53,14 +54,15 @@ def test_every_routed_provider_has_a_quota_entry():
 
 def test_resolution_default_when_nothing_set():
     q = quota_for_key(_key())
-    assert q.req_per_day == 14_400        # cerebras default
-    assert q.tok_per_day == 1_000_000
+    assert q.req_per_day is None          # cerebras: token-metered only
+    assert q.tok_per_day == 1_000_000     # from PROVIDER_QUOTAS default
 
 
 def test_resolution_discovered_overrides_default():
-    q = quota_for_key(_key(discovered_tok_limit=500_000))
-    assert q.tok_per_day == 500_000        # discovered wins
-    assert q.req_per_day == 14_400         # req still default
+    # groq has both axes: discovered tok overrides its default, req untouched.
+    q = quota_for_key(_key(provider="groq", discovered_tok_limit=250_000))
+    assert q.tok_per_day == 250_000        # discovered wins
+    assert q.req_per_day == 14_400         # req still default (untouched)
 
 
 def test_resolution_manual_overrides_discovered():

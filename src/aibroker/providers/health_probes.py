@@ -107,6 +107,11 @@ def extract_quota_headers(
             "x-ratelimit-limit-tokens-1d",
             "x-ratelimit-limit-tokens",
         )
+        # cerebras' requests-day header (2400 for gpt-oss-120b) isn't a hard
+        # cap — a single key logged 4,866 req without a 429. It meters on
+        # tokens, so drop the req axis to avoid a false >100% on the dashboard.
+        if provider == "cerebras":
+            req = None
         return req, tok
     # gemini / cohere / voyage — no documented daily-limit headers
     return None, None

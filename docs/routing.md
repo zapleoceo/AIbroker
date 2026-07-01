@@ -11,6 +11,11 @@
 > entries. Existing mistral + cohere keys still need the `llm:edit` scope
 > added in the dashboard (or via the bulk migration described in
 > `dashboard.md`).
+>
+> **2026-07-01**: cerebras quota is TOKENS-only (1M/day). The `req/day` axis
+> was dropped from `PROVIDER_QUOTAS` and auto-discover no longer ingests
+> cerebras' `x-ratelimit-limit-requests-day` header — a single key logged
+> 4,866 req against its 2,400 header without a 429, so it was never a hard cap.
 
 ## Capability → provider chain + required scope
 
