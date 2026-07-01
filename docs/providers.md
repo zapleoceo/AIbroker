@@ -13,6 +13,21 @@ cohere, which rejected `response_format`/`temperature` with
 then free-forms (no schema enforcement) → the broker's JSON validation falls it
 through; cohere's real value is `chat`, which now works.
 
+## Prompt caching (2026-07-01)
+
+`apply_prompt_cache(model, messages)` marks the first system message with
+`cache_control: {ephemeral}` for providers with **explicit** prompt caching
+(currently anthropic). A byte-stable system prefix is then billed as a cache
+read (~0.1× input cost) after the first write. The marker is harmless when the
+prefix varies or is under the provider's minimum cacheable size (silently not
+cached). **deepseek** caches automatically server-side (no param); **gemini**
+needs its own context-cache lifecycle — neither is marked here. `call_llm`'s
+`meta` now carries `cache_read_tokens` / `cache_write_tokens` (parsed by
+`_cache_tokens`, handling both the anthropic and OpenAI usage shapes) so
+callers and vending clients can see cache activity. Caching only helps when the
+caller (Vera/Stepan) sends a stable system prompt — a timestamp or per-request
+ID in the prefix defeats it.
+
 | Provider | chat:fast | chat:smart | chat:code | vision | embedding |
 |---|---|---|---|---|---|
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | — | — |

@@ -24,6 +24,47 @@ def test_drop_params_enabled():
     assert litellm.drop_params is True
 
 
+def test_apply_prompt_cache_marks_anthropic_system():
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    msgs = [{"role": "system", "content": "big stable prompt"},
+            {"role": "user", "content": "hi"}]
+    out = apply_prompt_cache("anthropic/claude-haiku-4-5", msgs)
+    sysblk = out[0]["content"]
+    assert isinstance(sysblk, list)
+    assert sysblk[0]["cache_control"] == {"type": "ephemeral"}
+    assert sysblk[0]["text"] == "big stable prompt"
+    assert out[1] == {"role": "user", "content": "hi"}   # user untouched
+
+
+def test_apply_prompt_cache_noop_for_other_providers():
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}]
+    # cerebras/gemini/deepseek: no explicit cache_control injected
+    assert apply_prompt_cache("cerebras/gpt-oss-120b", msgs) == msgs
+    assert apply_prompt_cache("deepseek/deepseek-chat", msgs) == msgs
+
+
+def test_apply_prompt_cache_only_first_system_and_skips_empty():
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    # no system → unchanged; only the FIRST system marked
+    assert apply_prompt_cache("anthropic/x", [{"role": "user", "content": "a"}]) == [
+        {"role": "user", "content": "a"}]
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": "one"},
+        {"role": "system", "content": "two"}])
+    assert isinstance(out[0]["content"], list)          # first marked
+    assert out[1]["content"] == "two"                   # second left as-is
+
+
+def test_cache_tokens_reads_anthropic_and_openai_shapes():
+    from aibroker.providers.litellm_adapter import _cache_tokens
+    assert _cache_tokens({"cache_read_input_tokens": 900,
+                          "cache_creation_input_tokens": 100}) == (900, 100)
+    # OpenAI-shape nested cached_tokens
+    assert _cache_tokens({"prompt_tokens_details": {"cached_tokens": 512}}) == (512, 0)
+    assert _cache_tokens({}) == (0, 0)
+
+
 def test_model_for_known_provider_capability():
     assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
     assert model_for("voyage", "embedding") == "voyage/voyage-3"

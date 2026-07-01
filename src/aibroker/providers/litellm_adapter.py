@@ -115,6 +115,59 @@ def estimate_llm_cost(
     return base * peak_multiplier(model.split("/", 1)[0], at)
 
 
+# Providers with EXPLICIT prompt caching (a stable system prefix is cached at
+# ~0.1x read cost once written). deepseek caches automatically server-side (no
+# param), gemini needs its own context-cache lifecycle — neither belongs here.
+_EXPLICIT_CACHE_PROVIDERS = ("anthropic",)
+
+
+def apply_prompt_cache(
+    model: str, messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Mark the first system message with `cache_control` for providers that
+    support explicit prompt caching, so a repeated system prompt is billed as a
+    cache read. No-op for other providers and for non-str system content.
+
+    Caching only pays off when the caller sends a byte-stable system prefix;
+    the marker is harmless (silently not cached) when it doesn't or when the
+    prefix is under the provider's minimum cacheable size."""
+    if model.split("/", 1)[0] not in _EXPLICIT_CACHE_PROVIDERS:
+        return messages
+    out: list[dict[str, Any]] = []
+    marked = False
+    for m in messages:
+        content = m.get("content")
+        if not marked and m.get("role") == "system" and isinstance(content, str) \
+                and content.strip():
+            m = {**m, "content": [{
+                "type": "text", "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]}
+            marked = True
+        out.append(m)
+    return out
+
+
+def _usage_field(usage: Any, name: str) -> int:
+    if isinstance(usage, dict):
+        return int(usage.get(name) or 0)
+    return int(getattr(usage, name, 0) or 0)
+
+
+def _cache_tokens(usage: Any) -> tuple[int, int]:
+    """(read, write) prompt-cache tokens from a LiteLLM usage object. anthropic
+    reports cache_read_input_tokens / cache_creation_input_tokens; OpenAI-shape
+    providers nest cached reads under prompt_tokens_details.cached_tokens."""
+    read = _usage_field(usage, "cache_read_input_tokens")
+    write = _usage_field(usage, "cache_creation_input_tokens")
+    if not read:
+        details = usage.get("prompt_tokens_details") if isinstance(usage, dict) \
+            else getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            read = _usage_field(details, "cached_tokens")
+    return read, write
+
+
 async def call_llm(
     *,
     model: str,
@@ -128,11 +181,11 @@ async def call_llm(
     """Call LiteLLM. Returns (text, meta).
 
     `meta` contains: model, tokens_in, tokens_out, cost_usd, latency_ms,
-    finish_reason, raw_response (omitted to save context).
+    finish_reason, cache_read_tokens, cache_write_tokens.
     """
     kwargs: dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": apply_prompt_cache(model, messages),
         "api_key": api_key,
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -171,6 +224,7 @@ async def call_llm(
     else:
         tokens_in = getattr(usage, "prompt_tokens", 0)
         tokens_out = getattr(usage, "completion_tokens", 0)
+    cache_read, cache_write = _cache_tokens(usage)
     cost = estimate_llm_cost(model, tokens_in, tokens_out)
 
     meta = {
@@ -179,6 +233,8 @@ async def call_llm(
         "tokens_out": tokens_out,
         "cost_usd": cost,
         "latency_ms": latency_ms,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
         "finish_reason": (choices[0].finish_reason if choices else None),
     }
     return text, meta
