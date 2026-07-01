@@ -5,6 +5,14 @@ default models.
 
 Source: `src/aibroker/providers/litellm_adapter.py:DEFAULT_MODEL`.
 
+`litellm.drop_params = True` is set at adapter import: the broker sends every
+provider the same kwargs (`temperature`, `response_format`, …) and LiteLLM
+strips the ones a given provider doesn't support instead of 400-ing. Fixes
+cohere, which rejected `response_format`/`temperature` with
+`UnsupportedParamsError` on every structured/chat call. On `structured`, cohere
+then free-forms (no schema enforcement) → the broker's JSON validation falls it
+through; cohere's real value is `chat`, which now works.
+
 | Provider | chat:fast | chat:smart | chat:code | vision | embedding |
 |---|---|---|---|---|---|
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | — | — |

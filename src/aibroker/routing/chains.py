@@ -70,13 +70,24 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "translate": [
         "mistral", "gemini", "cohere", "groq",
     ],
+    # 2026-07-01: cerebras dropped. Its gpt-oss returns HTTP-200 but malformed
+    # JSON on structured requests (~4.6k/wk InvalidJSON) — every one wasted a
+    # pick and fell through. groq (same model) does not exhibit this at volume,
+    # so it stays.
     "structured": [
-        "cerebras", "groq", "gemini",
+        "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
         "anthropic", "openai",
     ],
-    "vision": ["gemini", "anthropic", "openai"],
+    # 2026-07-01: anthropic dropped from vision. gemini's free tier is
+    # RPM-capped, so vision fell to anthropic ~1.4k/wk — every call 400'd with
+    # "Unable to download the file": Vera passes image URLs anthropic's fetcher
+    # can't reach (gemini could). The key/model are fine (chat/structured work);
+    # this is a vision image-passing issue. Re-add anthropic here once the
+    # caller sends images as base64 rather than a fetch-gated URL. openai is the
+    # working paid fallback when gemini is exhausted.
+    "vision": ["gemini", "openai"],
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
     "transcription": ["groq", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.

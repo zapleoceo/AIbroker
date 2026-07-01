@@ -43,7 +43,9 @@ don't answer" task under a tight client timeout.
 `vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
 may be a plain string **or** a list of blocks, e.g.
 `[{"type":"text","text":"что на фото?"}, {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}]`.
-LiteLLM forwards both shapes to vision-capable models (gemini → anthropic → openai).
+LiteLLM forwards both shapes to vision-capable models (gemini → openai). Pass
+images as base64 data URLs — anthropic was removed from the vision chain because
+it 400s on fetch-gated image URLs.
 
 ### `/v1/transcribe` (audio → text)
 

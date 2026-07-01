@@ -62,6 +62,23 @@ def test_vision_only_vision_providers():
     assert not (set(chain) & forbidden)
 
 
+def test_vision_excludes_anthropic_keeps_openai_fallback():
+    """anthropic removed from vision (2026-07-01): it 400'd on Vera's image
+    URLs. gemini stays primary, openai is the paid fallback when gemini is
+    RPM-exhausted."""
+    chain = chain_for("vision")
+    assert "anthropic" not in chain
+    assert chain[0] == "gemini"
+    assert "openai" in chain
+
+
+def test_structured_excludes_cerebras():
+    """cerebras dropped from structured (2026-07-01): HTTP-200 malformed JSON."""
+    assert "cerebras" not in chain_for("structured")
+    # groq (same base model) stays — no InvalidJSON at volume there.
+    assert "groq" in chain_for("structured")
+
+
 def test_embedding_chain_voyage_first():
     """voyage is the primary embedder; cohere is the fallback."""
     chain = chain_for("embedding")

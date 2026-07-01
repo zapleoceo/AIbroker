@@ -17,6 +17,15 @@ from aibroker.providers.peak_pricing import peak_multiplier
 
 log = logging.getLogger(__name__)
 
+# Broker sends every provider the same kwargs (temperature, response_format…).
+# Some providers reject params they don't support instead of ignoring them —
+# cohere 400'd with UnsupportedParamsError on every structured/chat call
+# (~1.2k/wk wasted). drop_params tells LiteLLM to strip params a given provider
+# doesn't support (per its own param map) rather than forward-and-fail. It only
+# drops genuinely-unsupported params, so providers that DO support a param keep
+# it — safe broker-wide default.
+litellm.drop_params = True
+
 # Map: provider name → default model per capability. Used when the caller
 # doesn't pin a model. Every (provider, capability) that appears in a routing
 # chain MUST have an entry here — otherwise the provider is silently skipped.

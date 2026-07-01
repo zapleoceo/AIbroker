@@ -16,6 +16,14 @@ from aibroker.providers.litellm_adapter import (
 # ─── model_for ────────────────────────────────────────────────────────────
 
 
+def test_drop_params_enabled():
+    """Broker forwards the same kwargs to every provider; LiteLLM must drop the
+    ones a provider rejects (cohere UnsupportedParamsError regression). The
+    module-level import at the top of this file already applied the flag."""
+    import litellm
+    assert litellm.drop_params is True
+
+
 def test_model_for_known_provider_capability():
     assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
     assert model_for("voyage", "embedding") == "voyage/voyage-3"
