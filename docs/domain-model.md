@@ -76,7 +76,10 @@ Append-only billing + analytics.
 | `error_kind` | Exception class name |
 
 Indexes on `(project_id, created_at)`, `(api_key_id, created_at)`,
-`(provider, created_at)` cover the dashboard queries.
+`(provider, created_at)`, and a plain `(created_at)` (migration 005) cover the
+dashboard queries — the last one for aggregates filtered on time alone
+("calls in last 1h", "tokens today"), which the composite indexes can't serve
+since none of them lead with `created_at`.
 
 ### `audit_log`
 

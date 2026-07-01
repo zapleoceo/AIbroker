@@ -293,6 +293,199 @@ def test_dashboard_renders_with_session_cookie():
     assert "AIbroker" in r.text
 
 
+# ─── _gather_data perf refactor (merged scan, sargable ranges, gather) ──────
+
+
+def test_range_where_no_filter_returns_empty():
+    from aibroker.routes.dashboard import _range_where
+    where, bind_ = _range_where(None, None)
+    assert where == "" and bind_ == {}
+
+
+def test_range_where_both_sides_is_sargable_half_open():
+    from datetime import date, datetime, timedelta
+
+    from aibroker.routes.dashboard import _range_where
+    df, dt = date(2026, 6, 1), date(2026, 6, 3)
+    where, bind_ = _range_where(df, dt)
+    assert "::date" not in where            # non-sargable cast must be gone
+    assert "created_at >=" in where and "created_at <" in where
+    assert bind_["start"] == datetime(2026, 6, 1)
+    assert bind_["end"] == datetime(2026, 6, 4)   # dt + 1 day, exclusive upper
+    assert bind_["end"] - bind_["start"] == timedelta(days=3)  # 3 whole days inclusive
+
+
+def test_range_where_from_only_open_ended():
+    from datetime import date, datetime
+
+    from aibroker.routes.dashboard import _range_where
+    where, bind_ = _range_where(date(2026, 6, 1), None)
+    assert where == "WHERE created_at >= :start"
+    assert bind_ == {"start": datetime(2026, 6, 1)}
+
+
+def test_range_where_to_only_exclusive_next_day():
+    from datetime import date, datetime
+
+    from aibroker.routes.dashboard import _range_where
+    where, bind_ = _range_where(None, date(2026, 6, 1))
+    assert where == "WHERE created_at < :end"
+    assert bind_ == {"end": datetime(2026, 6, 2)}   # inclusive of the whole day
+
+
+def test_fetch_range_and_proj_spend_merges_one_scan():
+    """Regression: range totals + proj_spend used to be two separate
+    full-table SUMs; now one GROUP BY project_id scan feeds both (portable
+    SQL — no Postgres-only functions, so this runs under SQLite too). Seed
+    rows across two projects plus one project-less row and assert both
+    views agree."""
+    import asyncio
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ProjectRow, UsageLogRow
+    from aibroker.routes.dashboard import _fetch_range_and_proj_spend
+
+    # Explicit ids: BigInteger PKs don't autoincrement under SQLite/aiosqlite
+    # (same reason other tests skipif ON_SQLITE) — supplying ids sidesteps
+    # that and keeps this test genuinely portable, since the SQL itself
+    # (GROUP BY project_id, no Postgres-only functions) is.
+    async def _seed():
+        async with get_session() as s:
+            s.add_all([
+                ProjectRow(id=901, name="p-alpha", project_key_prefix="aib_prj_a",
+                            project_key_hash="ha", allowed_scopes=["llm:chat"],
+                            is_active=True, notes=""),
+                ProjectRow(id=902, name="p-beta", project_key_prefix="aib_prj_b",
+                            project_key_hash="hb", allowed_scopes=["llm:chat"],
+                            is_active=True, notes=""),
+                UsageLogRow(id=910, project_id=901, provider="gemini", tokens_in=100,
+                             tokens_out=50, cost_usd=1.5, status="ok"),
+                UsageLogRow(id=911, project_id=901, provider="gemini", tokens_in=200,
+                             tokens_out=100, cost_usd=2.5, status="ok"),
+                UsageLogRow(id=912, project_id=902, provider="mistral", tokens_in=10,
+                             tokens_out=5, cost_usd=0.1, status="ok"),
+                UsageLogRow(id=913, project_id=None, provider="cerebras", tokens_in=5,
+                             tokens_out=5, cost_usd=0.0, status="ok"),
+            ])
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    totals, proj_spend = asyncio.get_event_loop().run_until_complete(
+        _fetch_range_and_proj_spend("", {})
+    )
+
+    # Grand total covers ALL rows, including the project-less one.
+    assert totals["calls"] == 4
+    assert totals["spend"] == pytest.approx(4.1)
+    assert totals["tin"] == 315
+    assert totals["tout"] == 160
+    # Per-project dict excludes the project-less row, matches per-project sums.
+    assert proj_spend[901] == pytest.approx(4.0)
+    assert proj_spend[902] == pytest.approx(0.1)
+    assert None not in proj_spend
+
+
+def test_fetch_range_and_proj_spend_date_range_excludes_out_of_range_rows():
+    """Sargable bounds must still filter correctly at the day boundary."""
+    import asyncio
+    from datetime import date, datetime
+
+    from aibroker.db import get_session
+    from aibroker.db.models import UsageLogRow
+    from aibroker.routes.dashboard import _fetch_range_and_proj_spend, _range_where
+
+    async def _seed():
+        async with get_session() as s:
+            s.add_all([
+                UsageLogRow(id=920, provider="gemini", cost_usd=1.0, status="ok",
+                             created_at=datetime(2026, 6, 2, 12, 0)),   # in range
+                UsageLogRow(id=921, provider="gemini", cost_usd=5.0, status="ok",
+                             created_at=datetime(2026, 6, 1, 23, 59)),  # before
+                UsageLogRow(id=922, provider="gemini", cost_usd=7.0, status="ok",
+                             created_at=datetime(2026, 6, 3, 0, 0)),    # after (next day start)
+            ])
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    where, bind_ = _range_where(date(2026, 6, 2), date(2026, 6, 2))
+    totals, _ = asyncio.get_event_loop().run_until_complete(
+        _fetch_range_and_proj_spend(where, bind_)
+    )
+    assert totals["calls"] == 1
+    assert totals["spend"] == pytest.approx(1.0)
+
+
+def test_fetch_tokens_today_aggregates_only_todays_rows():
+    """Portable SQL (Python-computed sargable bounds, no ::date cast) — must
+    include today's UTC rows and exclude yesterday's."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow, UsageLogRow
+    from aibroker.routes.dashboard import _fetch_tokens_today
+
+    today = datetime.now(UTC).replace(tzinfo=None)
+    yesterday = today - timedelta(days=1)
+
+    async def _seed():
+        async with get_session() as s:
+            s.add_all([
+                # Explicit id: real FK target for usage_log.api_key_id below
+                # (Postgres enforces it; SQLite BigInteger PK needs it anyway).
+                ApiKeyRow(id=905, provider="gemini", label="k-tokens-today",
+                           tier="free", scopes=["llm:chat"], token_encrypted="x",
+                           is_active=True, is_alive=True),
+                UsageLogRow(id=930, api_key_id=905, provider="gemini", tokens_in=100,
+                             tokens_out=50, status="ok", created_at=today),
+                UsageLogRow(id=931, api_key_id=905, provider="gemini", tokens_in=10,
+                             tokens_out=5, status="ok", created_at=yesterday),
+            ])
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    tokens_today = asyncio.get_event_loop().run_until_complete(_fetch_tokens_today())
+    assert tokens_today[905] == {"tot": 150, "tin": 100, "tout": 50}
+
+
+def test_fetch_projects_and_keys_return_seeded_rows():
+    """Plain ORM selects — portable, no Postgres-only syntax."""
+    import asyncio
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow, ProjectRow
+    from aibroker.routes.dashboard import _fetch_keys, _fetch_projects
+
+    async def _seed():
+        async with get_session() as s:
+            s.add_all([
+                ProjectRow(id=906, name="p-gamma", project_key_prefix="aib_prj_g",
+                            project_key_hash="hg", allowed_scopes=["llm:chat"],
+                            is_active=True, notes=""),
+                ApiKeyRow(id=907, provider="gemini", label="k-gamma", tier="free",
+                           scopes=["llm:chat"], token_encrypted="x",
+                           is_active=True, is_alive=True),
+            ])
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    projects = asyncio.get_event_loop().run_until_complete(_fetch_projects())
+    keys = asyncio.get_event_loop().run_until_complete(_fetch_keys())
+    assert any(p.name == "p-gamma" for p in projects)
+    assert any(k.label == "k-gamma" for k in keys)
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="calls_1h/provider_summary use Postgres-only now()/FILTER")
+def test_gather_data_runs_concurrently_without_session_conflicts():
+    """End-to-end proof against real Postgres: the 6 sub-fetches each open
+    their own session (asyncio.gather) — this must not raise 'session is
+    already in use' or deadlock the pool, and the merged/sargable rewrite
+    must still return every expected key."""
+    import asyncio
+
+    from aibroker.routes.dashboard import _gather_data
+    data = asyncio.get_event_loop().run_until_complete(_gather_data())
+    for key in ("projects", "keys", "range_spend", "proj_spend",
+                 "tokens_today", "calls_1h", "provider_summary"):
+        assert key in data
+
+
 # ─── Logout ─────────────────────────────────────────────────────────────────
 
 

@@ -99,6 +99,25 @@ floor on master.
   Each cell uses `data-sort` for the canonical comparable value, so
   monetary or status text doesn't break ordering.
 
+**`_gather_data` performance (2026-07-01).** The all-time default load (no
+date filter) was taking up to ~30s once `usage_log` passed ~450k rows:
+`range_stats` and `proj_spend` each did a separate full-table `SUM`, and
+`created_at::date = ...` casts made the "calls last 1h" / "tokens today"
+queries non-sargable even with an index. Fixed without changing the response
+shape:
+
+- `range_stats` + `proj_spend` merged into **one** `GROUP BY project_id` scan;
+  the range-wide grand total is a cheap in-Python sum over the handful of
+  per-project rows, not a second table scan.
+- Date-range and "today" bounds are computed in Python as half-open
+  `created_at >= start AND created_at < end`, never `::date`-cast — sargable
+  against a plain `(created_at)` index (migration 005, `CONCURRENTLY`).
+- The 6 independent queries (projects, keys, range+proj totals, calls/1h,
+  tokens/today, provider summary) run concurrently via `asyncio.gather`, each
+  on its own pooled connection (`get_session()` per fetch) — a single
+  `AsyncSession` can't run overlapping statements. `pool_size=10 +
+  max_overflow=20` comfortably covers 6 concurrent connections per load.
+
 **Project drill-down** (`/dashboard/projects/{id}?range=24h|7d|30d`): KPI cards
 (calls, spend, tokens, avg latency + success %), breakdown cards by
 provider / capability / model, and a **latency-distribution histogram** (calls
