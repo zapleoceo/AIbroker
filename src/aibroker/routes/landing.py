@@ -11,7 +11,6 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from aibroker import __version__
 
-
 # SVG favicon — hub-and-spokes: central node = broker, 4 satellites = providers
 # being routed. 32×32 viewBox; scales cleanly to 16×16 in tab strips.
 # Embedded as a module-level string so tests + multiple routes can reuse it.
@@ -826,10 +825,12 @@ _LLMS_TXT = """# AIbroker
   `vending` (broker hands the client a short-lived lease + plaintext key
   for direct provider calls).
 - **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
-  `chat:code`, `chat:edit`, `embedding`, `vision`, `prefilter`, `structured`.
-  Each maps to an ordered provider chain (free-first) and a required scope.
+  `chat:code`, `chat:edit`, `prefilter`, `structured`, `translate`, `vision`,
+  `transcription`, `embedding`. Each maps to an ordered provider chain
+  (free-first) and a required scope.
 - **Scopes**: every project key carries a list of allowed scopes
-  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`). Mismatch → HTTP 403.
+  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`, `llm:audio`).
+  Mismatch → HTTP 403.
 - **Adaptive cooldown**: per-provider base wait (Gemini 60s, Mistral 10s,
   OpenRouter 5min, etc.) with exponential backoff per consecutive 429.
 - **Reserved lane**: a key marked `is_reserve=true` is picked last in its

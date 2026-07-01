@@ -34,7 +34,11 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 ### Capabilities for `/v1/chat`
 
 `chat:fast`, `chat:smart`, `chat:code`, `chat:edit`, `prefilter`,
-`structured`, `vision`.
+`structured`, `translate`, `vision`.
+
+`translate` routes to small fast non-reasoning models first
+(mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,
+don't answer" task under a tight client timeout.
 
 `vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
 may be a plain string **or** a list of blocks, e.g.
