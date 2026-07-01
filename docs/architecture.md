@@ -99,6 +99,15 @@ floor on master.
   Each cell uses `data-sort` for the canonical comparable value, so
   monetary or status text doesn't break ordering.
 
+**Project drill-down** (`/dashboard/projects/{id}?range=24h|7d|30d`): KPI cards
+(calls, spend, tokens, avg latency + success %), breakdown cards by
+provider / capability / model / status, and a **latency-distribution
+histogram** (calls per latency bucket: `<250ms … >30s`, bars scaled to the
+busiest bucket). **Every aggregate is scoped to the selected range** — only the
+"recent 50 calls" table ignores it. The histogram surfaces a slow tail that a
+single average hides (e.g. an avg of 6 s that is really fast calls plus a fat
+`>30s` timeout bucket).
+
 All form posts go through `require_owner_session`; an unauth POST returns
 401. Every mutation writes an `audit_log` row through
 `telemetry.audit()`.

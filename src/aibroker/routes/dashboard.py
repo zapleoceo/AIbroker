@@ -1052,6 +1052,24 @@ async def dashboard(
 
 _RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 
+# Latency histogram: fixed edges (ms). width_bucket(x, edges) → 0..len(edges),
+# giving len(edges)+1 buckets that must line up 1:1 with the labels below.
+_LAT_EDGES_MS = (250, 500, 1000, 2000, 5000, 10000, 30000)
+_LAT_LABELS = ("<250ms", "250-500ms", "0.5-1s", "1-2s",
+               "2-5s", "5-10s", "10-30s", ">30s")
+_LAT_SQL_ARRAY = "ARRAY[" + ",".join(str(e) for e in _LAT_EDGES_MS) + "]"
+
+
+def _lat_hist_counts(rows: list[Any]) -> list[int]:
+    """Map sparse (bucket, count) rows from width_bucket into a dense per-label
+    count list (empty buckets → 0)."""
+    counts = [0] * len(_LAT_LABELS)
+    for r in rows:
+        b = int(r.b)
+        if 0 <= b < len(counts):
+            counts[b] = int(r.n)
+    return counts
+
 
 async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] | None:
     """Pull aggregates + recent calls for one project over the last `hours`."""
@@ -1096,6 +1114,13 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY status ORDER BY n DESC"
         ), bind_)).all()
+        lat_hist_rows = (await s.execute(text(
+            f"SELECT width_bucket(latency_ms, {_LAT_SQL_ARRAY}) AS b, "
+            "       COUNT(*) AS n "
+            "FROM usage_log WHERE project_id=:pid AND latency_ms IS NOT NULL "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
+            "GROUP BY b ORDER BY b"
+        ), bind_)).all()
         recent = (await s.execute(text(
             "SELECT created_at, provider, model, capability, "
             "       tokens_in, tokens_out, cost_usd, latency_ms, status, "
@@ -1112,6 +1137,7 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         "by_model": by_model,
         "by_capability": by_capability,
         "by_status": by_status,
+        "lat_hist": _lat_hist_counts(list(lat_hist_rows)),
         "recent": recent,
     }
 
@@ -1203,6 +1229,24 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         lambda r: f'<tr><td class="k status-{esc(r.status)}">{esc(r.status)}</td>'
                   f'<td class="num">{r.n}</td><td></td></tr>')
 
+    # Latency histogram: count of calls per latency bucket (same period), bars
+    # scaled to the busiest bucket. Reuses the cap-bar/fill quota-bar styling.
+    lat_counts = d["lat_hist"]
+    lat_max = max(lat_counts) or 1
+    lat_rows = "".join(
+        f'<tr><td class="k">{esc(lbl)}</td>'
+        f"<td style='width:55%'><span class='cap-bar'>"
+        f"<span class='fill' style='width:{int(n / lat_max * 100)}%'></span>"
+        f'</span></td><td class="num">{n}</td></tr>'
+        for lbl, n in zip(_LAT_LABELS, lat_counts, strict=True)
+    )
+    lat_card = (
+        '<div class="brk-card">'
+        '<h3 data-i18n data-en="Latency distribution" '
+        'data-ru="Распределение задержек">Latency distribution</h3>'
+        f'<table><tbody>{lat_rows}</tbody></table></div>'
+    ) if sum(lat_counts) else ""
+
     # tr.data-row marker is required by the sortable-table JS in _dash_html.
     # data-sort on the time column uses iso8601 so lexical sort works.
     recent_rows = "".join(
@@ -1247,6 +1291,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
       {cap_card}
       {model_card}
       {status_card}
+      {lat_card}
     </div>
 
     <h2 data-i18n data-en="Recent 50 calls" data-ru="Последние 50 вызовов">Recent 50 calls</h2>

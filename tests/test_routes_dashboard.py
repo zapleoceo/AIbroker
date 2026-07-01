@@ -520,7 +520,8 @@ def test_range_hours_table_complete():
 
 
 def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
-                       providers: list[tuple] | None = None):
+                       providers: list[tuple] | None = None,
+                       lat_hist: list[int] | None = None):
     """Build the dict that _render_project_detail() consumes — no DB."""
     from collections import namedtuple
     from datetime import UTC, datetime
@@ -549,6 +550,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
         "by_status": [BrkSt("ok", 3), BrkSt("rate_limit", 1)],
+        "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
             Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
                     "cerebras", "cerebras/gpt-oss-120b", "chat:fast",
@@ -603,6 +605,45 @@ def test_render_project_detail_handles_empty_breakdowns():
     body = _render_project_detail(d).body.decode()
     # Empty breakdown card falls back to the no-data line (bilingual)
     assert "(no data in this range)" in body
+
+
+# ─── Latency histogram ───────────────────────────────────────────────────────
+
+
+def test_lat_labels_align_with_edges():
+    """width_bucket yields len(edges)+1 buckets — labels must match 1:1."""
+    from aibroker.routes.dashboard import _LAT_EDGES_MS, _LAT_LABELS
+    assert len(_LAT_LABELS) == len(_LAT_EDGES_MS) + 1
+
+
+def test_lat_hist_counts_maps_sparse_to_dense():
+    """width_bucket returns only non-empty buckets; missing ones become 0."""
+    from collections import namedtuple
+
+    from aibroker.routes.dashboard import _LAT_LABELS, _lat_hist_counts
+    Row = namedtuple("Row", "b n")
+    counts = _lat_hist_counts([Row(0, 5), Row(3, 2), Row(7, 1)])
+    assert len(counts) == len(_LAT_LABELS)
+    assert counts[0] == 5 and counts[3] == 2 and counts[7] == 1
+    assert counts[1] == 0 and counts[6] == 0
+
+
+def test_render_project_detail_shows_latency_histogram():
+    from aibroker.routes.dashboard import _render_project_detail
+    # busiest bucket (10) → full-width bar; empty buckets → 0%.
+    d = _fake_proj_detail(lat_hist=[10, 5, 0, 0, 0, 0, 0, 0])
+    body = _render_project_detail(d).body.decode()
+    assert "Latency distribution" in body
+    assert "&lt;250ms" in body or "<250ms" in body   # first bucket label
+    assert "style='width:100%'" in body or 'style="width:100%"' in body  # peak bar
+    assert ">10<" in body and ">5<" in body           # per-bucket counts
+
+
+def test_render_project_detail_hides_empty_histogram():
+    from aibroker.routes.dashboard import _render_project_detail
+    d = _fake_proj_detail(lat_hist=[0] * 8)
+    body = _render_project_detail(d).body.decode()
+    assert "Latency distribution" not in body
 
 
 # ─── Main dashboard render (unit, no DB) ───────────────────────────────────
