@@ -68,7 +68,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # gemini-flash answer in ~1-2s. Also uses the models the bot's reply chains reach
     # LAST, so translation barely competes with live replies for keys.
     "translate": [
-        "cohere", "mistral", "gemini", "groq",
+        "mistral", "gemini", "cohere", "groq",
     ],
     "structured": [
         "cerebras", "groq", "gemini",
