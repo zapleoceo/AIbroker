@@ -80,6 +80,27 @@ def test_resolution_manual_in_out_axes():
     assert q.req_per_day == 1_500          # gemini default still applies
 
 
+# ─── Paid keys ignore free-tier seeds ────────────────────────────────────────
+
+
+def test_paid_key_skips_free_tier_seed():
+    """A paid key isn't bound by free-tier seeds — no quota axis at all unless
+    it carries an explicit manual/discovered cap (the $/day cost cap is a
+    separate column). Fixes the paid gemini key reading 212% of 1,500 free RPD."""
+    q = quota_for_key(_key(provider="gemini", tier="paid"))
+    assert q.req_per_day is None and q.tok_per_day is None
+
+
+def test_paid_key_keeps_explicit_manual_limit():
+    q = quota_for_key(_key(provider="gemini", tier="paid", manual_req_limit=500_000))
+    assert q.req_per_day == 500_000
+
+
+def test_free_key_still_gets_seed():
+    q = quota_for_key(_key(provider="gemini", tier="free"))
+    assert q.req_per_day == 1_500
+
+
 # ─── percent_used_for_key — max across 4 axes ────────────────────────────────
 
 

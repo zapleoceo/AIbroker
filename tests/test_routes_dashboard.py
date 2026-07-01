@@ -771,6 +771,24 @@ def test_main_render_keys_paid_provider_no_bar():
     assert "data-sort='-1'" in body
 
 
+def test_main_render_paid_key_no_free_tier_quota_bar():
+    """A paid gemini key isn't bound by the 1,500 free RPD seed — the quota
+    column shows just the count, not a misleading 200%+ req bar. Its $/day cap
+    is rendered in the separate cost column."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=16, provider="gemini", label="demoniwwwe", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=3183,
+        daily_cost_cap_usd=1.0, daily_cost_used_usd=0.42,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert "% req" not in body                # no free-tier req axis for paid
+    assert ">3183<" in body                   # quota column = plain count
+    assert "$0.4200 / $1.00" in body          # separate cost-cap column
+
+
 def test_dashboard_edit_key_saves_manual_quota_override():
     """Form posts the 4 manual limits; handler persists them, blank → None."""
     r = client.post(

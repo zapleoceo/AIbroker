@@ -206,6 +206,12 @@ observations override.
 A seed that's overridden by reality is a legitimate bootstrap, not a
 crutch: it's used only until the provider teaches us the real value.
 
+**Paid keys drop the seed tier entirely** (`quota_for_key`): `PROVIDER_QUOTAS`
+are FREE-tier limits, so a `tier='paid'` key keeps only its explicit
+manual/discovered axes — a paid gemini key no longer reads as 212% of the 1,500
+free RPD. Its dollar budget lives in the separate `daily_cost_cap_usd` column on
+the dashboard, not the quota bar.
+
 ### Per request
 
 1. **Size filter** — `run_chat` estimates prompt tokens (≈chars/4) and

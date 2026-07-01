@@ -67,6 +67,12 @@ def quota_for_key(key) -> Quota:
     `key` is any object exposing the column attrs (ApiKeyRow in prod;
     SimpleNamespace in tests)."""
     base = quota_for(getattr(key, "provider", ""))
+    # PROVIDER_QUOTAS seeds are FREE-tier limits; a paid key isn't bound by them
+    # (its real caps are orders higher), so a paid gemini key must not read as
+    # 212% of the 1,500 free RPD. Drop the seed for paid keys — only explicit
+    # manual/discovered axes remain; the $/day cost cap is a separate column.
+    if getattr(key, "tier", "") == "paid":
+        base = Quota(doc=base.doc)
 
     def pick(*vals: int | None) -> int | None:
         for v in vals:
