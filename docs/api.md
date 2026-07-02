@@ -27,7 +27,7 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 | `POST` | `/v1/chat?capability=<cap>` | `ChatRequest` | `ChatResponse` |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` |
-| `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key) |
+| `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key). `429` if the project exceeds `VENDING_RATE_LIMIT_PER_MINUTE` (default 30/min) — see **Threat model** in [security.md](security.md). |
 | `POST` | `/v1/usage` | `UsageReport` | `{recorded: true, request_id}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
 

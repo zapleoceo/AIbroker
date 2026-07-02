@@ -35,6 +35,7 @@ The actual provider credentials.
 | `is_active` / `is_alive` | `is_active` = ops toggle; `is_alive` = monitor-set |
 | `daily_used` / `daily_limit` | Request counter; `daily_limit=0` = no limit |
 | `daily_cost_used_usd` / `daily_cost_cap_usd` | Cap is NULL for free keys |
+| `daily_reset_at` | Date the two `daily_*` counters above were last touched. Read/write always goes through `FRESH_DAILY_USED_SQL`/`FRESH_DAILY_COST_SQL` (`selector.py`), which treats a non-today value as 0 — self-healing, no cron reset job. See **Cost guard** in [routing.md](routing.md). |
 | `cooldown_until` | Set on 429 |
 | `error_count` | Cleared on success ping by monitor |
 | `last_used_at` | Drives LRU |
@@ -55,6 +56,10 @@ Active checkouts in vending mode.
 Expired-but-not-released leases are technically still in the table — no
 cleanup job today. Acceptable because the row count grows ~linearly with
 vend operations, not requests.
+
+Indexed on `(project_id, leased_at)` (migration 007) — backs the per-project
+vending rate limit (`routes/vending.py::_check_vending_rate_limit`, see
+[security.md](security.md)).
 
 ### `usage_log`
 

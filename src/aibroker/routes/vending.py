@@ -55,11 +55,47 @@ class UsageReport(BaseModel):
     retry_after_s: int | None = None
 
 
+async def _check_vending_rate_limit(project_id: int, request: Request) -> None:
+    """Reject with 429 once a project has vended
+    `VENDING_RATE_LIMIT_PER_MINUTE` keys in the last rolling minute.
+
+    2026-07-03: vending hands out a REAL plaintext provider token per call —
+    unlike proxy mode (`/v1/chat`) there was no rate limiting at all here, so
+    a compromised or malicious X-Project-Key could drain the lease pool or
+    exfiltrate tokens unboundedly. Counts `leases.leased_at` (already written
+    on every successful vend — no new table), backed by
+    `ix_leases_project_leased_at` (migration 007). `VENDING_RATE_LIMIT_PER_MINUTE
+    <= 0` disables the check (escape hatch, not expected in normal ops)."""
+    limit = get_settings().VENDING_RATE_LIMIT_PER_MINUTE
+    if limit <= 0:
+        return
+    async with get_session() as s:
+        count = (await s.execute(
+            text(
+                "SELECT COUNT(*) FROM leases "
+                "WHERE project_id = :pid AND leased_at > now() - INTERVAL '1 minute'"
+            ),
+            {"pid": project_id},
+        )).scalar() or 0
+    if count >= limit:
+        await audit(
+            actor=f"project:{project_id}", action="vend_rate_limited",
+            target=str(project_id),
+            metadata={"limit_per_minute": limit, "count": int(count)},
+            ip=_client_ip(request),
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"vending rate limit exceeded: {limit}/min",
+        )
+
+
 @router.post("/key", response_model=KeyResponse)
 async def vend_key(body: KeyRequest, request: Request,
                     ctx: ProjectCtx = Depends(require_project)) -> KeyResponse:
     if not ctx.has_scope(body.scope):
         raise HTTPException(403, f"project lacks scope: {body.scope}")
+    await _check_vending_rate_limit(ctx.project.id, request)
     key = await pick_and_reserve(body.provider, scope=body.scope)
     if key is None:
         raise HTTPException(503, f"no available key for {body.provider}/{body.scope}")
