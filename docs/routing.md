@@ -154,17 +154,16 @@ WHERE id = (
     ORDER BY
       k.is_reserve,
       <saturation_case>,            -- over-quota keys pushed to back
-      COALESCE(r.n, 0),              -- recent-error penalty
       random()                       -- pure random rotation within bucket
     LIMIT 1
     FOR UPDATE OF k SKIP LOCKED
 )
 ```
 
-(Plus `LEFT JOIN`s against `recent` (15-min error count), `toks_today`
-(today's per-key req + token sum), and a `defaults` VALUES CTE built from
-`PROVIDER_QUOTAS` so the saturation check sees the right quota even when
-auto-discover hasn't populated `discovered_*_limit` yet.)
+(Plus a `LEFT JOIN` against `toks_today` (today's per-key req + token sum) and a
+`defaults` VALUES CTE built from `PROVIDER_QUOTAS` so the saturation check sees
+the right quota even when auto-discover hasn't populated `discovered_*_limit`
+yet.)
 
 Why each column matters:
 1. **`is_reserve`** — non-reserve keys first; reserved Coach safety net is last.
@@ -172,9 +171,7 @@ Why each column matters:
    (per-key `discovered_*` or `PROVIDER_QUOTAS` default) gets a `1`; clean
    peers get `0`. Soft sort, not a hard filter: when **every** peer is
    saturated the picker still returns one rather than fail the request.
-3. **recent_errors** — a key that 5× 429'd in the last 15 min waits until
-   clean keys are exhausted (within the same saturation bucket).
-4. **random()** — true random rotation. Replaced the LRU+`daily_used`
+3. **random()** — true random rotation. Replaced the LRU+`daily_used`
    ordering after we caught one workload-class (Coach JSON-heavy edits)
    monopolising the same handful of cerebras keys to token saturation
    while peers sat idle. Random distributes the next pick uniformly across
@@ -182,6 +179,16 @@ Why each column matters:
 
 Atomic, race-free across replicas, advances LRU in one go. Postgres-only
 (JSONB `?` + SKIP LOCKED + `random()`); exercised by the Postgres CI job.
+
+**Hot-path performance (2026-07-02).** `toks_today` filters `created_at >=
+date_trunc('day', now() AT TIME ZONE 'UTC')` (half-open range), NOT
+`created_at::date = today` — the cast was non-sargable and forced a full seq
+scan of `usage_log` (450k+ rows, ~220ms) on **every** pick, i.e. every provider
+attempt of every request. The bare-column range uses `ix_usage_created_at`
+(migration 005). A vestigial `recent` (15-min per-key error count) CTE was
+also dropped — it was computed and joined but never referenced in `ORDER BY`
+(removed when the recent-error sort gave way to `random()`), so it was pure
+scan cost.
 
 `mark_cooldown` normalises tz-aware datetimes to naive UTC — `cooldown_until` is
 a naive `TIMESTAMP` and asyncpg rejects offset-aware values.

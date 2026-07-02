@@ -57,8 +57,7 @@ async def pick_and_reserve(
     #   2. is_quota_saturated — keys at ≥95% of their daily token/request
     #      quota are pushed to the back of the queue. They still get picked
     #      if every healthy peer is also saturated (fallback, not hard cut).
-    #   3. recent_errors      — failures in the last 15 min push the key back.
-    #   4. random()           — true random rotation within the bucket. No
+    #   3. random()           — true random rotation within the bucket. No
     #      LRU, no daily_used sort — those caused one key per workload to
     #      monopolise its slot while others sat idle.
     #
@@ -85,14 +84,6 @@ async def pick_and_reserve(
         WITH defaults(provider, req_def, tok_def) AS (VALUES
           {quota_rows}
         ),
-        recent AS MATERIALIZED (
-            SELECT api_key_id, COUNT(*) AS n
-            FROM usage_log
-            WHERE created_at > now() - INTERVAL '15 minutes'
-              AND status <> 'ok'
-              AND api_key_id IS NOT NULL
-            GROUP BY api_key_id
-        ),
         toks_today AS MATERIALIZED (
             SELECT api_key_id,
                    COALESCE(SUM(tokens_in + tokens_out), 0) AS toks,
@@ -100,14 +91,18 @@ async def pick_and_reserve(
                    COALESCE(SUM(tokens_out), 0) AS toks_out,
                    COUNT(*) AS reqs
             FROM usage_log
-            WHERE created_at::date = (now() AT TIME ZONE 'UTC')::date
+            -- Sargable half-open bound on the bare created_at column (uses the
+            -- ix_usage_created_at index). The old `created_at::date = today`
+            -- cast forced a full seq-scan of usage_log on EVERY pick — ~220ms
+            -- and rising with the table, on the hot path of every request.
+            WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+              AND created_at <  date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day'
               AND api_key_id IS NOT NULL
             GROUP BY api_key_id
         )
         UPDATE api_keys SET last_used_at = now()
         WHERE id = (
             SELECT k.id FROM api_keys k
-            LEFT JOIN recent r      ON r.api_key_id = k.id
             LEFT JOIN toks_today t  ON t.api_key_id = k.id
             LEFT JOIN defaults d    ON d.provider   = k.provider
             WHERE {where}
@@ -128,10 +123,9 @@ async def pick_and_reserve(
                 END,
                 -- Pure random within the healthy bucket. Errors are already
                 -- reflected in is_alive (auth fails → mark_dead) and
-                -- cooldown_until (429 → adaptive_cooldown). The earlier
-                -- recent_errors sort caused a single 'cleanest' key to
-                -- monopolise traffic while peers sat idle — bucketing didn't
-                -- help when one key was in its own bucket. random() now
+                -- cooldown_until (429 → adaptive_cooldown). An earlier
+                -- recent-errors sort caused one 'cleanest' key to monopolise
+                -- traffic while peers sat idle, so random() replaced it and
                 -- distributes uniformly across every healthy peer.
                 random()
             LIMIT 1
