@@ -35,7 +35,7 @@ local routing policy (`stepan_shared/llm/routing.py`) is a *separate*,
 provider-direct fallback used only when `llm_backend=local` — it does not
 route through this broker and does not see anthropic.
 
-## Prompt caching (2026-07-01)
+## Prompt caching (2026-07-01, wired end-to-end 2026-07-02)
 
 `apply_prompt_cache(model, messages)` marks the first system message with
 `cache_control: {ephemeral}` for providers with **explicit** prompt caching
@@ -43,12 +43,28 @@ route through this broker and does not see anthropic.
 read (~0.1× input cost) after the first write. The marker is harmless when the
 prefix varies or is under the provider's minimum cacheable size (silently not
 cached). **deepseek** caches automatically server-side (no param); **gemini**
-needs its own context-cache lifecycle — neither is marked here. `call_llm`'s
-`meta` now carries `cache_read_tokens` / `cache_write_tokens` (parsed by
-`_cache_tokens`, handling both the anthropic and OpenAI usage shapes) so
-callers and vending clients can see cache activity. Caching only helps when the
-caller (Vera/Stepan) sends a stable system prompt — a timestamp or per-request
-ID in the prefix defeats it.
+needs its own context-cache lifecycle — neither is marked here. Caching only
+helps when the caller (Vera/Stepan) sends a stable system prompt — a
+timestamp or per-request ID in the prefix defeats it.
+
+`call_llm`'s `meta` carries `cache_read_tokens` / `cache_write_tokens`
+(parsed by `_cache_tokens`, handling both the anthropic and OpenAI usage
+shapes) — and now (2026-07-02) it's wired all the way through, not just
+computed and discarded:
+
+- `estimate_llm_cost(..., cache_read_tokens=, cache_write_tokens=)` passes
+  them to `litellm.cost_per_token`'s `cache_read_input_tokens` /
+  `cache_creation_input_tokens` kwargs, so a cache read prices at ~0.1× and a
+  cache write at its real (higher) creation rate — before this, every prompt
+  token priced flat, over-counting cached calls (safe direction, but not the
+  real bill).
+- `usage_log.cache_read_tokens` / `cache_write_tokens` (migration 006)
+  persist every call's cache activity.
+- `run_chat` → `ChatOutcome.cache_read_tokens/cache_write_tokens` →
+  `ChatResponse` — `/v1/chat` callers can see their own cache hit rate.
+- `/dashboard/projects/{id}` shows a **Prompt cache** KPI card (read/write
+  token totals + reuse ratio) for the selected range — hidden entirely when a
+  project never touches caching (most calls don't route through anthropic).
 
 | Provider | chat:fast | chat:smart | chat:code | vision | embedding |
 |---|---|---|---|---|---|

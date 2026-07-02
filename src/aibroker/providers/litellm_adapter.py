@@ -103,17 +103,28 @@ _pricing_warned: set[str] = set()
 
 
 def estimate_llm_cost(
-    model: str, tokens_in: int, tokens_out: int, *, at: datetime | None = None
+    model: str, tokens_in: int, tokens_out: int, *,
+    at: datetime | None = None,
+    cache_read_tokens: int = 0, cache_write_tokens: int = 0,
 ) -> float:
     """Real per-model cost from LiteLLM's pricing map, times any time-of-day
     surcharge (DeepSeek peak/valley). Returns 0.0 only when the model is
     genuinely unpriced — and logs that once per model so a silent pricing break
     can't hide (a `completion_cost` signature change zeroed every cost for days
     before we noticed, blinding the cost guard). `at` overrides the clock in
-    tests; production passes None (= now, UTC)."""
+    tests; production passes None (= now, UTC).
+
+    `cache_read_tokens`/`cache_write_tokens` are the SUBSET of `tokens_in` that
+    hit/wrote anthropic's prompt cache (see apply_prompt_cache) — passed through
+    to LiteLLM so a cache read prices at ~0.1x and a cache write at its real
+    (higher) creation rate, instead of every prompt token pricing at the flat
+    input rate. Without this, cost_usd over-counted anthropic calls that hit
+    cache — safe direction (never under-charges) but not the real bill."""
     try:
         p_cost, c_cost = litellm.cost_per_token(
-            model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out
+            model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out,
+            cache_read_input_tokens=cache_read_tokens,
+            cache_creation_input_tokens=cache_write_tokens,
         )
         base = float(p_cost + c_cost)
     except Exception as e:
@@ -234,7 +245,8 @@ async def call_llm(
         tokens_in = getattr(usage, "prompt_tokens", 0)
         tokens_out = getattr(usage, "completion_tokens", 0)
     cache_read, cache_write = _cache_tokens(usage)
-    cost = estimate_llm_cost(model, tokens_in, tokens_out)
+    cost = estimate_llm_cost(model, tokens_in, tokens_out,
+                              cache_read_tokens=cache_read, cache_write_tokens=cache_write)
 
     meta = {
         "model": model,

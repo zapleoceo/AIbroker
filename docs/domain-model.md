@@ -70,7 +70,8 @@ Append-only billing + analytics.
 | `capability` | `chat:fast`, `chat:smart`, ... |
 | `workflow` | Optional caller-provided tag (e.g. `triage`, `search`) |
 | `tokens_in` / `tokens_out` | From provider response |
-| `cost_usd` | LiteLLM-computed |
+| `cache_read_tokens` / `cache_write_tokens` | Prompt-cache subset of `tokens_in` (migration 006). Anthropic only today — see `providers/litellm_adapter.py:apply_prompt_cache`. 0 for every other call. |
+| `cost_usd` | LiteLLM-computed; cache-aware (a cache read prices at ~0.1x, a cache write at its real premium rate) |
 | `latency_ms` | End-to-end |
 | `status` | `ok` / `rate_limit` / `auth_fail` / `error` |
 | `error_kind` | Exception class name |

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -67,7 +67,7 @@ async def vend_key(body: KeyRequest, request: Request,
     s = get_settings()
     secs = body.lease_seconds or s.DEFAULT_LEASE_SECONDS
     lease_id = "lse_" + secrets.token_urlsafe(20)
-    lease_until = datetime.now(timezone.utc) + timedelta(seconds=secs)
+    lease_until = datetime.now(UTC) + timedelta(seconds=secs)
 
     async with get_session() as ses:
         await ses.execute(
@@ -118,19 +118,19 @@ async def report_usage(body: UsageReport, ctx: ProjectCtx = Depends(require_proj
     capability = None  # unknown at vending mode
 
     if body.status == "rate_limit":
-        until = datetime.now(timezone.utc) + timedelta(seconds=body.retry_after_s or 60)
+        until = datetime.now(UTC) + timedelta(seconds=body.retry_after_s or 60)
         await mark_cooldown(api_key_id, until)
     elif body.status == "auth_fail":
         await mark_dead(api_key_id)
 
-    await record_usage(
+    request_id = await record_usage(
         api_key_id=api_key_id, project_id=ctx.project.id, lease_id=body.lease_id,
         provider="?", model=body.model, capability=capability, workflow=workflow,
         tokens_in=body.tokens_in, tokens_out=body.tokens_out,
         cost_usd=body.cost_usd, latency_ms=body.latency_ms,
         status=body.status, error_kind=body.error_kind, http_status=body.http_status,
     )
-    return {"recorded": True}
+    return {"recorded": True, "request_id": request_id}
 
 
 @router.post("/release")

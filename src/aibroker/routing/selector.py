@@ -6,7 +6,7 @@ to advance the LRU.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -178,7 +178,7 @@ async def mark_cooldown(api_key_id: int, until: datetime) -> None:
     # ("can't subtract offset-naive and offset-aware"). Callers pass UTC-aware
     # datetimes — normalise to naive UTC here so prod (asyncpg) doesn't blow up.
     if until.tzinfo is not None:
-        until = until.astimezone(timezone.utc).replace(tzinfo=None)
+        until = until.astimezone(UTC).replace(tzinfo=None)
     async with get_session() as s:
         await s.execute(
             text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1 "
@@ -212,23 +212,39 @@ async def record_usage(
     status: str,
     error_kind: str | None,
     http_status: int | None,
-) -> None:
-    """Insert usage_log row + update counters on the api_key."""
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> int:
+    """Insert usage_log row + update counters on the api_key.
+
+    cache_read_tokens/cache_write_tokens default to 0 — only anthropic chat
+    calls populate them today (see providers/litellm_adapter.py
+    apply_prompt_cache); every other call site (embed, transcribe, vending's
+    /v1/usage self-report) has no cache concept and leaves them at 0.
+
+    Returns the new row's id — the broker-side request ID. Threaded back
+    through the outcome dataclasses and returned to the caller in the API
+    response (`request_id`) so both sides can find the same call in their own
+    logs / this dashboard's project detail table."""
     async with get_session() as s:
-        await s.execute(
+        usage_id = (await s.execute(
             text(
                 "INSERT INTO usage_log "
                 "(api_key_id, project_id, lease_id, provider, model, capability, workflow, "
-                " tokens_in, tokens_out, cost_usd, latency_ms, status, error_kind, http_status) "
-                "VALUES (:k, :p, :l, :pr, :m, :c, :w, :ti, :to, :co, :lm, :s, :e, :h)"
+                " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
+                " cost_usd, latency_ms, status, error_kind, http_status) "
+                "VALUES (:k, :p, :l, :pr, :m, :c, :w, :ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
+                "RETURNING id"
             ),
             {
                 "k": api_key_id, "p": project_id, "l": lease_id, "pr": provider,
                 "m": model, "c": capability, "w": workflow,
-                "ti": tokens_in, "to": tokens_out, "co": cost_usd, "lm": latency_ms,
+                "ti": tokens_in, "to": tokens_out,
+                "cr": cache_read_tokens, "cw": cache_write_tokens,
+                "co": cost_usd, "lm": latency_ms,
                 "s": status, "e": error_kind, "h": http_status,
             },
-        )
+        )).scalar_one()
         await s.execute(
             text(
                 "UPDATE api_keys "
@@ -240,3 +256,4 @@ async def record_usage(
             ),
             {"c": cost_usd, "id": api_key_id},
         )
+    return int(usage_id)

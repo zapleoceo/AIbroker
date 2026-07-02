@@ -97,7 +97,7 @@ async def test_chat_happy_path_returns_response():
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("hello dima", fake_meta))), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -110,6 +110,7 @@ async def test_chat_happy_path_returns_response():
     assert data["tokens_in"] == 12
     assert data["tokens_out"] == 8
     assert data["key_label"] == "t"  # surfaced for the Stepan UI chip
+    assert data["request_id"] == 101  # usage_log.id — caller correlates own logs
 
 
 async def test_chat_falls_back_on_cap_block():
@@ -134,7 +135,7 @@ async def test_chat_falls_back_on_cap_block():
          patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("ok", fake_meta))), \
          patch("aibroker.services.llm_service.audit", AsyncMock()), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -162,7 +163,7 @@ async def test_chat_call_llm_failure_records_and_falls_back():
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()) as cd, \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -184,7 +185,7 @@ async def test_chat_auth_error_marks_key_dead():
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_dead", AsyncMock()) as md, \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -211,7 +212,7 @@ async def test_chat_retries_multiple_keys_of_same_provider():
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -238,7 +239,7 @@ async def test_chat_invalid_json_falls_through_to_next_provider():
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=chat:fast",
             headers={"X-Project-Key": plain},
@@ -274,7 +275,7 @@ async def test_embed_happy_path():
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.embed",
                 AsyncMock(return_value=([[0.1, 0.2, 0.3]], fake_meta))), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/embed?provider=voyage",
             headers={"X-Project-Key": plain},
@@ -285,6 +286,7 @@ async def test_embed_happy_path():
     assert data["embeddings"] == [[0.1, 0.2, 0.3]]
     assert data["provider"] == "voyage"
     assert data["tokens_in"] == 5
+    assert data["request_id"] == 101
 
 
 async def test_embed_502_on_provider_failure():
@@ -296,7 +298,7 @@ async def test_embed_502_on_provider_failure():
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.embed", side_effect=fake_embed), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/embed?provider=voyage",
             headers={"X-Project-Key": plain},
@@ -350,7 +352,7 @@ async def test_chat_accepts_multimodal_content():
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/chat?capability=vision",
             headers={"X-Project-Key": plain},
@@ -421,7 +423,7 @@ async def test_transcribe_happy_path():
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.transcribe",
                 AsyncMock(return_value=("привет это голосовое", fake_meta))), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()):
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/transcribe?workflow=media",
             headers={"X-Project-Key": plain},
@@ -431,6 +433,7 @@ async def test_transcribe_happy_path():
     data = r.json()
     assert data["text"] == "привет это голосовое"
     assert data["provider"] == "groq"   # first in transcription chain
+    assert data["request_id"] == 101
 
 
 async def test_transcribe_502_when_all_providers_fail():
@@ -442,7 +445,7 @@ async def test_transcribe_502_when_all_providers_fail():
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.transcribe", side_effect=boom), \
-         patch("aibroker.services.llm_service.record_usage", AsyncMock()), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)), \
          patch("aibroker.services.llm_service._penalize", AsyncMock()):
         r = client.post(
             "/v1/transcribe",

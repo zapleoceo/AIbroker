@@ -202,6 +202,16 @@ kwarg in a LiteLLM bump on 2026-06-27, so every cost read 0 and all $-caps went
 blind until 2026-07-01. The one-shot warning + a "known model costs > 0" test
 now guard the regression.)
 
+**Cache-aware pricing** (2026-07-02): `estimate_llm_cost` also takes
+`cache_read_tokens`/`cache_write_tokens`, forwarded to LiteLLM's
+`cache_read_input_tokens`/`cache_creation_input_tokens` kwargs. A cache read
+(anthropic, ~0.1x input rate) now prices correctly instead of at the flat
+input rate — before this, every anthropic call that hit its prompt cache
+(see **Prompt caching** in [providers.md](providers.md)) had its `cost_usd`
+over-counted (safe direction for the cost guard, but not the real bill).
+`usage_log.cache_read_tokens`/`cache_write_tokens` (migration 006) persist
+the activity; the project drill-down shows it as a **Prompt cache** card.
+
 **Free-tier keys always bill $0** (`services/llm_service.py:_billed_cost`).
 `estimate_llm_cost` prices by MODEL — it has no idea whether the specific key
 that served the call is on a free plan. A free cerebras/gemini/mistral key

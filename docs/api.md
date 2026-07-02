@@ -28,7 +28,7 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` |
 | `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key) |
-| `POST` | `/v1/usage` | `UsageReport` | `{recorded: true}` |
+| `POST` | `/v1/usage` | `UsageReport` | `{recorded: true, request_id}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
 
 ### Capabilities for `/v1/chat`
@@ -47,11 +47,27 @@ LiteLLM forwards both shapes to vision-capable models (gemini → openai). Pass
 images as base64 data URLs — anthropic was removed from the vision chain because
 it 400s on fetch-gated image URLs.
 
+`ChatResponse` carries `cache_read_tokens` / `cache_write_tokens` (0 unless
+the call routed through anthropic and hit its prompt cache — see
+[providers.md](providers.md#prompt-caching-2026-07-01-wired-end-to-end-2026-07-02))
+and `request_id` (the `usage_log` row id — match your own logs against the
+broker's).
+
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
 `?workflow=` query tag. Chain: `groq` whisper-large-v3-turbo (free) →
-`openai` whisper-1. Returns `{text, provider, model, cost_usd, latency_ms, key_label}`.
+`openai` whisper-1. Returns
+`{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
+
+### `request_id` — correlating a call across both sides
+
+`ChatResponse`/`EmbedResponse`/`TranscribeResponse` and `/v1/usage`'s reply
+all carry `request_id` — the `usage_log.id` for that exact call. Log it on
+your side (Stepan/Vera); if a call misbehaves, quote it back to us and we can
+look the row up directly (`/dashboard/projects/{id}` — the "Recent 50 calls"
+table's leading `req id` column, sortable, also usable as a search target)
+instead of grepping timestamps against provider/model/workflow.
 
 ### Scopes a project must hold
 

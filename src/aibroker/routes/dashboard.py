@@ -1139,6 +1139,8 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "       COALESCE(SUM(cost_usd),0) AS spend, "
             "       COALESCE(SUM(tokens_in),0) AS tin, "
             "       COALESCE(SUM(tokens_out),0) AS tout, "
+            "       COALESCE(SUM(cache_read_tokens),0) AS cache_read, "
+            "       COALESCE(SUM(cache_write_tokens),0) AS cache_write, "
             "       COALESCE(AVG(latency_ms),0) AS avg_lat, "
             "       COUNT(*) FILTER (WHERE status='ok') AS ok_n, "
             "       COUNT(*) FILTER (WHERE status<>'ok') AS err_n "
@@ -1173,7 +1175,7 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "GROUP BY b ORDER BY b"
         ), bind_)).all()
         recent = (await s.execute(text(
-            "SELECT created_at, provider, model, capability, "
+            "SELECT id, created_at, provider, model, capability, "
             "       tokens_in, tokens_out, cost_usd, latency_ms, status, "
             "       http_status, error_kind "
             "FROM usage_log WHERE project_id=:pid "
@@ -1190,6 +1192,24 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         "lat_hist": _lat_hist_counts(list(lat_hist_rows)),
         "recent": recent,
     }
+
+
+def _cache_card(cache_read: int, cache_write: int) -> str:
+    """Prompt-cache KPI card — only anthropic calls ever populate these
+    (apply_prompt_cache), so most projects/ranges show neither; omit the card
+    entirely rather than show a permanent 0/0. Reuse ratio (reads per write)
+    is the honest cache-efficiency signal: one write feeds many cheap reads."""
+    if not cache_read and not cache_write:
+        return ""
+    reuse = f"{cache_read / cache_write:.1f}× reuse" if cache_write else "—"
+    return f"""
+      <div class="card">
+        <div class="card-label" data-i18n data-en="Prompt cache" data-ru="Кэш промпта">Prompt cache</div>
+        <div class="card-value" style="font-size:18px">{cache_read:,} / {cache_write:,}</div>
+        <div class="card-sub" data-i18n
+             data-en="read / write · {reuse}" data-ru="чтения / записи · {reuse}">read / write · {reuse}</div>
+      </div>
+    """
 
 
 def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
@@ -1232,6 +1252,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         <div class="card-value">{int(t.avg_lat or 0)} ms</div>
         <div class="card-sub">{ok_pct:.0f}% success</div>
       </div>
+      {_cache_card(t.cache_read, t.cache_write)}
     </div>
     """
 
@@ -1295,8 +1316,12 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     # tr.data-row marker is required by the sortable-table JS in _dash_html.
     # data-sort on the time column uses iso8601 so lexical sort works.
+    # data-row-id is usage_log.id — the same request_id returned to the API
+    # caller in its response, so the caller can paste it here to find the call.
     recent_rows = "".join(
-        f'<tr class="data-row" data-row-id="u{r.created_at.timestamp()}">'
+        f'<tr class="data-row" data-row-id="{r.id}">'
+        f'<td class="num" data-sort="{r.id}" '
+        f'style="color:#666;font-size:11px">{r.id}</td>'
         f'<td data-sort="{r.created_at.isoformat()}" '
         f'style="color:#888;font-size:11px">'
         f'{r.created_at.strftime("%m-%d %H:%M:%S")}</td>'
@@ -1313,7 +1338,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'<td style="color:#888;font-size:11px">{r.http_status or ""} '
         f'{esc(r.error_kind or "")}</td></tr>'
         for r in d["recent"]
-    ) or '<tr><td colspan="9" style="color:#5a6171">no calls yet</td></tr>'
+    ) or '<tr><td colspan="10" style="color:#5a6171">no calls yet</td></tr>'
 
     body = f"""
     <div class="breadcrumb">
@@ -1341,6 +1366,9 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     <h2 data-i18n data-en="Recent 50 calls" data-ru="Последние 50 вызовов">Recent 50 calls</h2>
     <table class="recent-table"><thead><tr>
+      <th class="sortable" data-type="num"
+          title="usage_log.id — the same request_id returned in the API response"
+          data-i18n data-en="req id" data-ru="req id">req id</th>
       <th class="sortable">when</th>
       <th class="sortable">provider</th>
       <th class="sortable">model</th>

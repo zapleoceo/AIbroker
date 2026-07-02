@@ -58,6 +58,12 @@ class ChatResponse(BaseModel):
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int = Field(
+        description="usage_log.id for this call. Log it — quote it back to us "
+                     "to find the exact call in this broker's dashboard/DB."
+    )
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class EmbedRequest(BaseModel):
@@ -74,6 +80,7 @@ class EmbedResponse(BaseModel):
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int = Field(description="usage_log.id for this call.")
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -113,6 +120,9 @@ async def chat(
         tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
         cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
         key_label=outcome.key_label,
+        cache_read_tokens=outcome.cache_read_tokens,
+        cache_write_tokens=outcome.cache_write_tokens,
+        request_id=outcome.request_id,
     )
 
 
@@ -140,6 +150,7 @@ async def embed_endpoint(
         embeddings=outcome.embeddings, provider=outcome.provider, model=outcome.model,
         tokens_in=outcome.tokens_in, cost_usd=outcome.cost_usd,
         latency_ms=outcome.latency_ms, key_label=outcome.key_label,
+        request_id=outcome.request_id,
     )
 
 
@@ -150,6 +161,7 @@ class TranscribeResponse(BaseModel):
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int = Field(description="usage_log.id for this call.")
 
 
 # 25 MB — Whisper's hard limit at both Groq and OpenAI.
@@ -186,5 +198,5 @@ async def transcribe_endpoint(
     return TranscribeResponse(
         text=outcome.text, provider=outcome.provider, model=outcome.model,
         cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
-        key_label=outcome.key_label,
+        key_label=outcome.key_label, request_id=outcome.request_id,
     )

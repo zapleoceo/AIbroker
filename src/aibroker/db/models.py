@@ -127,6 +127,10 @@ class UsageLogRow(Base):
     workflow: Mapped[str | None] = mapped_column(String(50))
     tokens_in: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Prompt-cache tokens (currently anthropic only — see providers/litellm_adapter.py
+    # apply_prompt_cache). 0 for providers/calls that never touch the cache.
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), nullable=False)

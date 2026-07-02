@@ -253,3 +253,90 @@ async def test_run_chat_keeps_real_cost_for_paid_tier_key(monkeypatch):
     )
     assert out.cost_usd == 0.70
     assert recorded_costs == [0.70]
+
+
+async def test_run_chat_passes_cache_tokens_to_record_usage_and_outcome(monkeypatch):
+    """cache_read_tokens/cache_write_tokens from call_llm's meta must reach
+    both record_usage (usage_log persistence) and the returned ChatOutcome
+    (API response) — this was the exact gap that left them computed-and-discarded."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    recorded: dict = {}
+    fake_key = SimpleNamespace(id=3, label="k", tier="paid", provider="anthropic",
+                                token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return fake_key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "hello", {
+            "model": "anthropic/claude-sonnet-5", "tokens_in": 10_000,
+            "tokens_out": 500, "cost_usd": 0.013, "latency_ms": 300,
+            "cache_read_tokens": 9_000, "cache_write_tokens": 0,
+        }
+
+    def fake_record_usage(**kw):
+        recorded["cache_read_tokens"] = kw["cache_read_tokens"]
+        recorded["cache_write_tokens"] = kw["cache_write_tokens"]
+        return _noop()
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["anthropic"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan2"), capability="chat:smart",
+        messages=[{"role": "system", "content": "kb"}, {"role": "user", "content": "hi"}],
+        model=None, max_tokens=128, temperature=0.7, response_format=None,
+        workflow="coach",
+    )
+    assert out.cache_read_tokens == 9_000
+    assert out.cache_write_tokens == 0
+    assert recorded == {"cache_read_tokens": 9_000, "cache_write_tokens": 0}
+
+
+async def test_run_chat_defaults_cache_tokens_when_meta_omits_them(monkeypatch):
+    """Providers that never populate cache_read_tokens/cache_write_tokens in
+    meta (everything except anthropic) must not crash record_usage/Outcome —
+    .get() default, not a required key."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    fake_key = SimpleNamespace(id=4, label="k", tier="free", provider="cerebras",
+                                token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return fake_key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "hello", {"model": "cerebras/gpt-oss-120b", "tokens_in": 100,
+                          "tokens_out": 50, "cost_usd": 0.0, "latency_ms": 100}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="vera",
+    )
+    assert out.cache_read_tokens == 0
+    assert out.cache_write_tokens == 0

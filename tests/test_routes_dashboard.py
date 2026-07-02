@@ -714,7 +714,8 @@ def test_range_hours_table_complete():
 
 def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
                        providers: list[tuple] | None = None,
-                       lat_hist: list[int] | None = None):
+                       lat_hist: list[int] | None = None,
+                       cache_read: int = 0, cache_write: int = 0):
     """Build the dict that _render_project_detail() consumes — no DB."""
     from collections import namedtuple
     from datetime import UTC, datetime
@@ -726,24 +727,26 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         project_key_hash="hash", allowed_scopes=["llm:chat", "llm:edit"],
         daily_cost_cap_usd=2.0, is_active=True, owner_email="x@y", notes="",
     )
-    Totals = namedtuple("T", "calls spend tin tout avg_lat ok_n err_n")
+    Totals = namedtuple("T", "calls spend tin tout cache_read cache_write "
+                              "avg_lat ok_n err_n")
     Brk = namedtuple("B", "provider n spend")
     BrkCap = namedtuple("BC", "cap n spend")
     BrkModel = namedtuple("BM", "model n spend toks")
-    Recent = namedtuple("R", "created_at provider model capability tokens_in "
+    Recent = namedtuple("R", "id created_at provider model capability tokens_in "
                               "tokens_out cost_usd latency_ms status http_status "
                               "error_kind")
     return {
         "project": project,
         "hours": hours,
         "totals": Totals(calls=4, spend=0.123, tin=1234, tout=567,
+                          cache_read=cache_read, cache_write=cache_write,
                           avg_lat=345, ok_n=3, err_n=1),
         "by_provider": providers or [Brk("cerebras", 2, 0.0), Brk("gemini", 2, 0.123)],
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
         "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
-            Recent(datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
+            Recent(90000 + i, datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
                     "cerebras", "cerebras/gpt-oss-120b", "chat:fast",
                     100, 50, 0.0, 234, "ok", 200, None)
             for i in range(recent_n)
@@ -779,6 +782,18 @@ def test_render_project_detail_sortable_recent_rows():
     assert 'data-sort="2026-06-26T12:00:00' in body   # iso8601 time
     assert 'data-sort="150"' in body                   # tokens_in+tokens_out
     assert 'data-sort="234"' in body                   # latency
+
+
+def test_render_project_detail_recent_rows_show_request_id():
+    """The recent-calls table's leading column is usage_log.id — the same
+    request_id returned to the API caller — so admins/callers can correlate a
+    specific call. data-row-id must use the real id, not a synthetic key."""
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail(recent_n=2)).body.decode()
+    assert 'data-row-id="90000"' in body
+    assert 'data-row-id="90001"' in body
+    assert 'data-sort="90000"' in body
+    assert ">90000<" in body   # visible in the cell, not just data-sort
 
 
 def test_render_project_detail_handles_no_recent_calls():
@@ -845,6 +860,46 @@ def test_render_project_detail_hides_empty_histogram():
     d = _fake_proj_detail(lat_hist=[0] * 8)
     body = _render_project_detail(d).body.decode()
     assert "Latency distribution" not in body
+
+
+# ─── Prompt-cache KPI card ────────────────────────────────────────────────────
+
+
+def test_cache_card_empty_when_no_activity():
+    from aibroker.routes.dashboard import _cache_card
+    assert _cache_card(0, 0) == ""
+
+
+def test_cache_card_shows_read_write_and_reuse_ratio():
+    from aibroker.routes.dashboard import _cache_card
+    html = _cache_card(9000, 1000)
+    assert "9,000" in html and "1,000" in html
+    assert "9.0" in html          # reuse ratio: 9000/1000 reads-per-write
+
+
+def test_cache_card_handles_read_without_write():
+    """A cache read can outlive the write bucket that created it (anthropic's
+    cache TTL/window semantics) — must not divide by zero."""
+    from aibroker.routes.dashboard import _cache_card
+    html = _cache_card(500, 0)
+    assert "500" in html
+    assert "—" in html            # no reuse ratio when write=0
+
+
+def test_render_project_detail_shows_cache_card_when_active():
+    from aibroker.routes.dashboard import _render_project_detail
+    d = _fake_proj_detail(cache_read=9000, cache_write=1000)
+    body = _render_project_detail(d).body.decode()
+    assert "Prompt cache" in body
+    assert "9,000 / 1,000" in body
+
+
+def test_render_project_detail_hides_cache_card_when_inactive():
+    """Most projects never touch anthropic's cache — no permanent 0/0 card."""
+    from aibroker.routes.dashboard import _render_project_detail
+    d = _fake_proj_detail()  # cache_read=cache_write=0 by default
+    body = _render_project_detail(d).body.decode()
+    assert "Prompt cache" not in body
 
 
 # ─── Main dashboard render (unit, no DB) ───────────────────────────────────

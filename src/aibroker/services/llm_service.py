@@ -128,6 +128,9 @@ class ChatOutcome:
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 async def run_chat(
@@ -218,17 +221,21 @@ async def run_chat(
                     provider=provider, model=use_model, capability=capability,
                     workflow=workflow, tokens_in=meta["tokens_in"],
                     tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+                    cache_read_tokens=meta.get("cache_read_tokens", 0),
+                    cache_write_tokens=meta.get("cache_write_tokens", 0),
                     latency_ms=meta["latency_ms"], status="error",
                     error_kind="InvalidJSON", http_status=200,
                 )
                 log.warning("provider %s returned unparseable JSON, trying next", provider)
                 continue  # try the next key of this provider
 
-            await record_usage(
+            request_id = await record_usage(
                 api_key_id=key.id, project_id=project.id, lease_id=None,
                 provider=provider, model=use_model, capability=capability,
                 workflow=workflow, tokens_in=meta["tokens_in"],
                 tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+                cache_read_tokens=meta.get("cache_read_tokens", 0),
+                cache_write_tokens=meta.get("cache_write_tokens", 0),
                 latency_ms=meta["latency_ms"], status="ok", error_kind=None,
                 http_status=200,
             )
@@ -236,7 +243,9 @@ async def run_chat(
                 text=text, provider=provider, model=meta["model"],
                 tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
                 cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-                key_label=key.label,
+                key_label=key.label, request_id=request_id,
+                cache_read_tokens=meta.get("cache_read_tokens", 0),
+                cache_write_tokens=meta.get("cache_write_tokens", 0),
             )
     return None
 
@@ -250,6 +259,7 @@ class EmbedOutcome:
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int
 
 
 class EmbedFailed(Exception):
@@ -283,7 +293,7 @@ async def run_embed(
             http_status=None,
         )
         raise EmbedFailed(str(e)) from e
-    await record_usage(
+    request_id = await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=use_model, capability="embedding",
         workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=0,
@@ -294,6 +304,7 @@ async def run_embed(
         embeddings=vectors, provider=provider, model=use_model,
         tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
         latency_ms=meta["latency_ms"], key_label=key.label,
+        request_id=request_id,
     )
 
 
@@ -305,6 +316,7 @@ class TranscribeOutcome:
     cost_usd: float
     latency_ms: int
     key_label: str
+    request_id: int
 
 
 class TranscribeFailed(Exception):
@@ -351,7 +363,7 @@ async def run_transcribe(
                 http_status=None,
             )
             continue
-        await record_usage(
+        request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model, capability="transcription",
             workflow=workflow, tokens_in=0, tokens_out=0,
@@ -361,7 +373,7 @@ async def run_transcribe(
         return TranscribeOutcome(
             text=text, provider=provider, model=use_model,
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            key_label=key.label,
+            key_label=key.label, request_id=request_id,
         )
 
     if not any_key_seen:

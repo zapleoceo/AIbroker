@@ -243,3 +243,74 @@ async def test_record_usage_increments_counters():
     assert row.daily_used == 1
     assert abs(row.daily_cost_used_usd - 0.01) < 1e-9
     assert abs(row.total_cost_usd - 0.01) < 1e-9
+
+
+async def test_record_usage_returns_new_row_id():
+    """The returned id is the broker-side request_id — threaded through the
+    outcome dataclasses to the caller's API response (Stepan/Vera correlate
+    their own logs against it, and it's the dashboard's 'req id' column)."""
+    from sqlalchemy import select
+
+    from aibroker.db.models import UsageLogRow
+
+    kid = await _add_key("cerebras", "y", tier="free")
+    usage_id = await record_usage(
+        api_key_id=kid, project_id=None, lease_id=None,
+        provider="cerebras", model="gpt-oss-120b",
+        capability="chat:fast", workflow="test",
+        tokens_in=1, tokens_out=1, cost_usd=0.0,
+        latency_ms=1, status="ok", error_kind=None, http_status=200,
+    )
+    assert isinstance(usage_id, int)
+    async with get_session() as s:
+        row = (await s.execute(
+            select(UsageLogRow).where(UsageLogRow.id == usage_id)
+        )).scalar_one()
+    assert row.api_key_id == kid  # returned id really is this row's PK
+
+
+async def test_record_usage_persists_cache_tokens():
+    """cache_read_tokens/cache_write_tokens must land in usage_log — the
+    dashboard's cache KPI card sums straight from this column."""
+    from sqlalchemy import select
+
+    from aibroker.db.models import UsageLogRow
+
+    kid = await _add_key("anthropic", "x", tier="paid")
+    await record_usage(
+        api_key_id=kid, project_id=None, lease_id=None,
+        provider="anthropic", model="anthropic/claude-sonnet-5",
+        capability="chat:smart", workflow="test",
+        tokens_in=10_000, tokens_out=500, cost_usd=0.05,
+        cache_read_tokens=9_000, cache_write_tokens=0,
+        latency_ms=200, status="ok", error_kind=None, http_status=200,
+    )
+    async with get_session() as s:
+        row = (await s.execute(
+            select(UsageLogRow).where(UsageLogRow.api_key_id == kid)
+        )).scalar_one()
+    assert row.cache_read_tokens == 9_000
+    assert row.cache_write_tokens == 0
+
+
+async def test_record_usage_cache_tokens_default_to_zero():
+    """Non-caching call sites (embed, transcribe, vending self-report) don't
+    pass cache_read_tokens/cache_write_tokens — must default to 0, not NULL."""
+    from sqlalchemy import select
+
+    from aibroker.db.models import UsageLogRow
+
+    kid = await _add_key("voyage", "x", tier="free")
+    await record_usage(
+        api_key_id=kid, project_id=None, lease_id=None,
+        provider="voyage", model="voyage/voyage-3",
+        capability="embedding", workflow=None,
+        tokens_in=500, tokens_out=0, cost_usd=0.0,
+        latency_ms=100, status="ok", error_kind=None, http_status=200,
+    )
+    async with get_session() as s:
+        row = (await s.execute(
+            select(UsageLogRow).where(UsageLogRow.api_key_id == kid)
+        )).scalar_one()
+    assert row.cache_read_tokens == 0
+    assert row.cache_write_tokens == 0
