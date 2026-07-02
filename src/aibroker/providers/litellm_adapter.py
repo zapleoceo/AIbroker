@@ -57,12 +57,21 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                    "chat:code": f"openrouter/openai/{_OSS}:free",
                    "prefilter": f"openrouter/openai/{_OSS}:free",
                    "structured": f"openrouter/openai/{_OSS}:free"},
+    # 2026-07-02: chat:smart/chat:code/vision/chat:edit bumped sonnet-4-6 →
+    # sonnet-5 (near-Opus coding/agentic quality at Sonnet cost; same $3/$15
+    # sticker, $2/$10 intro through 2026-08-31). chat:edit also bumped off
+    # haiku-4-5 — it's Stepan/Stepan2's Coach fallback (after gemini, deepseek
+    # both fail) and needs sonnet-tier reliability on the big-context JSON-edit
+    # task, not the fast/cheap tier. Verified the key reaches sonnet-5 and
+    # tolerates the broker's temperature=0.7 (drop_params strips it — sonnet-5
+    # rejects non-default sampling params). chat:fast/structured stay on
+    # haiku-4-5 (fast tier, unrelated to Coach).
     "anthropic": {"chat:fast": "anthropic/claude-haiku-4-5",
-                  "chat:smart": "anthropic/claude-sonnet-4-6",
-                  "chat:code": "anthropic/claude-sonnet-4-6",
-                  "chat:edit": "anthropic/claude-haiku-4-5",
+                  "chat:smart": "anthropic/claude-sonnet-5",
+                  "chat:code": "anthropic/claude-sonnet-5",
+                  "chat:edit": "anthropic/claude-sonnet-5",
                   "structured": "anthropic/claude-haiku-4-5",
-                  "vision": "anthropic/claude-sonnet-4-6"},
+                  "vision": "anthropic/claude-sonnet-5"},
     "openai": {"chat:fast": "openai/gpt-5-mini", "chat:smart": "openai/gpt-5",
                "chat:code": "openai/gpt-5", "structured": "openai/gpt-5-mini",
                "vision": "openai/gpt-5-mini",

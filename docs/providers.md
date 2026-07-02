@@ -13,6 +13,28 @@ cohere, which rejected `response_format`/`temperature` with
 then free-forms (no schema enforcement) → the broker's JSON validation falls it
 through; cohere's real value is `chat`, which now works.
 
+## Anthropic on Sonnet 5 (2026-07-02)
+
+`chat:smart`, `chat:code`, `vision`, and **`chat:edit`** on anthropic moved
+sonnet-4-6 → `claude-sonnet-5` (`DEFAULT_MODEL["anthropic"]`). Same $3/$15
+sticker ($2/$10 intro through 2026-08-31); near-Opus coding/agentic quality.
+Verified live: the key reaches `claude-sonnet-5`, and `litellm.drop_params`
+(above) strips the broker's `temperature=0.7` that Sonnet 5 otherwise rejects.
+`chat:fast`/`structured` stay on `claude-haiku-4-5` (fast tier, untouched).
+
+`chat:edit` is Stepan's and Stepan2's **Coach** fallback
+(`chains.CAPABILITY_CHAINS["chat:edit"] = [gemini, deepseek, anthropic]`) —
+fires only after gemini and deepseek both fail. Both projects already reach it
+with zero code change: `stepan` runs `llm_backend=broker` (its
+`stepan_shared.llm.broker_client.BrokerLLMClient` posts
+`/v1/chat?capability=chat:edit` to this broker) and already carries the
+`llm:edit` scope; `stepan2`'s `coach_service.py` does the same via its own
+`BrokerLLM` adapter — its project was missing `llm:edit` until 2026-07-02
+(added via the same `dash_edit_project` code path, audit-logged). Stepan's own
+local routing policy (`stepan_shared/llm/routing.py`) is a *separate*,
+provider-direct fallback used only when `llm_backend=local` — it does not
+route through this broker and does not see anthropic.
+
 ## Prompt caching (2026-07-01)
 
 `apply_prompt_cache(model, messages)` marks the first system message with
@@ -35,7 +57,7 @@ ID in the prefix defeats it.
 | **gemini** | gemini-2.5-flash | gemini-2.5-pro | — | gemini-2.5-flash | — |
 | **deepseek** | deepseek-chat | — | deepseek-coder | — | — |
 | **openrouter** | openai/gpt-oss-120b:free | openai/gpt-oss-120b:free | — | — | — |
-| **anthropic** | claude-haiku-4-5 | claude-sonnet-4-6 | claude-sonnet-4-6 | claude-sonnet-4-6 | — |
+| **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | claude-sonnet-5 | claude-sonnet-5 | — |
 | **openai** | gpt-5-mini | gpt-5 | — | — | — |
 | **voyage** | — | — | — | — | voyage-3 |
 

@@ -68,7 +68,17 @@ def test_cache_tokens_reads_anthropic_and_openai_shapes():
 def test_model_for_known_provider_capability():
     assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
     assert model_for("voyage", "embedding") == "voyage/voyage-3"
-    assert model_for("anthropic", "chat:smart") == "anthropic/claude-sonnet-4-6"
+    assert model_for("anthropic", "chat:smart") == "anthropic/claude-sonnet-5"
+
+
+def test_anthropic_sonnet5_on_smart_code_vision_and_edit():
+    """2026-07-02: bumped off sonnet-4-6. chat:edit specifically matters — it's
+    Stepan/Stepan2 Coach's anthropic fallback (after gemini, deepseek fail)."""
+    for cap in ("chat:smart", "chat:code", "vision", "chat:edit"):
+        assert model_for("anthropic", cap) == "anthropic/claude-sonnet-5", cap
+    # fast tier untouched
+    assert model_for("anthropic", "chat:fast") == "anthropic/claude-haiku-4-5"
+    assert model_for("anthropic", "structured") == "anthropic/claude-haiku-4-5"
 
 
 def test_model_for_unknown_provider_returns_none():
