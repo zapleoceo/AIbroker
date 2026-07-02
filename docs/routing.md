@@ -317,11 +317,22 @@ incident):
 ## Failure → next key → next provider
 
 The orchestration lives in `services/llm_service.run_chat` (routes stay thin).
-For each provider in the chain it tries **up to `_MAX_KEYS_PER_PROVIDER` (5)
-keys** before falling through — a direct client loops all of a provider's keys,
-and free keys (esp. gemini) 429 constantly, so a single rate-limited key must
-not sink the request. The selector hands a fresh LRU key each pick and
-`_penalize` cools failed ones, so each retry gets a different key.
+For each provider in the chain it tries **up to `_max_keys(provider)` keys**
+before falling through — a direct client loops all of a provider's keys, and
+free keys 429 constantly, so a single rate-limited key must not sink the
+request. Default is 5; **gemini and cerebras are capped at 3** (2026-07-02):
+their keys rate-limit in lockstep (gemini's ~20/day/model free cap, cerebras
+rolling RPM), so a 4th/5th retry there rarely finds a healthy key and is pure
+latency before the chain moves on. The selector hands a fresh LRU key each pick
+and `_penalize` cools failed ones, so each retry gets a different key.
+
+**JSON-reliable ordering (2026-07-02).** When `response_format` asks for JSON,
+`run_chat` runs the chain through `deprioritize_for_json` first, pushing
+`JSON_UNRELIABLE_PROVIDERS` (cerebras/cohere/openrouter — their gpt-oss /
+command-r7b mangle JSON at volume) to the back so the reliable providers lead.
+Cuts InvalidJSON at the source instead of after a wasted call. groq stays
+reliable (grammar-constrained JSON at volume); nothing is dropped, so a JSON
+request still reaches every provider.
 
 Per key:
 
@@ -333,9 +344,12 @@ Per key:
    - other → log, **try next key**.
 4. **JSON quality gate:** when the request asked for JSON (`response_format`
    type `json_object`/`json_schema`) and the body doesn't parse, the response is
-   billed but treated as a failure → **try next key**. Deterministic, no LLM judge.
-   Paired with gemini's `reasoning_effort=disable` in the adapter, which stops
-   2.5's thinking from eating the token budget and truncating the JSON.
+   billed but treated as a failure → **next PROVIDER** (2026-07-02: was next
+   key). Malformed JSON is a model property — sibling keys of the same provider
+   re-mangle the same prompt, so retrying them just multiplied the wasted
+   tokens ~5×. Deterministic, no LLM judge. Paired with gemini's
+   `reasoning_effort=disable` in the adapter, which stops 2.5's thinking from
+   eating the token budget and truncating the JSON.
 
 Chain exhausted → HTTP 503. The first success returns text + meta, including the
 chosen key's **label** (surfaced to clients for their cost/usage chip).

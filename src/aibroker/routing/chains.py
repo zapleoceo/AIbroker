@@ -128,3 +128,26 @@ def scope_for(capability: Capability) -> str:
     if capability not in CAPABILITY_SCOPE:
         raise ValueError(f"unknown capability: {capability}")
     return CAPABILITY_SCOPE[capability]
+
+
+# Providers whose default model emits malformed JSON at a meaningful rate on
+# structured/JSON requests: cerebras gpt-oss (~4.6k/wk InvalidJSON before it was
+# pulled from `structured`), cohere command-r7b, and openrouter's gpt-oss:free.
+# groq runs the same gpt-oss but shows ~0 InvalidJSON at volume (grammar-
+# constrained JSON mode), so it stays reliable. mistral-small is borderline but
+# is our free workhorse (≈0 on chat), so it's not demoted. Kept in the chain as
+# a last resort (a maybe-malformed retry still beats a 503) but pushed behind
+# the JSON-reliable providers whenever the caller asks for JSON.
+JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
+    {"cerebras", "cohere", "openrouter"}
+)
+
+
+def deprioritize_for_json(chain: list[str]) -> list[str]:
+    """Stable-partition `chain`: JSON-reliable providers first (original order),
+    then the JSON_UNRELIABLE_PROVIDERS (original order). Never drops one, so a
+    JSON request still reaches every provider — just tries the reliable ones
+    first, cutting InvalidJSON waste at the source instead of after the fact."""
+    reliable = [p for p in chain if p not in JSON_UNRELIABLE_PROVIDERS]
+    unreliable = [p for p in chain if p in JSON_UNRELIABLE_PROVIDERS]
+    return reliable + unreliable

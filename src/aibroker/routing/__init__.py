@@ -3,6 +3,7 @@ from aibroker.routing.chains import (
     CAPABILITY_SCOPE,
     Capability,
     chain_for,
+    deprioritize_for_json,
     is_known_capability,
     scope_for,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "SelectionError",
     "chain_for",
     "check_caps",
+    "deprioritize_for_json",
     "is_known_capability",
     "pick_and_reserve",
     "scope_for",

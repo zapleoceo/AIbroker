@@ -6,7 +6,9 @@ import pytest
 from aibroker.routing.chains import (
     CAPABILITY_CHAINS,
     CAPABILITY_SCOPE,
+    JSON_UNRELIABLE_PROVIDERS,
     chain_for,
+    deprioritize_for_json,
     is_known_capability,
     scope_for,
 )
@@ -150,3 +152,36 @@ def test_dead_providers_not_in_any_chain():
     for cap, chain in CAPABILITY_CHAINS.items():
         for dead in ("sambanova", "nvidia"):
             assert dead not in chain, f"{dead} still routed in {cap}"
+
+
+# ─── deprioritize_for_json — JSON-reliable ordering ──────────────────────────
+
+
+def test_deprioritize_for_json_pushes_unreliable_to_back():
+    """Reliable providers keep their order first; unreliable (gpt-oss/cohere)
+    sink to the back, also keeping their relative order."""
+    chain = ["cerebras", "groq", "gemini", "mistral", "cohere", "deepseek"]
+    out = deprioritize_for_json(chain)
+    assert out == ["groq", "gemini", "mistral", "deepseek", "cerebras", "cohere"]
+
+
+def test_deprioritize_for_json_never_drops_a_provider():
+    """Even an all-unreliable chain must keep every provider — a maybe-malformed
+    retry still beats a 503."""
+    chain = ["cerebras", "cohere", "openrouter"]
+    out = deprioritize_for_json(chain)
+    assert set(out) == set(chain)
+    assert len(out) == len(chain)
+
+
+def test_deprioritize_for_json_groq_stays_reliable():
+    """groq runs gpt-oss but is JSON-reliable at volume (grammar-constrained
+    mode) — it must NOT be demoted the way cerebras is."""
+    assert "groq" not in JSON_UNRELIABLE_PROVIDERS
+    assert "cerebras" in JSON_UNRELIABLE_PROVIDERS
+    assert deprioritize_for_json(["cerebras", "groq"]) == ["groq", "cerebras"]
+
+
+def test_deprioritize_for_json_noop_when_all_reliable():
+    chain = ["gemini", "mistral", "deepseek", "anthropic"]
+    assert deprioritize_for_json(chain) == chain

@@ -26,6 +26,7 @@ from aibroker.routing import (
     CostGuardError,
     chain_for,
     check_caps,
+    deprioritize_for_json,
     pick_and_reserve,
     scope_for,
 )
@@ -35,9 +36,19 @@ from aibroker.telemetry import audit
 log = logging.getLogger(__name__)
 
 _COOLDOWN = timedelta(minutes=5)
-# Free keys (esp. gemini) rate-limit constantly; try a few keys of a provider
-# before falling through to the next provider, like a direct client would.
+# Keys tried per provider before falling through to the next provider in the
+# chain (like a direct client looping a provider's keys). Free keys rate-limit
+# constantly, so a few retries pay off — but gemini (tiny per-project daily cap,
+# ~20/day/model on free tier) and cerebras (rolling RPM) rate-limit their keys
+# in lockstep: when the first two 429, a third rarely helps, and 5 tries is just
+# added latency before the chain moves on. Cap those two lower; everyone else
+# keeps the full breadth.
 _MAX_KEYS_PER_PROVIDER = 5
+_MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
+
+
+def _max_keys(provider: str) -> int:
+    return _MAX_KEYS_BY_PROVIDER.get(provider, _MAX_KEYS_PER_PROVIDER)
 
 
 # Substrings (lower-cased) that mean a provider throttled us — covers the
@@ -161,6 +172,11 @@ async def run_chat(
     est_tokens = estimate_prompt_tokens(messages)
     learned = await learned_ceilings()
     full_chain = chain_for(capability)
+    # JSON requests: try JSON-reliable providers first (gpt-oss/cohere sink to
+    # the back) so a structured call doesn't lead with a model that mangles
+    # JSON — cuts InvalidJSON at the source, not after the wasted call.
+    if _wants_json(response_format):
+        full_chain = deprioritize_for_json(full_chain)
     sized_chain = [
         p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
     ]
@@ -171,7 +187,7 @@ async def run_chat(
                  [p for p in full_chain if p not in sized_chain])
 
     for provider in chain:
-        for _ in range(_MAX_KEYS_PER_PROVIDER):
+        for _ in range(_max_keys(provider)):
             key = await pick_and_reserve(provider, scope=scope)
             if key is None:
                 break  # no (more) available key for this provider → next provider
@@ -226,8 +242,12 @@ async def run_chat(
                     latency_ms=meta["latency_ms"], status="error",
                     error_kind="InvalidJSON", http_status=200,
                 )
-                log.warning("provider %s returned unparseable JSON, trying next", provider)
-                continue  # try the next key of this provider
+                # Malformed JSON is a MODEL property, not a key one: cerebras
+                # gpt-oss mangles the same prompt on every key. Retrying sibling
+                # keys of this provider just burns tokens N more times (~80% of
+                # the InvalidJSON waste). Skip straight to the next provider.
+                log.warning("provider %s returned unparseable JSON, next provider", provider)
+                break  # next provider, not next key of the same model
 
             request_id = await record_usage(
                 api_key_id=key.id, project_id=project.id, lease_id=None,

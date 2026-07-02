@@ -149,6 +149,140 @@ async def _noop():
     return None
 
 
+# ─── per-provider retry cap ──────────────────────────────────────────────────
+
+
+def test_max_keys_per_provider_defaults_and_overrides():
+    from aibroker.services.llm_service import _max_keys
+    assert _max_keys("gemini") == 3       # chronically rate-limited free tier
+    assert _max_keys("cerebras") == 3
+    assert _max_keys("mistral") == 5      # default breadth
+    assert _max_keys("anthropic") == 5
+    assert _max_keys("whatever") == 5
+
+
+async def test_run_chat_caps_gemini_retries(monkeypatch):
+    """gemini keys 429 in lockstep — the retry loop must stop at _max_keys=3,
+    not burn 5 picks before moving on."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    key = SimpleNamespace(id=1, label="g", tier="free", provider="gemini",
+                           token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return key if provider == "gemini" else None
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        raise RuntimeError("429 rate limit exceeded")
+
+    async def fake_penalize(k, e):
+        return "rate_limit"
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="vera",
+    )
+    assert out is None
+    assert picks.count("gemini") == 3     # capped, not 5
+
+
+# ─── InvalidJSON breaks to next PROVIDER, not next key ───────────────────────
+
+
+async def test_run_chat_invalid_json_skips_provider_not_key(monkeypatch):
+    """Malformed JSON is a model property — retrying sibling keys of the same
+    provider re-mangles the same prompt. run_chat must break to the next
+    provider after ONE bad-JSON response, not loop the provider's keys."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    ka = SimpleNamespace(id=1, label="a", tier="free", provider="cerebras",
+                          token_encrypted="x")
+    kb = SimpleNamespace(id=2, label="b", tier="free", provider="gemini",
+                          token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return {"cerebras": ka, "gemini": kb}.get(provider)
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        m = kw["model"]
+        body = "not-json{{{" if m.startswith("cerebras") else '{"ok": true}'
+        return body, {"model": m, "tokens_in": 100, "tokens_out": 50,
+                      "cost_usd": 0.0, "latency_ms": 100,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "gemini"])
+    # isolate break-behaviour from the JSON reorder — keep the given order
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="structured",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7,
+        response_format={"type": "json_object"}, workflow="rel_extract",
+    )
+    assert picks.count("cerebras") == 1   # tried ONCE, not 5×
+    assert "gemini" in picks              # advanced to next provider
+    assert out.text == '{"ok": true}'
+
+
+async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
+    """A JSON request must reorder the live chain via deprioritize_for_json —
+    cerebras (unreliable) tried after gemini even though it's first in the raw
+    chain."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)  # no keys → just record the order the chain is walked
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "gemini", "mistral"])
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="structured",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7,
+        response_format={"type": "json_object"}, workflow="rel_extract",
+    )
+    # gemini + mistral (reliable) walked before cerebras (unreliable, to back)
+    assert picks.index("gemini") < picks.index("cerebras")
+    assert picks.index("mistral") < picks.index("cerebras")
+
+
 # ─── free-tier keys must never bill a real $ cost ───────────────────────────
 
 
