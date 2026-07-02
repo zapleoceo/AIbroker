@@ -82,12 +82,17 @@ the parking duration most-authoritative-first:
    "per day" / "daily limit" (Cerebras "Tokens per day limit exceeded")
    and gave no hint, park the key until **UTC midnight** when the daily
    quota resets.
-3. **Otherwise** — the adaptive per-provider backoff below.
+3. **Per-hour request cap** (2026-07-01) — Cerebras "Requests per hour limit
+   exceeded" → park to the top of the next UTC hour. Same anti-storm logic as
+   the daily tier, one hour scale. See the full list under **Adaptive
+   cooldown** below.
+4. **Otherwise** — the adaptive per-provider backoff below.
 
 Why: a daily-exhausted key used to get the flat 60 s adaptive cooldown,
 recover, get picked again, fail again — a retry storm (~290 wasted calls
 every 2 minutes on Cerebras) looping until midnight. Now it's parked once
-until reset, so the selector skips it entirely and the storm is gone.
+until reset, so the selector skips it entirely and the storm is gone. The
+per-hour tier fixes the same storm at hour scale.
 
 ## Adaptive cooldown (2026-06-26)
 
