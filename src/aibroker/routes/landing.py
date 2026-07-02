@@ -91,11 +91,14 @@ _HTML = """<!doctype html>
       "programmingLanguage": "Python",
       "featureList": [
         "Free-tier-first routing across 10 LLM providers",
-        "Adaptive per-provider cooldowns with exponential backoff",
+        "Adaptive per-provider cooldowns with exponential backoff and jitter",
         "Per-key, per-project and global daily cost caps",
         "Atomic SELECT FOR UPDATE SKIP LOCKED key selection",
         "Background health monitor with Telegram alerts",
         "Fernet-encrypted provider tokens at rest",
+        "JSON-reliable routing and native json_schema structured output",
+        "Prompt caching with per-call cache-token metering",
+        "Per-project and per-workflow cost attribution",
         "Telegram-login dashboard with per-project usage drill-down",
         "Two operating modes: proxy (broker holds keys) and vending (broker leases keys)"
       ]
@@ -507,8 +510,29 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
         <div class="feat-icon">09</div>
         <h3 data-i18n="f9.t" data-en="Hard CI gates" data-ru="Жёсткие CI-гейты"></h3>
         <p data-i18n="f9.d"
-           data-en="Deploy requires tests + docs to pass. Coverage gate stair-steps up; never drops. 100+ tests, 58%+ coverage."
-           data-ru="Деплой требует прохождение тестов + документации. Coverage-гейт растёт ступенями; не падает. 100+ тестов, 58%+ покрытие."></p>
+           data-en="Deploy requires tests + docs to pass. Coverage gate stair-steps up; never drops. 400+ tests, unit + Postgres integration."
+           data-ru="Деплой требует прохождение тестов + документации. Coverage-гейт растёт ступенями; не падает. 400+ тестов, unit + Postgres-интеграция."></p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">10</div>
+        <h3 data-i18n="f10.t" data-en="Reliable JSON" data-ru="Надёжный JSON"></h3>
+        <p data-i18n="f10.d"
+           data-en="Structured requests route to JSON-reliable providers first; send a json_schema and supported providers grammar-constrain output. A malformed body skips straight to the next provider — no wasted retries."
+           data-ru="Структурные запросы идут к JSON-надёжным провайдерам первыми; пришлите json_schema — поддерживающие провайдеры грамматически ограничат вывод. Битый ответ — сразу к следующему провайдеру, без лишних ретраев."></p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">11</div>
+        <h3 data-i18n="f11.t" data-en="Prompt caching" data-ru="Кэш промптов"></h3>
+        <p data-i18n="f11.d"
+           data-en="Stable system prefixes are cached (Anthropic explicit, DeepSeek/Gemini automatic) at ~0.1x read cost; cache tokens are metered per call. Repeated translate phrases skip the model entirely."
+           data-ru="Стабильные system-префиксы кэшируются (Anthropic явно, DeepSeek/Gemini автоматически) по ~0.1x цены чтения; кэш-токены учитываются на вызов. Повторяющиеся translate-фразы вообще минуют модель."></p>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">12</div>
+        <h3 data-i18n="f12.t" data-en="Cost & health visibility" data-ru="Видимость costs и здоровья"></h3>
+        <p data-i18n="f12.d"
+           data-en="Spend attributed per project and per workflow; last-hour error rate shown per provider so a rate-limit storm is visible at a glance. Adaptive cooldowns with jitter and a per-request attempt cap tame retry storms."
+           data-ru="Расходы разложены по проектам и workflow; error-rate за час на провайдера — шторм лимитов виден сразу. Адаптивные cooldown с jitter и лимит попыток на запрос гасят retry-штормы."></p>
       </div>
     </div>
   </div>
