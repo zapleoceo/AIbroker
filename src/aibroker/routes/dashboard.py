@@ -300,7 +300,7 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
                     text-transform:uppercase; letter-spacing:.05em; color:#5a6171; }}
 .range-form input[type="date"] {{ font-family:ui-monospace,monospace;
                                  font-size:12px; padding:5px 8px; min-width:130px; }}
-.range-form .range-reset {{ color:#4dabf7; font-size:12px; text-decoration:none;
+.range-form .range-reset {{ color:#888; font-size:12px; text-decoration:none;
                            font-family:ui-monospace,monospace; padding:5px 10px;
                            border:1px solid #2a2d34; border-radius:6px; }}
 .range-form .range-quick {{ margin-left:10px; display:inline-flex; gap:6px; }}
@@ -309,6 +309,12 @@ tr.edit-row input, tr.edit-row select {{ min-width:90px; }}
                              color:#888; text-decoration:none;
                              font-family:ui-monospace,monospace; }}
 .range-form .range-quick a:hover {{ color:#4dabf7; border-color:#4dabf7; }}
+/* Selected-range indicator: 'all time' and the quick today/7d/30d links share
+   the same active look (regression: 'all time' used to render permanently
+   blue regardless of state, and today/7d/30d never got any indicator). */
+.range-form .range-reset.active,
+.range-form .range-quick a.active {{ background:rgba(77,171,247,.12);
+                                    color:#4dabf7; border-color:#4dabf7; }}
 /* Totals row */
 tfoot td {{ background:#0f1115; font-weight:600; color:#e4e6eb;
            border-top:2px solid #2a2d34; padding:10px 12px; font-size:12px; }}
@@ -710,7 +716,16 @@ def _render(data: dict[str, Any], *, flash: str = "",
         range_label_en = f"{df_str or '…'} → {dt_str or '…'}"
         range_label_ru = f"{df_str or '…'} → {dt_str or '…'}"
 
-    today_iso = date.today().isoformat()
+    today_d = date.today()
+    today_iso = today_d.isoformat()
+    d7_iso = (today_d - timedelta(days=6)).isoformat()
+    d30_iso = (today_d - timedelta(days=29)).isoformat()
+    # Which quick-range link (if any) matches the current from/to — drives the
+    # 'active' class below. Mutually exclusive by construction (different
+    # from-dates), so at most one is ever true.
+    is_today = df_str == today_iso and dt_str == today_iso
+    is_7d = df_str == d7_iso and dt_str == today_iso
+    is_30d = df_str == d30_iso and dt_str == today_iso
     range_form = f"""
     <form method="get" action="/dashboard" class="range-form">
       <label data-i18n data-en="From" data-ru="С">From</label>
@@ -721,9 +736,9 @@ def _render(data: dict[str, Any], *, flash: str = "",
       <a href="/dashboard" class="range-reset{' active' if all_time else ''}" data-i18n
          data-en="all time" data-ru="за всё">all time</a>
       <span class="range-quick">
-        <a href="?from={today_iso}&to={today_iso}">today</a>
-        <a href="?from={(date.today() - timedelta(days=6)).isoformat()}&to={today_iso}">7d</a>
-        <a href="?from={(date.today() - timedelta(days=29)).isoformat()}&to={today_iso}">30d</a>
+        <a href="?from={today_iso}&to={today_iso}" class="{'active' if is_today else ''}">today</a>
+        <a href="?from={d7_iso}&to={today_iso}" class="{'active' if is_7d else ''}">7d</a>
+        <a href="?from={d30_iso}&to={today_iso}" class="{'active' if is_30d else ''}">30d</a>
       </span>
     </form>"""
 

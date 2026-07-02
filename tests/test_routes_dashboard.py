@@ -956,6 +956,66 @@ def test_main_render_with_empty_db():
     assert "TOTAL" in body
 
 
+# ─── Range-pill active-state indicator ───────────────────────────────────────
+
+
+def test_range_pill_today_is_active_when_selected():
+    """REGRESSION: clicking 'today' filtered correctly but never got an
+    'active' class — and 'all time' rendered permanently blue regardless of
+    state, so it visually looked stuck 'pressed' no matter what was selected."""
+    from datetime import date
+
+    from aibroker.routes.dashboard import _render
+    today = date.today()
+    body = _render(_fake_main_data(date_from=today, date_to=today)).body.decode()
+    assert '>today</a>' in body
+    assert 'class="active">today</a>' in body
+    # 'all time' must NOT be active once a range is selected
+    assert 'range-reset active' not in body
+
+
+def test_range_pill_7d_is_active_when_selected():
+    from datetime import date, timedelta
+
+    from aibroker.routes.dashboard import _render
+    today = date.today()
+    body = _render(_fake_main_data(
+        date_from=today - timedelta(days=6), date_to=today
+    )).body.decode()
+    assert 'class="active">7d</a>' in body
+    assert 'class="active">today</a>' not in body
+    assert 'class="active">30d</a>' not in body
+
+
+def test_range_pill_30d_is_active_when_selected():
+    from datetime import date, timedelta
+
+    from aibroker.routes.dashboard import _render
+    today = date.today()
+    body = _render(_fake_main_data(
+        date_from=today - timedelta(days=29), date_to=today
+    )).body.decode()
+    assert 'class="active">30d</a>' in body
+    assert 'class="active">today</a>' not in body
+    assert 'class="active">7d</a>' not in body
+
+
+def test_range_pill_none_active_for_custom_range():
+    """An arbitrary date range (not matching today/7d/30d) leaves every quick
+    pill un-highlighted — no false 'active' on the wrong button."""
+    from datetime import date, timedelta
+
+    from aibroker.routes.dashboard import _render
+    today = date.today()
+    body = _render(_fake_main_data(
+        date_from=today - timedelta(days=3), date_to=today - timedelta(days=1)
+    )).body.decode()
+    assert 'class="active">today</a>' not in body
+    assert 'class="active">7d</a>' not in body
+    assert 'class="active">30d</a>' not in body
+    assert 'range-reset active' not in body
+
+
 def test_main_render_shows_recent_error_rate_per_provider():
     """#3b: the provider summary surfaces last-hour errors so a 429-storm is
     visible without digging logs. Fixture: gemini has 42 err/1h, cerebras 0."""
