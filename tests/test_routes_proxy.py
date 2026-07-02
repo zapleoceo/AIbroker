@@ -94,7 +94,8 @@ async def test_chat_happy_path_returns_response():
     }
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("hello dima", fake_meta))), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
@@ -131,7 +132,8 @@ async def test_chat_falls_back_on_cap_block():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", side_effect=fake_check), \
+         patch("aibroker.services.llm_service.reserve_cost", side_effect=fake_check), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("ok", fake_meta))), \
          patch("aibroker.services.llm_service.audit", AsyncMock()), \
@@ -160,7 +162,8 @@ async def test_chat_call_llm_failure_records_and_falls_back():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()) as cd, \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
@@ -182,7 +185,8 @@ async def test_chat_auth_error_marks_key_dead():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_dead", AsyncMock()) as md, \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
@@ -209,7 +213,8 @@ async def test_chat_retries_multiple_keys_of_same_provider():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
@@ -237,7 +242,8 @@ async def test_chat_invalid_json_falls_through_to_next_provider():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
@@ -350,7 +356,8 @@ async def test_chat_accepts_multimodal_content():
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.check_caps", AsyncMock()), \
+         patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(

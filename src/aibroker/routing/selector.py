@@ -18,6 +18,30 @@ class SelectionError(Exception):
     """No usable api_key for the (provider, scope) request."""
 
 
+# A key's "daily" counters (daily_used, daily_cost_used_usd) never reset via
+# any cron — nothing in the codebase writes daily_reset_at forward. Confirmed
+# on prod: a key created 2026-06-26 had daily_used=51,921 six days later
+# (~8.6k/day) with daily_reset_at still NULL — so "daily_limit"/"daily_cost_cap"
+# were actually "lifetime limit", locking a key out forever the first time it
+# was ever crossed rather than resetting the next day.
+#
+# Fix: lazy, self-healing reset — every READ and WRITE of these two columns
+# treats them as 0 if `daily_reset_at IS DISTINCT FROM CURRENT_DATE` (works for
+# NULL too), and every WRITE stamps `daily_reset_at = CURRENT_DATE`. No cron
+# dependency; the counter heals itself the next time the key is touched after
+# midnight UTC. Shared here (not duplicated) so pick_and_reserve's read-side
+# check, record_usage's write-side increment, and cost_guard.reserve_cost's
+# admission check can never drift out of sync on what "fresh" means.
+FRESH_DAILY_USED_SQL = (
+    "(CASE WHEN k.daily_reset_at IS DISTINCT FROM CURRENT_DATE "
+    "THEN 0 ELSE k.daily_used END)"
+)
+FRESH_DAILY_COST_SQL = (
+    "(CASE WHEN k.daily_reset_at IS DISTINCT FROM CURRENT_DATE "
+    "THEN 0 ELSE k.daily_cost_used_usd END)"
+)
+
+
 async def pick_and_reserve(
     provider: str,
     scope: str,
@@ -43,8 +67,8 @@ async def pick_and_reserve(
         "k.is_alive = TRUE",
         "k.scopes ? :scope",
         "(k.cooldown_until IS NULL OR k.cooldown_until < now())",
-        "(k.daily_cost_cap_usd IS NULL OR k.daily_cost_used_usd < k.daily_cost_cap_usd)",
-        "(k.daily_limit = 0 OR k.daily_used < k.daily_limit)",
+        f"(k.daily_cost_cap_usd IS NULL OR {FRESH_DAILY_COST_SQL} < k.daily_cost_cap_usd)",
+        f"(k.daily_limit = 0 OR {FRESH_DAILY_USED_SQL} < k.daily_limit)",
     ]
     params: dict[str, object] = {"provider": provider, "scope": scope}
     if require_tier:
@@ -241,12 +265,13 @@ async def record_usage(
         )).scalar_one()
         await s.execute(
             text(
-                "UPDATE api_keys "
-                "SET daily_used = daily_used + 1, "
-                "    daily_cost_used_usd = daily_cost_used_usd + :c, "
+                "UPDATE api_keys AS k "
+                f"SET daily_used = {FRESH_DAILY_USED_SQL} + 1, "
+                f"    daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c, "
+                "    daily_reset_at = CURRENT_DATE, "
                 "    monthly_cost_used_usd = monthly_cost_used_usd + :c, "
                 "    total_cost_usd = total_cost_usd + :c "
-                "WHERE id = :id"
+                "WHERE k.id = :id"
             ),
             {"c": cost_usd, "id": api_key_id},
         )

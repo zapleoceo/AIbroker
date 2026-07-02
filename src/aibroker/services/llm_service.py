@@ -21,14 +21,20 @@ from aibroker.providers.context_limits import (
     fits_context,
     is_too_large_error,
 )
-from aibroker.providers.litellm_adapter import embed, model_for, transcribe
+from aibroker.providers.litellm_adapter import (
+    embed,
+    estimate_llm_cost,
+    model_for,
+    transcribe,
+)
 from aibroker.providers.observations import learned_ceilings, record_too_large
 from aibroker.routing import (
     CostGuardError,
     chain_for,
-    check_caps,
     deprioritize_for_json,
     pick_and_reserve,
+    release_cost,
+    reserve_cost,
     scope_for,
 )
 from aibroker.routing.selector import mark_cooldown, mark_dead, record_usage
@@ -224,15 +230,25 @@ async def run_chat(
             if key is None:
                 break  # no (more) available key for this provider → next provider
             attempts += 1
+            use_model = model or model_for(provider, capability)
+            if not use_model:
+                break  # provider can't serve this capability → next provider
+            # Worst-case cost estimate (assumes the full max_tokens budget is
+            # generated) reserved BEFORE the call — see reserve_cost's
+            # docstring for why this closes a real concurrent-overspend race
+            # that a plain pre-loaded-object comparison couldn't. Free-tier
+            # keys always cost $0 (_billed_cost) — never estimate/reserve for
+            # them, matching reserve_cost's own free-tier skip.
+            estimated_cost = (
+                0.0 if key.tier == "free"
+                else estimate_llm_cost(use_model, est_tokens, max_tokens)
+            )
             try:
-                await check_caps(api_key=key, project=project, estimated_cost=0.0)
+                await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
             except CostGuardError as e:
                 await audit(actor=f"project:{project.name}", action="cap_block",
                             target=f"provider={provider}", metadata={"reason": str(e)})
                 break  # project/global cap — more keys won't help → next provider
-            use_model = model or model_for(provider, capability)
-            if not use_model:
-                break  # provider can't serve this capability → next provider
             plain = decrypt(key.token_encrypted)
             try:
                 text, meta = await call_llm(
@@ -242,6 +258,9 @@ async def run_chat(
                 )
                 meta["cost_usd"] = _billed_cost(key, meta)
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+                # Attempt is over (however it ends) — release the reservation.
+                # record_usage below books the real cost (0 here — no response).
+                await release_cost(api_key=key, estimated_cost=estimated_cost)
                 kind = await _penalize(key, e)
                 # Self-learn the size ceiling: if the provider rejected the
                 # prompt for being too big, remember it so we skip this
@@ -261,6 +280,11 @@ async def run_chat(
                 log.warning("provider %s key %s failed (%s): %s",
                             provider, key.label, kind, e)
                 continue  # try the next key of this provider
+
+            # Call resolved (successfully) — release the reservation; record_usage
+            # below books the REAL final cost (meta["cost_usd"]) on top, so the
+            # key ends up debited by exactly the real cost, never the estimate.
+            await release_cost(api_key=key, estimated_cost=estimated_cost)
 
             # Deterministic JSON quality gate: an unparseable JSON body (gemini
             # truncated, deepseek rogue) is billed but treated as a failure.

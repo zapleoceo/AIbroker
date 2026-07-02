@@ -156,8 +156,11 @@ WHERE id = (
       AND is_active AND is_alive
       AND scopes ? :scope
       AND (cooldown_until IS NULL OR cooldown_until < now())
-      AND (daily_cost_cap_usd IS NULL OR daily_cost_used_usd < daily_cost_cap_usd)
-      AND (daily_limit = 0 OR daily_used < daily_limit)
+      -- daily_cost_used_usd/daily_used are reset-aware (FRESH_DAILY_*_SQL,
+      -- see **Cost guard**) — a stale (non-today) value reads as 0, not its
+      -- raw stored total.
+      AND (daily_cost_cap_usd IS NULL OR fresh(daily_cost_used_usd) < daily_cost_cap_usd)
+      AND (daily_limit = 0 OR fresh(daily_used) < daily_limit)
     ORDER BY
       k.is_reserve,
       <saturation_case>,            -- over-quota keys pushed to back
@@ -202,11 +205,47 @@ a naive `TIMESTAMP` and asyncpg rejects offset-aware values.
 
 ## Cost guard
 
-`src/aibroker/routing/cost_guard.py:check_caps(api_key, project, estimated_cost)`
+`src/aibroker/routing/cost_guard.py:reserve_cost(api_key, project, estimated_cost)`
++ `release_cost(api_key, estimated_cost)`.
 
-Three independent daily caps: per-key, per-project (live SUM from `usage_log`),
-global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`). Free-tier keys with `cost == 0`
-skip the check.
+Three independent daily caps: per-key (atomic, see below), per-project (live
+SUM from `usage_log`), global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
+Free-tier keys with `cost <= 0` skip the check entirely.
+
+**Real reservation pattern (2026-07-03).** `run_chat` estimates the
+worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —
+assumes the full `max_tokens` budget is generated) and calls `reserve_cost`
+**before** the provider call; `release_cost` undoes the reservation once the
+attempt resolves (success or failure), and `record_usage` then books the REAL
+final cost on top — so a key ends up debited by exactly the real cost, the
+estimate only ever counting toward the cap for the few hundred ms the call is
+actually in flight. This used to be advertised on the landing page
+("Reservation pattern: estimate before, settle after") without actually being
+implemented that way — `check_caps` was called with a hardcoded
+`estimated_cost=0.0`, so the per-key check was really just "is the counter,
+loaded earlier in the request, already over cap" — a plain Python comparison
+against a possibly-stale object, race-prone under concurrent requests against
+the same key. The per-key branch is now a single atomic
+`UPDATE ... WHERE ... RETURNING`: Postgres row-locks the key for the
+statement's duration, so two concurrent reservations against the same key
+serialize correctly instead of both reading the same stale value and both
+passing. Per-project/global checks are unchanged (live/cached SUM) — a
+smaller, accepted residual race remains there, a secondary backstop behind the
+now-atomic, tighter per-key cap.
+
+**Daily counters that never reset (2026-07-03, found while fixing the above).**
+`api_keys.daily_used`/`daily_cost_used_usd` were never actually reset day to
+day — nothing wrote `daily_reset_at` forward. Confirmed on prod: a key created
+six days earlier had `daily_used=51,921` (~8.6k/day) with `daily_reset_at`
+still `NULL` — a "daily" cap was really a **lifetime** cap, permanently
+locking a key out the first time it was ever crossed. Fixed with a lazy,
+self-healing reset (no cron dependency): every read (`pick_and_reserve`'s
+`WHERE`) and write (`record_usage`, `reserve_cost`) of these two columns
+treats them as `0` if `daily_reset_at IS DISTINCT FROM CURRENT_DATE`, and
+every write stamps `daily_reset_at = CURRENT_DATE`. The exact SQL fragment is
+shared (not duplicated) as `routing.selector.FRESH_DAILY_USED_SQL` /
+`FRESH_DAILY_COST_SQL` so the read-side check, the atomic reservation, and the
+final-cost write can never disagree on what "today" means.
 
 **Cost source** (`providers/litellm_adapter.py:estimate_llm_cost`): LiteLLM's
 `cost_per_token(model, prompt_tokens, completion_tokens)` pricing map, summed.

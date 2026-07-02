@@ -105,7 +105,7 @@ async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
     picks: list[str] = []
     recorded: list[tuple[str, int]] = []
 
-    fake_key = SimpleNamespace(id=1, label="k", provider="cerebras",
+    fake_key = SimpleNamespace(id=1, label="k", tier="free", provider="cerebras",
                                token_encrypted="x")
 
     async def fake_pick(provider, scope, **kw):
@@ -125,7 +125,8 @@ async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "_penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
@@ -188,7 +189,8 @@ async def test_run_chat_caps_gemini_retries(monkeypatch):
         return "rate_limit"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "_penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
@@ -237,7 +239,8 @@ async def test_run_chat_invalid_json_skips_provider_not_key(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -342,7 +345,8 @@ async def test_run_chat_translate_caches_success(monkeypatch):
                           "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -383,7 +387,8 @@ async def test_run_chat_does_not_cache_chat_capability(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -486,7 +491,8 @@ async def test_run_chat_global_attempt_cap(monkeypatch):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "_penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
@@ -554,7 +560,8 @@ async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -595,7 +602,8 @@ async def test_run_chat_keeps_real_cost_for_paid_tier_key(monkeypatch):
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -642,7 +650,8 @@ async def test_run_chat_passes_cache_tokens_to_record_usage_and_outcome(monkeypa
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
@@ -682,7 +691,8 @@ async def test_run_chat_defaults_cache_tokens_when_meta_omits_them(monkeypatch):
                           "tokens_out": 50, "cost_usd": 0.0, "latency_ms": 100}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
