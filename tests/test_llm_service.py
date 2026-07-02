@@ -1,6 +1,8 @@
 """services/llm_service — provider-error classification (the DRY classifier)."""
 from __future__ import annotations
 
+import pytest
+
 from aibroker.services.llm_service import classify_provider_error
 
 
@@ -694,3 +696,173 @@ async def test_run_chat_defaults_cache_tokens_when_meta_omits_them(monkeypatch):
     )
     assert out.cache_read_tokens == 0
     assert out.cache_write_tokens == 0
+
+
+# ─── run_embed retries same-provider keys (never crosses provider) ──────────
+
+
+async def test_run_embed_retries_next_key_on_transient_failure(monkeypatch):
+    """A transient APIConnectionError on the first voyage key must fall
+    through to a second voyage key — not raise immediately."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    keys = [
+        SimpleNamespace(id=1, label="a", tier="free", provider="voyage",
+                         token_encrypted="x"),
+        SimpleNamespace(id=2, label="b", tier="free", provider="voyage",
+                         token_encrypted="x"),
+    ]
+    picks: list[str] = []
+    calls = {"n": 0}
+
+    async def fake_pick(provider, scope, **kw):
+        idx = len(picks)
+        picks.append(provider)
+        return keys[idx] if idx < len(keys) else None
+
+    async def fake_penalize(key, exc):
+        return "error"
+
+    async def fake_embed(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("APIConnectionError: connection reset")
+        return [[0.1, 0.2]], {"model": kw["model"], "tokens_in": 10,
+                              "tokens_out": 0, "cost_usd": 0.0001, "latency_ms": 50}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "embed", fake_embed)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+
+    out = await svc.run_embed(
+        project=SimpleNamespace(id=1, name="vera"), provider="voyage",
+        inputs=["hello"], model=None, workflow="reindex",
+    )
+    assert out.embeddings == [[0.1, 0.2]]
+    assert out.key_label == "b"           # succeeded on the SECOND key
+    assert picks == ["voyage", "voyage"]  # both attempts stayed on voyage
+
+
+async def test_run_embed_raises_after_exhausting_all_keys(monkeypatch):
+    """Every key of the provider fails → EmbedFailed (502), not a silent
+    cross-provider fallback."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
+                                token_encrypted="x")
+
+    async def fake_penalize(key, exc):
+        return "error"
+
+    async def fake_embed(**kw):
+        raise RuntimeError("APIConnectionError: connection reset")
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "embed", fake_embed)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+
+    with pytest.raises(svc.EmbedFailed):
+        await svc.run_embed(
+            project=SimpleNamespace(id=1, name="vera"), provider="voyage",
+            inputs=["hello"], model=None, workflow="reindex",
+        )
+
+
+async def test_run_embed_never_falls_back_to_a_different_provider(monkeypatch):
+    """Embeddings from different providers aren't interchangeable (different
+    vector spaces/dimensionality) — a failing voyage key must never silently
+    resolve via cohere. Only 'voyage' is ever picked."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked_providers: set[str] = set()
+
+    async def fake_pick(provider, scope, **kw):
+        picked_providers.add(provider)
+        return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
+                                token_encrypted="x")
+
+    async def fake_penalize(key, exc):
+        return "error"
+
+    async def fake_embed(**kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "embed", fake_embed)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+
+    with pytest.raises(svc.EmbedFailed):
+        await svc.run_embed(
+            project=SimpleNamespace(id=1, name="vera"), provider="voyage",
+            inputs=["hello"], model=None, workflow="reindex",
+        )
+    assert picked_providers == {"voyage"}
+
+
+async def test_run_embed_returns_none_when_no_key_available(monkeypatch):
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    async def fake_pick(provider, scope, **kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+
+    out = await svc.run_embed(
+        project=SimpleNamespace(id=1, name="vera"), provider="voyage",
+        inputs=["hello"], model=None, workflow="reindex",
+    )
+    assert out is None
+
+
+async def test_run_embed_succeeds_first_try_records_usage(monkeypatch):
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    recorded = {}
+    key = SimpleNamespace(id=5, label="only", tier="free", provider="voyage",
+                           token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return key
+
+    async def fake_embed(**kw):
+        return [[1.0, 2.0]], {"model": kw["model"], "tokens_in": 42,
+                              "tokens_out": 0, "cost_usd": 0.0005, "latency_ms": 30}
+
+    def fake_record_usage(**kw):
+        recorded.update(kw)
+        return _noop()
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "embed", fake_embed)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+
+    out = await svc.run_embed(
+        project=SimpleNamespace(id=1, name="vera"), provider="voyage",
+        inputs=["hello", "world"], model=None, workflow="reindex",
+    )
+    assert out.embeddings == [[1.0, 2.0]]
+    assert out.tokens_in == 42
+    assert recorded["status"] == "ok"
+    assert recorded["tokens_in"] == 42

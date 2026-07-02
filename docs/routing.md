@@ -379,6 +379,28 @@ Per key:
 Chain exhausted → HTTP 503. The first success returns text + meta, including the
 chosen key's **label** (surfaced to clients for their cost/usage chip).
 
+## Embedding: retry same-provider keys, never cross providers (2026-07-02)
+
+`run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**
+`pick_and_reserve` call, **zero** retry — any failure raised `EmbedFailed`
+(HTTP 502) immediately. Real driver: `voyage APIConnectionError` was 100% of
+7-day embedding failures (621 calls) — a transient network blip, not a dead
+key or a dead provider. One flaky connection killed the whole request with a
+live pool of 6 voyage keys sitting unused.
+
+Fixed to mirror the chat retry loop — `for _ in range(_max_keys(provider))`,
+picking a fresh key each attempt (`_penalize` cools the failed one first) —
+**but scoped to the single `provider` the caller asked for**. Unlike
+`chat_for(capability)`'s multi-provider chain, embedding deliberately does
+**not** walk to a different provider on exhaustion: `voyage-3` and
+`cohere embed-english-v3` are different vector spaces, so a silent
+voyage→cohere fallback mid-batch would write incomparable vectors into the
+same index — a correctness bug, not a resilience win. `provider` stays
+exactly what the client specified; only the key rotates.
+
+`EmbedFailed` (all keys exhausted) → HTTP 502, same as before — now it means
+"the whole provider is actually down", not "one key blipped once".
+
 **Prefer native structured output over the gate.** The JSON gate is a
 post-hoc safety net. The *root-cause* fix is for the caller to send a full
 `response_format={"type":"json_schema","json_schema":{…,"strict":true}}`

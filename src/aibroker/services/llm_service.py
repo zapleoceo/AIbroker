@@ -319,7 +319,7 @@ class EmbedOutcome:
 
 
 class EmbedFailed(Exception):
-    """Provider call failed — route maps this to HTTP 502."""
+    """Every key of `provider` failed — route maps this to HTTP 502."""
 
 
 async def run_embed(
@@ -330,38 +330,62 @@ async def run_embed(
     model: str | None,
     workflow: str | None,
 ) -> EmbedOutcome | None:
-    """Embed `inputs` via `provider`. None → no key (503); EmbedFailed → 502."""
-    key = await pick_and_reserve(provider, scope=scope_for("embedding"))
-    if key is None:
-        return None
+    """Embed `inputs` via `provider`, retrying up to `_max_keys(provider)` keys
+    of that SAME provider on failure. None → no key at all (503); EmbedFailed →
+    every key tried and failed (502).
+
+    Deliberately does NOT fall back to a different provider (unlike
+    run_chat/run_transcribe walking their capability chain): voyage-3 and
+    cohere embed-english-v3 are different vector spaces with no guaranteed
+    cross-compatible dimensionality. Silently switching provider mid-batch
+    would poison a vector index with incomparable embeddings. `provider` is
+    the caller's explicit choice — the broker only rotates KEYS within it.
+
+    (Real-world driver: voyage APIConnectionError — 100% of 7d embedding
+    failures — is a transient network blip, not a bad key or a dead
+    provider; a fresh key retry turns most of these into a normal success.)
+    """
     use_model = model or model_for(provider, "embedding") or "voyage/voyage-3"
-    plain = decrypt(key.token_encrypted)
-    try:
-        vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
-        meta["cost_usd"] = _billed_cost(key, meta)
-    except Exception as e:
-        await _penalize(key, e)
-        await record_usage(
+    any_key_seen = False
+    last_exc: Exception | None = None
+    for _ in range(_max_keys(provider)):
+        key = await pick_and_reserve(provider, scope=scope_for("embedding"))
+        if key is None:
+            break  # no (more) available key for this provider
+        any_key_seen = True
+        plain = decrypt(key.token_encrypted)
+        try:
+            vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
+            meta["cost_usd"] = _billed_cost(key, meta)
+        except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+            last_exc = e
+            await _penalize(key, e)
+            await record_usage(
+                api_key_id=key.id, project_id=project.id, lease_id=None,
+                provider=provider, model=use_model, capability="embedding",
+                workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+                latency_ms=None, status="error", error_kind=type(e).__name__,
+                http_status=None,
+            )
+            log.warning("provider %s key %s embed failed, trying next key: %s",
+                        provider, key.label, e)
+            continue
+        request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model, capability="embedding",
-            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-            latency_ms=None, status="error", error_kind=type(e).__name__,
-            http_status=None,
+            workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=0,
+            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+            status="ok", error_kind=None, http_status=200,
         )
-        raise EmbedFailed(str(e)) from e
-    request_id = await record_usage(
-        api_key_id=key.id, project_id=project.id, lease_id=None,
-        provider=provider, model=use_model, capability="embedding",
-        workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=0,
-        cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-        status="ok", error_kind=None, http_status=200,
-    )
-    return EmbedOutcome(
-        embeddings=vectors, provider=provider, model=use_model,
-        tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
-        latency_ms=meta["latency_ms"], key_label=key.label,
-        request_id=request_id,
-    )
+        return EmbedOutcome(
+            embeddings=vectors, provider=provider, model=use_model,
+            tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
+            latency_ms=meta["latency_ms"], key_label=key.label,
+            request_id=request_id,
+        )
+    if not any_key_seen:
+        return None
+    raise EmbedFailed(str(last_exc) if last_exc else "all keys failed")
 
 
 @dataclass

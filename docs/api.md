@@ -64,6 +64,17 @@ the call routed through anthropic and hit its prompt cache — see
 and `request_id` (the `usage_log` row id — match your own logs against the
 broker's).
 
+### `/v1/embed?provider=<p>` (default `voyage`)
+
+The broker retries **up to 5 keys of the same provider** on failure
+(2026-07-02) before returning `502`. It does **not** fall back to a different
+provider — `voyage-3` and `cohere embed-english-v3` are different vector
+spaces, and silently switching mid-batch would poison a vector index with
+incomparable embeddings. `provider` is your explicit choice; the broker only
+rotates keys within it. If you need a specific fallback provider, call
+`/v1/embed?provider=cohere` yourself and re-embed the affected batch — don't
+mix vectors from two providers in one index.
+
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
