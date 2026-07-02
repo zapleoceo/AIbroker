@@ -120,6 +120,13 @@ Exponential backoff: each consecutive 429 on the same key within a 1h
 window doubles the wait (60 → 120 → 240 → 480 …) capped at 30 min.
 Counter resets when the key has gone 1h without a 429.
 
+**Anti-herd jitter (2026-07-02).** A provider's whole key pool tends to 429
+together, so without jitter they'd all recover on the same tick and re-storm in
+lockstep. Adaptive waits are stretched by a random 0-25% (`_adaptive_jitter`);
+day/hour boundary resets get a random 0-90s offset (`_boundary_jitter`). Jitter
+only ever LENGTHENS a wait — never shortens it — and is skipped when the
+provider gave an explicit retry-after (we honour that exactly).
+
 `cooldown_until(api_key_id, provider, error_msg)` resolves the `until`
 timestamp most-authoritative-first:
 
@@ -324,7 +331,25 @@ request. Default is 5; **gemini and cerebras are capped at 3** (2026-07-02):
 their keys rate-limit in lockstep (gemini's ~20/day/model free cap, cerebras
 rolling RPM), so a 4th/5th retry there rarely finds a healthy key and is pure
 latency before the chain moves on. The selector hands a fresh LRU key each pick
-and `_penalize` cools failed ones, so each retry gets a different key.
+and `_penalize` cools failed ones, so each retry gets a different key. A
+**global `_MAX_ATTEMPTS_PER_REQUEST` (12)** caps total attempts across the whole
+chain (2026-07-02) — a saturation storm could otherwise walk ~30 attempts of
+pure latency before giving up; past the cap the request 503s.
+
+**Translate exact-match cache (2026-07-02).** `run_chat` first checks
+`services/response_cache.py` for deterministic capabilities — `is_cacheable`
+allow-lists `translate` only (same phrases recur verbatim, and a translation of
+fixed input is stable). A hit returns immediately (`provider="cache"`, cost 0)
+with no provider call; a success is stored (LRU + 24h TTL, per-replica,
+in-process, keyed on the full request signature incl. model/params). chat/* is
+never cacheable — non-deterministic.
+
+**Skip size-filter on the small-prompt path (2026-07-02).** The learned-ceiling
+size filter (`learned_ceilings()`, a DB round-trip) runs only when
+`est_tokens >= MIN_LEARNABLE_CEILING`. Below the floor every provider fits by
+definition, so chat:fast/translate (avg ~1k / ~370 tokens) skip the query
+entirely — the highest-volume path no longer pays for a filter that can't change
+the chain.
 
 **JSON-reliable ordering (2026-07-02).** When `response_format` asks for JSON,
 `run_chat` runs the chain through `deprioritize_for_json` first, pushing
@@ -353,3 +378,13 @@ Per key:
 
 Chain exhausted → HTTP 503. The first success returns text + meta, including the
 chosen key's **label** (surfaced to clients for their cost/usage chip).
+
+**Prefer native structured output over the gate.** The JSON gate is a
+post-hoc safety net. The *root-cause* fix is for the caller to send a full
+`response_format={"type":"json_schema","json_schema":{…,"strict":true}}`
+instead of a bare `json_object`: providers that support it (gemini, openai,
+groq) then grammar-constrain generation, so the model *cannot* emit invalid
+JSON and the gate never fires. The broker forwards the schema byte-for-byte
+(`call_llm`) — it can't invent one, so this win depends on the client sending
+it. cerebras/cohere don't grammar-constrain, which is why they're in
+`JSON_UNRELIABLE_PROVIDERS` and deprioritized for JSON either way.

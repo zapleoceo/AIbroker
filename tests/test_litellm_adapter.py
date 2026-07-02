@@ -196,6 +196,45 @@ async def test_call_llm_passes_response_format_kwarg():
     assert captured["api_key"] == "k"
 
 
+async def test_call_llm_forwards_json_schema_verbatim():
+    """Native structured output (#1): a full json_schema response_format must
+    reach the provider UNCHANGED — that's what grammar-constrains generation to
+    valid JSON at the source (root-cause fix vs the post-hoc regex gate). The
+    broker can't invent a schema, so its whole job here is faithful pass-through."""
+    captured = {}
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "extraction", "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"], "additionalProperties": False,
+            },
+        },
+    }
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"name":"x"}'),
+                finish_reason="stop",
+            )],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="gemini/gemini-2.5-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format=schema, max_tokens=256, temperature=0.0,
+        )
+    assert captured["response_format"] == schema        # byte-for-byte, incl. strict
+    assert captured["response_format"]["json_schema"]["strict"] is True
+
+
 async def test_call_llm_disables_gemini_thinking_for_json():
     """gemini + JSON → reasoning_effort=disable so thinking doesn't truncate."""
     captured = {}

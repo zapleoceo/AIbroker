@@ -38,7 +38,18 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 
 `translate` routes to small fast non-reasoning models first
 (mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,
-don't answer" task under a tight client timeout.
+don't answer" task under a tight client timeout. Identical translate requests
+are served from an in-process exact-match cache (24h TTL) — repeated phrases
+skip the LLM entirely (`provider="cache"` in the response).
+
+**For structured/JSON output, send a full `json_schema`, not a bare
+`json_object`.** With `response_format={"type":"json_schema","json_schema":
+{"name":…, "strict":true, "schema":{…}}}` the schema-capable providers (gemini,
+openai, groq) grammar-constrain generation, so the model **cannot** return
+invalid JSON — this is the root-cause fix for the `InvalidJSON` failures, far
+better than the broker's post-hoc JSON validation. The broker forwards the
+schema unchanged; providers that don't support it (cerebras/cohere) are
+automatically deprioritized for JSON requests.
 
 `vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
 may be a plain string **or** a list of blocks, e.g.

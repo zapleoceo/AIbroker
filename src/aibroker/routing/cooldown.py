@@ -9,6 +9,7 @@ key keeps tripping within a window.
 """
 from __future__ import annotations
 
+import random
 import re
 from datetime import UTC, datetime, time, timedelta
 
@@ -39,12 +40,29 @@ MAX_COOLDOWN_S = 30 * 60
 # for backoff math. Past this, counter resets.
 BACKOFF_WINDOW_S = 60 * 60
 
+# Anti-thundering-herd jitter. Keys that trip together (a whole provider's pool
+# 429ing at once) would otherwise recover at the same instant and re-storm the
+# provider in lockstep. A random spread desynchronises them.
+_ADAPTIVE_JITTER_FRAC = 0.25      # adaptive waits stretched by 0-25%
+_BOUNDARY_JITTER_S = 90           # day/hour resets spread 0-90s past the boundary
+
 
 def cooldown_seconds(provider: str, recent_cooldowns: int) -> int:
     """How long to park a key, given how many times it's tripped in the window."""
     base = COOLDOWN_BASE_S.get(provider, DEFAULT_COOLDOWN_S)
     # 0 prior cooldowns → base; 1 → base*2; 2 → base*4; cap at MAX_COOLDOWN_S.
     return min(base * (2 ** max(0, recent_cooldowns)), MAX_COOLDOWN_S)
+
+
+def _adaptive_jitter(secs: int) -> float:
+    """Stretch an adaptive wait by a random 0-25% so peers don't recover as one."""
+    return secs * random.uniform(1.0, 1.0 + _ADAPTIVE_JITTER_FRAC)
+
+
+def _boundary_jitter() -> timedelta:
+    """A small random offset past a day/hour reset, so a provider's keys don't
+    all wake at the exact same tick."""
+    return timedelta(seconds=random.uniform(0, _BOUNDARY_JITTER_S))
 
 
 # A key that hit its DAILY quota won't recover until the provider's day rolls
@@ -127,11 +145,12 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
+        # Provider told us exactly — honour it (no jitter; it knows its window).
         return datetime.now(UTC) + timedelta(seconds=retry)
     if is_daily_quota_error(error_msg):
-        return next_utc_midnight()
+        return next_utc_midnight() + _boundary_jitter()
     if is_hourly_quota_error(error_msg):
-        return next_hour_boundary()
+        return next_hour_boundary() + _boundary_jitter()
     return await adaptive_cooldown(api_key_id, provider)
 
 
@@ -150,5 +169,5 @@ async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:
             ),
             {"id": api_key_id, "w": BACKOFF_WINDOW_S},
         )).scalar() or 0)
-    secs = cooldown_seconds(provider, recent)
+    secs = _adaptive_jitter(cooldown_seconds(provider, recent))
     return datetime.now(UTC) + timedelta(seconds=secs)

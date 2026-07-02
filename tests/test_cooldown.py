@@ -7,6 +7,8 @@ from aibroker.routing.cooldown import (
     COOLDOWN_BASE_S,
     DEFAULT_COOLDOWN_S,
     MAX_COOLDOWN_S,
+    _adaptive_jitter,
+    _boundary_jitter,
     cooldown_seconds,
     is_daily_quota_error,
     is_hourly_quota_error,
@@ -19,6 +21,20 @@ from aibroker.routing.cooldown import (
 def test_first_cooldown_is_provider_base():
     for prov, base in COOLDOWN_BASE_S.items():
         assert cooldown_seconds(prov, 0) == base, f"{prov} should start at base"
+
+
+def test_adaptive_jitter_within_0_to_25_percent():
+    """Anti-herd jitter only ever LENGTHENS a wait, by at most 25%."""
+    for _ in range(200):
+        j = _adaptive_jitter(60)
+        assert 60.0 <= j <= 75.0
+
+
+def test_boundary_jitter_within_90s():
+    """Day/hour reset spread stays in [0, 90s] so it never shortens the wait."""
+    for _ in range(200):
+        d = _boundary_jitter().total_seconds()
+        assert 0.0 <= d <= 90.0
 
 
 def test_unknown_provider_uses_default():
@@ -129,8 +145,9 @@ async def test_cooldown_until_daily_goes_to_midnight():
     from aibroker.routing.cooldown import cooldown_until
     until = await cooldown_until(1, "cerebras",
                                  "CerebrasException - Tokens per day limit exceeded")
-    # Must be the next UTC midnight, far more than a 60s adaptive cooldown
-    assert until == next_utc_midnight()
+    # Next UTC midnight + a small anti-herd jitter (0-90s), far more than 60s
+    offset = (until - next_utc_midnight()).total_seconds()
+    assert 0 <= offset <= 90
     assert (until - datetime.now(UTC)).total_seconds() > 120
 
 
@@ -164,7 +181,9 @@ async def test_cooldown_until_hourly_goes_to_next_hour():
     from aibroker.routing.cooldown import cooldown_until
     until = await cooldown_until(1, "cerebras",
                                  "CerebrasException - Requests per hour limit exceeded")
-    assert until == next_hour_boundary()
-    # Between 0 and 60 min out — always more than the 60s first adaptive step
+    # Top of the next hour + a small anti-herd jitter (0-90s)
+    offset = (until - next_hour_boundary()).total_seconds()
+    assert 0 <= offset <= 90
+    # Between 0 and ~60 min out — always more than the 60s first adaptive step
     delta = (until - datetime.now(UTC)).total_seconds()
-    assert 0 < delta <= 3600
+    assert 0 < delta <= 3600 + 90

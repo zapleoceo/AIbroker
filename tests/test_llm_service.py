@@ -283,6 +283,226 @@ async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
     assert picks.index("mistral") < picks.index("cerebras")
 
 
+# ─── translate exact-match cache ─────────────────────────────────────────────
+
+
+async def test_run_chat_translate_cache_hit_skips_providers(monkeypatch):
+    """A cached translate response returns immediately — no provider is picked."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.services import response_cache
+
+    response_cache.clear()
+    picked = {"n": 0}
+
+    async def fake_pick(provider, scope, **kw):
+        picked["n"] += 1
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
+
+    msgs = [{"role": "user", "content": "Halo"}]
+    response_cache.put("translate", msgs, "Hello", model=None,
+                        max_tokens=128, temperature=0.7)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="translate",
+        messages=msgs, model=None, max_tokens=128, temperature=0.7,
+        response_format=None, workflow="translate",
+    )
+    response_cache.clear()
+    assert out.text == "Hello"
+    assert out.provider == "cache"
+    assert picked["n"] == 0            # never touched a provider
+
+
+async def test_run_chat_translate_caches_success(monkeypatch):
+    """A successful translate response is stored for the next identical call."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.services import response_cache
+
+    response_cache.clear()
+    key = SimpleNamespace(id=1, label="m", tier="free", provider="mistral",
+                           token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "Hello", {"model": "mistral/mistral-small-latest", "tokens_in": 10,
+                          "tokens_out": 5, "cost_usd": 0.0, "latency_ms": 100,
+                          "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
+
+    msgs = [{"role": "user", "content": "Terima kasih"}]
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="translate",
+        messages=msgs, model=None, max_tokens=128, temperature=0.7,
+        response_format=None, workflow="translate",
+    )
+    assert response_cache.get("translate", msgs, model=None,
+                               max_tokens=128, temperature=0.7) == "Hello"
+    response_cache.clear()
+
+
+async def test_run_chat_does_not_cache_chat_capability(monkeypatch):
+    """chat/* must never be cached — non-deterministic."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.services import response_cache
+
+    response_cache.clear()
+    key = SimpleNamespace(id=1, label="m", tier="free", provider="mistral",
+                           token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return key
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return "hi", {"model": "m", "tokens_in": 10, "tokens_out": 5,
+                      "cost_usd": 0.0, "latency_ms": 100,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
+
+    msgs = [{"role": "user", "content": "hi"}]
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=msgs, model=None, max_tokens=128, temperature=0.7,
+        response_format=None, workflow="x",
+    )
+    assert response_cache.get("chat:fast", msgs, model=None,
+                               max_tokens=128, temperature=0.7) is None
+
+
+# ─── size-filter skipped for small prompts (#2) ──────────────────────────────
+
+
+async def test_run_chat_skips_size_filter_for_small_prompt(monkeypatch):
+    """A sub-ceiling prompt fits every provider, so learned_ceilings() (a DB
+    round-trip) must be skipped on the high-volume small-prompt path."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    called = {"learned": 0}
+
+    async def fake_learned():
+        called["learned"] += 1
+        return {}
+
+    async def fake_pick(provider, scope, **kw):
+        return None
+
+    monkeypatch.setattr(svc, "learned_ceilings", fake_learned)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:fast",
+        messages=[{"role": "user", "content": "short prompt"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="x",
+    )
+    assert called["learned"] == 0     # skipped: prompt < MIN_LEARNABLE_CEILING
+
+
+async def test_run_chat_runs_size_filter_for_large_prompt(monkeypatch):
+    """A prompt above the floor still consults learned_ceilings()."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    called = {"learned": 0}
+
+    async def fake_learned():
+        called["learned"] += 1
+        return {}
+
+    async def fake_pick(provider, scope, **kw):
+        return None
+
+    monkeypatch.setattr(svc, "learned_ceilings", fake_learned)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
+
+    big = [{"role": "user", "content": "x" * 40_000}]   # ~10k tokens > floor
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:smart",
+        messages=big, model=None, max_tokens=128, temperature=0.7,
+        response_format=None, workflow="x",
+    )
+    assert called["learned"] == 1
+
+
+# ─── per-request global attempt cap (#5b) ────────────────────────────────────
+
+
+async def test_run_chat_global_attempt_cap(monkeypatch):
+    """A long chain of failing providers must stop at _MAX_ATTEMPTS_PER_REQUEST
+    total attempts, not walk every provider × every key."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    attempts = {"n": 0}
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
+                                token_encrypted="x")
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        attempts["n"] += 1
+        raise RuntimeError("boom generic error")
+
+    async def fake_penalize(k, e):
+        return "error"
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "check_caps", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    # 9-provider chain (default 5 keys each = up to 45 attempts without the cap)
+    monkeypatch.setattr(svc, "chain_for",
+                         lambda cap: [f"p{i}" for i in range(9)])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="chat:smart",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="x",
+    )
+    assert out is None
+    assert attempts["n"] == svc._MAX_ATTEMPTS_PER_REQUEST
+
+
 # ─── free-tier keys must never bill a real $ cost ───────────────────────────
 
 

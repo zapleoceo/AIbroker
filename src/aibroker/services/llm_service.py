@@ -16,6 +16,7 @@ from aibroker.crypto import decrypt
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
 from aibroker.providers.context_limits import (
+    MIN_LEARNABLE_CEILING,
     estimate_prompt_tokens,
     fits_context,
     is_too_large_error,
@@ -31,6 +32,7 @@ from aibroker.routing import (
     scope_for,
 )
 from aibroker.routing.selector import mark_cooldown, mark_dead, record_usage
+from aibroker.services import response_cache
 from aibroker.telemetry import audit
 
 log = logging.getLogger(__name__)
@@ -45,6 +47,11 @@ _COOLDOWN = timedelta(minutes=5)
 # keeps the full breadth.
 _MAX_KEYS_PER_PROVIDER = 5
 _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
+
+# Hard ceiling on provider-call attempts for a single request, across the whole
+# chain — a saturation storm could otherwise walk ~30 attempts (9 providers ×
+# per-provider key retries) of pure latency before giving up. Bounds the tail.
+_MAX_ATTEMPTS_PER_REQUEST = 12
 
 
 def _max_keys(provider: str) -> int:
@@ -162,35 +169,61 @@ async def run_chat(
     through — so one rate-limited free key doesn't sink the whole request.
     """
     scope = scope_for(capability)
-    # Size-aware provider filter: drop providers whose single-request token
-    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt —
-    # a guaranteed 413). The ceiling is self-learned per provider (overrides
-    # the code seed). The request still reaches a provider that CAN serve it,
-    # so quality is identical; we just skip the wasted failures. If EVERY
-    # provider is size-skipped (impossible today — big-context providers have
-    # no ceiling), fall back to the full chain so we never starve.
+
+    # Exact-match cache for deterministic capabilities (translate): the same
+    # phrases recur verbatim, so a cached answer is correct and skips the whole
+    # LLM round-trip. No-op for chat/* (not deterministic).
+    cached = response_cache.get(capability, messages, model=model,
+                                 max_tokens=max_tokens, temperature=temperature)
+    if cached is not None:
+        return ChatOutcome(
+            text=cached, provider="cache", model="cache",
+            tokens_in=0, tokens_out=0, cost_usd=0.0, latency_ms=0,
+            key_label="cache", request_id=0,
+        )
+
     est_tokens = estimate_prompt_tokens(messages)
-    learned = await learned_ceilings()
     full_chain = chain_for(capability)
     # JSON requests: try JSON-reliable providers first (gpt-oss/cohere sink to
     # the back) so a structured call doesn't lead with a model that mangles
     # JSON — cuts InvalidJSON at the source, not after the wasted call.
     if _wants_json(response_format):
         full_chain = deprioritize_for_json(full_chain)
-    sized_chain = [
-        p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
-    ]
-    chain = sized_chain or full_chain
-    if len(sized_chain) < len(full_chain):
-        log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
-                 capability, est_tokens,
-                 [p for p in full_chain if p not in sized_chain])
+    # Size-aware provider filter: drop providers whose single-request token
+    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt — a
+    # guaranteed 413). Ceilings never drop below MIN_LEARNABLE_CEILING, so a
+    # smaller prompt fits EVERY provider — skip the learned_ceilings() DB
+    # round-trip entirely on the high-volume small-prompt path (chat:fast,
+    # translate). Above the floor, filter as before (fall back to the full
+    # chain if every provider is size-skipped, so we never starve).
+    if est_tokens >= MIN_LEARNABLE_CEILING:
+        learned = await learned_ceilings()
+        sized_chain = [
+            p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
+        ]
+        chain = sized_chain or full_chain
+        if len(sized_chain) < len(full_chain):
+            log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
+                     capability, est_tokens,
+                     [p for p in full_chain if p not in sized_chain])
+    else:
+        chain = full_chain
 
+    # Hard cap on total provider-call attempts per request — a 9-provider chain
+    # × per-provider key retries could otherwise reach ~30 attempts of pure
+    # latency in a saturation storm. Bound the tail; the chain still reaches
+    # most providers at least once.
+    attempts = 0
     for provider in chain:
         for _ in range(_max_keys(provider)):
+            if attempts >= _MAX_ATTEMPTS_PER_REQUEST:
+                log.warning("chat:%s hit per-request attempt cap (%d) — 503",
+                            capability, _MAX_ATTEMPTS_PER_REQUEST)
+                return None
             key = await pick_and_reserve(provider, scope=scope)
             if key is None:
                 break  # no (more) available key for this provider → next provider
+            attempts += 1
             try:
                 await check_caps(api_key=key, project=project, estimated_cost=0.0)
             except CostGuardError as e:
@@ -259,6 +292,9 @@ async def run_chat(
                 latency_ms=meta["latency_ms"], status="ok", error_kind=None,
                 http_status=200,
             )
+            # Cache deterministic (translate) successes for verbatim repeats.
+            response_cache.put(capability, messages, text, model=model,
+                                max_tokens=max_tokens, temperature=temperature)
             return ChatOutcome(
                 text=text, provider=provider, model=meta["model"],
                 tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
