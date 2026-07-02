@@ -20,6 +20,13 @@
 > **2026-07-01**: cost tracking restored (`cost_per_token`; `completion_cost`
 > had silently zeroed all costs since 2026-06-27) and DeepSeek peak/valley
 > pricing added (2x in peak UTC hours from mid-July). See **Cost guard**.
+>
+> **2026-07-02**: mistral quota has no daily axes. Confirmed live: mistral
+> publishes only PER-MINUTE headers (`x-ratelimit-limit-req-minute=50`,
+> `-tokens-minute=50000`) — no daily cap. The old `req_per_day=86_400` /
+> `tok_per_day=500_000` seed was invented, never backed by evidence; real keys
+> sustained 1.3-1.7M tok/day at ~260% of the fake cap while 99.96% `ok`,
+> showing fully red on the dashboard despite being alive and healthy.
 
 ## Capability → provider chain + required scope
 

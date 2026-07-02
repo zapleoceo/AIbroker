@@ -43,8 +43,15 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
                    doc="https://console.groq.com/docs/rate-limits"),
     "gemini": Quota(req_per_day=1_500,
                      doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
-    "mistral": Quota(req_per_day=86_400, tok_per_day=500_000,
-                      doc="https://docs.mistral.ai/deployment/laplateforme/tier/"),
+    # mistral publishes only PER-MINUTE headers (x-ratelimit-limit-req-minute=50,
+    # x-ratelimit-limit-tokens-minute=50000, confirmed live 2026-07-02) — no
+    # per-day cap at all. The old req/tok_per_day=86_400/500_000 seed was an
+    # invented daily figure never backed by evidence; real keys sustain
+    # 1.3-1.7M tok/day (99.96% ok, one transient RateLimitError) at ~260% of
+    # the fake 500k cap, so the dashboard showed them fully red while alive.
+    # Dropped both axes — we have no per-minute axis to represent the real
+    # constraint, and extrapolating minute→day isn't backed by an observed cap.
+    "mistral": Quota(doc="https://docs.mistral.ai/deployment/laplateforme/tier/"),
     "cohere": Quota(req_per_day=1_000,
                      doc="https://docs.cohere.com/v2/docs/rate-limits"),
     "openrouter": Quota(req_per_day=200,

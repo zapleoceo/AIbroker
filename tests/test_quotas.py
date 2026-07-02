@@ -42,6 +42,19 @@ def test_quota_for_paid_returns_empty():
         assert q.req_per_day is None and q.tok_per_day is None
 
 
+def test_quota_for_mistral_has_no_daily_axes():
+    """REGRESSION (2026-07-02): mistral publishes only PER-MINUTE rate-limit
+    headers (x-ratelimit-limit-req-minute=50, -tokens-minute=50000) — no daily
+    cap. The old req/tok_per_day=86_400/500_000 seed was an invented daily
+    figure never backed by evidence; real keys sustained 1.3-1.7M tok/day
+    (99.96% ok) at ~260% of the fake 500k cap, showing fully red on the
+    dashboard while genuinely alive and healthy."""
+    q = quota_for("mistral")
+    assert q.req_per_day is None
+    assert q.tok_per_day is None
+    assert q.doc.startswith("https://")
+
+
 def test_every_routed_provider_has_a_quota_entry():
     from aibroker.routing.chains import CAPABILITY_CHAINS
     routed = {p for chain in CAPABILITY_CHAINS.values() for p in chain}
