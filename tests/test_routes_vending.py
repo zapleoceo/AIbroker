@@ -48,6 +48,9 @@ async def _seed_leases(project_id: int, count: int) -> None:
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow, LeaseRow
 
+    # naive datetime: leases.lease_until is TIMESTAMP WITHOUT TIME ZONE —
+    # asyncpg rejects tz-aware values on that column type.
+    until = (datetime.now(UTC) + timedelta(minutes=1)).replace(tzinfo=None)
     async with get_session() as s:
         s.add(ApiKeyRow(
             id=project_id * 10, provider="cerebras", label="rl-test",
@@ -59,7 +62,7 @@ async def _seed_leases(project_id: int, count: int) -> None:
             {
                 "id": "lse_" + secrets.token_urlsafe(8),
                 "api_key_id": project_id * 10, "project_id": project_id,
-                "lease_until": datetime.now(UTC) + timedelta(minutes=1),
+                "lease_until": until,
             }
             for _ in range(count)
         ])

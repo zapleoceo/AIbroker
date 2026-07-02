@@ -6,7 +6,7 @@ neither of which SQLite supports. These tests need a real Postgres to run.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import insert
@@ -172,10 +172,23 @@ async def test_pick_skips_in_cooldown():
 
 
 async def test_pick_skips_capped():
+    # daily_reset_at=today: the selector's reset-aware read treats a non-today
+    # counter as 0, so "capped" only means anything if the spend is today's.
     await _add_key("cerebras", "x", tier="paid",
-                    daily_cost_cap_usd=1.0, daily_cost_used_usd=1.0)
+                    daily_cost_cap_usd=1.0, daily_cost_used_usd=1.0,
+                    daily_reset_at=date.today())
     result = await pick_and_reserve("cerebras", "llm:chat")
     assert result is None
+
+
+async def test_pick_ignores_stale_cap_from_yesterday():
+    """A key that hit its cap YESTERDAY must be selectable today — the
+    reset-aware read treats a non-today daily_reset_at as counter=0."""
+    await _add_key("cerebras", "x", tier="paid",
+                    daily_cost_cap_usd=1.0, daily_cost_used_usd=1.0,
+                    daily_reset_at=date.today() - timedelta(days=1))
+    result = await pick_and_reserve("cerebras", "llm:chat")
+    assert result is not None
 
 
 async def test_pick_filters_by_scope():

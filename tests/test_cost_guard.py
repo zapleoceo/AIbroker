@@ -9,6 +9,7 @@ test_selector.py). The free-tier / no-cap bypass tests never touch the DB
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import pytest
 from sqlalchemy import insert
@@ -42,8 +43,10 @@ async def _add_key(**kw) -> ApiKeyRow:
         "scopes": ["llm:chat"], "token_encrypted": "x",
         "is_active": True, "is_alive": True,
         "daily_limit": 999999, "daily_used": 0,
+        # Seeded usage represents TODAY's spend — a None/stale daily_reset_at
+        # would make the reset-aware SQL read the counter as 0.
         "daily_cost_used_usd": 0.0, "daily_cost_cap_usd": None,
-        "daily_reset_at": None,
+        "daily_reset_at": date.today(),
         "monthly_cost_used_usd": 0.0, "total_cost_usd": 0.0,
         "error_count": 0, "notes": "",
     }
