@@ -623,13 +623,24 @@ async def _fetch_tokens_today() -> dict[int, dict[str, int]]:
 
 async def _fetch_provider_summary() -> list[Any]:
     # Postgres-only `now()`/`FILTER` — same pragma rationale as _fetch_calls_1h.
+    # err_1h surfaces the 429/error storm per provider (was invisible without
+    # digging the logs) — LEFT JOIN of last-hour non-ok calls, grouped by
+    # provider.
     async with get_session() as s:  # pragma: no cover
         return list((await s.execute(text(
-            "SELECT provider, "
+            "SELECT k.provider, "
             "COUNT(*) FILTER (WHERE is_active AND is_alive "
             "                  AND (cooldown_until IS NULL OR cooldown_until < now())) AS alive, "
             "COUNT(*) FILTER (WHERE NOT is_alive OR NOT is_active) AS dead, "
-            "COUNT(*) AS total FROM api_keys GROUP BY provider ORDER BY provider"
+            "COUNT(*) AS total, "
+            "COALESCE(e.err_1h, 0) AS err_1h "
+            "FROM api_keys k "
+            "LEFT JOIN ("
+            "  SELECT provider, COUNT(*) AS err_1h FROM usage_log "
+            "  WHERE status <> 'ok' AND created_at > now() - INTERVAL '1 hour' "
+            "  GROUP BY provider"
+            ") e ON e.provider = k.provider "
+            "GROUP BY k.provider, e.err_1h ORDER BY k.provider"
         ))).all())
 
 
@@ -743,8 +754,11 @@ def _render(data: dict[str, Any], *, flash: str = "",
 
     providers_html = "".join(
         f'<span class="provider"><b>{esc(p)}</b> '
-        f'<span class="ok">{a}</span> / <span class="bad">{d}</span> / {t}</span>'
-        for p, a, d, t in data["provider_summary"]
+        f'<span class="ok">{a}</span> / <span class="bad">{d}</span> / {t}'
+        + (f' <span class="bad" title="errors in the last hour">⚠{e1h}/1h</span>'
+           if e1h else "")
+        + '</span>'
+        for p, a, d, t, e1h in data["provider_summary"]
     )
 
     show_new_key = ""
@@ -1167,6 +1181,13 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY cap ORDER BY n DESC"
         ), bind_)).all()
+        by_workflow = (await s.execute(text(
+            "SELECT COALESCE(workflow,'(none)') AS wf, COUNT(*) AS n, "
+            "       COALESCE(SUM(cost_usd),0) AS spend "
+            "FROM usage_log WHERE project_id=:pid "
+            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
+            "GROUP BY wf ORDER BY spend DESC, n DESC"
+        ), bind_)).all()
         lat_hist_rows = (await s.execute(text(
             f"SELECT width_bucket(latency_ms, {_LAT_SQL_ARRAY}) AS b, "
             "       COUNT(*) AS n "
@@ -1189,6 +1210,7 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         "by_provider": by_provider,
         "by_model": by_model,
         "by_capability": by_capability,
+        "by_workflow": by_workflow,
         "lat_hist": _lat_hist_counts(list(lat_hist_rows)),
         "recent": recent,
     }
@@ -1291,6 +1313,12 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
                   f'<td class="num">{r.n}</td>'
                   f'<td class="num">${float(r.spend):.4f}</td></tr>')
 
+    wf_card = _bd_card("By workflow", "По workflow",
+        list(d["by_workflow"]),
+        lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
+                  f'<td class="num">{r.n}</td>'
+                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
+
     model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
         lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
                   f'<td class="num">{r.n}</td>'
@@ -1360,6 +1388,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     <div class="breakdown">
       {prov_card}
       {cap_card}
+      {wf_card}
       {model_card}
       {lat_card}
     </div>

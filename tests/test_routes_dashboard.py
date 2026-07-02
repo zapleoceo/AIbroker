@@ -731,6 +731,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
                               "avg_lat ok_n err_n")
     Brk = namedtuple("B", "provider n spend")
     BrkCap = namedtuple("BC", "cap n spend")
+    BrkWf = namedtuple("BW", "wf n spend")
     BrkModel = namedtuple("BM", "model n spend toks")
     Recent = namedtuple("R", "id created_at provider model capability tokens_in "
                               "tokens_out cost_usd latency_ms status http_status "
@@ -743,6 +744,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
                           avg_lat=345, ok_n=3, err_n=1),
         "by_provider": providers or [Brk("cerebras", 2, 0.0), Brk("gemini", 2, 0.123)],
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
+        "by_workflow": [BrkWf("triage", 3, 0.05), BrkWf("rel_extract", 1, 0.07)],
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
         "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
@@ -922,7 +924,7 @@ def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
         "proj_spend": proj_spend or {},
         "tokens_today": tokens_today or {},
         "calls_1h": 7,
-        "provider_summary": [("cerebras", 5, 0, 5), ("gemini", 3, 1, 4)],
+        "provider_summary": [("cerebras", 5, 0, 5, 0), ("gemini", 3, 1, 4, 42)],
     }
 
 
@@ -952,6 +954,23 @@ def test_main_render_with_empty_db():
     # Totals rows
     assert "<tfoot>" in body
     assert "TOTAL" in body
+
+
+def test_main_render_shows_recent_error_rate_per_provider():
+    """#3b: the provider summary surfaces last-hour errors so a 429-storm is
+    visible without digging logs. Fixture: gemini has 42 err/1h, cerebras 0."""
+    from aibroker.routes.dashboard import _render
+    body = _render(_fake_main_data()).body.decode()
+    assert "⚠42/1h" in body                       # gemini storm shown
+    assert "⚠0/1h" not in body                     # zero-error provider stays quiet
+
+
+def test_render_project_detail_shows_workflow_breakdown():
+    """#4: cost/calls attributed by workflow in the project drill-down."""
+    from aibroker.routes.dashboard import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail()).body.decode()
+    assert "By workflow" in body
+    assert "triage" in body and "rel_extract" in body
 
 
 def test_main_render_renders_key_rows_with_data_row_marker():

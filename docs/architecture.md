@@ -84,7 +84,9 @@ floor on master.
 `/dashboard` (Telegram-login or `X-Admin-Key`) renders single-page HTML:
 
 - KPI cards: spend today vs global cap, calls 1h, project count, key count.
-- Provider summary line (alive / dead / total per provider).
+- Provider summary line (alive / dead / total per provider) + a red
+  **⚠N/1h** badge showing last-hour error count per provider, so a 429-storm
+  is visible at a glance instead of only in the logs.
 - Projects table — `id, name, scopes, active, daily cap, key prefix,
   actions`. Each row has inline **edit** that swaps the row for a form
   with `name`, `allowed_scopes` (csv), `daily_cost_cap_usd`,
@@ -119,9 +121,13 @@ shape:
   max_overflow=20` comfortably covers 6 concurrent connections per load.
 
 **Project drill-down** (`/dashboard/projects/{id}?range=24h|7d|30d`): KPI cards
-(calls, spend, tokens, avg latency + success %), breakdown cards by
-provider / capability / model, and a **latency-distribution histogram** (calls
-per latency bucket: `<250ms … >30s`, bars scaled to the busiest bucket).
+(calls, spend, tokens, avg latency + success %, prompt-cache when active),
+breakdown cards by provider / capability / **workflow** / model, and a
+**latency-distribution histogram** (calls per latency bucket: `<250ms … >30s`,
+bars scaled to the busiest bucket). The by-workflow card attributes cost/calls
+to each caller task (`triage`, `rel_extract`, `coach_edit`, …) — the data was
+always in `usage_log.workflow`, now surfaced so "where are we spending" isn't a
+manual query.
 **Every aggregate is scoped to the selected range** — only the "recent 50
 calls" table ignores it. The histogram surfaces a slow tail that a single
 average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`
