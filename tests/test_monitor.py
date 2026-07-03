@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -82,9 +82,37 @@ async def test_tick_marks_cooldown_sets_expiry():
         )).scalar_one()
     assert row.cooldown_until is not None
     # Cooldown ~ now + 5min
-    delta = row.cooldown_until - datetime.now(timezone.utc).replace(tzinfo=None)
+    delta = row.cooldown_until - datetime.now(UTC).replace(tzinfo=None)
     assert delta.total_seconds() > 60      # at least 1 min in future
     assert delta.total_seconds() < 7 * 60  # less than 7 min
+    assert row.is_alive is True            # 429 proves the key is alive, not dead
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
+async def test_tick_cooldown_revives_a_previously_dead_key():
+    """REGRESSION: a key marked dead by an earlier tick could get stuck
+    forever if every later probe hit a 429 window instead of a clean 'alive'
+    — pick_and_reserve excludes is_alive=False, so only this tiny probe could
+    ever prove it's alive, and 429 (proof of valid auth) didn't count. A
+    rate-limit response must revive it just like a clean 'alive' would."""
+    async with get_session() as s:
+        r = await s.execute(insert(ApiKeyRow).values(
+            provider="cohere", label="t3b",
+            token_encrypted=encrypt("test-token-3b"),
+            tier="free", is_active=True, is_alive=False,   # ← was dead
+            error_count=2, scopes=["llm:chat"],
+        ).returning(ApiKeyRow.id))
+        kid = r.scalar_one()
+    fake_results = {kid: ("cooldown", 429, "rate limited")}
+    with patch("aibroker.monitor.probe_all", AsyncMock(return_value=fake_results)), \
+         patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
+        await tick()
+    async with get_session() as s:
+        row = (await s.execute(
+            select(ApiKeyRow).where(ApiKeyRow.id == kid)
+        )).scalar_one()
+    assert row.is_alive is True
+    fake_recover.assert_awaited_once()
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")

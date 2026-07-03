@@ -30,6 +30,17 @@
 └───────────────────────────────────────────┘
 ```
 
+**Cooldown revives a dead key too (2026-07-03).** `monitor.tick()`'s three
+verdicts (`alive`/`cooldown`/`dead`) used to treat `cooldown` (429) as
+orthogonal to `is_alive` — only a clean `alive` verdict reset `is_alive=True`.
+A key marked dead once could get stuck there forever: `pick_and_reserve`
+excludes `is_alive=False` from real traffic, so only the monitor's own tiny,
+infrequent probe could prove it alive again — and if *that* kept landing on a
+429 window (a real risk for tight-quota trial keys, e.g. cohere), the key
+never got the clean `alive` reading it needed. A 429 already proves the
+credential is valid (auth passed, just rate-limited) — `cooldown` now also
+sets `is_alive=True` and fires the same `recover()` alert as `alive` does.
+
 ## Operating modes
 
 ### Proxy mode (default for LLM)

@@ -3,7 +3,13 @@
 Every MONITOR_INTERVAL_S seconds:
 1. probes each key (cheapest call per provider)
 2. on 401/403 → mark is_alive=False, alert
-3. on 429 → set cooldown
+3. on 429 → set cooldown AND mark is_alive=True — a rate-limit response
+   proves the credential is valid (auth passed), so a previously-dead key
+   recovers here too, not just on a clean "alive" verdict. Without this, a
+   key that flipped dead once could get stuck there forever: pick_and_reserve
+   excludes is_alive=False keys from real traffic, so only this probe's own
+   (tiny, infrequent) call can prove it's alive — and if THAT keeps landing
+   on a 429 window, the key never gets a clean "alive" verdict to recover.
 4. on success → clear error_count
 5. emits ✅/⚠️ Telegram messages on state changes
 """
@@ -12,13 +18,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 
 from aibroker.config import get_settings
 from aibroker.crypto import decrypt
-from aibroker.db import close_engine, init_engine, get_session
+from aibroker.db import close_engine, get_session, init_engine
 from aibroker.db.models import ApiKeyRow
 from aibroker.providers.health_probes import probe_all
 from aibroker.telemetry import alert, recover
@@ -64,7 +70,7 @@ async def tick() -> None:
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
                         is_alive=True, error_count=0,
-                        last_alive_check_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
                 if not was_alive:
@@ -73,17 +79,21 @@ async def tick() -> None:
                 cooldown_count += 1
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
-                        cooldown_until=datetime.now(timezone.utc).replace(tzinfo=None)
+                        is_alive=True,
+                        cooldown_until=datetime.now(UTC).replace(tzinfo=None)
                                        + timedelta(minutes=5),
-                        last_alive_check_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
+                if not was_alive:
+                    await recover(f"key:{r.id}",
+                                  f"{r.provider}/{r.label} back alive (rate-limited)")
             elif verdict == "dead":
                 dead_count += 1
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
                         is_alive=False, error_count=ApiKeyRow.error_count + 1,
-                        last_alive_check_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                        last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
                 if was_alive:
