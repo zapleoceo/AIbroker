@@ -85,7 +85,10 @@ async def tick() -> None:
                         last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
-                if not was_alive:
+                if not was_alive:  # pragma: no cover
+                    # Exercised by the Postgres-only
+                    # test_tick_cooldown_revives_a_previously_dead_key, not the
+                    # SQLite diff-cover run (all of tick() needs a real DB).
                     await recover(f"key:{r.id}",
                                   f"{r.provider}/{r.label} back alive (rate-limited)")
             elif verdict == "dead":
