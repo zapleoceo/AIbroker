@@ -85,21 +85,45 @@ the parking duration most-authoritative-first:
 1. **Provider retry-after hint** — if the error carries "Please retry in
    24.5s" / "retry after 30s" / "retryDelay: 24s" (Gemini, OpenAI, Google),
    honour it exactly. The provider knows its own window.
-2. **Daily-quota exhaustion** — if the error says "tokens per day" /
+2. **Monthly account/plan cap** (2026-07-03) — "trial key" / "api calls /
+   month" (Cohere trial: "You are using a Trial key, which is limited to
+   1000 API calls / month") → park until the **next UTC calendar month**.
+   Not a rate limit that clears in minutes/hours — the account's monthly
+   allowance is gone until the provider's billing cycle rolls over.
+3. **Daily-quota exhaustion** — if the error says "tokens per day" /
    "per day" / "daily limit" (Cerebras "Tokens per day limit exceeded")
    and gave no hint, park the key until **UTC midnight** when the daily
    quota resets.
-3. **Per-hour request cap** (2026-07-01) — Cerebras "Requests per hour limit
+4. **Per-hour request cap** (2026-07-01) — Cerebras "Requests per hour limit
    exceeded" → park to the top of the next UTC hour. Same anti-storm logic as
    the daily tier, one hour scale. See the full list under **Adaptive
    cooldown** below.
-4. **Otherwise** — the adaptive per-provider backoff below.
+5. **Otherwise** — the adaptive per-provider backoff below.
 
 Why: a daily-exhausted key used to get the flat 60 s adaptive cooldown,
 recover, get picked again, fail again — a retry storm (~290 wasted calls
 every 2 minutes on Cerebras) looping until midnight. Now it's parked once
 until reset, so the selector skips it entirely and the storm is gone. The
 per-hour tier fixes the same storm at hour scale.
+
+**LiteLLM cohere exception-mapping bug (2026-07-03).** LiteLLM 1.89.3 maps
+cohere's HTTP 429 quota response to `litellm.APIConnectionError` instead of
+`RateLimitError` (confirmed live against a real exhausted key: exception
+class `APIConnectionError`, `status_code=500` — both wrong; traces to
+`litellm_core_utils/exception_mapping_utils.py`'s cohere handler losing the
+real status code somewhere before the generic-fallback raise). Worse: cohere's
+message body says "...higher **rate limits** at..." (with a space) — that
+doesn't match `ratelimit`/`rate_limit` in `classify_provider_error`'s
+`_RATE_LIMIT_SIGNS`, so it fell all the way through to generic `'error'`.
+`_penalize` does **nothing** for `'error'` (no cooldown, no `mark_dead`) — an
+exhausted key was retried on **every single pick with zero backoff**: 1447
+wasted attempts in 17h before this was caught. Fixed by adding `"trial key"` /
+`"api calls / month"` to `_RATE_LIMIT_SIGNS` (classification) and
+`_MONTHLY_QUOTA_MARKERS` (cooldown duration) — both are message-body substring
+matches, so they route around the wrong exception type entirely rather than
+depending on a LiteLLM fix or version bump. Checked gemini/openrouter for the
+same pattern: both already log correct `RateLimitError` — this was cohere-only,
+not a general LiteLLM classification failure.
 
 ## Adaptive cooldown (2026-06-26)
 

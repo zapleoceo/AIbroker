@@ -70,6 +70,17 @@ def _max_keys(provider: str) -> int:
 # phrasings ('quota', 'tokens per day', 'too many tokens'). Missing any of
 # these meant cerebras 'RateLimitError - Tokens per day' fell through to
 # 'error' and the key was never cooled → infinite retry storm.
+#
+# 'trial key' / 'api calls / month' (2026-07-03): a LiteLLM 1.89.3 bug maps
+# cohere's 429 quota response to litellm.APIConnectionError instead of
+# RateLimitError (confirmed live: a real quota-exhausted cohere key raises
+# APIConnectionError with status_code=500, both wrong). Cohere's trial-quota
+# body says "You are using a Trial key, which is limited to 1000 API calls /
+# month" — 'rate limits' (with a space) elsewhere in that message doesn't
+# match 'ratelimit'/'rate_limit' above, so classify_provider_error fell
+# through to generic 'error'. _penalize does NOTHING for 'error' (no
+# cooldown, no mark_dead) — an exhausted key was retried on every single pick
+# with zero backoff: 1447 wasted attempts / 17h before this fix.
 _RATE_LIMIT_SIGNS = (
     "rate_limit",
     "ratelimit",
@@ -80,6 +91,8 @@ _RATE_LIMIT_SIGNS = (
     "tokens per minute",
     "too many tokens",
     "too many requests",
+    "trial key",
+    "api calls / month",
 )
 
 

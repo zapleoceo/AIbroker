@@ -26,6 +26,26 @@ def test_classify_camelcase_and_quota_shapes():
         assert classify_provider_error(RuntimeError(msg)) == "rate_limit", msg
 
 
+def test_classify_cohere_trial_quota_mislabeled_by_litellm():
+    """REGRESSION (2026-07-03): LiteLLM 1.89.3 maps cohere's 429 quota
+    response to APIConnectionError instead of RateLimitError (confirmed live
+    against a real exhausted key: exception class APIConnectionError,
+    status_code=500 — both wrong). The message body's 'rate limits' (with a
+    space) doesn't match 'ratelimit'/'rate_limit' above, so this fell through
+    to generic 'error' — _penalize does nothing for 'error' (no cooldown, no
+    mark_dead), so the exhausted key got retried on every pick with zero
+    backoff. Must classify as rate_limit regardless of the wrong exception
+    class, purely from the message body."""
+    real_message = (
+        'litellm.APIConnectionError: Cohere_chatException - {"id":"x",'
+        '"message":"You are using a Trial key, which is limited to 1000 '
+        "API calls / month. You can continue to use the Trial key for free "
+        'or upgrade to a Production key with higher rate limits at '
+        'https://dashboard.cohere.com..."}'
+    )
+    assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
+
+
 def test_classify_auth():
     assert classify_provider_error(RuntimeError("401 Unauthorized")) == "auth"
     assert classify_provider_error(Exception("403 forbidden")) == "auth"

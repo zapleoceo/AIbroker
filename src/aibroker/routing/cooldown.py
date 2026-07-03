@@ -136,17 +136,54 @@ def next_hour_boundary(now: datetime | None = None) -> datetime:
     return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
 
 
+# A per-MONTH call cap (cohere trial: "You are using a Trial key, which is
+# limited to 1000 API calls / month"). This is NOT a rate-limit that clears in
+# minutes/hours/a day — the account's monthly allowance is gone until the
+# provider's billing cycle rolls over. Confirmed live (2026-07-03): all 7
+# cohere keys are exhausted trial keys; the adaptive 60s-doubling backoff was
+# the only thing applying (worse: classify_provider_error didn't even
+# recognise "trial key"/"1000 API calls" as rate-limiting at all, so
+# _penalize did NOTHING — no cooldown, no mark_dead — and the exhausted key
+# was retried on every single pick with zero backoff, 1447 wasted attempts in
+# 17h). Anything shorter than "next month" just re-hits the same wall.
+_MONTHLY_QUOTA_MARKERS = (
+    "trial key",
+    "api calls / month",
+    "calls / month",
+    "monthly limit",
+)
+
+
+def is_monthly_quota_error(msg: str) -> bool:
+    """True if the error is a per-MONTH account/plan cap (e.g. a trial key's
+    call allowance), not a per-minute/hour/day rate limit."""
+    m = msg.lower()
+    return any(marker in m for marker in _MONTHLY_QUOTA_MARKERS)
+
+
+def next_utc_month_start(now: datetime | None = None) -> datetime:
+    """First instant of next UTC calendar month — when a monthly call
+    allowance (e.g. a trial-tier plan) resets."""
+    now = now or datetime.now(UTC)
+    if now.month == 12:
+        return datetime(now.year + 1, 1, 1, tzinfo=UTC)
+    return datetime(now.year, now.month + 1, 1, tzinfo=UTC)
+
+
 async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> datetime:
     """Resolve the cooldown end for a rate-limited call, most-authoritative first:
       1. provider's own retry-after hint  → wait exactly that
-      2. daily-quota exhaustion (no hint)  → wait until UTC midnight
-      3. hourly request cap (no hint)      → wait to the top of the next hour
-      4. otherwise                         → adaptive per-provider backoff
+      2. monthly account/plan cap (no hint) → wait until next UTC calendar month
+      3. daily-quota exhaustion (no hint)  → wait until UTC midnight
+      4. hourly request cap (no hint)      → wait to the top of the next hour
+      5. otherwise                         → adaptive per-provider backoff
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
         # Provider told us exactly — honour it (no jitter; it knows its window).
         return datetime.now(UTC) + timedelta(seconds=retry)
+    if is_monthly_quota_error(error_msg):
+        return next_utc_month_start() + _boundary_jitter()
     if is_daily_quota_error(error_msg):
         return next_utc_midnight() + _boundary_jitter()
     if is_hourly_quota_error(error_msg):

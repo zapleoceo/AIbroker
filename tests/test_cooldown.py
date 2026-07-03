@@ -12,8 +12,10 @@ from aibroker.routing.cooldown import (
     cooldown_seconds,
     is_daily_quota_error,
     is_hourly_quota_error,
+    is_monthly_quota_error,
     next_hour_boundary,
     next_utc_midnight,
+    next_utc_month_start,
     parse_retry_after,
 )
 
@@ -187,3 +189,52 @@ async def test_cooldown_until_hourly_goes_to_next_hour():
     # Between 0 and ~60 min out — always more than the 60s first adaptive step
     delta = (until - datetime.now(UTC)).total_seconds()
     assert 0 < delta <= 3600 + 90
+
+
+# ─── per-month account/plan cap (2026-07-03: cohere trial "1000 calls/month") ─
+
+
+def test_is_monthly_quota_error_detects_cohere_trial():
+    """The exact real message from an exhausted cohere trial key."""
+    assert is_monthly_quota_error(
+        "You are using a Trial key, which is limited to 1000 API calls / month."
+    )
+    assert is_monthly_quota_error("monthly limit reached")
+
+
+def test_is_monthly_quota_error_false_for_minute_hour_day():
+    """'rate limits' (space) in cohere's message must NOT collide with the
+    daily/hourly/per-minute markers — those are genuinely different axes."""
+    assert not is_monthly_quota_error("requests per minute exceeded")
+    assert not is_monthly_quota_error("Tokens per day limit exceeded")
+    assert not is_monthly_quota_error("Requests per hour limit exceeded")
+    assert not is_monthly_quota_error("429 Too Many Requests")
+
+
+def test_next_utc_month_start_mid_month():
+    base = datetime(2026, 7, 3, 12, 0, tzinfo=UTC)
+    assert next_utc_month_start(base) == datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
+
+
+def test_next_utc_month_start_rolls_past_year():
+    base = datetime(2026, 12, 15, 8, 0, tzinfo=UTC)
+    assert next_utc_month_start(base) == datetime(2027, 1, 1, 0, 0, tzinfo=UTC)
+
+
+async def test_cooldown_until_monthly_goes_to_next_month():
+    """REGRESSION: an exhausted cohere trial key used to fall through
+    classify_provider_error to generic 'error' (no cooldown at all, since
+    'rate limits' with a space doesn't match 'ratelimit'/'rate_limit') — the
+    key was retried on every single pick with zero backoff. A per-month cap
+    must park until next month, not a few minutes."""
+    from aibroker.routing.cooldown import cooldown_until
+    until = await cooldown_until(
+        1, "cohere",
+        'Cohere_chatException - {"message":"You are using a Trial key, '
+        'which is limited to 1000 API calls / month. You can continue to '
+        "use the Trial key for free or upgrade to a Production key with "
+        'higher rate limits at https://dashboard..."}',
+    )
+    offset = (until - next_utc_month_start()).total_seconds()
+    assert 0 <= offset <= 90                                    # + anti-herd jitter
+    assert (until - datetime.now(UTC)).total_seconds() > 86400  # far more than a day
