@@ -85,11 +85,12 @@ the parking duration most-authoritative-first:
 1. **Provider retry-after hint** — if the error carries "Please retry in
    24.5s" / "retry after 30s" / "retryDelay: 24s" (Gemini, OpenAI, Google),
    honour it exactly. The provider knows its own window.
-2. **Monthly account/plan cap** (2026-07-03) — "trial key" / "api calls /
-   month" (Cohere trial: "You are using a Trial key, which is limited to
-   1000 API calls / month") → park until the **next UTC calendar month**.
-   Not a rate limit that clears in minutes/hours — the account's monthly
-   allowance is gone until the provider's billing cycle rolls over.
+2. **Monthly account/plan cap** (2026-07-03) — `is_monthly_quota_error`
+   detects "trial key" / "api calls / month" (Cohere trial: "You are using a
+   Trial key, which is limited to 1000 API calls / month") → `next_utc_month_start`
+   parks until the **next UTC calendar month**. Not a rate limit that clears
+   in minutes/hours — the account's monthly allowance is gone until the
+   provider's billing cycle rolls over.
 3. **Daily-quota exhaustion** — if the error says "tokens per day" /
    "per day" / "daily limit" (Cerebras "Tokens per day limit exceeded")
    and gave no hint, park the key until **UTC midnight** when the daily
