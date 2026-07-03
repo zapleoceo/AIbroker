@@ -47,7 +47,7 @@ _HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {favicon}
 <title>AIbroker — one API key, every LLM provider · free-first routing, cost guard, self-hosted</title>
-<meta name="description" content="Open-source LLM key broker. One API for Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage. Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
+<meta name="description" content="Self-hosted LLM key broker. One API for Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage. Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
 <meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Mistral Cohere OpenRouter DeepSeek Anthropic Voyage">
 <meta name="author" content="zapleoceo">
 <meta name="robots" content="index, follow">
@@ -60,7 +60,7 @@ _HTML = """<!doctype html>
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aib.zapleo.com/">
 <meta property="og:title" content="AIbroker — one API key, every LLM provider">
-<meta property="og:description" content="Open-source LLM key broker. Free-first routing across 10 providers, cost caps, health monitoring. Self-host on any VPS.">
+<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 10 providers, cost caps, health monitoring. Self-host on any VPS.">
 <meta property="og:site_name" content="AIbroker">
 <meta property="og:locale" content="en_US">
 <meta property="og:locale:alternate" content="ru_RU">
@@ -68,7 +68,7 @@ _HTML = """<!doctype html>
 <!-- Twitter / X card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="AIbroker — one API key, every LLM provider">
-<meta name="twitter:description" content="Open-source LLM key broker · free-first across 10 providers · cost guard · self-hosted.">
+<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 10 providers · cost guard · encrypted keys.">
 
 <!-- Schema.org structured data — picked up by Google rich-results AND by
      LLM crawlers (Perplexity, ChatGPT browse, Claude search). Two graphs:
@@ -83,9 +83,9 @@ _HTML = """<!doctype html>
       "url": "https://aib.zapleo.com/",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux / Docker",
-      "description": "Open-source LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI and Voyage — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
+      "description": "Self-hosted LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI and Voyage — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
       "softwareVersion": "{version}",
-      "license": "https://opensource.org/licenses/MIT",
+      "license": "Proprietary — all rights reserved. Source visible on GitHub, not licensed for reuse.",
       "offers": {{"@type": "Offer", "price": "0", "priceCurrency": "USD"}},
       "codeRepository": "https://github.com/zapleoceo/AIbroker",
       "programmingLanguage": "Python",
@@ -620,8 +620,8 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
         data-en="Free to run. Pay only your providers."
         data-ru="Запуск бесплатный. Платите только провайдерам."></h2>
     <p class="section-intro" data-i18n="price.intro"
-       data-en="AIbroker is open source and self-hosted. There is no SaaS fee. The broker itself runs on a single small VPS."
-       data-ru="AIbroker — открытый код и self-hosted. SaaS-сбора нет. Сам брокер работает на одном маленьком VPS."></p>
+       data-en="AIbroker is self-hosted. There is no SaaS fee. The broker itself runs on a single small VPS."
+       data-ru="AIbroker — self-hosted. SaaS-сбора нет. Сам брокер работает на одном маленьком VPS."></p>
     <div class="pricing">
       <div class="tier">
         <div class="tier-name" data-i18n="price.t1" data-en="Self-host" data-ru="Self-host"></div>
@@ -630,7 +630,7 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
         <ul>
           <li data-i18n="price.t1.1" data-en="All features" data-ru="Все возможности"></li>
           <li data-i18n="price.t1.2" data-en="Unlimited projects + keys" data-ru="Безлимитные проекты и ключи"></li>
-          <li data-i18n="price.t1.3" data-en="MIT-style license" data-ru="MIT-подобная лицензия"></li>
+          <li data-i18n="price.t1.3" data-en="Source visible on GitHub" data-ru="Исходники видны на GitHub"></li>
           <li data-i18n="price.t1.4" data-en="GitHub issues for support" data-ru="Поддержка через GitHub issues"></li>
         </ul>
         <a href="https://github.com/zapleoceo/AIbroker" class="btn" data-i18n="price.t1.cta" data-en="View on GitHub" data-ru="Открыть на GitHub"></a>
@@ -732,7 +732,7 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
       </div>
     </div>
     <div class="footer-bottom">
-      <span data-i18n="foot.copy" data-en="© 2026 AIbroker · open source" data-ru="© 2026 AIbroker · открытый код"></span>
+      <span data-i18n="foot.copy" data-en="© 2026 AIbroker" data-ru="© 2026 AIbroker"></span>
       <span style="font-family:var(--mono);font-size:12px;color:var(--dim)">v{version}</span>
     </div>
   </div>
@@ -836,7 +836,7 @@ _SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 # as a hint of what content is worth ingesting + how to structure it.
 _LLMS_TXT = """# AIbroker
 
-> Open-source centralized LLM key broker. One API endpoint routes calls across
+> Self-hosted centralized LLM key broker. One API endpoint routes calls across
 > 10 LLM providers (Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter,
 > DeepSeek, Anthropic, OpenAI, Voyage) with free-tier-first ordering, paid
 > fallback, per-key and per-project cost caps, automatic health probing, and
@@ -873,8 +873,8 @@ _LLMS_TXT = """# AIbroker
 
 ## Code
 
-- GitHub: https://github.com/zapleoceo/AIbroker
-- License: MIT-style
+- GitHub: https://github.com/zapleoceo/AIbroker (source visible, proprietary — not licensed for reuse)
+- License: Proprietary, all rights reserved (owner: zapleoceo)
 - Stack: FastAPI · SQLAlchemy 2 async · asyncpg · LiteLLM · Postgres · Docker
 """
 

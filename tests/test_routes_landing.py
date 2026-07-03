@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 
 from aibroker.main import app
 
-
 client = TestClient(app)
 
 
@@ -209,14 +208,17 @@ def test_llms_txt_served():
     assert "text/plain" in r.headers["content-type"]
     # Standard markdown structure: # title + > summary + sections
     assert r.text.startswith("# AIbroker")
-    assert "> Open-source" in r.text
+    assert "> Self-hosted" in r.text
     # Key concepts documented
     for kw in ("Two operating modes", "Capabilities", "Scopes",
                "Adaptive cooldown", "Reserved lane"):
         assert kw in r.text
-    # GitHub repo + license
+    # GitHub repo + license — must match README.md's own "Proprietary,
+    # owner: zapleoceo" (2026-07-03: the site used to claim MIT-style in
+    # three places, directly contradicting README; there's no LICENSE file).
     assert "github.com/zapleoceo/AIbroker" in r.text
-    assert "License: MIT" in r.text
+    assert "License: Proprietary" in r.text
+    assert "MIT" not in r.text
 
 
 def test_landing_shows_version():
