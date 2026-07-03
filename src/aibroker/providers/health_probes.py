@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import httpx
 
@@ -79,6 +80,48 @@ def _read_int(headers: dict[str, str], *keys: str) -> int | None:
     return None
 
 
+# "1h33m36s", "547ms", "2400s", "1d" — the provider's own reset-window duration
+# strings (groq/OpenAI-compat style). Used to sanity-check whether a bare
+# (non -day-suffixed) rate-limit header is actually daily-scoped.
+_DURATION_RE = re.compile(
+    r"(?:(?P<days>\d+)d)?(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m(?!s))?"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s)?(?:(?P<millis>\d+)ms)?"
+)
+
+
+def _parse_duration_seconds(value: str) -> float | None:
+    m = _DURATION_RE.fullmatch(value.strip()) if value else None
+    if not m or not any(m.groups()):
+        return None
+    return (
+        int(m.group("days") or 0) * 86400
+        + int(m.group("hours") or 0) * 3600
+        + int(m.group("minutes") or 0) * 60
+        + float(m.group("seconds") or 0)
+        + int(m.group("millis") or 0) / 1000
+    )
+
+
+# A bare limit header is trusted as a DAILY cap only if its own reset window is
+# within this margin of 24h. Groq's bare x-ratelimit-limit-tokens resets in
+# ~500ms (a rolling TPM bucket) and x-ratelimit-limit-requests in ~1h33m (not a
+# day either) — a single key logged 90k-170k tokens/day against an "8000
+# tokens/day" reading from this header, instantly red on the dashboard despite
+# being perfectly healthy. Requiring a near-24h reset (the provider's OWN
+# signal, not a guess) rejects sub-day buckets instead of mis-storing them.
+_MIN_DAILY_RESET_S = 20 * 3600
+
+
+def _read_daily_int(headers: dict[str, str], limit_key: str, reset_key: str) -> int | None:
+    """Like `_read_int`, but for a header with NO -day/-1d variant: only trust
+    it as daily if `reset_key`'s duration is close to 24h."""
+    h = {k.lower(): v for k, v in headers.items()}
+    reset_s = _parse_duration_seconds(h.get(reset_key.lower(), ""))
+    if reset_s is None or reset_s < _MIN_DAILY_RESET_S:
+        return None
+    return _read_int(headers, limit_key)
+
+
 def extract_quota_headers(
     provider: str, headers: dict[str, str]
 ) -> tuple[int | None, int | None]:
@@ -95,18 +138,16 @@ def extract_quota_headers(
     # OpenAI-compat family (groq, openai, deepseek, mistral, openrouter, cerebras)
     if provider in ("cerebras", "groq", "openai", "deepseek",
                      "mistral", "openrouter"):
-        req = _read_int(
-            headers,
-            "x-ratelimit-limit-requests-day",
-            "x-ratelimit-limit-requests-1d",
-            "x-ratelimit-limit-requests",
-        )
-        tok = _read_int(
-            headers,
-            "x-ratelimit-limit-tokens-day",
-            "x-ratelimit-limit-tokens-1d",
-            "x-ratelimit-limit-tokens",
-        )
+        req = _read_int(headers, "x-ratelimit-limit-requests-day",
+                          "x-ratelimit-limit-requests-1d")
+        if req is None:
+            req = _read_daily_int(headers, "x-ratelimit-limit-requests",
+                                    "x-ratelimit-reset-requests")
+        tok = _read_int(headers, "x-ratelimit-limit-tokens-day",
+                          "x-ratelimit-limit-tokens-1d")
+        if tok is None:
+            tok = _read_daily_int(headers, "x-ratelimit-limit-tokens",
+                                    "x-ratelimit-reset-tokens")
         # cerebras' requests-day header (2400 for gpt-oss-120b) isn't a hard
         # cap — a single key logged 4,866 req without a 429. It meters on
         # tokens, so drop the req axis to avoid a false >100% on the dashboard.

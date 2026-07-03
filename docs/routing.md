@@ -314,6 +314,32 @@ manual/discovered axes — a paid gemini key no longer reads as 212% of the 1,50
 free RPD. Its dollar budget lives in the separate `daily_cost_cap_usd` column on
 the dashboard, not the quota bar.
 
+**Discovered daily quota must be confirmed daily (2026-07-03).** Same root
+cause as the cerebras/mistral seed fixes below, but at the auto-discover
+layer this time: `extract_quota_headers` used to trust ANY bare (non
+`-day`/`-1d`-suffixed) `x-ratelimit-limit-{requests,tokens}` header as a daily
+figure. Groq's bare headers are **not** daily — confirmed live:
+`x-ratelimit-limit-tokens=8000` resets in **~547ms** (a rolling TPM bucket) and
+`x-ratelimit-limit-requests=1000` resets in **~1h33m** — neither is a 24h
+window. A groq key logging 90k-170k real tokens/day against a stored "8000
+tokens/day" `discovered_tok_limit` read 1000%+ saturated and showed fully red
+on the dashboard while perfectly healthy (0 real 429s that day).
+
+Fixed at the source: `extract_quota_headers` now only trusts a bare header as
+daily when the provider's own `x-ratelimit-reset-{requests,tokens}` duration
+is within `_MIN_DAILY_RESET_S` (20h) of 24h — otherwise it returns `None` for
+that axis rather than mis-storing a sub-day bucket as `discovered_*_limit`.
+Existing bogus rows (4 groq keys, `discovered_tok_limit=8000` /
+`discovered_req_limit=1000`) were cleared on prod; the seed
+`PROVIDER_QUOTAS['groq']` (14,400 req / 500,000 tok) now applies until a
+genuinely daily-scoped header is observed.
+
+Don't confuse this with `SEED_MAX_REQUEST_TOKENS['groq'] = 8_000`
+(`context_limits.py`) — same 8k figure, entirely different axis: that one is
+correctly a **single-request** size ceiling (a lone request bigger than
+groq's TPM burst always 413s), not a daily cumulative cap. The bug was
+specifically applying the header's rolling-bucket number to the *daily* axis.
+
 ### Per request
 
 1. **Size filter** — `run_chat` estimates prompt tokens (≈chars/4) and
