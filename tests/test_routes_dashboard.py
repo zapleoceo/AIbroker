@@ -627,14 +627,27 @@ def test_dashboard_edit_key_404_when_missing():
 
 
 def test_dashboard_edit_project_rejects_empty_scopes():
+    """allowed_scopes is now a checkbox multi-select (list[str]), validated
+    against _KNOWN_SCOPES like key scopes — no scopes checked at all."""
     r = client.post(
         "/dashboard/projects/99999/edit",
         cookies=_logged_in_cookies(),
-        data={"name": "x", "allowed_scopes": "   ,  ,"},
+        data={"name": "x"},
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert "Need+at+least+one+scope" in r.headers["location"]
+    assert "Bad+or+empty+scope" in r.headers["location"]
+
+
+def test_dashboard_edit_project_rejects_unknown_scope():
+    r = client.post(
+        "/dashboard/projects/99999/edit",
+        cookies=_logged_in_cookies(),
+        data={"name": "x", "allowed_scopes": "not-a-real-scope"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Bad+or+empty+scope" in r.headers["location"]
 
 
 def test_project_detail_requires_auth():

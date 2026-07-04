@@ -818,7 +818,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'<tr class="edit-row" data-edit-for="p{p.id}"><td colspan="9">'
             f'<form method="post" action="/dashboard/projects/{p.id}/edit" class="row-form">'
             f'<input name="name" value="{esc(p.name)}" required>'
-            f'<input name="allowed_scopes" value="{esc(scopes_csv)}" style="min-width:240px">'
+            f'<span class="scope-group">{_scope_checkboxes(p.allowed_scopes, "allowed_scopes")}</span>'
             f'<input name="daily_cost_cap_usd" type="number" step="0.01" '
             f'value="{cap_val}" '
             f'data-en-placeholder="cap (blank = none)" '
@@ -1047,7 +1047,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
       </div>
     </fieldset>"""
 
-    add_project_form = """
+    add_project_form = f"""
     <fieldset><legend data-i18n data-en="Add project" data-ru="Добавить проект">Add project</legend>
       <form method="post" action="/dashboard/projects/create" class="row-form">
         <input name="name" required
@@ -1058,10 +1058,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
                data-en-placeholder="owner email"
                data-ru-placeholder="email владельца"
                placeholder="owner email">
-        <input name="allowed_scopes" value="llm:chat,llm:embed" style="min-width:240px"
-               data-en-placeholder="scopes comma-sep"
-               data-ru-placeholder="права через запятую"
-               placeholder="scopes comma-sep">
+        <span class="scope-group">{_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes")}</span>
         <input name="daily_cost_cap_usd" type="number" step="0.01"
                data-en-placeholder="cap (optional)"
                data-ru-placeholder="лимит (опц.)"
@@ -1695,14 +1692,14 @@ async def dash_edit_project(
     project_id: int,
     request: Request,
     name: str = Form(...),
-    allowed_scopes: str = Form(""),
+    allowed_scopes: Annotated[list[str] | None, Form()] = None,
     daily_cost_cap_usd: str = Form(""),
     owner_email: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
-    scopes = [x.strip() for x in allowed_scopes.split(",") if x.strip()]
-    if not scopes:
-        return RedirectResponse("/dashboard?flash=!Need+at+least+one+scope", status_code=303)
+    scopes = _validate_scope_list(allowed_scopes or [])
+    if scopes is None:
+        return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         row = await s.get(ProjectRow, project_id)
@@ -1724,14 +1721,16 @@ async def dash_create_project(
     request: Request,
     name: str = Form(...),
     owner_email: str = Form(""),
-    allowed_scopes: str = Form("llm:chat,llm:embed"),
+    allowed_scopes: Annotated[list[str] | None, Form()] = None,
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> HTMLResponse:
+    scopes = _validate_scope_list(allowed_scopes or ["llm:chat", "llm:embed"])
+    if scopes is None:
+        return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     from aibroker.auth import generate_project_key, hash_project_key
     plain = generate_project_key()
     h = hash_project_key(plain)
-    scopes = [x.strip() for x in allowed_scopes.split(",") if x.strip()]
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         row = ProjectRow(
