@@ -107,11 +107,17 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # this is a vision image-passing issue. Re-add anthropic here once the
     # caller sends images as base64 rather than a fetch-gated URL. openai is the
     # working paid fallback when gemini is exhausted.
-    # 2026-07-04: cloudflare (llava-1.5-7b) added as tail fallback — confirmed
-    # live (real token+account, 200 OK). No rate-limit headers, no daily-quota
-    # figure to seed (Workers AI free tier is "10,000 neurons/day", a compute
-    # budget that varies per model, not a request count) — see quotas.py.
-    "vision": ["gemini", "openai", "cloudflare"],
+    # 2026-07-04: cloudflare (llava-1.5-7b) tried as tail fallback, then
+    # REMOVED same day — a garbage-bytes probe returned 200 (proving
+    # auth+connectivity work), but a real base64 data-URL image (the format
+    # gemini/openai actually receive here) 400'd with "Unsupported image
+    # data": {"code":3010}. Workers AI's llava wants raw byte-array image
+    # input, not an OpenAI-style image_url — LiteLLM doesn't convert between
+    # them for cloudflare. Would be dead weight in the chain (always fails)
+    # until that conversion is written. DEFAULT_MODEL/quotas/cooldown/probe
+    # entries stay (same "known but not chained" treatment as github before
+    # its own prod key test — see docs/routing.md).
+    "vision": ["gemini", "openai"],
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
     "transcription": ["groq", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.

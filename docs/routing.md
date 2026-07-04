@@ -45,7 +45,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
-| `vision` | gemini → openai → **cloudflare** | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare (llava-1.5-7b) added 2026-07-04 as tail breadth, see below. |
+| `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare tried and pulled same day 2026-07-04, see below. |
 | `transcription` | groq → openai | `llm:audio` | Whisper: groq whisper-large-v3-turbo (free) → openai whisper-1. `/v1/transcribe` route |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 
@@ -100,13 +100,28 @@ returns the scope the **project** must hold and the **key** must carry.
 > fast, sub-second) are NOT wired into any chain yet, pending a decision on
 > accepting that silent-billing risk for general chat traffic.
 >
-> **cloudflare added to `vision` (2026-07-04).** Confirmed live (real token +
-> account ID) against text, vision (`@cf/llava-hf/llava-1.5-7b-hf`), and
-> whisper endpoints. Only vision is wired — LiteLLM's cloudflare provider only
+> **cloudflare tried in `vision`, then pulled the SAME DAY (2026-07-04).**
+> Confirmed live (real token + account ID, 200 OK) against a garbage-bytes
+> probe — but that only proved auth+connectivity. A follow-up test with a
+> REAL base64 data-URL image (the exact format gemini/openai receive through
+> this code path) 400'd: `"Unsupported image data"` (`code: 3010`). Workers
+> AI's llava wants raw byte-array image input, not an OpenAI-style
+> `image_url` — LiteLLM doesn't convert between the two for cloudflare. Left
+> in the chain, it would be dead weight that always fails, exactly the
+> "chains that lie about their breadth" problem the sambanova/nvidia removal
+> note above already warns against. Pulled back out of `CAPABILITY_CHAINS`;
+> `DEFAULT_MODEL`/`quotas.py`/`cooldown.py`/health-probe entries stay (same
+> "known but not chained" treatment `github` got before its own prod key
+> test). Lesson: a probe with placeholder/garbage payload only proves
+> auth — always follow up with a real-shaped payload before trusting a chain
+> addition.
+>
+> Not wired for `transcription` either — LiteLLM's cloudflare provider only
 > implements chat completions (no audio submodule), and Workers AI's whisper
-> endpoint has a different request shape LiteLLM doesn't speak, so using it
-> for `transcription` would need a raw HTTP call outside LiteLLM. Left for a
-> future pass. Genuinely safer than nvidia: no card on file at all (so no
+> endpoint has a different request shape LiteLLM doesn't speak; using it
+> would need a raw HTTP call outside LiteLLM.
+>
+> Genuinely safer than nvidia in one respect: no card on file at all (so no
 > silent-billing path), and the free tier ("10,000 neurons/day") actually
 > renews daily — but it's a compute-unit budget, not a request count, so no
 > honest `req_per_day` axis exists (see quotas.py).
