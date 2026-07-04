@@ -216,8 +216,7 @@ _PROBES = {
                              {"model": "Meta-Llama-3.3-70B-Instruct",
                               "messages": [{"role": "user", "content": "."}],
                               "max_tokens": 1}),
-    # GitHub Models — model routes through Azure AI Inference; unverified with a
-    # real token as of 2026-07-04.
+    # GitHub Models — routes through Azure AI Inference. Confirmed live 2026-07-04.
     "github": lambda k: ("POST", "https://models.inference.ai.azure.com/chat/completions",
                           _bearer(k),
                           {"model": "gpt-4o-mini",

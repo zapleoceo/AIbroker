@@ -101,11 +101,12 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                   "chat:code": "sambanova/Meta-Llama-3.3-70B-Instruct",
                   "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
     # 2026-07-04: GitHub Models (models.inference.ai.azure.com via LiteLLM's
-    # github/ prefix) — NOT yet verified with a real token. Rate limits vary
-    # by GitHub plan tier and are undocumented per-key; no Quota entry until
-    # confirmed live (see quotas.py).
+    # github/ prefix) — confirmed live with a real token (200 OK, gpt-4o-mini).
+    # gpt-4o-mini everywhere, not gpt-4o: GitHub's "high" tier models (gpt-4o)
+    # have a much stricter free-account daily cap than "low" tier (gpt-4o-mini)
+    # per GitHub's own docs — gpt-4o unverified, don't default chat:smart to it.
     "github": {"chat:fast": "github/gpt-4o-mini",
-               "chat:smart": "github/gpt-4o",
+               "chat:smart": "github/gpt-4o-mini",
                "chat:code": "github/gpt-4o-mini",
                "prefilter": "github/gpt-4o-mini"},
 }
