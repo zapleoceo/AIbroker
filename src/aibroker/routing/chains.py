@@ -107,7 +107,11 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # this is a vision image-passing issue. Re-add anthropic here once the
     # caller sends images as base64 rather than a fetch-gated URL. openai is the
     # working paid fallback when gemini is exhausted.
-    "vision": ["gemini", "openai"],
+    # 2026-07-04: cloudflare (llava-1.5-7b) added as tail fallback — confirmed
+    # live (real token+account, 200 OK). No rate-limit headers, no daily-quota
+    # figure to seed (Workers AI free tier is "10,000 neurons/day", a compute
+    # budget that varies per model, not a request count) — see quotas.py.
+    "vision": ["gemini", "openai", "cloudflare"],
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
     "transcription": ["groq", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.

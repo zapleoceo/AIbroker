@@ -118,7 +118,30 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # yet — pending a decision on accepting the silent-billing risk once the
     # one-time free credits run out.
     "nvidia": {"chat:deep": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"},
+    # 2026-07-04: cloudflare Workers AI — confirmed live (real token + account
+    # ID). Vision only for now: llava is a real, working image model. NOT
+    # wired for transcription — LiteLLM's cloudflare provider only implements
+    # chat (see litellm/llms/cloudflare/, no audio submodule); Workers AI's
+    # whisper endpoint has a different request shape litellm doesn't speak, so
+    # using it would need a raw HTTP call outside litellm. Left for later.
+    "cloudflare": {"vision": "cloudflare/@cf/llava-hf/llava-1.5-7b-hf"},
 }
+
+# cloudflare needs its account ID embedded in the request URL — LiteLLM has no
+# separate kwarg for it, just a full api_base override that already includes
+# the model path prefix. See ApiKeyRow.account_id.
+_CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/"
+
+
+def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] | None:
+    """Provider-specific `extra` kwargs for `call_llm`, beyond model/api_key.
+
+    Only cloudflare needs this right now. Returns None when there's nothing
+    to add (including cloudflare with no account_id set — that call will fail
+    downstream with a clear connection error rather than silently here)."""
+    if provider == "cloudflare" and account_id:
+        return {"api_base": _CLOUDFLARE_API_BASE.format(account_id=account_id)}
+    return None
 
 
 def model_for(provider: str, capability: str) -> str | None:

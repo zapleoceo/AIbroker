@@ -49,7 +49,7 @@ def _provider_catalogue() -> list[dict[str, Any]]:
     order = ["cerebras", "groq", "gemini", "mistral", "cohere",
              "openrouter", "deepseek",
              "openai", "anthropic", "voyage",
-             "sambanova", "github", "nvidia"]
+             "sambanova", "github", "nvidia", "cloudflare"]
     out = []
     for p in order:
         caps = list(DEFAULT_MODEL.get(p, {}).keys())
@@ -967,6 +967,10 @@ def _render(data: dict[str, Any], *, flash: str = "",
             f'data-en-placeholder="new token (leave blank to keep)" '
             f'data-ru-placeholder="новый токен (пусто = оставить)" '
             f'placeholder="new token (leave blank to keep)">'
+            f'<input name="account_id" value="{esc(k.account_id or "")}" style="min-width:150px" '
+            f'title="Only needed for cloudflare." '
+            f'data-en-placeholder="account ID" data-ru-placeholder="account ID" '
+            f'placeholder="account ID">'
             f'<span class="quota-override" title="Manual daily quota override — '
             f'blank = use discovered/default. For corp keys (e.g. Gemini 3M in / 80k out).">'
             f'<input name="manual_req_limit" type="number" min="0" value="{k.manual_req_limit or ""}" '
@@ -1006,6 +1010,11 @@ def _render(data: dict[str, Any], *, flash: str = "",
                data-en-placeholder="raw token"
                data-ru-placeholder="токен"
                placeholder="raw token">
+        <input name="account_id" style="min-width:180px"
+               title="Only needed for cloudflare (its API URL embeds the account ID)."
+               data-en-placeholder="account ID (cloudflare only)"
+               data-ru-placeholder="account ID (только cloudflare)"
+               placeholder="account ID (cloudflare only)">
         <select name="tier">
           <option value="free">free</option>
           <option value="paid">paid</option>
@@ -1528,12 +1537,14 @@ async def dash_create_key(
     manual_tok_limit: str = Form(""),
     manual_tok_in_limit: str = Form(""),
     manual_tok_out_limit: str = Form(""),
+    account_id: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
     scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    account_id_val = account_id.strip() or None
     # Parsing is unit-tested via _apply_manual_limits / _positive_int_or_none;
     # the DB-write glue below only runs on Postgres (SQLite can't autoincrement
     # the BigInteger PK), so it's exercised by the Postgres-only integration
@@ -1554,6 +1565,7 @@ async def dash_create_key(
             existing.scopes = scope_list
             existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
+            existing.account_id = account_id_val
             _apply_manual_limits(existing, **limits)  # pragma: no cover
             existing.is_active = True
             existing.is_alive = True
@@ -1565,6 +1577,7 @@ async def dash_create_key(
                 scopes=scope_list, is_reserve=is_reserve,
                 token_encrypted=encrypt(token),
                 daily_cost_cap_usd=cap,
+                account_id=account_id_val,
             )
             _apply_manual_limits(fresh, **limits)  # pragma: no cover
             s.add(fresh)
@@ -1634,6 +1647,7 @@ async def dash_edit_key(
     is_reserve: bool = Form(False),
     daily_cost_cap_usd: str = Form(""),
     token: str = Form(""),
+    account_id: str = Form(""),
     manual_req_limit: str = Form(""),
     manual_tok_limit: str = Form(""),
     manual_tok_in_limit: str = Form(""),
@@ -1656,6 +1670,7 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
+        row.account_id = account_id.strip() or None
         _apply_manual_limits(  # pragma: no cover
             row, req=manual_req_limit, tok=manual_tok_limit,
             tok_in=manual_tok_in_limit, tok_out=manual_tok_out_limit)

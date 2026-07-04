@@ -24,6 +24,7 @@ from aibroker.providers.context_limits import (
 from aibroker.providers.litellm_adapter import (
     embed,
     estimate_llm_cost,
+    extra_for_provider,
     model_for,
     transcribe,
 )
@@ -268,6 +269,7 @@ async def run_chat(
                     model=use_model, messages=messages, api_key=plain,
                     max_tokens=max_tokens, temperature=temperature,
                     response_format=response_format,
+                    extra=extra_for_provider(provider, getattr(key, "account_id", None)),
                 )
                 meta["cost_usd"] = _billed_cost(key, meta)
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next

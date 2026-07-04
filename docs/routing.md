@@ -45,7 +45,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
-| `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. |
+| `vision` | gemini → openai → **cloudflare** | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare (llava-1.5-7b) added 2026-07-04 as tail breadth, see below. |
 | `transcription` | groq → openai | `llm:audio` | Whisper: groq whisper-large-v3-turbo (free) → openai whisper-1. `/v1/transcribe` route |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 
@@ -99,6 +99,33 @@ returns the scope the **project** must hold and the **key** must carry.
 > nvidia models (`moonshotai/kimi-k2.6`, `deepseek-ai/deepseek-v4-pro` — both
 > fast, sub-second) are NOT wired into any chain yet, pending a decision on
 > accepting that silent-billing risk for general chat traffic.
+>
+> **cloudflare added to `vision` (2026-07-04).** Confirmed live (real token +
+> account ID) against text, vision (`@cf/llava-hf/llava-1.5-7b-hf`), and
+> whisper endpoints. Only vision is wired — LiteLLM's cloudflare provider only
+> implements chat completions (no audio submodule), and Workers AI's whisper
+> endpoint has a different request shape LiteLLM doesn't speak, so using it
+> for `transcription` would need a raw HTTP call outside LiteLLM. Left for a
+> future pass. Genuinely safer than nvidia: no card on file at all (so no
+> silent-billing path), and the free tier ("10,000 neurons/day") actually
+> renews daily — but it's a compute-unit budget, not a request count, so no
+> honest `req_per_day` axis exists (see quotas.py).
+>
+> **Cloudflare needs an account ID, not just a token.** Its API URL is
+> `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}`
+> — the account ID isn't a secret but must ride along with the key. Added a
+> new nullable `api_keys.account_id` column (see `db/models.py`,
+> `infra/sql/init.sql`) and `litellm_adapter.extra_for_provider()` builds the
+> full `api_base` override from it at call time. **The trailing slash on
+> `api_base` matters** — LiteLLM's cloudflare transformation does
+> `api_base + encoded_model` with no separator; omit it and every call 404s
+> with "No route for that URI".
+>
+> **Known gap:** the health monitor's `probe_all()` only carries
+> `(api_key_id, provider, plain_token)` per key — no account_id — so
+> cloudflare keys are NOT probed by the background monitor yet. Liveness is
+> only inferred from real traffic (`_penalize` on a failed call), same as
+> before any provider had a dedicated probe.
 
 ## Scopes & the reserved lane
 

@@ -87,6 +87,11 @@ class ApiKeyRow(Base):
     manual_tok_limit: Mapped[int | None] = mapped_column(BigInteger)
     manual_tok_in_limit: Mapped[int | None] = mapped_column(BigInteger)
     manual_tok_out_limit: Mapped[int | None] = mapped_column(BigInteger)
+    # Non-secret per-provider config that must ride along with the key. Only
+    # cloudflare needs this so far (account ID is embedded in its API URL,
+    # not sent as a header/param litellm can take separately) — NULL for
+    # every other provider.
+    account_id: Mapped[str | None] = mapped_column(String(64))
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 

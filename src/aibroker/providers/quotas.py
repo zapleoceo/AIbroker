@@ -83,6 +83,11 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     # only real guard is each key's manual daily_limit (request count), kept
     # deliberately low. See chains.py chat:deep for why only nemotron is wired.
     "nvidia": Quota(doc="https://build.nvidia.com/settings/api-keys"),
+    # Confirmed live 2026-07-04. Genuinely renewing daily (no card on file at
+    # all — unlike nvidia, there's no path to silent billing), but the free
+    # tier is "10,000 neurons/day", a compute-unit budget that varies per
+    # model — not a request count, so no req_per_day axis would be honest.
+    "cloudflare": Quota(doc="https://developers.cloudflare.com/workers-ai/platform/pricing/"),
 }
 
 

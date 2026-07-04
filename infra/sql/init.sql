@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   error_count INT NOT NULL DEFAULT 0,
   last_used_at TIMESTAMP,
   last_alive_check_at TIMESTAMP,
+  account_id VARCHAR(64),  -- non-secret provider config (e.g. cloudflare account ID)
   notes TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   CONSTRAINT uq_api_keys_provider_label UNIQUE (provider, label)
