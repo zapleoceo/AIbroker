@@ -32,6 +32,10 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "openrouter",
         "anthropic",
         "openai",
+        # 2026-07-04: sambanova capped at 20 req/day/key (confirmed live,
+        # DEFAULT_MODEL + health probe + prod key test) — tail position, pure
+        # extra breadth. github NOT added here yet — no verified prod key test.
+        "sambanova",
     ],
     "chat:smart": [
         "cerebras", "groq", "gemini",
@@ -39,12 +43,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "anthropic",
         "openrouter",
         "openai", "deepseek",
+        "sambanova",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
         "mistral",
         "anthropic",
         "deepseek", "openai",
+        "sambanova",
     ],
     # Coach editor (Stepan): JSON-reliable providers ONLY. gemini first
     # (thinking disabled → JSON fits), deepseek the paid fallback that stays
@@ -60,6 +66,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
+        "sambanova",
     ],
     # Trivial utility task (message translation): does NOT need premium/reasoning
     # models. Put SMALL FAST non-reasoning models FIRST — cerebras/groq gpt-oss is a

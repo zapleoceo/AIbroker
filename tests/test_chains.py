@@ -148,9 +148,10 @@ def test_is_known_capability():
 def test_dead_providers_not_in_any_chain():
     """Providers without DEFAULT_MODEL entries must not be in any chain.
     Mistral + cohere were added 2026-06-26 — they have DEFAULT_MODEL coverage
-    so are no longer dead."""
+    so are no longer dead. Sambanova was added 2026-07-04 (confirmed live,
+    req_per_day=20) — also no longer dead. nvidia was never wired in."""
     for cap, chain in CAPABILITY_CHAINS.items():
-        for dead in ("sambanova", "nvidia"):
+        for dead in ("nvidia",):
             assert dead not in chain, f"{dead} still routed in {cap}"
 
 

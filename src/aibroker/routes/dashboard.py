@@ -46,7 +46,8 @@ def _provider_catalogue() -> list[dict[str, Any]]:
 
     order = ["cerebras", "groq", "gemini", "mistral", "cohere",
              "openrouter", "deepseek",
-             "openai", "anthropic", "voyage"]
+             "openai", "anthropic", "voyage",
+             "sambanova", "github"]
     out = []
     for p in order:
         caps = list(DEFAULT_MODEL.get(p, {}).keys())

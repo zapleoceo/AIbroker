@@ -61,6 +61,14 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     "deepseek":  Quota(doc="https://api-docs.deepseek.com/quick_start/pricing"),
     "anthropic": Quota(doc="https://docs.claude.com/en/docs/about-claude/usage-limits"),
     "openai":    Quota(doc="https://platform.openai.com/docs/guides/rate-limits"),
+    # Confirmed live 2026-07-04: x-ratelimit-limit-requests-day: 20,
+    # x-ratelimit-reset-requests-day ~24h out. Real daily reset, not a
+    # one-time trial grant — but a hard 20 req/day per key.
+    "sambanova": Quota(req_per_day=20,
+                        doc="https://docs.sambanova.ai/cloud/docs/get-started/rate-limits"),
+    # Not yet verified with a real token — no invented cap (see mistral's
+    # note above for why a guessed number is worse than none).
+    "github": Quota(doc="https://docs.github.com/en/github-models/prototyping-with-ai-models#rate-limits"),
 }
 
 

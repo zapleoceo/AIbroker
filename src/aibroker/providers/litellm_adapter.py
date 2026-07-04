@@ -92,6 +92,22 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "translate":   "cohere/command-r7b-12-2024",
                "embedding":   "cohere/embed-english-v3.0"},
     "voyage": {"embedding": "voyage/voyage-3"},
+    # 2026-07-04: free tier confirmed live (real key, 200 OK) but capped at
+    # req_per_day=20 (x-ratelimit-limit-requests-day header) — see quotas.py.
+    # Too thin to be a primary workhorse; added at chain tail as extra free
+    # breadth across however many keys accumulate.
+    "sambanova": {"chat:fast": "sambanova/Meta-Llama-3.3-70B-Instruct",
+                  "chat:smart": "sambanova/Meta-Llama-3.3-70B-Instruct",
+                  "chat:code": "sambanova/Meta-Llama-3.3-70B-Instruct",
+                  "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
+    # 2026-07-04: GitHub Models (models.inference.ai.azure.com via LiteLLM's
+    # github/ prefix) — NOT yet verified with a real token. Rate limits vary
+    # by GitHub plan tier and are undocumented per-key; no Quota entry until
+    # confirmed live (see quotas.py).
+    "github": {"chat:fast": "github/gpt-4o-mini",
+               "chat:smart": "github/gpt-4o",
+               "chat:code": "github/gpt-4o-mini",
+               "prefilter": "github/gpt-4o-mini"},
 }
 
 

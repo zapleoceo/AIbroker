@@ -135,9 +135,10 @@ def extract_quota_headers(
             _read_int(headers, "anthropic-ratelimit-requests-limit"),
             _read_int(headers, "anthropic-ratelimit-tokens-limit"),
         )
-    # OpenAI-compat family (groq, openai, deepseek, mistral, openrouter, cerebras)
+    # OpenAI-compat family (groq, openai, deepseek, mistral, openrouter, cerebras,
+    # sambanova — confirmed same x-ratelimit-limit-requests-day header live 2026-07-04)
     if provider in ("cerebras", "groq", "openai", "deepseek",
-                     "mistral", "openrouter"):
+                     "mistral", "openrouter", "sambanova"):
         req = _read_int(headers, "x-ratelimit-limit-requests-day",
                           "x-ratelimit-limit-requests-1d")
         if req is None:
@@ -207,6 +208,19 @@ _PROBES = {
     "cohere": lambda k: ("POST", "https://api.cohere.com/v2/chat",
                           _bearer(k),
                           {"model": "command-r7b-12-2024",
+                           "messages": [{"role": "user", "content": "."}],
+                           "max_tokens": 1}),
+    # 2026-07-04: confirmed live — 200 OK + x-ratelimit-limit-requests-day header.
+    "sambanova": lambda k: ("POST", "https://api.sambanova.ai/v1/chat/completions",
+                             _bearer(k),
+                             {"model": "Meta-Llama-3.3-70B-Instruct",
+                              "messages": [{"role": "user", "content": "."}],
+                              "max_tokens": 1}),
+    # GitHub Models — model routes through Azure AI Inference; unverified with a
+    # real token as of 2026-07-04.
+    "github": lambda k: ("POST", "https://models.inference.ai.azure.com/chat/completions",
+                          _bearer(k),
+                          {"model": "gpt-4o-mini",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
 }

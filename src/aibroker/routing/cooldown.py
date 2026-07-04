@@ -30,6 +30,8 @@ COOLDOWN_BASE_S: dict[str, int] = {
     "anthropic":  120,   # paid, conservative
     "openai":     120,   # paid, conservative
     "voyage":     60,    # rolling RPM window
+    "sambanova":  120,   # only 20 req/day — don't hammer a near-exhausted key
+    "github":     120,   # unverified free tier — conservative until confirmed
 }
 DEFAULT_COOLDOWN_S = 300
 

@@ -37,11 +37,11 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
-| `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai | `llm:chat` | Codestral via mistral when other free chains are dry |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai → **sambanova** | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. sambanova is tail-only extra breadth (see below). |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek → **sambanova** | `llm:chat` | Strict free-first; expensive last |
+| `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai → **sambanova** | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
-| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter | `llm:chat` | No paid; cheap pre-filter |
+| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
 | `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. |
@@ -56,6 +56,18 @@ returns the scope the **project** must hold and the **key** must carry.
 > had no `DEFAULT_MODEL`, so `model_for` returned `None` and they were silently
 > skipped — the chains lied about their breadth. They're now out. Re-add only
 > with (a) a verified `DEFAULT_MODEL`, (b) a health probe, (c) a prod key test.
+>
+> **sambanova re-added (2026-07-04).** All three criteria met: a real key
+> (`api.sambanova.ai/v1/chat/completions`) returned 200 with `sambanova/Meta-
+> Llama-3.3-70B-Instruct`, confirmed `x-ratelimit-limit-requests-day: 20` with
+> a genuine ~24h reset (not a one-time trial grant — it renews daily for as
+> long as the free program exists). 20 req/day/key is too thin to be a
+> workhorse, so it sits at the tail of `chat:fast`/`chat:smart`/`chat:code`/
+> `prefilter` as pure extra breadth; adding more sambanova keys adds up
+> linearly (10 keys ≈ 200 req/day pool). `github` (GitHub Models, via
+> LiteLLM's `github/` prefix → `models.inference.ai.azure.com`) has a
+> `DEFAULT_MODEL` entry and dashboard dropdown option for when a token is
+> generated, but is deliberately NOT in any chain yet — no prod key test.
 
 ## Scopes & the reserved lane
 
