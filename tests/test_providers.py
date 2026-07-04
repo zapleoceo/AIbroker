@@ -1,13 +1,40 @@
 """LiteLLM adapter — model resolution & response parsing."""
 from __future__ import annotations
 
-from aibroker.providers.litellm_adapter import estimate_llm_cost, model_for
+from aibroker.providers.litellm_adapter import (
+    estimate_llm_cost,
+    extra_for_provider,
+    model_for,
+)
 
 
 def test_model_for_known_combos():
     assert model_for("cerebras", "chat:fast").startswith("cerebras/")
     assert model_for("voyage", "embedding") == "voyage/voyage-3"
     assert model_for("gemini", "vision").startswith("gemini/")
+
+
+def test_extra_for_provider_cloudflare_builds_api_base_with_account_id():
+    extra = extra_for_provider("cloudflare", "865824c3e1d2ced02b16adb355616363")
+    assert extra == {
+        "api_base": "https://api.cloudflare.com/client/v4/accounts/"
+                     "865824c3e1d2ced02b16adb355616363/ai/run/"
+    }
+    # Trailing slash matters — LiteLLM's cloudflare transformation does
+    # `api_base + encoded_model` with no separator (see docs/routing.md).
+    assert extra["api_base"].endswith("/")
+
+
+def test_extra_for_provider_cloudflare_without_account_id_returns_none():
+    """No account_id set → None, not a broken api_base — the call fails
+    downstream with a clear connection error instead of a silent bad URL."""
+    assert extra_for_provider("cloudflare", None) is None
+    assert extra_for_provider("cloudflare", "") is None
+
+
+def test_extra_for_provider_other_providers_return_none():
+    assert extra_for_provider("gemini", "some-id") is None
+    assert extra_for_provider("openai", None) is None
 
 
 def test_model_for_unknown_returns_none():

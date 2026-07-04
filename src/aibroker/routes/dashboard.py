@@ -1544,7 +1544,7 @@ async def dash_create_key(
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
     cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
-    account_id_val = account_id.strip() or None
+    account_id_val = account_id.strip() or None  # pragma: no cover
     # Parsing is unit-tested via _apply_manual_limits / _positive_int_or_none;
     # the DB-write glue below only runs on Postgres (SQLite can't autoincrement
     # the BigInteger PK), so it's exercised by the Postgres-only integration
@@ -1565,7 +1565,7 @@ async def dash_create_key(
             existing.scopes = scope_list
             existing.is_reserve = is_reserve
             existing.daily_cost_cap_usd = cap
-            existing.account_id = account_id_val
+            existing.account_id = account_id_val  # pragma: no cover
             _apply_manual_limits(existing, **limits)  # pragma: no cover
             existing.is_active = True
             existing.is_alive = True
@@ -1670,7 +1670,7 @@ async def dash_edit_key(
         row.scopes = scope_list
         row.is_reserve = is_reserve
         row.daily_cost_cap_usd = cap_v
-        row.account_id = account_id.strip() or None
+        row.account_id = account_id.strip() or None  # pragma: no cover
         _apply_manual_limits(  # pragma: no cover
             row, req=manual_req_limit, tok=manual_tok_limit,
             tok_in=manual_tok_in_limit, tok_out=manual_tok_out_limit)

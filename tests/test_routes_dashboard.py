@@ -72,13 +72,15 @@ def test_create_and_edit_key_persist_manual_limits():
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow
 
-    # 1. create with manual in/out caps (corp-Gemini shape)
+    # 1. create with manual in/out caps (corp-Gemini shape) + a cloudflare-style
+    # account_id, to prove that field round-trips too.
     r = client.post(
         "/dashboard/keys/create", cookies=_logged_in_cookies(),
         data={"provider": "gemini", "label": "corp",
               "token": "g-fake-token-1234567890",
               "scopes": ["llm:chat", "llm:vision"],
-              "manual_tok_in_limit": "3000000", "manual_tok_out_limit": "80000"},
+              "manual_tok_in_limit": "3000000", "manual_tok_out_limit": "80000",
+              "account_id": "acct-123"},
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -93,18 +95,21 @@ def test_create_and_edit_key_persist_manual_limits():
     assert row.manual_tok_in_limit == 3_000_000
     assert row.manual_tok_out_limit == 80_000
     assert row.manual_req_limit is None      # blank → no cap
+    assert row.account_id == "acct-123"
 
-    # 2. edit: tighten req cap, clear the out cap
+    # 2. edit: tighten req cap, clear the out cap, change account_id
     r = client.post(
         f"/dashboard/keys/{row.id}/edit", cookies=_logged_in_cookies(),
         data={"label": "corp", "tier": "free", "scopes": ["llm:chat"],
-              "manual_req_limit": "500", "manual_tok_out_limit": ""},
+              "manual_req_limit": "500", "manual_tok_out_limit": "",
+              "account_id": "acct-456"},
         follow_redirects=False,
     )
     assert r.status_code == 303
     row2 = asyncio.get_event_loop().run_until_complete(_read())
     assert row2.manual_req_limit == 500
     assert row2.manual_tok_out_limit is None   # cleared
+    assert row2.account_id == "acct-456"
 
 
 def test_add_key_form_has_four_manual_limit_fields():
