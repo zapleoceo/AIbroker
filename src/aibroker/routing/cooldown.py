@@ -32,6 +32,7 @@ COOLDOWN_BASE_S: dict[str, int] = {
     "voyage":     60,    # rolling RPM window
     "sambanova":  120,   # only 20 req/day — don't hammer a near-exhausted key
     "github":     120,   # unverified free tier — conservative until confirmed
+    "nvidia":     300,   # one-time credits + invisible quota — most conservative
 }
 DEFAULT_COOLDOWN_S = 300
 

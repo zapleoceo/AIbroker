@@ -60,7 +60,7 @@ _HTML = """<!doctype html>
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aib.zapleo.com/">
 <meta property="og:title" content="AIbroker — one API key, every LLM provider">
-<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 10 providers, cost caps, health monitoring. Self-host on any VPS.">
+<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 13 providers, cost caps, health monitoring. Self-host on any VPS.">
 <meta property="og:site_name" content="AIbroker">
 <meta property="og:locale" content="en_US">
 <meta property="og:locale:alternate" content="ru_RU">
@@ -68,7 +68,7 @@ _HTML = """<!doctype html>
 <!-- Twitter / X card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="AIbroker — one API key, every LLM provider">
-<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 10 providers · cost guard · encrypted keys.">
+<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 13 providers · cost guard · encrypted keys.">
 
 <!-- Schema.org structured data — picked up by Google rich-results AND by
      LLM crawlers (Perplexity, ChatGPT browse, Claude search). Two graphs:
@@ -83,14 +83,14 @@ _HTML = """<!doctype html>
       "url": "https://aib.zapleo.com/",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux / Docker",
-      "description": "Self-hosted LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI and Voyage — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
+      "description": "Self-hosted LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage, SambaNova, GitHub Models and NVIDIA NIM — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
       "softwareVersion": "{version}",
       "license": "Proprietary — all rights reserved. Source visible on GitHub, not licensed for reuse.",
       "offers": {{"@type": "Offer", "price": "0", "priceCurrency": "USD"}},
       "codeRepository": "https://github.com/zapleoceo/AIbroker",
       "programmingLanguage": "Python",
       "featureList": [
-        "Free-tier-first routing across 10 LLM providers",
+        "Free-tier-first routing across 13 LLM providers",
         "Adaptive per-provider cooldowns with exponential backoff and jitter",
         "Per-key, per-project and global daily cost caps",
         "Atomic SELECT FOR UPDATE SKIP LOCKED key selection",
@@ -543,8 +543,8 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
   <div class="container">
     <div class="eyebrow" data-i18n="prov.eyebrow" data-en="Providers" data-ru="Провайдеры"></div>
     <h2 data-i18n="prov.title"
-        data-en="Ten providers. Add more in one row of code."
-        data-ru="Десять провайдеров. Добавить ещё — одна строка кода."></h2>
+        data-en="Thirteen providers. Add more in one row of code."
+        data-ru="Тринадцать провайдеров. Добавить ещё — одна строка кода."></h2>
     <p class="section-intro" data-i18n="prov.intro"
        data-en="Built on LiteLLM, so any of its 100+ providers can be plugged in. The free-first chain is configurable per capability."
        data-ru="Построено на LiteLLM — можно подключить любой из его 100+ провайдеров. Free-first цепочка настраивается на каждую способность."></p>
@@ -556,6 +556,9 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
       <div class="prov">cohere <span class="badge">free</span></div>
       <div class="prov">openrouter <span class="badge">free</span></div>
       <div class="prov">voyage <span class="badge">free</span></div>
+      <div class="prov">sambanova <span class="badge">free</span></div>
+      <div class="prov">github <span class="badge">free</span></div>
+      <div class="prov">nvidia nim <span class="badge">free</span></div>
       <div class="prov">deepseek <span class="badge paid">paid</span></div>
       <div class="prov">anthropic <span class="badge paid">paid</span></div>
       <div class="prov">openai <span class="badge paid">paid</span></div>
@@ -837,10 +840,11 @@ _SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 _LLMS_TXT = """# AIbroker
 
 > Self-hosted centralized LLM key broker. One API endpoint routes calls across
-> 10 LLM providers (Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter,
-> DeepSeek, Anthropic, OpenAI, Voyage) with free-tier-first ordering, paid
-> fallback, per-key and per-project cost caps, automatic health probing, and
-> Fernet-encrypted token storage at rest. Self-host on any VPS.
+> 13 LLM providers (Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter,
+> DeepSeek, Anthropic, OpenAI, Voyage, SambaNova, GitHub Models, NVIDIA NIM)
+> with free-tier-first ordering, paid fallback, per-key and per-project cost
+> caps, automatic health probing, and Fernet-encrypted token storage at rest.
+> Self-host on any VPS.
 
 ## Key concepts
 
@@ -849,11 +853,14 @@ _LLMS_TXT = """# AIbroker
   `vending` (broker hands the client a short-lived lease + plaintext key
   for direct provider calls).
 - **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
-  `chat:code`, `chat:edit`, `prefilter`, `structured`, `translate`, `vision`,
-  `transcription`, `embedding`. Each maps to an ordered provider chain
-  (free-first) and a required scope.
+  `chat:code`, `chat:edit`, `chat:deep`, `prefilter`, `structured`,
+  `translate`, `vision`, `transcription`, `embedding`. Each maps to an
+  ordered provider chain (free-first) and a required scope. `chat:deep` is a
+  dedicated long-context/reasoning lane (1M-token context, no latency
+  guarantee) gated behind its own scope so it never competes with live chat
+  traffic.
 - **Scopes**: every project key carries a list of allowed scopes
-  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`, `llm:audio`).
+  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`, `llm:deep`, `llm:audio`).
   Mismatch → HTTP 403.
 - **Adaptive cooldown**: per-provider base wait (Gemini 60s, Mistral 10s,
   OpenRouter 5min, etc.) with exponential backoff per consecutive 429.

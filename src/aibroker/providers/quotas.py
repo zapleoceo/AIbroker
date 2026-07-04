@@ -75,6 +75,14 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     # Free Copilot tier / low-tier models instead: 150 req/day.
     "github": Quota(req_per_day=150,
                      doc="https://docs.github.com/en/github-models/prototyping-with-ai-models#rate-limits"),
+    # Confirmed live 2026-07-04, but genuinely uncappable from here: NVIDIA
+    # exposes NO rate-limit headers at all (only nvcf-status: fulfilled), and
+    # the free tier is 1,000 ONE-TIME inference credits (not a daily/monthly
+    # renewal) that silently convert to real pay-as-you-go billing once spent
+    # — no error, no visible signal. No axis here would mean anything; the
+    # only real guard is each key's manual daily_limit (request count), kept
+    # deliberately low. See chains.py chat:deep for why only nemotron is wired.
+    "nvidia": Quota(doc="https://build.nvidia.com/settings/api-keys"),
 }
 
 

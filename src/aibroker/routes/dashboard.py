@@ -42,12 +42,14 @@ def _provider_catalogue() -> list[dict[str, Any]]:
             return "llm:embed"
         if "vision" in caps and len(caps) == 1:
             return "llm:vision"
+        if "chat:deep" in caps and len(caps) == 1:
+            return "llm:deep"
         return "llm:chat"
 
     order = ["cerebras", "groq", "gemini", "mistral", "cohere",
              "openrouter", "deepseek",
              "openai", "anthropic", "voyage",
-             "sambanova", "github"]
+             "sambanova", "github", "nvidia"]
     out = []
     for p in order:
         caps = list(DEFAULT_MODEL.get(p, {}).keys())
@@ -1450,7 +1452,7 @@ async def dashboard_project_detail(
 # ─── Form handlers ──────────────────────────────────────────────────────────
 
 
-_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit")
+_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep")
 
 
 def _parse_scopes(csv: str) -> list[str] | None:

@@ -222,6 +222,15 @@ _PROBES = {
                           {"model": "gpt-4o-mini",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
+    # Confirmed live 2026-07-04. Probes with kimi-k2.6, NOT the chat:deep
+    # default (nemotron-3-ultra) — nemotron took ~27s for 5 tokens on the free
+    # pool in a live test, which would stall the monitor's probe_all sweep
+    # across every other provider's keys every cycle.
+    "nvidia": lambda k: ("POST", "https://integrate.api.nvidia.com/v1/chat/completions",
+                          _bearer(k),
+                          {"model": "moonshotai/kimi-k2.6",
+                           "messages": [{"role": "user", "content": "."}],
+                           "max_tokens": 1}),
 }
 
 

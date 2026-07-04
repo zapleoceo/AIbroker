@@ -149,9 +149,11 @@ def test_dead_providers_not_in_any_chain():
     """Providers without DEFAULT_MODEL entries must not be in any chain.
     Mistral + cohere were added 2026-06-26 — they have DEFAULT_MODEL coverage
     so are no longer dead. Sambanova was added 2026-07-04 (confirmed live,
-    req_per_day=20) — also no longer dead. nvidia was never wired in."""
+    req_per_day=20) — also no longer dead. nvidia now has a DEFAULT_MODEL
+    entry too (chat:deep only, see chains.py) — no "dead" providers remain to
+    check, but the test stays as a guard rail for the next removal."""
     for cap, chain in CAPABILITY_CHAINS.items():
-        for dead in ("nvidia",):
+        for dead in ():
             assert dead not in chain, f"{dead} still routed in {cap}"
 
 

@@ -15,6 +15,7 @@ Capability = Literal[
     "chat:smart",
     "chat:code",
     "chat:edit",
+    "chat:deep",
     "structured",
     "vision",
     "transcription",
@@ -63,6 +64,17 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # worth a malformed edit. cerebras/groq/openrouter stay excluded for the
     # same reason.
     "chat:edit": ["gemini", "deepseek", "anthropic"],
+    # 2026-07-04: long-context / async reasoning lane. nvidia's Nemotron 3
+    # Ultra (nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b) is a 550B MoE with a
+    # real 1M-token context (95% RULER@1M) and strong agentic benchmarks
+    # (91% PinchBench), but is SLOW (~27s for 5 output tokens on the free,
+    # oversubscribed pool in a live test) — unfit for any latency-sensitive
+    # chain above. Gated behind its own scope (llm:deep) so it's never reached
+    # by normal chat traffic; callers who don't need 1M context or can't
+    # tolerate long waits should keep using chat:smart. Single-provider chain
+    # (no other free provider offers this context length) — a miss here falls
+    # straight to a 503, by design.
+    "chat:deep": ["nvidia"],
     "prefilter": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
@@ -111,6 +123,7 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "chat:smart": "llm:chat",
     "chat:code": "llm:chat",
     "chat:edit": "llm:edit",
+    "chat:deep": "llm:deep",
     "structured": "llm:chat",
     "prefilter": "llm:chat",
     "translate": "llm:chat",

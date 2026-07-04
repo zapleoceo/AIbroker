@@ -41,6 +41,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek → **github** → **sambanova** | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai → **github** → **sambanova** | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
+| `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. See below. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
@@ -77,6 +78,27 @@ returns the scope the **project** must hold and the **key** must carry.
 > models: 150 req/day. `chat:smart` defaults to `gpt-4o-mini` too, not
 > `gpt-4o` — GitHub's "high" tier models have a much stricter free-account cap
 > and haven't been verified.
+>
+> **`chat:deep` added (2026-07-04).** A dedicated long-context/reasoning
+> capability for NVIDIA's Nemotron 3 Ultra (550B MoE, 55B active,
+> `nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b`) — 1M-token context (95%
+> RULER@1M), strong agentic benchmarks (91% PinchBench), but **slow**: a live
+> test measured ~27s for 5 output tokens on the free, oversubscribed pool.
+> Unfit for any latency-sensitive chain, so it gets its own scope
+> (`llm:deep`) and its own single-provider chain — no fallback, a miss is a
+> 503 by design, not a silent slide into a fast/cheap model.
+>
+> NVIDIA's free tier is fundamentally different from sambanova/github: no
+> rate-limit headers at all (only `nvcf-status: fulfilled`), and it's **1,000
+> ONE-TIME inference credits** (not a renewing daily/monthly quota) that
+> silently convert to real pay-as-you-go billing once spent — no error, no
+> visible signal. LiteLLM also has no pricing entry for these models, so
+> `cost_usd` is always `0` for nvidia calls — the usual `daily_cost_cap_usd`
+> safety net is blind here. The only real guard is each key's `daily_limit`
+> (request count), kept deliberately conservative. Two other verified-live
+> nvidia models (`moonshotai/kimi-k2.6`, `deepseek-ai/deepseek-v4-pro` — both
+> fast, sub-second) are NOT wired into any chain yet, pending a decision on
+> accepting that silent-billing risk for general chat traffic.
 
 ## Scopes & the reserved lane
 

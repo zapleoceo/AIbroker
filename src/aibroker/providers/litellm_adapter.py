@@ -109,6 +109,15 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "chat:smart": "github/gpt-4o-mini",
                "chat:code": "github/gpt-4o-mini",
                "prefilter": "github/gpt-4o-mini"},
+    # 2026-07-04: nvidia — confirmed live with 3 real keys (nemotron-3-ultra,
+    # kimi-k2.6, deepseek-v4-pro all returned 200). Only chat:deep is wired
+    # (see chains.py for why: no rate-limit headers, no LiteLLM pricing entry
+    # — cost_usd is always 0 for this provider, so the usual daily_cost_cap_usd
+    # safety net is blind here; daily_limit (request count) is the only real
+    # guard). kimi-k2.6/deepseek-v4-pro are NOT wired into chat:fast/smart/code
+    # yet — pending a decision on accepting the silent-billing risk once the
+    # one-time free credits run out.
+    "nvidia": {"chat:deep": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"},
 }
 
 
