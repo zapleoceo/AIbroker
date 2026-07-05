@@ -213,6 +213,8 @@ th, td { padding:8px 12px; text-align:left; border-bottom:1px solid #2a2d34; fon
 th { background:#0f1115; color:#888; text-transform:uppercase; font-size:11px; font-weight:500; }
 td.mono, code { font-family:ui-monospace, monospace; color:#4dabf7; font-size:12px; }
 .ok { color:#4caf50; } .bad { color:#f44336; } .warn { color:#ffd84a; }
+.status-detail { font-size:10px; color:#888; margin-top:2px; white-space:nowrap;
+                 max-width:160px; overflow:hidden; text-overflow:ellipsis; }
 .pill { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px;
          background:#0f1115; border:1px solid #2a2d34; }
 form.inline { display:inline; }
@@ -879,9 +881,29 @@ def _render(data: dict[str, Any], *, flash: str = "",
         )
         status_class = {"alive": "ok", "cooldown": "warn", "dead": "bad"}[status_label]
         status_ru = {"alive": "жив", "cooldown": "пауза", "dead": "мёртв"}[status_label]
+        # Reason + (for cooldown) when it ends — 2026-07-05: status used to be
+        # just "мёртв"/"пауза" with no way to tell "no money" from "rate
+        # limited" apart, or when a cooldown actually ends. last_error is set
+        # by _penalize (real traffic) / monitor.py (probes); cleared back to
+        # None the moment a key is confirmed alive again.
+        detail_bits = []
+        if k.last_error:
+            detail_bits.append(esc(k.last_error))
+        if status_label == "cooldown" and k.cooldown_until:
+            same_day = k.cooldown_until.date() == now.date()
+            fmt = "%H:%M" if same_day else "%m-%d %H:%M"
+            detail_bits.append(f"until {k.cooldown_until.strftime(fmt)} UTC")
+        detail_title = " — ".join(detail_bits)
+        detail_sub = (
+            f'<div class="status-detail" title="{detail_title}">'
+            f'{esc(detail_bits[0][:40] + ("…" if len(detail_bits[0]) > 40 else "")) if detail_bits else ""}'
+            f'{" · " + detail_bits[-1] if len(detail_bits) > 1 else ""}'
+            f'</div>' if detail_bits else ""
+        )
         status_html = (
-            f'<span class="{status_class}" data-i18n '
+            f'<span class="{status_class}" data-i18n title="{detail_title}" '
             f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
+            f'{detail_sub}'
         )
 
         # Daily-quota usage — show ALL capped axes (req / tok / in / out) so

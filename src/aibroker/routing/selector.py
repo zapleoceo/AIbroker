@@ -191,7 +191,7 @@ async def pick_and_reserve(
     )
 
 
-async def mark_cooldown(api_key_id: int, until: datetime) -> None:
+async def mark_cooldown(api_key_id: int, until: datetime, reason: str | None = None) -> None:
     # cooldown_until is a naive UTC TIMESTAMP; asyncpg rejects tz-aware values
     # ("can't subtract offset-naive and offset-aware"). Callers pass UTC-aware
     # datetimes — normalise to naive UTC here so prod (asyncpg) doesn't blow up.
@@ -199,18 +199,18 @@ async def mark_cooldown(api_key_id: int, until: datetime) -> None:
         until = until.astimezone(UTC).replace(tzinfo=None)
     async with get_session() as s:
         await s.execute(
-            text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1 "
-                 "WHERE id = :id"),
-            {"u": until, "id": api_key_id},
+            text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1, "
+                 "last_error = :reason WHERE id = :id"),
+            {"u": until, "id": api_key_id, "reason": (reason or "")[:200] or None},
         )
 
 
-async def mark_dead(api_key_id: int) -> None:
+async def mark_dead(api_key_id: int, reason: str | None = None) -> None:
     async with get_session() as s:
         await s.execute(
-            text("UPDATE api_keys SET is_alive = FALSE, error_count = error_count + 1 "
-                 "WHERE id = :id"),
-            {"id": api_key_id},
+            text("UPDATE api_keys SET is_alive = FALSE, error_count = error_count + 1, "
+                 "last_error = :reason WHERE id = :id"),
+            {"id": api_key_id, "reason": (reason or "")[:200] or None},
         )
 
 

@@ -69,7 +69,7 @@ async def tick() -> None:
                 alive_count += 1
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
-                        is_alive=True, error_count=0,
+                        is_alive=True, error_count=0, last_error=None,
                         last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
@@ -83,6 +83,7 @@ async def tick() -> None:
                         cooldown_until=datetime.now(UTC).replace(tzinfo=None)
                                        + timedelta(minutes=5),
                         last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
+                        last_error=hint or None,
                     )
                 )
                 if not was_alive:  # pragma: no cover
@@ -97,6 +98,7 @@ async def tick() -> None:
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
                         is_alive=False, error_count=ApiKeyRow.error_count + 1,
                         last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
+                        last_error=hint or None,
                     )
                 )
                 if was_alive:

@@ -215,6 +215,35 @@ async def test_mark_dead_skips_subsequent_picks():
     assert result is None
 
 
+async def test_mark_dead_persists_reason():
+    """2026-07-05: the dashboard used to show only 'мёртв' with no way to
+    tell 'no money' from 'auth failed' apart — mark_dead now stores a short
+    human reason on the key row."""
+    kid = await _add_key("anthropic", "x")
+    await mark_dead(kid, reason="Your credit balance is too low to access the API")
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+    assert row.last_error == "Your credit balance is too low to access the API"
+
+
+async def test_mark_dead_truncates_long_reason():
+    kid = await _add_key("anthropic", "x")
+    await mark_dead(kid, reason="x" * 500)
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+    assert len(row.last_error) == 200
+
+
+async def test_mark_cooldown_persists_reason():
+    kid = await _add_key("deepseek", "x")
+    future = datetime.now(UTC) + timedelta(minutes=5)
+    await mark_cooldown(kid, future, reason="This response_format type is unavailable now")
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+    assert row.last_error == "This response_format type is unavailable now"
+    assert row.cooldown_until is not None
+
+
 async def test_reserve_key_picked_only_when_shared_exhausted():
     """Reserve key is the safety net: shared edit keys go first; the reserve
     is picked only once every shared key in the group is unavailable."""

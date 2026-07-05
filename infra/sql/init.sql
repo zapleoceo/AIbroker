@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   error_count INT NOT NULL DEFAULT 0,
   last_used_at TIMESTAMP,
   last_alive_check_at TIMESTAMP,
+  last_error VARCHAR(200),  -- why the key is currently dead/cooldown ("no funds", etc.)
   account_id VARCHAR(64),  -- non-secret provider config (e.g. cloudflare account ID)
   notes TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP NOT NULL DEFAULT now(),

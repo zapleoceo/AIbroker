@@ -134,6 +134,10 @@ def classify_provider_error(exc: Exception) -> str:
 async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
     kind = classify_provider_error(exc)
+    # Short, human-readable reason surfaced on the dashboard (2026-07-05) — the
+    # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
+    # money" from "rate limited" apart, or when a cooldown actually ends.
+    reason = str(exc)[:200]
     if kind == "rate_limit":
         # 2026-06-29: cooldown resolved by the provider's own signal —
         # retry-after hint > daily-quota (until UTC midnight) > adaptive
@@ -145,9 +149,9 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
             until = await cooldown_until(key.id, key.provider, str(exc))
         except Exception:
             until = datetime.now(UTC) + _COOLDOWN
-        await mark_cooldown(key.id, until)
+        await mark_cooldown(key.id, until, reason)
     elif kind == "auth":
-        await mark_dead(key.id)
+        await mark_dead(key.id, reason)
     return kind
 
 

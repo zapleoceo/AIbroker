@@ -1108,6 +1108,56 @@ def test_main_render_keys_show_both_axes_for_groq():
     assert "525/14,400 req" in body
 
 
+def test_main_render_dead_key_shows_reason():
+    """2026-07-05: 'мёртв' alone didn't say WHY — last_error (set by
+    _penalize/monitor.py) now renders under the status pill and in its
+    tooltip, so 'no money' is distinguishable from 'auth failed' at a
+    glance."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=20, provider="anthropic", label="default", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=False,
+        last_error="Your credit balance is too low to access the Anthropic API",
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert "Your credit balance is too low" in body
+    assert 'class="status-detail"' in body
+
+
+def test_main_render_cooldown_key_shows_until_time():
+    """Cooldown status now shows WHEN it ends, not just that it's paused."""
+    from datetime import UTC, datetime, timedelta
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
+    k = ApiKeyRow(
+        id=21, provider="deepseek", label="x", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, cooldown_until=until,
+        last_error="This response_format type is unavailable now",
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert "This response_format type is unavailable now" in body
+    assert f"until {until.strftime('%H:%M')} UTC" in body
+
+
+def test_main_render_alive_key_has_no_status_detail():
+    """A healthy key shows no stray reason/time — detail only appears for
+    dead/cooldown keys with a last_error set."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=22, provider="groq", label="x", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'class="status-detail"' not in body
+
+
 def test_main_render_cerebras_token_axis_only():
     """Cerebras is token-metered — its req-day header isn't a hard cap, so the
     req axis is dropped. Only the tok chip shows (no req chip)."""

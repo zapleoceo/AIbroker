@@ -110,6 +110,18 @@ floor on master.
   the operator rename the key, change tier/scope/cap, and optionally
   rotate the token in one shot. Old buttons (enable/disable/delete)
   stay.
+  **Status detail (2026-07-05).** `status` used to be just "жив"/"пауза"/
+  "мёртв" with no way to tell *why* — "no money" and "rate limited" both
+  showed as a generic red/yellow pill, and a paused key gave no hint of
+  when it'd recover. `api_keys.last_error` (short human reason: a probe
+  hint like `no funds`/`rate limit`, or the real exception text truncated
+  to 200 chars) is now set by both real-traffic failures
+  (`services/llm_service.py:_penalize`) and the background monitor
+  (`monitor.py:tick`), and cleared back to `NULL` the moment a key is
+  confirmed alive again. Dead keys show the reason; cooldown keys show the
+  reason **and** the actual `cooldown_until` time (same day → `HH:MM UTC`,
+  otherwise `MM-DD HH:MM UTC`) — both as a small line under the pill and
+  as a hover tooltip.
 - All table headers are clickable for client-side sort (asc → desc → asc).
   Each cell uses `data-sort` for the canonical comparable value, so
   monetary or status text doesn't break ordering.
