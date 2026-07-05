@@ -630,9 +630,12 @@ async def test_deep_submit_creates_job_and_runs_in_background():
         assert r.json()["poll_url"] == f"/v1/deep/{job_id}"
 
         # Background task runs on the same event loop as this test — give it
-        # a beat to complete before polling.
-        for _ in range(20):
-            await asyncio.sleep(0.05)
+        # a beat to complete before polling. Generous budget: each of submit's
+        # insert and _finish's update opens its own connection (NullPool, see
+        # conftest.py), so under CI resource contention this can take longer
+        # than the mocked run_chat call itself suggests.
+        for _ in range(100):
+            await asyncio.sleep(0.1)
             poll = client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
             if poll.json()["status"] != "pending":
                 break
