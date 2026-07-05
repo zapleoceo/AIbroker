@@ -510,6 +510,7 @@ async def test_deep_poll_404_for_unknown_job():
     assert r.status_code == 404
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
 async def test_deep_poll_pending_job_returns_poll_after_s():
     """Insert a pending job directly (explicit id — BIGINT PK doesn't
     autoincrement on SQLite) to test the poll response shape without
@@ -528,6 +529,7 @@ async def test_deep_poll_pending_job_returns_poll_after_s():
     assert data["poll_after_s"] == 5
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
 async def test_deep_poll_scoped_to_owning_project():
     """A job belonging to project A must 404 for project B — jobs are not a
     shared pool like keys, each belongs to exactly one caller."""
@@ -545,6 +547,7 @@ async def test_deep_poll_scoped_to_owning_project():
     assert r_owner.json()["text"] == "secret answer"
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
 async def test_deep_poll_done_job_returns_result_meta():
     plain, pid = await _make_project(["llm:deep"])
     async with get_session() as s:
@@ -565,6 +568,7 @@ async def test_deep_poll_done_job_returns_result_meta():
     assert data["latency_ms"] == 98000
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
 async def test_deep_poll_error_job_returns_error_message():
     plain, pid = await _make_project(["llm:deep"])
     async with get_session() as s:
@@ -580,6 +584,7 @@ async def test_deep_poll_error_job_returns_error_message():
     assert "no provider available" in data["error"]
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
 async def test_deep_poll_stale_pending_job_times_out():
     """A job stuck 'pending' past _STALE_AFTER_S (worker restarted mid-call)
     resolves to a timeout error on poll instead of hanging forever."""

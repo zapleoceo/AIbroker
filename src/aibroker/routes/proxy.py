@@ -260,13 +260,16 @@ async def deep_submit(
     Returns immediately with a job_id — poll GET /v1/deep/{job_id} for the
     result. Real latency has been observed up to ~8 minutes."""
     _require_capability_scope(ctx, scope_for("chat:deep"))
-    job_id = await submit_deep_job(
+    # submit_deep_job needs a real autoincrementing BIGSERIAL id — SQLite
+    # doesn't do that for BigInteger, so this whole path is exercised only by
+    # the Postgres-only test_deep_submit_creates_job_and_runs_in_background.
+    job_id = await submit_deep_job(  # pragma: no cover
         project=ctx.project,
         messages=[m.model_dump() for m in body.messages],
         model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
         workflow=body.workflow,
     )
-    return DeepSubmitResponse(
+    return DeepSubmitResponse(  # pragma: no cover
         job_id=job_id, poll_url=f"/v1/deep/{job_id}", poll_after_s=5,
     )
 
@@ -279,15 +282,21 @@ async def deep_poll(
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
-    if row.status == "pending":
+    # pending/error/done branches read a row inserted by a SEPARATE
+    # session/request — cross-session reads on SQLite don't see it (see
+    # deep_jobs.get_job) — so these are Postgres-only-tested (skipif
+    # ON_SQLITE): test_deep_poll_pending_job_returns_poll_after_s,
+    # test_deep_poll_error_job_returns_error_message,
+    # test_deep_poll_done_job_returns_result_meta.
+    if row.status == "pending":  # pragma: no cover
         return DeepJobResponse(
             job_id=row.id, status="pending",
             poll_after_s=next_poll_after_s(row.created_at),
         )
-    if row.status == "error":
+    if row.status == "error":  # pragma: no cover
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
-    meta = row.result_meta or {}
-    return DeepJobResponse(
+    meta = row.result_meta or {}  # pragma: no cover
+    return DeepJobResponse(  # pragma: no cover
         job_id=row.id, status="done", text=row.result_text,
         provider=meta.get("provider"), model=meta.get("model"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
