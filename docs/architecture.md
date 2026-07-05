@@ -100,8 +100,10 @@ floor on master.
   is visible at a glance instead of only in the logs.
 - Projects table — `id, name, scopes, active, daily cap, key prefix,
   actions`. Each row has inline **edit** that swaps the row for a form
-  with `name`, `allowed_scopes` (csv), `daily_cost_cap_usd`,
-  `owner_email`.
+  with `name`, `allowed_scopes` (checkbox group — same `_scope_checkboxes`
+  widget the key forms use, validated against `_KNOWN_SCOPES`; was a raw
+  comma-separated text input with no validation until 2026-07-05),
+  `daily_cost_cap_usd`, `owner_email`.
 - API keys table — `id, provider, label, tier, status, used, $/cap, errs,
   actions`. The `$/cap` cell shows `used / cap` with a coloured progress
   bar (blue < 70 % → yellow < 90 % → red). Inline **edit** form lets
@@ -125,6 +127,12 @@ shape:
 - Date-range and "today" bounds are computed in Python as half-open
   `created_at >= start AND created_at < end`, never `::date`-cast — sargable
   against a plain `(created_at)` index (migration 005, `CONCURRENTLY`).
+  **Gap found and fixed 2026-07-05:** migration 005 was written and
+  documented here but had never actually been run against prod — only the
+  three composite indexes existed, none of which lead with `created_at`
+  alone, so the "calls last 1h" / "tokens today" queries were still doing
+  a near-full-table index scan. Applied live: one such query went from
+  264ms to 0.88ms on 850k+ rows.
 - The 6 independent queries (projects, keys, range+proj totals, calls/1h,
   tokens/today, provider summary) run concurrently via `asyncio.gather`, each
   on its own pooled connection (`get_session()` per fetch) — a single
@@ -152,6 +160,19 @@ Removed 2026-07-01 rather than kept as a redundant tile.
 All form posts go through `require_owner_session`; an unauth POST returns
 401. Every mutation writes an `audit_log` row through
 `telemetry.audit()`.
+
+**Static shell vs data (2026-07-05).** The ~17KB of CSS + JS behind the
+dashboard never changes per request, but used to be inlined into the same
+HTML document as live key/project/usage data — and the whole document is
+served `Cache-Control: no-store` (the data must never be Chrome-heuristic-
+cached, see the login-page no-store note above). Every navigation was
+re-downloading and re-parsing identical markup. Split into
+`_DASHBOARD_CSS`/`_DASHBOARD_JS`, served from `GET /dashboard/assets.css`
+and `GET /dashboard/assets.js` — both public (no user data in them) and
+long-cached (`Cache-Control: public, max-age=31536000, immutable`),
+versioned via `?v={__version__}` in `_dash_html` so a deploy naturally
+busts the cache. The HTML document itself still `<link>`s/`<script src>`s
+these and stays `no-store`.
 
 ### Add-key form is provider-driven
 
