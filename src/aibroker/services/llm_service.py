@@ -94,6 +94,27 @@ _RATE_LIMIT_SIGNS = (
     "too many requests",
     "trial key",
     "api calls / month",
+    # 2026-07-05: DeepSeek "This response_format type is unavailable now" —
+    # confirmed live, ~2510 wasted attempts/day across every deepseek key
+    # (veranda/eatmeat/levaromat/demoniwwwe/zapleosoft/itstep — not one bad
+    # key, a provider-side feature outage). Falls through to generic 'error'
+    # (no cooldown) without this, so every triage call re-hits the same
+    # guaranteed failure on the next key pick with zero backoff. Not
+    # literally a rate limit, but the desired behavior (throttle, don't
+    # mark_dead — the credential is fine) is identical.
+    "response_format type is unavailable",
+)
+
+# 2026-07-05: confirmed live — Anthropic's "default" key had been failing
+# ~2743 times/day with this exact message, classified as generic 'error' (no
+# mark_dead), so it kept getting picked and kept failing at zero cost to the
+# key itself but real waste on every request that reached anthropic in its
+# chain. This is a billing/credentials problem, not a transient one — same
+# bucket as 401/403: mark_dead stops real traffic from hitting it, and the
+# monitor's own probe (independent of is_alive) keeps checking every
+# MONITOR_INTERVAL_S and auto-revives it the moment credits are topped up.
+_AUTH_SIGNS = (
+    "credit balance is too low",
 )
 
 
@@ -105,7 +126,7 @@ def classify_provider_error(exc: Exception) -> str:
     emsg = str(exc).lower()
     if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
         return "rate_limit"
-    if "401" in emsg or "403" in emsg or "auth" in emsg:
+    if any(sign in emsg for sign in _AUTH_SIGNS) or "401" in emsg or "403" in emsg or "auth" in emsg:
         return "auth"
     return "error"
 

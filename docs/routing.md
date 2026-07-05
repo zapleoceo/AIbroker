@@ -583,6 +583,24 @@ Per key:
 Chain exhausted → HTTP 503. The first success returns text + meta, including the
 chosen key's **label** (surfaced to clients for their cost/usage chip).
 
+> **Two more real messages added to `classify_provider_error` (2026-07-05),
+> both found by reading live logs, not guessed.** `_AUTH_SIGNS` now includes
+> Anthropic's `"credit balance is too low"` — confirmed live, the `default`
+> key had been failing ~2743 times/day, generic-`error`-classified (no
+> `mark_dead`), so it kept getting picked and kept failing at zero cost to
+> itself but real waste on every request whose chain reached anthropic.
+> Billing exhaustion isn't transient, so it belongs in the same bucket as
+> 401/403 — `mark_dead` stops real traffic from hitting it, and the
+> monitor's own probe (independent of `is_alive`) keeps checking every
+> `MONITOR_INTERVAL_S` and auto-revives it the moment credits are topped up.
+>
+> `_RATE_LIMIT_SIGNS` now includes DeepSeek's `"response_format type is
+> unavailable"` — confirmed live, hit every single deepseek key identically
+> (not one bad key, a provider-side feature outage), ~2510 wasted
+> attempts/day. Not literally a rate limit, but the wanted behavior
+> (throttle this key, don't `mark_dead` it — the credential is fine) is
+> exactly rate_limit's.
+
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
 `run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**

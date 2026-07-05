@@ -52,6 +52,42 @@ def test_classify_auth():
     assert classify_provider_error(Exception("invalid auth token")) == "auth"
 
 
+def test_classify_anthropic_credit_balance_exhausted():
+    """REGRESSION (2026-07-05): confirmed live — Anthropic's 'default' key was
+    failing ~2743 times/day with this exact message (no '401'/'403'/'auth'
+    substring), classified as generic 'error' — no mark_dead, so it kept
+    getting picked and kept failing at zero cost to the credential but real
+    waste on every request whose chain reached anthropic. This is a billing
+    problem, not transient — must be 'auth' so mark_dead stops real traffic;
+    the monitor's own probe still checks independently and auto-revives it
+    once credits are topped up."""
+    real_message = (
+        'litellm.BadRequestError: AnthropicException - {"type":"error","error":'
+        '{"type":"invalid_request_error","message":"Your credit balance is too '
+        'low to access the Anthropic API. Please go to Plans & Billing to '
+        'upgrade or purchase credits."},"request_id":"req_011CciYm3rbwdsviiFJD2YLt"}'
+    )
+    assert classify_provider_error(RuntimeError(real_message)) == "auth"
+
+
+def test_classify_deepseek_response_format_unavailable():
+    """REGRESSION (2026-07-05): confirmed live — DeepSeek's 'This response_format
+    type is unavailable now' hit every deepseek key identically (veranda,
+    eatmeat, levaromat, demoniwwwe, zapleosoft, itstep — not one bad key, a
+    provider-side feature outage), ~2510 wasted attempts/day. No '429'/
+    'rate_limit' substring, so it fell to generic 'error' (no cooldown) and
+    every triage call re-hit the same guaranteed failure on the next key pick
+    with zero backoff. Not literally a rate limit, but rate_limit's cooldown
+    (throttle, don't mark_dead — the credential itself is fine) is exactly
+    the wanted behavior."""
+    real_message = (
+        'litellm.BadRequestError: DeepseekException - {"error":{"message":'
+        '"This response_format type is unavailable now","type":'
+        '"invalid_request_error","param":null,"code":"invalid_request_error"}}'
+    )
+    assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
+
+
 def test_classify_generic_error():
     assert classify_provider_error(RuntimeError("boom")) == "error"
     assert classify_provider_error(ValueError("connection reset by peer")) == "error"
