@@ -606,7 +606,17 @@ async def test_deep_poll_stale_pending_job_times_out():
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
 async def test_deep_submit_creates_job_and_runs_in_background():
     """Full loop on real Postgres: submit → background task runs (mocked
-    run_chat) → poll sees status=done with the result."""
+    run_chat) → poll sees status=done with the result.
+
+    Needs `with TestClient(app) as local_client:` (NOT the module-level
+    `client`) — Starlette's TestClient only keeps its ASGI portal (and
+    therefore any asyncio.create_task scheduled during a request) alive for
+    the duration of that `with` block. The plain module-level instantiation
+    used everywhere else tears the portal down after each call, silently
+    cancelling submit_deep_job's background task before a later poll could
+    ever see it finish — this isn't a real production bug (a live uvicorn
+    worker's event loop just keeps running), it's specific to how this one
+    test needs to observe fire-and-forget background work."""
     import asyncio
 
     from aibroker.services.llm_service import ChatOutcome
@@ -619,8 +629,9 @@ async def test_deep_submit_creates_job_and_runs_in_background():
         key_label="demoniwwwe", request_id=777,
     )
     with patch("aibroker.services.deep_jobs.run_chat",
-                AsyncMock(return_value=fake_outcome)):
-        r = client.post(
+                AsyncMock(return_value=fake_outcome)), \
+         TestClient(app) as local_client:
+        r = local_client.post(
             "/v1/deep",
             headers={"X-Project-Key": plain},
             json={"messages": [{"role": "user", "content": "hi"}]},
@@ -629,14 +640,11 @@ async def test_deep_submit_creates_job_and_runs_in_background():
         job_id = r.json()["job_id"]
         assert r.json()["poll_url"] == f"/v1/deep/{job_id}"
 
-        # Background task runs on the same event loop as this test — give it
-        # a beat to complete before polling. Generous budget: each of submit's
-        # insert and _finish's update opens its own connection (NullPool, see
-        # conftest.py), so under CI resource contention this can take longer
-        # than the mocked run_chat call itself suggests.
+        # Background task runs on the portal's event loop — give it a beat
+        # to complete before polling.
         for _ in range(100):
             await asyncio.sleep(0.1)
-            poll = client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
+            poll = local_client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
             if poll.json()["status"] != "pending":
                 break
 
