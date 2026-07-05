@@ -37,12 +37,12 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai → **github** → **sambanova** | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. github/sambanova are tail-only extra breadth (see below). |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai → **github** → **sambanova** → **zai** | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. github/sambanova/zai are tail-only extra breadth (see below). |
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek → **github** → **sambanova** | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai → **github** → **sambanova** | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
-| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
+| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
 | `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare tried and pulled same day 2026-07-04, see below. |
@@ -170,6 +170,16 @@ returns the scope the **project** must hold and the **key** must carry.
 > cloudflare keys are NOT probed by the background monitor yet. Liveness is
 > only inferred from real traffic (`_penalize` on a failed call), same as
 > before any provider had a dedicated probe.
+>
+> **zai (Z.ai/Zhipu) added (2026-07-05).** Confirmed live, but only
+> `glm-4.5-flash` — the bigger `glm-4.5`/`glm-4.5-air` both 429'd with
+> "Insufficient balance or no resource package" on this account, so
+> `chat:smart`/`chat:code` stay off this provider; only `chat:fast` and
+> `prefilter` use it, tail position. LiteLLM DOES have a real (zero) price
+> for `glm-4.5-flash` — `cost_usd` isn't blind here like nvidia/cloudflare.
+> No rate-limit headers exposed and no documented per-account daily cap
+> found, so `quotas.py` carries no invented axis (same reasoning as
+> mistral above).
 
 ## Scopes & the reserved lane
 

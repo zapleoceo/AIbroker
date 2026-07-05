@@ -88,6 +88,11 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     # tier is "10,000 neurons/day", a compute-unit budget that varies per
     # model — not a request count, so no req_per_day axis would be honest.
     "cloudflare": Quota(doc="https://developers.cloudflare.com/workers-ai/platform/pricing/"),
+    # Confirmed live 2026-07-05 (glm-4.5-flash only — bigger models 429 with
+    # "Insufficient balance", no free package on this account). No
+    # rate-limit headers exposed at all, and no documented per-account daily
+    # cap found — no invented axis (same reasoning as mistral above).
+    "zai": Quota(doc="https://docs.z.ai/guides/overview/quick-start"),
 }
 
 

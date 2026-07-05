@@ -34,6 +34,7 @@ COOLDOWN_BASE_S: dict[str, int] = {
     "github":     120,   # unverified free tier — conservative until confirmed
     "nvidia":     300,   # one-time credits + invisible quota — most conservative
     "cloudflare": 120,   # invisible neuron budget, renews daily — moderate
+    "zai":        60,    # no visible quota — moderate default
 }
 DEFAULT_COOLDOWN_S = 300
 

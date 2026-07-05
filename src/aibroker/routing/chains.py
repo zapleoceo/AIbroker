@@ -38,6 +38,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # + health probe + prod key test. Tail position, pure extra breadth;
         # github first (more headroom per key).
         "github", "sambanova",
+        # 2026-07-05: zai (Z.ai/Zhipu, glm-4.5-flash) — confirmed live. No
+        # visible quota, no known daily cap — kept at the very tail.
+        "zai",
     ],
     "chat:smart": [
         "cerebras", "groq", "gemini",
@@ -79,7 +82,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        "github", "sambanova",
+        "github", "sambanova", "zai",
     ],
     # Trivial utility task (message translation): does NOT need premium/reasoning
     # models. Put SMALL FAST non-reasoning models FIRST — cerebras/groq gpt-oss is a

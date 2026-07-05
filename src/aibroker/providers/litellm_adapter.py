@@ -125,6 +125,13 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # whisper endpoint has a different request shape litellm doesn't speak, so
     # using it would need a raw HTTP call outside litellm. Left for later.
     "cloudflare": {"vision": "cloudflare/@cf/llava-hf/llava-1.5-7b-hf"},
+    # 2026-07-05: Z.ai (Zhipu) — confirmed live. Only glm-4.5-flash is
+    # actually free on this account: glm-4.5/glm-4.5-air both 429'd with
+    # "Insufficient balance or no resource package" — no free package for the
+    # bigger models here, so chat:smart stays off this provider. LiteLLM DOES
+    # have a real (zero) price for glm-4.5-flash — cost_usd isn't blind like
+    # nvidia/cloudflare.
+    "zai": {"chat:fast": "zai/glm-4.5-flash", "prefilter": "zai/glm-4.5-flash"},
 }
 
 # cloudflare needs its account ID embedded in the request URL — LiteLLM has no

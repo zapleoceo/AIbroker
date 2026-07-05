@@ -231,6 +231,14 @@ _PROBES = {
                           {"model": "moonshotai/kimi-k2.6",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
+    # 2026-07-05: confirmed live — 200 OK on glm-4.5-flash (the only free
+    # model on this account; glm-4.5/glm-4.5-air 429 with "Insufficient
+    # balance", so the probe deliberately targets the confirmed-free model).
+    "zai": lambda k: ("POST", "https://api.z.ai/api/paas/v4/chat/completions",
+                        _bearer(k),
+                        {"model": "glm-4.5-flash",
+                         "messages": [{"role": "user", "content": "."}],
+                         "max_tokens": 1}),
 }
 
 
