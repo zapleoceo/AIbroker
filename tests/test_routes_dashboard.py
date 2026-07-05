@@ -1214,9 +1214,11 @@ def test_tables_have_row_number_column():
     assert "<th>#</th>" in body
     # each data row carries the rownum cell
     assert '<td class="rownum"></td>' in body
-    # CSS counter wired
-    assert "counter-increment: rownum" in body
-    assert "counter(rownum)" in body
+    # CSS counter wired — CSS itself lives in the cacheable /dashboard/assets.css
+    # (see _DASHBOARD_CSS), not inline in the per-request HTML anymore.
+    from aibroker.routes.dashboard import _DASHBOARD_CSS
+    assert "counter-increment: rownum" in _DASHBOARD_CSS
+    assert "counter(rownum)" in _DASHBOARD_CSS
     # id column still present (id 77 shown literally, distinct from row #)
     assert 'data-sort="77"' in body
 
@@ -1308,3 +1310,42 @@ def test_dashboard_edit_project_404_when_missing():
     )
     assert r.status_code == 303
     assert "Project+not+found" in r.headers["location"]
+
+
+def test_dashboard_assets_css_served_without_auth():
+    """Static shell has no user data — cacheable, no owner session required."""
+    r = client.get("/dashboard/assets.css")
+    assert r.status_code == 200
+    assert "text/css" in r.headers["content-type"]
+    assert "public, max-age=31536000, immutable" in r.headers["cache-control"]
+    assert "counter-increment: rownum" in r.text
+
+
+def test_dashboard_assets_js_served_without_auth():
+    r = client.get("/dashboard/assets.js")
+    assert r.status_code == 200
+    assert "application/javascript" in r.headers["content-type"]
+    assert "public, max-age=31536000, immutable" in r.headers["cache-control"]
+    assert "aib_lang" in r.text
+
+
+def test_dashboard_html_links_versioned_assets_not_inline():
+    """Regression: the dashboard HTML must reference the cacheable asset
+    routes, not re-embed the CSS/JS inline on every request."""
+    from aibroker.routes.dashboard import _render
+    body = _render(_fake_main_data()).body.decode()
+    assert '<link rel="stylesheet" href="/dashboard/assets.css?v=' in body
+    assert '<script src="/dashboard/assets.js?v=' in body
+    assert "counter-increment: rownum" not in body
+    assert "aib_lang" not in body
+
+
+@pytest.mark.skipif(
+    ON_SQLITE,
+    reason="dashboard queries use Postgres-only now() / FILTER",
+)
+def test_dashboard_html_still_no_store():
+    """The data-bearing HTML document itself must stay no-store even though
+    its static assets are now long-cached."""
+    r = client.get("/dashboard", cookies=_logged_in_cookies())
+    assert "no-store" in r.headers["cache-control"]
