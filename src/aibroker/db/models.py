@@ -167,3 +167,24 @@ class AuditLogRow(Base):
     )
     ip: Mapped[str | None] = mapped_column(String(45))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class DeepJobRow(Base):
+    """Async job for chat:deep — nemotron's real latency (seen up to ~8 min on
+    the free NVIDIA pool) exceeds Cloudflare's and nginx's proxy read timeouts
+    (~100-120s), so a synchronous HTTP response can't carry the result: the
+    client gets a 504 while the broker is still waiting on the provider.
+    Submit here, poll for the result — see services/deep_jobs.py."""
+    __tablename__ = "deep_jobs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    result_text: Mapped[str | None] = mapped_column(Text)
+    result_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)

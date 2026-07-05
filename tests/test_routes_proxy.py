@@ -5,16 +5,21 @@ so they don't need real Postgres / real LLM providers.
 """
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert
 
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
-from aibroker.db.models import ApiKeyRow, ProjectRow
+from aibroker.db.models import ApiKeyRow, DeepJobRow, ProjectRow
 from aibroker.main import app
+from aibroker.services.deep_jobs import next_poll_after_s
+
+ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 client = TestClient(app)
 
@@ -460,3 +465,176 @@ async def test_transcribe_502_when_all_providers_fail():
             files={"file": ("v.ogg", b"fakeaudiobytes", "audio/ogg")},
         )
     assert r.status_code == 502
+
+
+# ─── chat:deep — async job API ──────────────────────────────────────────────
+
+
+def test_next_poll_after_s_widens_over_time():
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC).replace(tzinfo=None)
+    assert next_poll_after_s(now) == 5
+    assert next_poll_after_s(now - timedelta(seconds=45)) == 10
+    assert next_poll_after_s(now - timedelta(minutes=5)) == 20
+
+
+async def test_chat_deep_rejected_on_sync_chat_endpoint():
+    """chat:deep must never be reachable via the synchronous /v1/chat — its
+    real latency (up to ~8 min observed) exceeds Cloudflare's and this
+    broker's own nginx read timeouts, so a blocking call here would 504
+    the caller while the broker is still waiting on the provider."""
+    plain, _ = await _make_project(["llm:deep"])
+    r = client.post(
+        "/v1/chat?capability=chat:deep",
+        headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 400
+    assert "async-only" in r.json()["detail"]
+    assert "/v1/deep" in r.json()["detail"]
+
+
+async def test_deep_submit_requires_llm_deep_scope():
+    plain, _ = await _make_project(["llm:chat"])  # no llm:deep
+    r = client.post(
+        "/v1/deep",
+        headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 403
+
+
+async def test_deep_poll_404_for_unknown_job():
+    plain, _ = await _make_project(["llm:deep"])
+    r = client.get("/v1/deep/999999", headers={"X-Project-Key": plain})
+    assert r.status_code == 404
+
+
+async def test_deep_poll_pending_job_returns_poll_after_s():
+    """Insert a pending job directly (explicit id — BIGINT PK doesn't
+    autoincrement on SQLite) to test the poll response shape without
+    needing submit_deep_job's real insert-then-flush path."""
+    plain, pid = await _make_project(["llm:deep"])
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5001, project_id=pid, status="pending",
+            request={"messages": [], "model": None, "max_tokens": 4096,
+                      "temperature": 0.7, "workflow": None},
+        ))
+    r = client.get("/v1/deep/5001", headers={"X-Project-Key": plain})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "pending"
+    assert data["poll_after_s"] == 5
+
+
+async def test_deep_poll_scoped_to_owning_project():
+    """A job belonging to project A must 404 for project B — jobs are not a
+    shared pool like keys, each belongs to exactly one caller."""
+    plain_a, pid_a = await _make_project(["llm:deep"])
+    plain_b, _ = await _make_project(["llm:deep"])
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5002, project_id=pid_a, status="done",
+            request={"messages": []}, result_text="secret answer",
+        ))
+    r = client.get("/v1/deep/5002", headers={"X-Project-Key": plain_b})
+    assert r.status_code == 404
+    r_owner = client.get("/v1/deep/5002", headers={"X-Project-Key": plain_a})
+    assert r_owner.status_code == 200
+    assert r_owner.json()["text"] == "secret answer"
+
+
+async def test_deep_poll_done_job_returns_result_meta():
+    plain, pid = await _make_project(["llm:deep"])
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5003, project_id=pid, status="done",
+            request={"messages": []}, result_text="the answer",
+            result_meta={"provider": "nvidia", "model": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+                          "tokens_in": 50, "tokens_out": 20, "cost_usd": 0.0,
+                          "latency_ms": 98000, "key_label": "demoniwwwe",
+                          "request_id": 999, "cache_read_tokens": 0, "cache_write_tokens": 0},
+        ))
+    r = client.get("/v1/deep/5003", headers={"X-Project-Key": plain})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "done"
+    assert data["text"] == "the answer"
+    assert data["provider"] == "nvidia"
+    assert data["latency_ms"] == 98000
+
+
+async def test_deep_poll_error_job_returns_error_message():
+    plain, pid = await _make_project(["llm:deep"])
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5004, project_id=pid, status="error",
+            request={"messages": []},
+            error_message="no provider available for capability=chat:deep",
+        ))
+    r = client.get("/v1/deep/5004", headers={"X-Project-Key": plain})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "error"
+    assert "no provider available" in data["error"]
+
+
+async def test_deep_poll_stale_pending_job_times_out():
+    """A job stuck 'pending' past _STALE_AFTER_S (worker restarted mid-call)
+    resolves to a timeout error on poll instead of hanging forever."""
+    from datetime import UTC, datetime, timedelta
+    plain, pid = await _make_project(["llm:deep"])
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=25)
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5005, project_id=pid, status="pending",
+            request={"messages": []}, created_at=old,
+        ))
+    r = client.get("/v1/deep/5005", headers={"X-Project-Key": plain})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "error"
+    assert "timed out" in data["error"]
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
+async def test_deep_submit_creates_job_and_runs_in_background():
+    """Full loop on real Postgres: submit → background task runs (mocked
+    run_chat) → poll sees status=done with the result."""
+    import asyncio
+
+    from aibroker.services.llm_service import ChatOutcome
+
+    plain, _ = await _make_project(["llm:deep"])
+    fake_outcome = ChatOutcome(
+        text="deep answer", provider="nvidia",
+        model="nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+        tokens_in=40, tokens_out=15, cost_usd=0.0, latency_ms=45000,
+        key_label="demoniwwwe", request_id=777,
+    )
+    with patch("aibroker.services.deep_jobs.run_chat",
+                AsyncMock(return_value=fake_outcome)):
+        r = client.post(
+            "/v1/deep",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 202
+        job_id = r.json()["job_id"]
+        assert r.json()["poll_url"] == f"/v1/deep/{job_id}"
+
+        # Background task runs on the same event loop as this test — give it
+        # a beat to complete before polling.
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            poll = client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
+            if poll.json()["status"] != "pending":
+                break
+
+    assert poll.status_code == 200
+    data = poll.json()
+    assert data["status"] == "done"
+    assert data["text"] == "deep answer"
+    assert data["provider"] == "nvidia"
+    assert data["request_id"] == 777

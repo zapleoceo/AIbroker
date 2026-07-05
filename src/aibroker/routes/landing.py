@@ -877,6 +877,9 @@ _LLMS_TXT = """# AIbroker
 - [/v1/health](https://aib.zapleo.com/v1/health) — per-provider key health
 - `POST /v1/chat?capability=chat:fast` — proxy mode chat (needs `X-Project-Key`)
 - `POST /v1/embed?provider=voyage` — proxy mode embed
+- `POST /v1/deep` + `GET /v1/deep/{job_id}` — async job API for
+  `capability=chat:deep` (long-context/reasoning; latency observed up to
+  ~8 min, past Cloudflare/nginx proxy timeouts — submit, then poll)
 - `POST /v1/key` — vending mode (returns lease + plaintext key)
 
 ## Code

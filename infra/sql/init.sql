@@ -100,3 +100,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_actor_date ON audit_log(actor, created_at);
 CREATE INDEX IF NOT EXISTS ix_audit_action_date ON audit_log(action, created_at);
+
+-- ─── Async chat:deep jobs (nemotron latency exceeds CF/nginx proxy timeouts) ─
+CREATE TABLE IF NOT EXISTS deep_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|done|error
+  request JSONB NOT NULL,
+  result_text TEXT,
+  result_meta JSONB,
+  error_message TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  completed_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);

@@ -41,7 +41,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek → **github** → **sambanova** | `llm:chat` | Strict free-first; expensive last |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai → **github** → **sambanova** | `llm:chat` | Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
-| `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. See below. |
+| `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** | `llm:chat` | No paid; cheap pre-filter |
 | `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
@@ -100,6 +100,35 @@ returns the scope the **project** must hold and the **key** must carry.
 > fast, sub-second) are NOT wired into any chain yet, pending a decision on
 > accepting that silent-billing risk for general chat traffic.
 >
+> **`chat:deep` made async-only (2026-07-05).** Real production latency
+> (Stepan2) was observed up to ~8 minutes — far past Cloudflare's edge
+> timeout (~100s) and this broker's own `infra/nginx-aib.conf`
+> (`proxy_read_timeout 120s`). The caller got a 504 while the broker was
+> still waiting on nemotron and would eventually log a perfectly good `ok`
+> that nobody was left to receive — `usage_log` had zero `http_status=504`
+> rows despite the caller-visible failures, because the timeout happens at
+> the proxy layer, before the broker's own response.
+>
+> `POST /v1/chat?capability=chat:deep` now returns `400` unconditionally.
+> Use the job API instead:
+> - `POST /v1/deep` — same body shape as `/v1/chat` minus `response_format`
+>   (nemotron isn't JSON-reliable, don't ask it for structured output).
+>   Returns `202` immediately with `{job_id, poll_url, poll_after_s}`.
+> - `GET /v1/deep/{job_id}` — scoped to the caller's own project (a job from
+>   another project 404s, same as a wrong id). Returns `status`
+>   (`pending`/`done`/`error`) and, once `done`, the same fields `/v1/chat`
+>   returns (`text`, `provider`, `tokens_in/out`, `cost_usd`, `latency_ms`,
+>   `key_label`, `request_id`).
+>
+> New `deep_jobs` table backs this — the submitting request creates a
+> `pending` row and schedules the real call via `asyncio.create_task` on
+> whichever of the broker's 2 uvicorn workers handled the submit; the HTTP
+> response returns immediately. Poll requests read straight from Postgres,
+> so they work regardless of which of the 2 workers answers them — no
+> in-process task handle has to survive across workers. A worker restart
+> mid-job leaves a row stuck `pending`; `get_job` lazily resolves anything
+> older than 20 minutes into a timeout `error` on the next poll, rather than
+> needing a separate sweeper process.
 > **cloudflare tried in `vision`, then pulled the SAME DAY (2026-07-04).**
 > Confirmed live (real token + account ID, 200 OK) against a garbage-bytes
 > probe — but that only proved auth+connectivity. A follow-up test with a
