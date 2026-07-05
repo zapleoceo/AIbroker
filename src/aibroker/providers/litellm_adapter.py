@@ -109,15 +109,22 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "chat:smart": "github/gpt-4o-mini",
                "chat:code": "github/gpt-4o-mini",
                "prefilter": "github/gpt-4o-mini"},
-    # 2026-07-04: nvidia — confirmed live with 3 real keys (nemotron-3-ultra,
-    # kimi-k2.6, deepseek-v4-pro all returned 200). Only chat:deep is wired
-    # (see chains.py for why: no rate-limit headers, no LiteLLM pricing entry
-    # — cost_usd is always 0 for this provider, so the usual daily_cost_cap_usd
-    # safety net is blind here; daily_limit (request count) is the only real
-    # guard). kimi-k2.6/deepseek-v4-pro are NOT wired into chat:fast/smart/code
-    # yet — pending a decision on accepting the silent-billing risk once the
-    # one-time free credits run out.
-    "nvidia": {"chat:deep": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"},
+    # 2026-07-04/05: nvidia — confirmed live with 3 real models on one key
+    # (nemotron-3-ultra, kimi-k2.6, deepseek-v4-pro all returned 200). No
+    # rate-limit headers, no LiteLLM pricing entry (cost_usd always 0 for
+    # this provider — daily_cost_cap_usd is blind here, daily_limit is the
+    # only real guard). No card on file on this account, so the earlier
+    # "silent billing once one-time credits run out" concern doesn't apply —
+    # worst case once the 1,000 one-time credits are spent is the key simply
+    # stops working (real 402/"add payment method"), same as any other
+    # exhausted free key, not a real charge with nothing to charge against.
+    # kimi-k2.6 (fast, ~1.4s, confirmed valid JSON live) → chat:fast.
+    # deepseek-v4-pro (slower, ~7.4s, also confirmed valid JSON) → chat:smart,
+    # where the latency budget is looser. nemotron stays chat:deep-only — it's
+    # the one genuinely too slow (~27s+) for any synchronous capability.
+    "nvidia": {"chat:deep": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+                "chat:fast": "nvidia_nim/moonshotai/kimi-k2.6",
+                "chat:smart": "nvidia_nim/deepseek-ai/deepseek-v4-pro"},
     # 2026-07-04: cloudflare Workers AI — confirmed live (real token + account
     # ID). Vision only for now: llava is a real, working image model. NOT
     # wired for transcription — LiteLLM's cloudflare provider only implements

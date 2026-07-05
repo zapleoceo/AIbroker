@@ -37,8 +37,8 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → **nvidia** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. nvidia = kimi-k2.6 here. |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **nvidia** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last. nvidia = deepseek-v4-pro here (slower, looser latency budget). |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → **github** → **sambanova** → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
@@ -90,15 +90,23 @@ returns the scope the **project** must hold and the **key** must carry.
 >
 > NVIDIA's free tier is fundamentally different from sambanova/github: no
 > rate-limit headers at all (only `nvcf-status: fulfilled`), and it's **1,000
-> ONE-TIME inference credits** (not a renewing daily/monthly quota) that
-> silently convert to real pay-as-you-go billing once spent — no error, no
-> visible signal. LiteLLM also has no pricing entry for these models, so
-> `cost_usd` is always `0` for nvidia calls — the usual `daily_cost_cap_usd`
-> safety net is blind here. The only real guard is each key's `daily_limit`
-> (request count), kept deliberately conservative. Two other verified-live
-> nvidia models (`moonshotai/kimi-k2.6`, `deepseek-ai/deepseek-v4-pro` — both
-> fast, sub-second) are NOT wired into any chain yet, pending a decision on
-> accepting that silent-billing risk for general chat traffic.
+> ONE-TIME inference credits** (not a renewing daily/monthly quota). LiteLLM
+> also has no pricing entry for these models, so `cost_usd` is always `0` for
+> nvidia calls — the usual `daily_cost_cap_usd` safety net is blind here. The
+> only real guard is each key's `daily_limit` (request count).
+>
+> **kimi-k2.6/deepseek-v4-pro wired into chat:fast/chat:smart (2026-07-05).**
+> The "silently convert to real pay-as-you-go billing" risk noted above
+> assumed a payment method on file — **this account has none**, so once the
+> 1,000 one-time credits are spent the key simply stops working (a real
+> `402`/"add a payment method" error, same shape as any other exhausted free
+> key going `mark_dead`), not an actual charge with nothing to charge
+> against. Both models confirmed live with real, valid JSON output on a
+> `response_format=json_object` test — `kimi-k2.6` (~1.4s) → `chat:fast`;
+> `deepseek-v4-pro` (~7.4s, slower but chat:smart's latency budget is
+> looser) → `chat:smart`. `nemotron-3-ultra` stays `chat:deep`-only — it's
+> the one genuinely too slow (~27s+ seen live) for any synchronous
+> capability.
 >
 > **`chat:deep` made async-only (2026-07-05).** Real production latency
 > (Stepan2) was observed up to ~8 minutes — far past Cloudflare's edge

@@ -38,6 +38,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
         "github", "sambanova", "zai",
+        # 2026-07-05: nvidia (kimi-k2.6, ~1.4s, confirmed valid JSON) — no
+        # card on file, so no silent-billing risk (see litellm_adapter.py).
+        "nvidia",
         "deepseek", "anthropic", "openai",
     ],
     "chat:smart": [
@@ -45,6 +48,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
         "github", "sambanova",
+        # 2026-07-05: nvidia (deepseek-v4-pro, ~7.4s — slower but chat:smart's
+        # latency budget is looser) — confirmed valid JSON, no card on file.
+        "nvidia",
         "anthropic", "openai", "deepseek",
     ],
     "chat:code": [
