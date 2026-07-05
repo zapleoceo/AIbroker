@@ -197,3 +197,13 @@ def test_deprioritize_for_json_groq_stays_reliable():
 def test_deprioritize_for_json_noop_when_all_reliable():
     chain = ["gemini", "mistral", "deepseek", "anthropic"]
     assert deprioritize_for_json(chain) == chain
+
+
+def test_deprioritize_for_json_demotes_zai():
+    """2026-07-05: zai/glm-4.5-flash doesn't support response_format at all
+    (confirmed via litellm.get_supported_openai_params) — drop_params=True
+    silently strips it, so the model never gets told to emit JSON. Confirmed
+    live (request #871336): 200 OK, unparseable body. Must be demoted behind
+    JSON-reliable providers on any JSON-format request."""
+    assert "zai" in JSON_UNRELIABLE_PROVIDERS
+    assert deprioritize_for_json(["zai", "gemini"]) == ["gemini", "zai"]

@@ -195,6 +195,17 @@ returns the scope the **project** must hold and the **key** must carry.
 > paid-last). `prefilter`/`structured`/`vision`/`transcription` were
 > already free-first and untouched; `chat:edit`/`chat:deep` are
 > deliberately narrow single-purpose chains, also untouched.
+>
+> **zai added to `JSON_UNRELIABLE_PROVIDERS` (2026-07-05).** Confirmed via
+> `litellm.get_supported_openai_params(model="glm-4.5-flash",
+> custom_llm_provider="zai")`: `response_format` isn't in the supported
+> list at all. `litellm.drop_params=True` (broker-wide) silently strips it
+> on every call, so the model never receives an instruction to emit JSON —
+> a 100%-guaranteed `InvalidJSON` on any JSON-format request, not just "a
+> meaningful rate" like cerebras/cohere/openrouter. Confirmed live (request
+> `#871336`): 200 OK, unparseable body, correctly fell through to the next
+> provider per the JSON quality gate — now demoted behind the JSON-reliable
+> providers on any JSON-format request instead of being tried first.
 
 ## Scopes & the reserved lane
 

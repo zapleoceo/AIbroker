@@ -168,8 +168,18 @@ def scope_for(capability: Capability) -> str:
 # is our free workhorse (≈0 on chat), so it's not demoted. Kept in the chain as
 # a last resort (a maybe-malformed retry still beats a 503) but pushed behind
 # the JSON-reliable providers whenever the caller asks for JSON.
+#
+# 2026-07-05: zai added — confirmed via
+# `litellm.get_supported_openai_params(model="glm-4.5-flash",
+# custom_llm_provider="zai")`: no `response_format` in the supported list at
+# all. litellm.drop_params=True (broker-wide) SILENTLY strips it on every
+# call, so the model never even receives an instruction to emit JSON — a
+# 100%-guaranteed InvalidJSON on any JSON-format request, not just "a
+# meaningful rate". Confirmed live (request #871336): 200 OK, unparseable
+# body, correctly fell through to the next provider per the JSON quality
+# gate — but no reason to try it first on JSON requests again.
 JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
-    {"cerebras", "cohere", "openrouter"}
+    {"cerebras", "cohere", "openrouter", "zai"}
 )
 
 
