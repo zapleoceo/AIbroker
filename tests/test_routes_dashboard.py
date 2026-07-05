@@ -1126,6 +1126,60 @@ def test_main_render_dead_key_shows_reason():
     assert 'class="status-detail"' in body
 
 
+def test_main_render_dead_key_shows_friendly_actionable_label():
+    """2026-07-05: a recognized failure (billing exhaustion) shows a short
+    actionable EN/RU label ('top up balance'/'пополнить баланс') as the
+    VISIBLE text, not the raw litellm dump — the raw text is still the
+    hover tooltip, for anyone who wants the exact wording."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    k = ApiKeyRow(
+        id=23, provider="anthropic", label="default", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=False,
+        last_error='litellm.BadRequestError: AnthropicException - {"message":'
+                    '"Your credit balance is too low to access the Anthropic API."}',
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-en="top up balance" data-ru="пополнить баланс"' in body
+    # full raw text still available on hover
+    assert "Your credit balance is too low" in body
+
+
+def test_main_render_cooldown_key_shows_friendly_label_and_time():
+    """DeepSeek's response_format outage gets its own friendly label too,
+    alongside the cooldown-until time."""
+    from datetime import UTC, datetime, timedelta
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard import _render
+    until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
+    k = ApiKeyRow(
+        id=24, provider="deepseek", label="x", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, cooldown_until=until,
+        last_error="This response_format type is unavailable now",
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-en="provider feature outage" data-ru="сбой фичи у провайдера"' in body
+    assert f"until {until.strftime('%H:%M')} UTC" in body
+
+
+def test_friendly_reason_unrecognized_falls_back_to_raw_text():
+    from aibroker.routes.dashboard import _friendly_reason
+    assert _friendly_reason("some brand new provider error nobody's seen") is None
+
+
+def test_friendly_reason_recognizes_billing_and_outage_signs():
+    from aibroker.routes.dashboard import _friendly_reason
+    assert _friendly_reason("Your credit balance is too low") == (
+        "top up balance", "пополнить баланс"
+    )
+    assert _friendly_reason("This response_format type is unavailable now") == (
+        "provider feature outage", "сбой фичи у провайдера"
+    )
+
+
 def test_main_render_cooldown_key_shows_until_time():
     """Cooldown status now shows WHEN it ends, not just that it's paused."""
     from datetime import UTC, datetime, timedelta

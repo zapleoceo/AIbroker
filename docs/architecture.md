@@ -121,7 +121,15 @@ floor on master.
   confirmed alive again. Dead keys show the reason; cooldown keys show the
   reason **and** the actual `cooldown_until` time (same day → `HH:MM UTC`,
   otherwise `MM-DD HH:MM UTC`) — both as a small line under the pill and
-  as a hover tooltip.
+  as a hover tooltip. **Friendly labels (2026-07-05):** `_friendly_reason`
+  maps known raw signatures to a short actionable EN/RU label instead of a
+  raw litellm dump — e.g. Anthropic's "credit balance is too low" (and
+  other billing-exhaustion phrasings) renders as "top up balance"/
+  "пополнить баланс", DeepSeek's "response_format type is unavailable" as
+  "provider feature outage"/"сбой фичи у провайдера". Display-layer only
+  (doesn't affect `classify_provider_error`'s routing decisions) — an
+  unrecognized error still falls back to a truncated raw-text slice, and
+  the full raw text is always in the tooltip regardless.
 - All table headers are clickable for client-side sort (asc → desc → asc).
   Each cell uses `data-sort` for the canonical comparable value, so
   monetary or status text doesn't break ordering.

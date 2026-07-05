@@ -725,6 +725,32 @@ async def _gather_data(date_from: date | None = None,
     }
 
 
+# Known failure signatures → a short actionable label instead of raw
+# exception text. 2026-07-05: "мёртв" + a raw litellm dump didn't tell the
+# operator what to actually DO — "credit balance is too low" buried in JSON
+# reads as generic breakage, not "go add money". Order matters (first match
+# wins); nothing here duplicates classify_provider_error's signs — this is
+# purely a display-layer translation, not a routing decision.
+_FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
+    ("credit balance is too low", "top up balance", "пополнить баланс"),
+    ("insufficient", "top up balance", "пополнить баланс"),
+    ("payment required", "top up balance", "пополнить баланс"),
+    ("no funds", "top up balance", "пополнить баланс"),
+    ("response_format type is unavailable", "provider feature outage",
+     "сбой фичи у провайдера"),
+)
+
+
+def _friendly_reason(raw: str) -> tuple[str, str] | None:
+    """(en, ru) short actionable label for a known raw error, else None —
+    caller falls back to showing (a truncated slice of) the raw text."""
+    low = raw.lower()
+    for sign, en, ru in _FRIENDLY_REASONS:
+        if sign in low:
+            return en, ru
+    return None
+
+
 def _render(data: dict[str, Any], *, flash: str = "",
              new_project_key: str | None = None) -> HTMLResponse:
     s = get_settings()
@@ -885,20 +911,32 @@ def _render(data: dict[str, Any], *, flash: str = "",
         # just "мёртв"/"пауза" with no way to tell "no money" from "rate
         # limited" apart, or when a cooldown actually ends. last_error is set
         # by _penalize (real traffic) / monitor.py (probes); cleared back to
-        # None the moment a key is confirmed alive again.
-        detail_bits = []
-        if k.last_error:
-            detail_bits.append(esc(k.last_error))
+        # None the moment a key is confirmed alive again. A known failure
+        # (_friendly_reason) renders as a short actionable EN/RU label
+        # ("top up balance"/"пополнить баланс") instead of a raw litellm
+        # dump; the full raw text is always still in the hover tooltip.
+        cooldown_bit = None
         if status_label == "cooldown" and k.cooldown_until:
             same_day = k.cooldown_until.date() == now.date()
             fmt = "%H:%M" if same_day else "%m-%d %H:%M"
-            detail_bits.append(f"until {k.cooldown_until.strftime(fmt)} UTC")
-        detail_title = " — ".join(detail_bits)
+            cooldown_bit = f"until {k.cooldown_until.strftime(fmt)} UTC"
+        detail_title = esc(" — ".join(
+            b for b in (k.last_error, cooldown_bit) if b
+        ))
+        reason_html = ""
+        if k.last_error:
+            friendly = _friendly_reason(k.last_error)
+            if friendly:
+                en, ru = friendly
+                reason_html = f'<span data-i18n data-en="{en}" data-ru="{ru}">{en}</span>'
+            else:
+                short = k.last_error[:40] + ("…" if len(k.last_error) > 40 else "")
+                reason_html = esc(short)
         detail_sub = (
             f'<div class="status-detail" title="{detail_title}">'
-            f'{esc(detail_bits[0][:40] + ("…" if len(detail_bits[0]) > 40 else "")) if detail_bits else ""}'
-            f'{" · " + detail_bits[-1] if len(detail_bits) > 1 else ""}'
-            f'</div>' if detail_bits else ""
+            f'{reason_html}'
+            f'{(" · " + cooldown_bit) if cooldown_bit else ""}'
+            f'</div>' if (k.last_error or cooldown_bit) else ""
         )
         status_html = (
             f'<span class="{status_class}" data-i18n title="{detail_title}" '
