@@ -37,9 +37,9 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → **deepseek** → openrouter → anthropic → openai → **github** → **sambanova** → **zai** | `llm:chat` | DeepSeek (paid) precedes slow openrouter for backfill. Documented exception. github/sambanova/zai are tail-only extra breadth (see below). |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → anthropic → openrouter → openai → deepseek → **github** → **sambanova** | `llm:chat` | Strict free-first; expensive last |
-| `chat:code` | cerebras → groq → openrouter → gemini → mistral → anthropic → deepseek → openai → **github** → **sambanova** | `llm:chat` | Codestral via mistral when other free chains are dry |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last |
+| `chat:code` | cerebras → groq → openrouter → gemini → mistral → **github** → **sambanova** → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** | `llm:chat` | No paid; cheap pre-filter |
@@ -180,6 +180,21 @@ returns the scope the **project** must hold and the **key** must carry.
 > No rate-limit headers exposed and no documented per-account daily cap
 > found, so `quotas.py` carries no invented axis (same reasoning as
 > mistral above).
+>
+> **Paid moved to the tail of every `chat:*` chain (2026-07-05).** Was:
+> `deepseek` sat ahead of `openrouter`/`github`/`sambanova`/`zai` "for
+> backfill speed" (a documented exception from when deepseek was the only
+> tail addition). As free tail providers accumulated, this stopped making
+> sense — a paid call could fire the moment the first ~5 free providers
+> were saturated, while 3+ more free providers (all confirmed live)
+> further down the chain went untried. Explicit operator choice: **slow
+> but free beats fast but paid**. `deepseek`/`anthropic`/`openai` are now
+> strictly the last 3 entries in `chat:fast`/`chat:smart`/`chat:code` —
+> `test_strict_free_first` in `tests/test_chains.py` now covers all three
+> (previously only `prefilter`/`structured`, which were already
+> paid-last). `prefilter`/`structured`/`vision`/`transcription` were
+> already free-first and untouched; `chat:edit`/`chat:deep` are
+> deliberately narrow single-purpose chains, also untouched.
 
 ## Scopes & the reserved lane
 

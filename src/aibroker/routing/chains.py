@@ -26,36 +26,32 @@ Capability = Literal[
 
 
 CAPABILITY_CHAINS: dict[Capability, list[str]] = {
+    # 2026-07-05: strict free-first — paid (deepseek/anthropic/openai) moved
+    # to the tail of every chat:* chain, after ALL free providers including
+    # github/sambanova/zai. Was: deepseek sat ahead of openrouter/github/
+    # sambanova/zai "for backfill speed" — but that meant a paid call fired
+    # the moment the first 5 free providers were saturated, even though 3+
+    # more free providers (all confirmed live) were still untried further
+    # down the chain. Explicit choice: slow-but-free beats fast-but-paid.
     "chat:fast": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
-        "deepseek",
         "openrouter",
-        "anthropic",
-        "openai",
-        # 2026-07-04: sambanova (20 req/day/key) and github (~150 req/day/key
-        # on gpt-4o-mini, Free Copilot tier) both confirmed live — DEFAULT_MODEL
-        # + health probe + prod key test. Tail position, pure extra breadth;
-        # github first (more headroom per key).
-        "github", "sambanova",
-        # 2026-07-05: zai (Z.ai/Zhipu, glm-4.5-flash) — confirmed live. No
-        # visible quota, no known daily cap — kept at the very tail.
-        "zai",
+        "github", "sambanova", "zai",
+        "deepseek", "anthropic", "openai",
     ],
     "chat:smart": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
-        "anthropic",
         "openrouter",
-        "openai", "deepseek",
         "github", "sambanova",
+        "anthropic", "openai", "deepseek",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
         "mistral",
-        "anthropic",
-        "deepseek", "openai",
         "github", "sambanova",
+        "anthropic", "deepseek", "openai",
     ],
     # Coach editor (Stepan): JSON-reliable providers ONLY. gemini first
     # (thinking disabled → JSON fits), deepseek the paid fallback that stays

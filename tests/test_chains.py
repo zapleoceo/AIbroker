@@ -15,7 +15,7 @@ from aibroker.routing.chains import (
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
-              "nvidia", "mistral", "cohere", "voyage"}
+              "nvidia", "mistral", "cohere", "voyage", "github", "zai"}
 
 
 @pytest.mark.parametrize("capability", list(CAPABILITY_CHAINS.keys()))
@@ -25,9 +25,18 @@ def test_chain_first_provider_is_known(capability):
     assert chain[0] in KNOWN_FREE | KNOWN_PAID
 
 
-@pytest.mark.parametrize("capability", ["prefilter", "structured"])
+@pytest.mark.parametrize(
+    "capability", ["prefilter", "structured", "chat:fast", "chat:smart", "chat:code"]
+)
 def test_strict_free_first(capability):
-    """Strictly-free-first capabilities — no paid before any free."""
+    """Strictly-free-first capabilities — no paid before any free.
+
+    2026-07-05: chat:fast/smart/code joined this list — paid (deepseek/
+    anthropic/openai) used to sit ahead of github/sambanova/zai "for
+    backfill speed", meaning a paid call fired the moment the first ~5 free
+    providers were saturated even though more free providers were still
+    untried further down the chain. Explicit choice: slow-but-free beats
+    fast-but-paid."""
     chain = chain_for(capability)
     paid_idx = [i for i, p in enumerate(chain) if p in KNOWN_PAID]
     free_idx = [i for i, p in enumerate(chain) if p in KNOWN_FREE]
@@ -47,14 +56,14 @@ def test_chat_first_3_are_free(capability):
         )
 
 
-def test_chat_fast_documented_exception():
-    """chat:fast intentionally puts deepseek after the 3 top free for backfill speed."""
+def test_chat_fast_paid_at_the_very_tail():
+    """2026-07-05: supersedes the old 'deepseek precedes openrouter for
+    backfill speed' exception — deepseek/anthropic/openai must now be the
+    LAST 3 entries, after every free provider including github/sambanova/
+    zai (previously deepseek sat ahead of them, so a paid call could fire
+    while free providers further down the chain were still untried)."""
     chain = chain_for("chat:fast")
-    deepseek_idx = chain.index("deepseek")
-    for must_precede in ("cerebras", "groq", "gemini"):
-        assert chain.index(must_precede) < deepseek_idx, (
-            f"{must_precede} must precede deepseek in chat:fast"
-        )
+    assert chain[-3:] == ["deepseek", "anthropic", "openai"]
 
 
 def test_vision_only_vision_providers():
