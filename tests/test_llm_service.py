@@ -88,6 +88,25 @@ def test_classify_deepseek_response_format_unavailable():
     assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
 
 
+def test_classify_voyage_no_payment_method():
+    """REGRESSION (2026-07-07): confirmed live (docker logs, 24h window) —
+    Voyage's 'no payment method on file' response hit every voyage key
+    (lev/verandapay/eatmeat/itstep/...) dozens of times/day with zero
+    backoff, since it fell to generic 'error' (no '429'/'401'/'403'/'auth'
+    substring). The account isn't dead or unauthorized, just throttled to
+    'reduced rate limits of 3 RPM and 10K TPM' — same bucket as any other
+    rate limit: cooldown, don't mark_dead."""
+    real_message = (
+        'litellm.APIConnectionError: VoyageException - {"detail":"You have '
+        "not yet added your payment method in the billing page and will "
+        "have reduced rate limits of 3 RPM and 10K TPM. To unlock our "
+        "standard rate limits, please add a payment method in the billing "
+        'page for the appropriate organization in the user dashboard '
+        '(https://dashboard.voyageai.com/)."}'
+    )
+    assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
+
+
 def test_classify_generic_error():
     assert classify_provider_error(RuntimeError("boom")) == "error"
     assert classify_provider_error(ValueError("connection reset by peer")) == "error"
@@ -582,12 +601,30 @@ def test_billed_cost_zeroes_free_tier():
 
     from aibroker.services.llm_service import _billed_cost
 
-    free_key = SimpleNamespace(tier="free")
-    paid_key = SimpleNamespace(tier="paid")
+    free_key = SimpleNamespace(tier="free", provider="gemini")
+    paid_key = SimpleNamespace(tier="paid", provider="anthropic")
     meta = {"cost_usd": 2.80}
 
     assert _billed_cost(free_key, meta) == 0.0
     assert _billed_cost(paid_key, meta) == 2.80
+
+
+def test_billed_cost_voyage_always_bills_real_cost():
+    """REGRESSION (2026-07-07): confirmed live via Voyage's own dashboard
+    (Usage → Free Token tab) that voyage-3 has a ZERO free-token allocation on
+    our accounts (0 used, 0 remaining) — unlike voyage-context-3/voyage-4
+    which get 200M free. A 'free'-tier label on a voyage key does NOT mean $0
+    real cost: a real $0.51 invoice arrived for July while usage_log showed
+    $0.00 for every call, because the free-tier zero-out was unconditional.
+    Voyage must always bill LiteLLM's real estimated cost, tier label or not."""
+    from types import SimpleNamespace
+
+    from aibroker.services.llm_service import _billed_cost
+
+    free_voyage_key = SimpleNamespace(tier="free", provider="voyage")
+    meta = {"cost_usd": 0.51}
+
+    assert _billed_cost(free_voyage_key, meta) == 0.51
 
 
 async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):

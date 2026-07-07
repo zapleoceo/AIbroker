@@ -463,6 +463,22 @@ across 51 free keys in a few hours before this landed. One-time prod cleanup:
 zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
 `monthly_cost_used_usd` / `total_cost_usd` for tier='free' keys.)
 
+> **Voyage is the one exception to "free tier bills $0" (2026-07-07).**
+> Confirmed live via Voyage's own dashboard (Usage → Free Token tab): the
+> whole `voyage-3` family (`voyage-3`, `voyage-3-large`, `voyage-3-lite`,
+> `voyage-3.5`, `voyage-3.5-lite`, `rerank-2`, `rerank-2-lite`) shows **0
+> used / 0 remaining** free tokens on our accounts — only the newer models
+> (`voyage-context-3`, `voyage-4` family, `voyage-multimodal-3(.5)`) get the
+> 200M free-token allocation. A `tier="free"` label on a voyage key does NOT
+> mean $0 real cost: a real $0.51 invoice arrived for July while
+> `usage_log` showed $0.00 for every single call, because `_billed_cost`
+> zeroed it out unconditionally regardless of provider. Fixed by
+> special-casing `key.provider == "voyage"` in `_billed_cost` to always bill
+> the real LiteLLM-estimated cost. We are staying on `voyage-3` for now
+> (switching models means re-indexing every existing embedding — see
+> **Embedding never falls back across providers** below); this only fixes
+> the cost bookkeeping, not the underlying zero-free-token model choice.
+
 **Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`): DeepSeek
 charges 2x during peak UTC hours (01:00–04:00 and 06:00–10:00) from mid-July
 2026. `estimate_llm_cost` multiplies the base price by that factor, so the
@@ -644,6 +660,17 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > attempts/day. Not literally a rate limit, but the wanted behavior
 > (throttle this key, don't `mark_dead` it — the credential is fine) is
 > exactly rate_limit's.
+
+> **A third message added, Voyage's "no payment method" (2026-07-07),
+> confirmed live via `docker logs` (24h window).** Every voyage key
+> (lev/verandapay/eatmeat/itstep/...) was hitting `VoyageException -
+> "You have not yet added your payment method ... reduced rate limits of 3
+> RPM and 10K TPM"` dozens of times/day, falling to generic `error` (no
+> `429`/`401`/`403`/`auth` substring) — zero cooldown, hammered on every
+> pick. The account isn't dead or unauthorized, just throttled to a lower
+> ceiling, so `_RATE_LIMIT_SIGNS` now matches `"reduced rate limits"` →
+> `mark_cooldown` using voyage's existing 60s `COOLDOWN_BASE_S` entry with
+> adaptive backoff, instead of an instant zero-backoff retry storm.
 
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 

@@ -103,6 +103,15 @@ _RATE_LIMIT_SIGNS = (
     # literally a rate limit, but the desired behavior (throttle, don't
     # mark_dead — the credential is fine) is identical.
     "response_format type is unavailable",
+    # 2026-07-07: Voyage's "no payment method on file" response — confirmed
+    # live (docker logs, 24h window): dozens of hits/day across every voyage
+    # key (lev/verandapay/eatmeat/itstep/...), zero backoff since it fell
+    # through to generic 'error'. Real behavior: the account is throttled to
+    # "reduced rate limits of 3 RPM and 10K TPM", not dead or unauthorized —
+    # same bucket as any other rate limit (cooldown, don't mark_dead; a fresh
+    # key or a short wait clears it, same free 200M-token budget still
+    # applies once under the reduced ceiling).
+    "reduced rate limits",
 )
 
 # 2026-07-05: confirmed live — Anthropic's "default" key had been failing
@@ -177,7 +186,19 @@ def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
     e.g. gemini-2.5-flash gets the same nominal per-token price a paid caller
     would pay, even though the free plan absorbs it at $0 real cost to us.
     Free-tier keys must always bill $0, whatever the model's list price is.
+
+    EXCEPT voyage (2026-07-07): confirmed live via Voyage's own dashboard
+    (Usage → Free Token tab) that `voyage-3` has a ZERO free-token allocation
+    on our accounts — 0 used, 0 remaining, unlike voyage-context-3/voyage-4
+    which get 200M free. A "free"-tier label on a voyage key does NOT mean
+    $0 real cost here: real invoices arrived ($0.51 seen live) while our own
+    tracking showed $0.00 for every single call, because this function
+    zeroed it out unconditionally. Voyage always bills LiteLLM's real
+    estimated cost regardless of our tier label — the free-tier assumption
+    this function makes is simply false for this provider.
     """
+    if key.provider == "voyage":
+        return meta["cost_usd"]
     return 0.0 if key.tier == "free" else meta["cost_usd"]
 
 
