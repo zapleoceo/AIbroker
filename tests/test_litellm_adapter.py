@@ -67,7 +67,7 @@ def test_cache_tokens_reads_anthropic_and_openai_shapes():
 
 def test_model_for_known_provider_capability():
     assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
-    assert model_for("voyage", "embedding") == "voyage/voyage-3"
+    assert model_for("voyage", "embedding") == "voyage/voyage-4"
     assert model_for("anthropic", "chat:smart") == "anthropic/claude-sonnet-5"
 
 

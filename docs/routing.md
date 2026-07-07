@@ -508,10 +508,24 @@ zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
 > `usage_log` showed $0.00 for every single call, because `_billed_cost`
 > zeroed it out unconditionally regardless of provider. Fixed by
 > special-casing `key.provider == "voyage"` in `_billed_cost` to always bill
-> the real LiteLLM-estimated cost. We are staying on `voyage-3` for now
-> (switching models means re-indexing every existing embedding — see
-> **Embedding never falls back across providers** below); this only fixes
-> the cost bookkeeping, not the underlying zero-free-token model choice.
+> the real LiteLLM-estimated cost.
+>
+> **Switched to `voyage-4` (2026-07-07).** Live audit of real usage: both
+> callers (Vera, Stepan2) run ~61M input tokens/month combined against
+> voyage-3's $0-free ceiling — real ~$3.7/mo, invisible until the fix above.
+> `voyage-4` gets 200M free tokens/month, comfortably covering that run-rate
+> at $0. Confirmed live that `voyage-4` outputs the SAME 1024 dims as
+> voyage-3 (no storage schema change needed) but is a genuinely different
+> vector space — an old voyage-3 row compared against a new voyage-4 query
+> vector produces a same-length, silently-wrong cosine score (both Vera's
+> `brain_search/app.py:_cosine` and Stepan2's `rag.py:retrieve` only guard
+> against differing LENGTH, not differing space). Every existing embedding
+> in both projects must be re-embedded before/soon after this switch — see
+> the one-off backfill scripts in each repo, run right after this deploy.
+> `voyage-context-3` was also tested live and rejected for now: it 400s with
+> `"requires enable_auto_chunking=True or input_type='query'"` — a different
+> request shape our generic embed path doesn't send; worth a dedicated
+> integration later, not blocking this fix.
 
 **Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`): DeepSeek
 charges 2x during peak UTC hours (01:00–04:00 and 06:00–10:00) from mid-July

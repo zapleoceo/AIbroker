@@ -10,7 +10,7 @@ from aibroker.providers.litellm_adapter import (
 
 def test_model_for_known_combos():
     assert model_for("cerebras", "chat:fast").startswith("cerebras/")
-    assert model_for("voyage", "embedding") == "voyage/voyage-3"
+    assert model_for("voyage", "embedding") == "voyage/voyage-4"
     assert model_for("gemini", "vision").startswith("gemini/")
 
 

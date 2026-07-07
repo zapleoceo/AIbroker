@@ -430,7 +430,7 @@ async def run_embed(
     failures — is a transient network blip, not a bad key or a dead
     provider; a fresh key retry turns most of these into a normal success.)
     """
-    use_model = model or model_for(provider, "embedding") or "voyage/voyage-3"
+    use_model = model or model_for(provider, "embedding") or "voyage/voyage-4"
     any_key_seen = False
     last_exc: Exception | None = None
     for _ in range(_max_keys(provider)):

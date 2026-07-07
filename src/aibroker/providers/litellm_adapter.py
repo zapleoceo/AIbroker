@@ -91,7 +91,18 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "structured":  "cohere/command-r7b-12-2024",
                "translate":   "cohere/command-r7b-12-2024",
                "embedding":   "cohere/embed-english-v3.0"},
-    "voyage": {"embedding": "voyage/voyage-3"},
+    # 2026-07-07: voyage-3 → voyage-4. Confirmed live via Voyage's own
+    # dashboard that the whole voyage-3 family has ZERO free-token
+    # allocation on our accounts (real $ from token 1 — see _billed_cost),
+    # while voyage-4 gets 200M free/month. Confirmed live that voyage-4
+    # outputs the SAME 1024 dims as voyage-3 (no storage schema change
+    # needed downstream in Vera/Stepan2) but is a DIFFERENT vector space —
+    # every existing embedding needs re-embedding with the new model before
+    # being compared against a voyage-4 query vector, or similarity scores
+    # go silently wrong (same dims, so the callers' `len(a) != len(b)` guard
+    # does NOT catch a stale voyage-3 row). See the backfill scripts in the
+    # vera3/stepan2 repos run right after this deploy.
+    "voyage": {"embedding": "voyage/voyage-4"},
     # 2026-07-04: free tier confirmed live (real key, 200 OK) but capped at
     # req_per_day=20 (x-ratelimit-limit-requests-day header) — see quotas.py.
     # Too thin to be a primary workhorse; added at chain tail as extra free
