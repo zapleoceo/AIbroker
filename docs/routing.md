@@ -506,9 +506,19 @@ zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
 > 200M free-token allocation. A `tier="free"` label on a voyage key does NOT
 > mean $0 real cost: a real $0.51 invoice arrived for July while
 > `usage_log` showed $0.00 for every single call, because `_billed_cost`
-> zeroed it out unconditionally regardless of provider. Fixed by
+> zeroed it out unconditionally regardless of provider. Originally fixed by
 > special-casing `key.provider == "voyage"` in `_billed_cost` to always bill
-> the real LiteLLM-estimated cost.
+> the real LiteLLM-estimated cost — **but that carve-out was reverted the same
+> day** once we switched the default model to `voyage-4` (below): voyage-4
+> gets 200M free tokens/month (genuinely $0 under our run-rate), so a voyage
+> free-tier key is now correctly $0 like any other free key, `tier` is the
+> single source of truth again, and there's no voyage exception. If a voyage
+> account ever burns its 200M monthly free allocation, flip that specific key
+> to `tier='paid'` and it bills real cost from then on. (The carve-out had
+> also become a latent landmine: LiteLLM currently has *no* price for
+> `voyage-4`, so it books $0 anyway — but the moment LiteLLM ships a
+> voyage-4 price, the old carve-out would have started billing the 200M free
+> tokens as phantom spend.)
 >
 > **Switched to `voyage-4` (2026-07-07).** Live audit of real usage: both
 > callers (Vera, Stepan2) run ~61M input tokens/month combined against
@@ -643,10 +653,23 @@ request. Default is 5; **gemini and cerebras are capped at 3** (2026-07-02):
 their keys rate-limit in lockstep (gemini's ~20/day/model free cap, cerebras
 rolling RPM), so a 4th/5th retry there rarely finds a healthy key and is pure
 latency before the chain moves on. The selector hands a fresh LRU key each pick
-and `_penalize` cools failed ones, so each retry gets a different key. A
-**global `_MAX_ATTEMPTS_PER_REQUEST` (12)** caps total attempts across the whole
-chain (2026-07-02) — a saturation storm could otherwise walk ~30 attempts of
-pure latency before giving up; past the cap the request 503s.
+and `_penalize` cools failed ones, so each retry gets a different key.
+
+**Dynamic per-request attempt budget (2026-07-07, was a flat `12`).** The total
+provider-call attempts for one request = `_attempt_budget(chain)` = the SUM of
+every provider's key allowance across the actual chain ("try every key we have
+before giving up"), bounded by an absolute runaway backstop `_MAX_ATTEMPTS_ABS`
+(60). This guarantees the paid tail (deepseek/anthropic/openai) is reached
+before a 503 — a saturated provider yields no key and costs 0 attempts, so the
+chain falls through to the tail fast. The old flat `12` predated the chains
+growing to 14 providers: during the 2026-07-07 incident (cerebras+groq daily
+quota exhausted, overflow saturating the free head) the cap was consumed by
+early providers and long dialogs 503'd without ever reaching the paid tail. A
+per-provider-call `timeout` (`_CALL_TIMEOUT_S` 45s; chat:deep gets 19 min since
+nemotron legitimately runs minutes as an async job) is the companion safeguard:
+without it a hung upstream would block until the client's own read timeout
+(a hard 504) instead of the broker cleanly failing over. Past the budget the
+request 503s.
 
 **Translate exact-match cache (2026-07-02).** `run_chat` first checks
 `services/response_cache.py` for deterministic capabilities — `is_cacheable`
@@ -738,6 +761,20 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > key in the same incident showed a normal `RateLimitError` — already
 > correctly cooling down, no fix needed there, just genuine overload.
 
+> **Narrow signatures moved to provider-scoped maps (2026-07-07).** Three of
+> the fixes above were narrow, provider-specific strings — deepseek's
+> `"response_format type is unavailable"`, voyage's `"reduced rate limits"`,
+> and zai's `"invalid api parameter"`. Left in the GLOBAL
+> `_RATE_LIMIT_SIGNS`/`_AUTH_SIGNS`, they risked mis-penalising an unrelated
+> provider's healthy key on a superficially-similar message — most dangerously
+> zai's, which is an `auth`/`mark_dead` verdict: a request WE built wrong
+> eliciting "invalid api parameter" from some other provider would have killed
+> that provider's key. They now live in `_PROVIDER_RATE_LIMIT_SIGNS` /
+> `_PROVIDER_AUTH_SIGNS`, keyed by provider, and `classify_provider_error(exc,
+> provider)` only applies them when the failing key matches (`_penalize`
+> passes `key.provider`). The genuinely-generic signs (`429`, `quota`, `credit
+> balance is too low`, …) stay global. Each fix is now surgical.
+
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
 `run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**
@@ -759,6 +796,17 @@ exactly what the client specified; only the key rotates.
 
 `EmbedFailed` (all keys exhausted) → HTTP 502, same as before — now it means
 "the whole provider is actually down", not "one key blipped once".
+
+**`run_embed` intentionally does NOT reserve against the cost guard.** Unlike
+`run_chat` (which calls `reserve_cost`/`release_cost` around each attempt),
+the embed path books real cost only *after* the fact via `record_usage`, with
+no pre-call cap admission. This was harmless while embeddings were free
+(voyage-3 was the only embed provider and, once on voyage-4, genuinely $0
+under the 200M/mo free allocation — `_billed_cost` returns $0 for its
+free-tier key). It IS a gap to remember if a paid embed provider is ever
+added or a voyage key is flipped to `tier='paid'`: embed spend would then be
+uncapped by the project/global $-guard. Documented here as a deliberate,
+known limitation rather than an oversight.
 
 **Prefer native structured output over the gate.** The JSON gate is a
 post-hoc safety net. The *root-cause* fix is for the caller to send a full

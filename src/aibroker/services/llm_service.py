@@ -55,14 +55,42 @@ _COOLDOWN = timedelta(minutes=5)
 _MAX_KEYS_PER_PROVIDER = 5
 _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
 
-# Hard ceiling on provider-call attempts for a single request, across the whole
-# chain — a saturation storm could otherwise walk ~30 attempts (9 providers ×
-# per-provider key retries) of pure latency before giving up. Bounds the tail.
-_MAX_ATTEMPTS_PER_REQUEST = 12
+# Absolute runaway backstop on provider-call attempts for a single request.
+# The real budget is dynamic — sum of per-provider key allowances across the
+# actual chain (see `_attempt_budget`), so every provider (incl. the paid tail)
+# is reachable before we 503. This flat ceiling only guards against a
+# pathological chain; it's set well above the longest real chain's key sum so
+# it never starves the tail. Was a flat 12 — but chat:fast grew to 14
+# providers, so 12 could be consumed by early free providers and the paid tail
+# (deepseek/anthropic/openai) was never reached: long dialogs 503'd during the
+# 2026-07-07 incident precisely because of this.
+_MAX_ATTEMPTS_ABS = 60
+
+# Per-provider-call timeout (seconds). A safety net against a hung upstream —
+# normal calls finish in ~1-8s; this only cuts a genuine hang so the chain can
+# fail over instead of blocking until the client's read timeout. chat:deep is
+# the exception: nemotron legitimately runs minutes (it's an async job, polled
+# by deep_jobs with a 20-min stale marker), so it gets a long ceiling that
+# still fires before the job is marked stale.
+_CALL_TIMEOUT_S = 45.0
+_DEEP_CALL_TIMEOUT_S = 19 * 60.0
 
 
 def _max_keys(provider: str) -> int:
     return _MAX_KEYS_BY_PROVIDER.get(provider, _MAX_KEYS_PER_PROVIDER)
+
+
+def _attempt_budget(chain: list[str]) -> int:
+    """Total provider-call attempts allowed for a request over `chain`: the sum
+    of every provider's key allowance ("try every key we have before giving
+    up"), bounded by the absolute runaway backstop. Guarantees each provider —
+    including the paid tail — is reached before a 503, since a saturated
+    provider returns no key and costs 0 attempts."""
+    return min(_MAX_ATTEMPTS_ABS, sum(_max_keys(p) for p in chain))
+
+
+def _call_timeout(capability: str) -> float:
+    return _DEEP_CALL_TIMEOUT_S if capability == "chat:deep" else _CALL_TIMEOUT_S
 
 
 # Substrings (lower-cased) that mean a provider throttled us — covers the
@@ -94,24 +122,6 @@ _RATE_LIMIT_SIGNS = (
     "too many requests",
     "trial key",
     "api calls / month",
-    # 2026-07-05: DeepSeek "This response_format type is unavailable now" —
-    # confirmed live, ~2510 wasted attempts/day across every deepseek key
-    # (veranda/eatmeat/levaromat/demoniwwwe/zapleosoft/itstep — not one bad
-    # key, a provider-side feature outage). Falls through to generic 'error'
-    # (no cooldown) without this, so every triage call re-hits the same
-    # guaranteed failure on the next key pick with zero backoff. Not
-    # literally a rate limit, but the desired behavior (throttle, don't
-    # mark_dead — the credential is fine) is identical.
-    "response_format type is unavailable",
-    # 2026-07-07: Voyage's "no payment method on file" response — confirmed
-    # live (docker logs, 24h window): dozens of hits/day across every voyage
-    # key (lev/verandapay/eatmeat/itstep/...), zero backoff since it fell
-    # through to generic 'error'. Real behavior: the account is throttled to
-    # "reduced rate limits of 3 RPM and 10K TPM", not dead or unauthorized —
-    # same bucket as any other rate limit (cooldown, don't mark_dead; a fresh
-    # key or a short wait clears it, same free 200M-token budget still
-    # applies once under the reduced ceiling).
-    "reduced rate limits",
 )
 
 # 2026-07-05: confirmed live — Anthropic's "default" key had been failing
@@ -122,38 +132,62 @@ _RATE_LIMIT_SIGNS = (
 # bucket as 401/403: mark_dead stops real traffic from hitting it, and the
 # monitor's own probe (independent of is_alive) keeps checking every
 # MONITOR_INTERVAL_S and auto-revives it the moment credits are topped up.
+# "credit balance is too low" is generic-billing enough to match any provider.
 _AUTH_SIGNS = (
     "credit balance is too low",
-    # 2026-07-07: confirmed live during a real incident (cerebras/groq daily
-    # quota exhaustion overflowed traffic onto zai) — zai key "eatmeat" hit
-    # this EXACT message on 3141 of ~3189 attempts in 30 min (98.5%, only 2
-    # successes), while every other zai key on the same account type/model
-    # succeeded normally. Isolated to one key/account, not a shared zai
-    # outage — a persistent config problem (unclear which param), not
-    # transient. Was generic 'error' (no cooldown, no mark_dead), so it got
-    # hammered on every pick with zero backoff. mark_dead stops real traffic;
-    # the monitor's own probe keeps checking and auto-revives it once
-    # whatever's misconfigured on that account is fixed.
-    "invalid api parameter",
 )
 
+# Provider-SCOPED signatures: applied ONLY when the failing key belongs to that
+# provider. These are narrow, provider-specific error strings we caught live;
+# putting them in the global lists risked mis-penalising an unrelated
+# provider's healthy key on a superficially-similar message (e.g. a request we
+# built wrong eliciting "invalid api parameter" would have mark_dead'd that
+# provider's key). Scoping keeps each fix surgical.
+_PROVIDER_RATE_LIMIT_SIGNS: dict[str, tuple[str, ...]] = {
+    # DeepSeek "This response_format type is unavailable now" — confirmed live
+    # (2026-07-05), hit every deepseek key identically (a provider-side feature
+    # outage, not one bad key), ~2510 wasted attempts/day. Not literally a rate
+    # limit, but the wanted behaviour (throttle, don't mark_dead — the
+    # credential is fine) is rate_limit's.
+    "deepseek": ("response_format type is unavailable",),
+    # Voyage "no payment method on file … reduced rate limits of 3 RPM and 10K
+    # TPM" — confirmed live (2026-07-07). The account is throttled to a lower
+    # ceiling, not dead/unauthorized: cooldown, don't mark_dead.
+    "voyage": ("reduced rate limits",),
+}
+_PROVIDER_AUTH_SIGNS: dict[str, tuple[str, ...]] = {
+    # zai "Invalid API parameter, please check the documentation" — confirmed
+    # live during the 2026-07-07 incident: key "eatmeat" hit it on 3141 of
+    # ~3189 attempts (98.5%) while every other zai key succeeded normally. A
+    # persistent per-account config problem, not transient: mark_dead stops
+    # real traffic; the monitor's probe auto-revives it once fixed. Scoped to
+    # zai so a request-construction bug on another provider can't kill its key.
+    "zai": ("invalid api parameter",),
+}
 
-def classify_provider_error(exc: Exception) -> str:
+
+def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     """Map a provider exception to one of: 'rate_limit', 'auth', 'error'.
 
     Single source of truth — both chat and embed paths classify the same way.
+    `provider` enables provider-scoped signatures (narrow strings that must not
+    penalise other providers' keys); omit it to match only the global signs.
     """
     emsg = str(exc).lower()
     if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
         return "rate_limit"
+    if provider and any(s in emsg for s in _PROVIDER_RATE_LIMIT_SIGNS.get(provider, ())):
+        return "rate_limit"
     if any(sign in emsg for sign in _AUTH_SIGNS) or "401" in emsg or "403" in emsg or "auth" in emsg:
+        return "auth"
+    if provider and any(s in emsg for s in _PROVIDER_AUTH_SIGNS.get(provider, ())):
         return "auth"
     return "error"
 
 
 async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
-    kind = classify_provider_error(exc)
+    kind = classify_provider_error(exc, key.provider)
     # Short, human-readable reason surfaced on the dashboard (2026-07-05) — the
     # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
     # money" from "rate limited" apart, or when a cooldown actually ends.
@@ -173,6 +207,22 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     elif kind == "auth":
         await mark_dead(key.id, reason)
     return kind
+
+
+async def _record_error(
+    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
+    capability: str, workflow: str | None, exc: Exception,
+) -> None:
+    """Book a failed attempt in usage_log (zero tokens/cost, no HTTP status).
+    Shared by run_chat/run_embed/run_transcribe — the shape is identical; only
+    the capability differs."""
+    await record_usage(
+        api_key_id=key.id, project_id=project.id, lease_id=None,
+        provider=provider, model=model, capability=capability,
+        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+        latency_ms=None, status="error", error_kind=type(exc).__name__,
+        http_status=None,
+    )
 
 
 def _wants_json(response_format: dict[str, Any] | None) -> bool:
@@ -196,20 +246,18 @@ def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
     concept of "this specific key is on a free plan". A free-tier key calling
     e.g. gemini-2.5-flash gets the same nominal per-token price a paid caller
     would pay, even though the free plan absorbs it at $0 real cost to us.
-    Free-tier keys must always bill $0, whatever the model's list price is.
+    Free-tier keys always bill $0; the `tier` column is the source of truth.
 
-    EXCEPT voyage (2026-07-07): confirmed live via Voyage's own dashboard
-    (Usage → Free Token tab) that `voyage-3` has a ZERO free-token allocation
-    on our accounts — 0 used, 0 remaining, unlike voyage-context-3/voyage-4
-    which get 200M free. A "free"-tier label on a voyage key does NOT mean
-    $0 real cost here: real invoices arrived ($0.51 seen live) while our own
-    tracking showed $0.00 for every single call, because this function
-    zeroed it out unconditionally. Voyage always bills LiteLLM's real
-    estimated cost regardless of our tier label — the free-tier assumption
-    this function makes is simply false for this provider.
+    voyage history (2026-07-07): a voyage carve-out here used to bill real
+    cost unconditionally, because `voyage-3` had a ZERO free-token allocation
+    on our accounts (real invoices arrived while we tracked $0). We have since
+    moved the default embedding model to `voyage-4`, which grants 200M free
+    tokens/month — genuinely $0 under our ~61M/mo run-rate — so a voyage
+    free-tier key is now correctly $0 like any other free key, and the
+    carve-out is gone. If a voyage account ever exhausts its 200M monthly free
+    allocation, flip that specific key to `tier='paid'` and it bills the real
+    per-token cost from then on (the same mechanism every paid key uses).
     """
-    if key.provider == "voyage":
-        return meta["cost_usd"]
     return 0.0 if key.tier == "free" else meta["cost_usd"]
 
 
@@ -286,16 +334,18 @@ async def run_chat(
     else:
         chain = full_chain
 
-    # Hard cap on total provider-call attempts per request — a 9-provider chain
-    # × per-provider key retries could otherwise reach ~30 attempts of pure
-    # latency in a saturation storm. Bound the tail; the chain still reaches
-    # most providers at least once.
+    # Dynamic per-request attempt budget = "try every key we have across the
+    # whole chain before giving up", so the paid tail is always reached before
+    # a 503 (a saturated provider yields no key → 0 attempts, so the chain
+    # falls through to it fast). Bounded by the absolute runaway backstop.
+    attempt_cap = _attempt_budget(chain)
+    call_timeout = _call_timeout(capability)
     attempts = 0
     for provider in chain:
         for _ in range(_max_keys(provider)):
-            if attempts >= _MAX_ATTEMPTS_PER_REQUEST:
+            if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
-                            capability, _MAX_ATTEMPTS_PER_REQUEST)
+                            capability, attempt_cap)
                 return None
             key = await pick_and_reserve(provider, scope=scope)
             if key is None:
@@ -327,6 +377,7 @@ async def run_chat(
                     max_tokens=max_tokens, temperature=temperature,
                     response_format=response_format,
                     extra=extra_for_provider(provider, getattr(key, "account_id", None)),
+                    timeout=call_timeout,
                 )
                 meta["cost_usd"] = _billed_cost(key, meta)
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
@@ -342,12 +393,9 @@ async def run_chat(
                     log.info("learned: %s rejects ~%d tok prompts",
                              provider, est_tokens)
                     break  # bigger keys won't help — go straight to next provider
-                await record_usage(
-                    api_key_id=key.id, project_id=project.id, lease_id=None,
-                    provider=provider, model=use_model, capability=capability,
-                    workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-                    latency_ms=None, status="error", error_kind=type(e).__name__,
-                    http_status=None,
+                await _record_error(
+                    key=key, project=project, provider=provider,
+                    model=use_model, capability=capability, workflow=workflow, exc=e,
                 )
                 log.warning("provider %s key %s failed (%s): %s",
                             provider, key.label, kind, e)
@@ -456,12 +504,9 @@ async def run_embed(
         except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
             last_exc = e
             await _penalize(key, e)
-            await record_usage(
-                api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model, capability="embedding",
-                workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-                latency_ms=None, status="error", error_kind=type(e).__name__,
-                http_status=None,
+            await _record_error(
+                key=key, project=project, provider=provider,
+                model=use_model, capability="embedding", workflow=workflow, exc=e,
             )
             log.warning("provider %s key %s embed failed, trying next key: %s",
                         provider, key.label, e)
@@ -531,12 +576,9 @@ async def run_transcribe(
         except Exception as e:
             last_exc = e
             await _penalize(key, e)
-            await record_usage(
-                api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model, capability="transcription",
-                workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-                latency_ms=None, status="error", error_kind=type(e).__name__,
-                http_status=None,
+            await _record_error(
+                key=key, project=project, provider=provider,
+                model=use_model, capability="transcription", workflow=workflow, exc=e,
             )
             continue
         request_id = await record_usage(

@@ -280,11 +280,18 @@ async def call_llm(
     temperature: float = 0.7,
     response_format: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    timeout: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Call LiteLLM. Returns (text, meta).
 
     `meta` contains: model, tokens_in, tokens_out, cost_usd, latency_ms,
     finish_reason, cache_read_tokens, cache_write_tokens.
+
+    `timeout` (seconds) caps a single provider call so one hung upstream can't
+    consume the caller's whole budget — without it, a provider that accepts the
+    connection but never responds blocks until the client's own read timeout
+    fires (a hard 504/abort) instead of the broker cleanly failing over to the
+    next key/provider. None = no cap (LiteLLM default).
     """
     kwargs: dict[str, Any] = {
         "model": model,
@@ -293,6 +300,8 @@ async def call_llm(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if response_format:
         kwargs["response_format"] = response_format
         # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat

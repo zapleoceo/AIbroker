@@ -56,8 +56,14 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
                      doc="https://docs.cohere.com/v2/docs/rate-limits"),
     "openrouter": Quota(req_per_day=200,
                          doc="https://openrouter.ai/docs/api-reference/limits"),
-    "voyage": Quota(tok_per_day=200_000_000,
-                     doc="https://docs.voyageai.com/docs/pricing"),
+    # voyage-4's 200M free tokens is a per-MONTH allocation, not a daily rate
+    # cap — representing it as tok_per_day=200M mislabelled the axis (30x too
+    # loose, the dashboard bar could never fill). We have no honest daily axis
+    # to show here: voyage's real short-term throttle is RPM/TPM (handled as a
+    # cooldown via classify_provider_error's "reduced rate limits" sign), and
+    # the 200M monthly budget isn't a daily quota. Dropped the axis (same
+    # reasoning as mistral's per-minute-only limits above).
+    "voyage": Quota(doc="https://docs.voyageai.com/docs/pricing"),
     "deepseek":  Quota(doc="https://api-docs.deepseek.com/quick_start/pricing"),
     "anthropic": Quota(doc="https://docs.claude.com/en/docs/about-claude/usage-limits"),
     "openai":    Quota(doc="https://platform.openai.com/docs/guides/rate-limits"),

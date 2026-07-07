@@ -78,7 +78,11 @@ def test_classify_zai_invalid_api_parameter():
     to one key, a persistent config problem not a shared outage — was generic
     'error' (no mark_dead), hammered with zero backoff on every pick."""
     real_message = "litellm.BadRequestError: ZaiException - Invalid API parameter, please check the documentation."
-    assert classify_provider_error(RuntimeError(real_message)) == "auth"
+    # Provider-scoped: 'auth' for zai, but must NOT penalise another provider's
+    # key if a request-construction bug elicits the same string elsewhere.
+    assert classify_provider_error(RuntimeError(real_message), "zai") == "auth"
+    assert classify_provider_error(RuntimeError(real_message), "deepseek") == "error"
+    assert classify_provider_error(RuntimeError(real_message)) == "error"
 
 
 def test_classify_deepseek_response_format_unavailable():
@@ -96,7 +100,9 @@ def test_classify_deepseek_response_format_unavailable():
         '"This response_format type is unavailable now","type":'
         '"invalid_request_error","param":null,"code":"invalid_request_error"}}'
     )
-    assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
+    # Provider-scoped to deepseek (rate_limit → cooldown, don't mark_dead).
+    assert classify_provider_error(RuntimeError(real_message), "deepseek") == "rate_limit"
+    assert classify_provider_error(RuntimeError(real_message)) == "error"
 
 
 def test_classify_voyage_no_payment_method():
@@ -115,7 +121,9 @@ def test_classify_voyage_no_payment_method():
         'page for the appropriate organization in the user dashboard '
         '(https://dashboard.voyageai.com/)."}'
     )
-    assert classify_provider_error(RuntimeError(real_message)) == "rate_limit"
+    # Provider-scoped to voyage.
+    assert classify_provider_error(RuntimeError(real_message), "voyage") == "rate_limit"
+    assert classify_provider_error(RuntimeError(real_message)) == "error"
 
 
 def test_classify_generic_error():
@@ -550,12 +558,25 @@ async def test_run_chat_runs_size_filter_for_large_prompt(monkeypatch):
     assert called["learned"] == 1
 
 
-# ─── per-request global attempt cap (#5b) ────────────────────────────────────
+# ─── per-request dynamic attempt budget ──────────────────────────────────────
 
 
-async def test_run_chat_global_attempt_cap(monkeypatch):
-    """A long chain of failing providers must stop at _MAX_ATTEMPTS_PER_REQUEST
-    total attempts, not walk every provider × every key."""
+def test_attempt_budget_is_key_sum_bounded_by_backstop():
+    """Budget = sum of per-provider key allowances, capped at the runaway
+    backstop. A short chain gets its full key sum; a long one is clamped."""
+    import aibroker.services.llm_service as svc
+
+    # 3 default providers (5 keys each) → 15, under the backstop.
+    assert svc._attempt_budget(["a", "b", "c"]) == 15
+    # gemini/cerebras allowance is lower (3) — summed exactly, not defaulted.
+    assert svc._attempt_budget(["gemini", "cerebras", "groq"]) == 3 + 3 + 5
+    # 20 default providers → 100 key-attempts, clamped to the backstop.
+    assert svc._attempt_budget([f"p{i}" for i in range(20)]) == svc._MAX_ATTEMPTS_ABS
+
+
+async def test_run_chat_stops_at_absolute_backstop(monkeypatch):
+    """A pathologically long chain of failing providers stops at the absolute
+    backstop, not walking every provider × every key unbounded."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
@@ -584,9 +605,9 @@ async def test_run_chat_global_attempt_cap(monkeypatch):
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
-    # 9-provider chain (default 5 keys each = up to 45 attempts without the cap)
+    # 20-provider chain (default 5 keys each = 100 attempts without the cap).
     monkeypatch.setattr(svc, "chain_for",
-                         lambda cap: [f"p{i}" for i in range(9)])
+                         lambda cap: [f"p{i}" for i in range(20)])
 
     out = await svc.run_chat(
         project=SimpleNamespace(id=1, name="vera"), capability="chat:smart",
@@ -594,7 +615,60 @@ async def test_run_chat_global_attempt_cap(monkeypatch):
         max_tokens=128, temperature=0.7, response_format=None, workflow="x",
     )
     assert out is None
-    assert attempts["n"] == svc._MAX_ATTEMPTS_PER_REQUEST
+    assert attempts["n"] == svc._MAX_ATTEMPTS_ABS
+
+
+async def test_run_chat_reaches_paid_tail_when_free_providers_saturated(monkeypatch):
+    """REGRESSION (2026-07-07 incident): with a flat cap of 12 and a 14-provider
+    chain, the paid tail was never reached when the free head was saturated, so
+    long dialogs 503'd. A saturated provider yields no key (0 attempts), so the
+    dynamic budget must let the chain fall through to the last provider and
+    succeed there."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    # 13 saturated free providers (no key) + 1 paid tail that succeeds.
+    chain = [f"free{i}" for i in range(13)] + ["paid_tail"]
+    tried: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        if provider == "paid_tail":
+            return SimpleNamespace(id=1, label="tail", tier="paid",
+                                    provider=provider, token_encrypted="x")
+        return None  # saturated — no key available
+
+    async def fake_call_llm(**kw):
+        tried.append(kw["model"])
+        return "hello", {"model": kw["model"], "tokens_in": 1, "tokens_out": 1,
+                         "cost_usd": 0.01, "latency_ms": 5,
+                         "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    async def fake_caps(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+
+    async def fake_record(**kw):
+        return 1
+
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: chain)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="x",
+    )
+    assert out is not None
+    assert out.provider == "paid_tail"
+    assert tried == ["paid_tail/model"]
 
 
 # ─── free-tier keys must never bill a real $ cost ───────────────────────────
@@ -620,22 +694,24 @@ def test_billed_cost_zeroes_free_tier():
     assert _billed_cost(paid_key, meta) == 2.80
 
 
-def test_billed_cost_voyage_always_bills_real_cost():
-    """REGRESSION (2026-07-07): confirmed live via Voyage's own dashboard
-    (Usage → Free Token tab) that voyage-3 has a ZERO free-token allocation on
-    our accounts (0 used, 0 remaining) — unlike voyage-context-3/voyage-4
-    which get 200M free. A 'free'-tier label on a voyage key does NOT mean $0
-    real cost: a real $0.51 invoice arrived for July while usage_log showed
-    $0.00 for every call, because the free-tier zero-out was unconditional.
-    Voyage must always bill LiteLLM's real estimated cost, tier label or not."""
+def test_billed_cost_voyage_free_tier_is_zero_on_voyage4():
+    """REGRESSION (2026-07-07): a voyage carve-out here once billed real cost
+    unconditionally, because voyage-3 had a ZERO free-token allocation. We
+    moved the default embedding model to voyage-4 (200M free tokens/month,
+    genuinely $0 under our run-rate), so a voyage free-tier key is now $0 like
+    any other free key — the carve-out is gone. (Belt-and-suspenders: LiteLLM
+    also has no price for voyage-4, so meta['cost_usd'] is already 0; this
+    guards the tier logic even if a price is added upstream later.)"""
     from types import SimpleNamespace
 
     from aibroker.services.llm_service import _billed_cost
 
     free_voyage_key = SimpleNamespace(tier="free", provider="voyage")
+    paid_voyage_key = SimpleNamespace(tier="paid", provider="voyage")
     meta = {"cost_usd": 0.51}
 
-    assert _billed_cost(free_voyage_key, meta) == 0.51
+    assert _billed_cost(free_voyage_key, meta) == 0.0
+    assert _billed_cost(paid_voyage_key, meta) == 0.51
 
 
 async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):
