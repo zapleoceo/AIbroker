@@ -38,6 +38,10 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
         "github", "sambanova", "zai",
+        # 2026-07-07: cloudflare (gpt-oss-120b) — confirmed live with the
+        # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
+        # idle capacity (only vision was wired).
+        "cloudflare",
         # 2026-07-05: nvidia (kimi-k2.6, ~1.4s, confirmed valid JSON) — no
         # card on file, so no silent-billing risk (see litellm_adapter.py).
         "nvidia",
@@ -85,6 +89,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
         "github", "sambanova", "zai",
+        "cloudflare",
     ],
     # Trivial utility task (message translation): does NOT need premium/reasoning
     # models. Put SMALL FAST non-reasoning models FIRST — cerebras/groq gpt-oss is a

@@ -131,7 +131,16 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # chat (see litellm/llms/cloudflare/, no audio submodule); Workers AI's
     # whisper endpoint has a different request shape litellm doesn't speak, so
     # using it would need a raw HTTP call outside litellm. Left for later.
-    "cloudflare": {"vision": "cloudflare/@cf/llava-hf/llava-1.5-7b-hf"},
+    # 2026-07-07: chat:fast/prefilter added — confirmed live with the real
+    # strict Vera triage json_schema (not just json_object): valid JSON,
+    # ~1.6s, correct classification, and litellm.get_supported_openai_params
+    # confirms response_format is genuinely supported (not silently dropped
+    # like zai). Same gpt-oss-120b family already proven reliable on
+    # cerebras/groq. Previously only vision was wired here — this was idle
+    # free capacity (10k neurons/day, no card on file).
+    "cloudflare": {"vision": "cloudflare/@cf/llava-hf/llava-1.5-7b-hf",
+                   "chat:fast": "cloudflare/@cf/openai/gpt-oss-120b",
+                   "prefilter": "cloudflare/@cf/openai/gpt-oss-120b"},
     # 2026-07-05: Z.ai (Zhipu) — confirmed live. Only glm-4.5-flash is
     # actually free on this account: glm-4.5/glm-4.5-air both 429'd with
     # "Insufficient balance or no resource package" — no free package for the
