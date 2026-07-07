@@ -271,6 +271,33 @@ def _cache_tokens(usage: Any) -> tuple[int, int]:
     return read, write
 
 
+# Providers that reject the strict `{"type":"json_schema"}` response_format
+# sub-type but DO accept `{"type":"json_object"}`. deepseek confirmed live
+# (2026-07-07): a json_schema request 400s with "This response_format type is
+# unavailable now" on every key (~2414 triage calls/6h wasted), while plain
+# json_object returns valid JSON fine. litellm.supports_response_schema is NOT
+# a reliable gate here — it reports deepseek supports json_schema (stale/
+# optimistic). Downgrading to json_object keeps the JSON intent; the broker's
+# post-hoc JSON gate (run_chat._is_valid_json) plus caller-side validation
+# replace the lost server-side grammar enforcement. Re-remove deepseek here if
+# it re-enables json_schema.
+_JSON_SCHEMA_UNSUPPORTED: frozenset[str] = frozenset({"deepseek"})
+
+
+def _effective_response_format(
+    model: str, response_format: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Downgrade a strict json_schema request to json_object for providers that
+    reject the json_schema sub-type (see _JSON_SCHEMA_UNSUPPORTED). No-op for
+    non-JSON, for json_object, and for providers that support json_schema."""
+    if not response_format or response_format.get("type") != "json_schema":
+        return response_format
+    provider = model.split("/", 1)[0]
+    if provider in _JSON_SCHEMA_UNSUPPORTED:
+        return {"type": "json_object"}
+    return response_format
+
+
 async def call_llm(
     *,
     model: str,
@@ -303,12 +330,13 @@ async def call_llm(
     if timeout is not None:
         kwargs["timeout"] = timeout
     if response_format:
-        kwargs["response_format"] = response_format
+        rf = _effective_response_format(model, response_format)
+        kwargs["response_format"] = rf
         # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat
         # the whole budget and truncate the object mid-string. Disable thinking
         # so the JSON fits (mirrors Stepan's thinkingBudget=0). Other providers
         # ignore reasoning_effort=disable, so gate it to gemini.
-        if model.startswith("gemini/") and response_format.get("type") in (
+        if model.startswith("gemini/") and rf.get("type") in (
             "json_object", "json_schema"
         ):
             kwargs["reasoning_effort"] = "disable"

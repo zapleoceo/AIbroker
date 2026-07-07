@@ -6,12 +6,39 @@ from unittest.mock import AsyncMock, patch
 
 from aibroker.providers.litellm_adapter import (
     DEFAULT_MODEL,
+    _effective_response_format,
     call_llm,
     embed,
     estimate_llm_cost,
     model_for,
     transcribe,
 )
+
+# ─── json_schema → json_object downgrade for providers that reject it ────────
+
+_SCHEMA = {"type": "json_schema", "json_schema": {"name": "r", "strict": True,
+           "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                      "required": ["ok"], "additionalProperties": False}}}
+
+
+def test_response_format_downgraded_for_deepseek():
+    """REGRESSION (2026-07-07): deepseek 400s on json_schema ('This
+    response_format type is unavailable now') but accepts json_object — every
+    triage call to deepseek wasted. json_schema must downgrade to json_object
+    for deepseek so the provider stays usable; the JSON gate still validates."""
+    assert _effective_response_format("deepseek/deepseek-chat", _SCHEMA) == {"type": "json_object"}
+
+
+def test_response_format_preserved_for_schema_capable_providers():
+    """Providers that support json_schema keep the strict schema untouched."""
+    assert _effective_response_format("gemini/gemini-2.5-flash", _SCHEMA) == _SCHEMA
+    assert _effective_response_format("openai/gpt-5-mini", _SCHEMA) == _SCHEMA
+
+
+def test_response_format_downgrade_noop_for_non_schema():
+    """json_object and no-format requests pass through unchanged everywhere."""
+    assert _effective_response_format("deepseek/deepseek-chat", {"type": "json_object"}) == {"type": "json_object"}
+    assert _effective_response_format("deepseek/deepseek-chat", None) is None
 
 # ─── model_for ────────────────────────────────────────────────────────────
 

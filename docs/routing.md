@@ -817,3 +817,19 @@ JSON and the gate never fires. The broker forwards the schema byte-for-byte
 (`call_llm`) — it can't invent one, so this win depends on the client sending
 it. cerebras/cohere don't grammar-constrain, which is why they're in
 `JSON_UNRELIABLE_PROVIDERS` and deprioritized for JSON either way.
+
+> **json_schema → json_object downgrade for deepseek (2026-07-07).** DeepSeek
+> disabled the strict `{"type":"json_schema"}` sub-type server-side: a
+> json_schema request 400s with `"This response_format type is unavailable
+> now"` on every key (~2414 wasted triage calls in 6h), while plain
+> `{"type":"json_object"}` returns valid JSON fine — confirmed live with all
+> three shapes. This was quietly removing a whole paid-tail provider from
+> service under load. `call_llm` now downgrades json_schema → json_object for
+> providers in `_JSON_SCHEMA_UNSUPPORTED` (`{"deepseek"}`) before sending; the
+> JSON intent survives and the post-hoc JSON gate + caller validation replace
+> the lost server-side grammar enforcement. `litellm.supports_response_schema`
+> is NOT usable as the gate — it reports deepseek supports json_schema
+> (stale/optimistic), so the set is broker-maintained and confirmed live.
+> The provider-scoped `_PROVIDER_RATE_LIMIT_SIGNS["deepseek"]` cooldown stays
+> as defence-in-depth. Remove deepseek from the set if it re-enables
+> json_schema.
