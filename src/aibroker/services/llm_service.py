@@ -183,6 +183,17 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     `provider` enables provider-scoped signatures (narrow strings that must not
     penalise other providers' keys); omit it to match only the global signs.
     """
+    # 2026-07-07: our own call-timeout backstop (litellm_adapter.call_llm's
+    # asyncio.wait_for) raises a bare TimeoutError with NO message — none of
+    # the string-substring signs below can ever match it. Confirmed live: a
+    # slow/overloaded zai key was taking 90-180s per call (real completions,
+    # not hangs) well past our timeout ceiling; without this, the timeout
+    # would classify as generic 'error' (no cooldown) and the same overloaded
+    # key gets hit again immediately with zero backoff — the exact failure
+    # mode this whole classifier exists to prevent. A provider/key that's
+    # currently too slow is transient overload, not a dead credential.
+    if isinstance(exc, TimeoutError):
+        return "rate_limit"
     emsg = str(exc).lower()
     if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
         return "rate_limit"

@@ -4,6 +4,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from aibroker.providers.litellm_adapter import (
     DEFAULT_MODEL,
     _effective_response_format,
@@ -350,6 +352,27 @@ async def test_call_llm_missing_usage_safe():
         )
     assert meta["tokens_in"] == 0
     assert meta["tokens_out"] == 0
+
+
+async def test_call_llm_timeout_is_enforced_independently_of_litellm():
+    """REGRESSION (2026-07-07): confirmed live that LiteLLM's own `timeout`
+    kwarg does NOT reliably cut off a hung/slow call — a zai key was observed
+    completing normally at 90-180s wall time on a timeout=60 request (no
+    TimeoutError raised by LiteLLM at all). call_llm must enforce the ceiling
+    itself via asyncio.wait_for as a hard backstop, independent of whatever
+    LiteLLM/the provider plugin does internally with the timeout kwarg."""
+    import asyncio
+
+    async def _never_returns(**kw):
+        await asyncio.sleep(10)
+        raise AssertionError("should have been cancelled by wait_for before this")
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                _never_returns), pytest.raises(TimeoutError):
+        await call_llm(
+            model="zai/glm-4.5-flash", messages=[{"role": "user", "content": "x"}],
+            api_key="k", timeout=0.05,
+        )
 
 
 # ─── embed — mocked LiteLLM ───────────────────────────────────────────────

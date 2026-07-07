@@ -52,6 +52,18 @@ def test_classify_auth():
     assert classify_provider_error(Exception("invalid auth token")) == "auth"
 
 
+def test_classify_timeout_is_rate_limit():
+    """REGRESSION (2026-07-07): our own call-timeout backstop
+    (litellm_adapter.call_llm's asyncio.wait_for) raises a bare TimeoutError
+    with no message — no string sign can ever match it, so it fell to generic
+    'error' (no cooldown) and an overloaded key got hit again immediately with
+    zero backoff. Confirmed live: a zai key was taking 90-180s per call, well
+    past our timeout ceiling. A too-slow-right-now provider is transient
+    overload, not a dead credential — rate_limit (cooldown), not auth/error."""
+    assert classify_provider_error(TimeoutError()) == "rate_limit"
+    assert classify_provider_error(TimeoutError(), "zai") == "rate_limit"
+
+
 def test_classify_anthropic_credit_balance_exhausted():
     """REGRESSION (2026-07-05): confirmed live — Anthropic's 'default' key was
     failing ~2743 times/day with this exact message (no '401'/'403'/'auth'

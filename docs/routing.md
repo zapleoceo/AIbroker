@@ -680,6 +680,29 @@ of the broker cleanly failing over. Past the budget the request 503s.
 > `chat:smart`'s 90s client budget still has headroom for one hang + a
 > fallback attempt. Flagging this rather than silently tightening `chat:fast`
 > back down, since the 60s was an explicit choice.
+>
+> **LiteLLM's `timeout` kwarg alone is NOT reliable — confirmed live the same
+> day.** Right after the 60s raise, Stepan2 started seeing genuine 504s
+> (nginx's `proxy_read_timeout` cutting the connection). Live logs showed WHY:
+> a zai key was completing normally (a real response, just JSON-invalid) at
+> **90-180 seconds wall time** on a `timeout=60` request — LiteLLM never
+> raised a `TimeoutError` at all. Whatever LiteLLM/the zai plugin does
+> internally with the `timeout` kwarg isn't a hard guarantee. Fixed by
+> wrapping `litellm.acompletion(**kwargs)` in `asyncio.wait_for(..., timeout=)`
+> in `call_llm` — an independent, broker-side enforcement that doesn't depend
+> on LiteLLM's own behavior. Confirmed live with a mocked never-returning call:
+> `asyncio.wait_for` cancels it and raises `TimeoutError` at the exact ceiling.
+>
+> **`TimeoutError` classifies as `rate_limit`, not generic `error`.** A bare
+> `asyncio.TimeoutError`/`TimeoutError` carries no message, so none of the
+> string-substring signs above can ever match it — it would have fallen to
+> generic `error` (no cooldown), hitting the same overloaded key again
+> immediately with zero backoff, the exact failure mode this classifier
+> exists to prevent. `classify_provider_error` now special-cases
+> `isinstance(exc, TimeoutError)` → `rate_limit` before any string matching: a
+> provider/key that's currently too slow is transient overload, not a dead
+> credential, and `cooldown_until` resolves it via the provider's normal
+> adaptive backoff (empty exception message doesn't match any quota marker).
 
 **Translate exact-match cache (2026-07-02).** `run_chat` first checks
 `services/response_cache.py` for deterministic capabilities — `is_cacheable`

@@ -6,6 +6,7 @@ and the API key. No HTTP code in our broker for individual providers.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -344,7 +345,19 @@ async def call_llm(
         kwargs.update(extra)
 
     t0 = time.time()
-    resp = await litellm.acompletion(**kwargs)
+    # 2026-07-07: confirmed live — LiteLLM's own `timeout` kwarg does NOT
+    # reliably cut off a hung zai call (observed real completions at 90-180s
+    # wall time on a `timeout=60` request, ending in a normal — if
+    # JSON-invalid — response, not a TimeoutError). Whatever LiteLLM/the
+    # provider plugin does internally with `timeout` isn't enough on its own.
+    # Enforce the ceiling ourselves with asyncio.wait_for as a hard backstop —
+    # this is what actually protects the attempt budget and the caller's own
+    # read timeout (Stepan's chat:fast client + this broker's nginx
+    # proxy_read_timeout) from a single hung/slow call.
+    if timeout is not None:
+        resp = await asyncio.wait_for(litellm.acompletion(**kwargs), timeout=timeout)
+    else:
+        resp = await litellm.acompletion(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
 
     choices = resp.choices or []
