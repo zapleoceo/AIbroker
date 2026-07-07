@@ -72,7 +72,17 @@ _MAX_ATTEMPTS_ABS = 60
 # the exception: nemotron legitimately runs minutes (it's an async job, polled
 # by deep_jobs with a 20-min stale marker), so it gets a long ceiling that
 # still fires before the job is marked stale.
-_CALL_TIMEOUT_S = 45.0
+#
+# 2026-07-07: raised 45s -> 60s (explicit ask, applies to every key/provider).
+# Trade-off worth knowing: Stepan2's own client read timeout for chat:fast is
+# also 60s (llm_read_timeout_s) — a single hung attempt at this ceiling can
+# now consume that entire budget, leaving no time for the chain to fail over
+# to the next provider before the CLIENT gives up (a 504/abort instead of a
+# clean 503). chat:smart's 90s client budget still has headroom for one hang
+# + a fallback attempt. Not tightened here since the ask was explicit; flagging
+# so a future chat:fast timeout tightening is an informed choice, not a
+# surprise discovery.
+_CALL_TIMEOUT_S = 60.0
 _DEEP_CALL_TIMEOUT_S = 19 * 60.0
 
 

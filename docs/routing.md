@@ -665,11 +665,21 @@ chain falls through to the tail fast. The old flat `12` predated the chains
 growing to 14 providers: during the 2026-07-07 incident (cerebras+groq daily
 quota exhausted, overflow saturating the free head) the cap was consumed by
 early providers and long dialogs 503'd without ever reaching the paid tail. A
-per-provider-call `timeout` (`_CALL_TIMEOUT_S` 45s; chat:deep gets 19 min since
-nemotron legitimately runs minutes as an async job) is the companion safeguard:
-without it a hung upstream would block until the client's own read timeout
-(a hard 504) instead of the broker cleanly failing over. Past the budget the
-request 503s.
+per-provider-call `timeout` (`_CALL_TIMEOUT_S`, uniform across every
+key/provider; chat:deep gets its own 19 min since nemotron legitimately runs
+minutes as an async job) is the companion safeguard: without it a hung
+upstream would block until the client's own read timeout (a hard 504) instead
+of the broker cleanly failing over. Past the budget the request 503s.
+>
+> **`_CALL_TIMEOUT_S` raised 45s → 60s (2026-07-07, explicit ask).** Applies
+> uniformly to every key/provider. Trade-off worth knowing: Stepan2's own
+> client read timeout for `chat:fast` is ALSO 60s (`llm_read_timeout_s`) — a
+> single hung attempt at the new ceiling can now consume that entire client
+> budget, leaving no time for the chain to fail over to the next provider
+> before the CLIENT gives up (a 504/abort instead of a clean 503).
+> `chat:smart`'s 90s client budget still has headroom for one hang + a
+> fallback attempt. Flagging this rather than silently tightening `chat:fast`
+> back down, since the 60s was an explicit choice.
 
 **Translate exact-match cache (2026-07-02).** `run_chat` first checks
 `services/response_cache.py` for deterministic capabilities — `is_cacheable`

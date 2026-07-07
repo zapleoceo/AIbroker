@@ -574,6 +574,20 @@ def test_attempt_budget_is_key_sum_bounded_by_backstop():
     assert svc._attempt_budget([f"p{i}" for i in range(20)]) == svc._MAX_ATTEMPTS_ABS
 
 
+def test_call_timeout_uniform_across_capabilities_except_deep():
+    """REGRESSION (2026-07-07): per-call timeout raised 45s -> 60s, applied
+    uniformly to every key/provider via a single constant — chat:deep is the
+    sole capability-specific exception (nemotron legitimately runs minutes as
+    an async job)."""
+    import aibroker.services.llm_service as svc
+
+    assert svc._CALL_TIMEOUT_S == 60.0
+    for cap in ("chat:fast", "chat:smart", "chat:code", "chat:edit", "structured"):
+        assert svc._call_timeout(cap) == 60.0
+    assert svc._call_timeout("chat:deep") == svc._DEEP_CALL_TIMEOUT_S
+    assert svc._call_timeout("chat:deep") != 60.0
+
+
 async def test_run_chat_stops_at_absolute_backstop(monkeypatch):
     """A pathologically long chain of failing providers stops at the absolute
     backstop, not walking every provider × every key unbounded."""
