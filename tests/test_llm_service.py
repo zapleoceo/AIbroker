@@ -70,6 +70,17 @@ def test_classify_anthropic_credit_balance_exhausted():
     assert classify_provider_error(RuntimeError(real_message)) == "auth"
 
 
+def test_classify_zai_invalid_api_parameter():
+    """REGRESSION (2026-07-07): confirmed live during a real incident (cerebras/
+    groq daily quota exhaustion overflowed traffic onto zai) — key 'eatmeat' hit
+    this exact message on 3141 of ~3189 attempts in 30 min (98.5%), while every
+    other zai key on the same account type/model succeeded normally. Isolated
+    to one key, a persistent config problem not a shared outage — was generic
+    'error' (no mark_dead), hammered with zero backoff on every pick."""
+    real_message = "litellm.BadRequestError: ZaiException - Invalid API parameter, please check the documentation."
+    assert classify_provider_error(RuntimeError(real_message)) == "auth"
+
+
 def test_classify_deepseek_response_format_unavailable():
     """REGRESSION (2026-07-05): confirmed live — DeepSeek's 'This response_format
     type is unavailable now' hit every deepseek key identically (veranda,

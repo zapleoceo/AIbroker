@@ -720,6 +720,24 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > `mark_cooldown` using voyage's existing 60s `COOLDOWN_BASE_S` entry with
 > adaptive backoff, instead of an instant zero-backoff retry storm.
 
+> **`_AUTH_SIGNS` gains zai's "Invalid API parameter" (2026-07-07), found
+> live during a real incident.** cerebras+groq hit their daily token quota
+> unusually early (~10:38 UTC) and cooled down until UTC midnight — with
+> our two highest-capacity free providers gone, overflow traffic from Vera's
+> triage volume and Stepan2 hammered the remaining pool (72 keys: only 4
+> alive-with-no-cooldown at the worst point) hard enough to surface a
+> latent bug: zai key `eatmeat` failed 3141 of ~3189 attempts in 30 minutes
+> (98.5%) with `ZaiException - "Invalid API parameter, please check the
+> documentation."`, while every other zai key on the same account
+> type/model succeeded normally in the same window — a persistent
+> config problem isolated to that one key/account, not a shared zai outage
+> or a rate limit. Was generic `error` (no `mark_dead`), so it got hammered
+> with zero backoff on every pick that reached zai. `mark_dead` stops real
+> traffic on it; the monitor's own probe keeps checking and auto-revives it
+> once whatever's misconfigured on that account is fixed. The `zai/mbar`
+> key in the same incident showed a normal `RateLimitError` — already
+> correctly cooling down, no fix needed there, just genuine overload.
+
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
 `run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**

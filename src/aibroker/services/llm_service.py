@@ -124,6 +124,17 @@ _RATE_LIMIT_SIGNS = (
 # MONITOR_INTERVAL_S and auto-revives it the moment credits are topped up.
 _AUTH_SIGNS = (
     "credit balance is too low",
+    # 2026-07-07: confirmed live during a real incident (cerebras/groq daily
+    # quota exhaustion overflowed traffic onto zai) — zai key "eatmeat" hit
+    # this EXACT message on 3141 of ~3189 attempts in 30 min (98.5%, only 2
+    # successes), while every other zai key on the same account type/model
+    # succeeded normally. Isolated to one key/account, not a shared zai
+    # outage — a persistent config problem (unclear which param), not
+    # transient. Was generic 'error' (no cooldown, no mark_dead), so it got
+    # hammered on every pick with zero backoff. mark_dead stops real traffic;
+    # the monitor's own probe keeps checking and auto-revives it once
+    # whatever's misconfigured on that account is fixed.
+    "invalid api parameter",
 )
 
 
