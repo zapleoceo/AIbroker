@@ -123,6 +123,6 @@ instead of grepping timestamps against provider/model/workflow.
 | `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
 | `POST` | `/dashboard/projects/create` | HTML form handler |
 | `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
-| `GET` | `/dashboard/projects/{id}?range=24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
+| `GET` | `/dashboard/projects/{id}?range=1h\|4h\|12h\|24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
 | `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
 | `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |

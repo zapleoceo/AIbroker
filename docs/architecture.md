@@ -159,7 +159,7 @@ shape:
   `AsyncSession` can't run overlapping statements. `pool_size=10 +
   max_overflow=20` comfortably covers 6 concurrent connections per load.
 
-**Project drill-down** (`/dashboard/projects/{id}?range=24h|7d|30d`): KPI cards
+**Project drill-down** (`/dashboard/projects/{id}?range=1h|4h|12h|24h|7d|30d`): KPI cards
 (calls, spend, tokens, avg latency + success %, prompt-cache when active),
 breakdown cards by provider / capability / **workflow** / model, and a
 **latency-distribution histogram** (calls per latency bucket: `<250ms … >30s`,

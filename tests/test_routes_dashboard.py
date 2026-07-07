@@ -720,11 +720,16 @@ def test_parse_date_range_one_sided_inputs():
 
 
 def test_range_hours_table_complete():
-    """The 24h/7d/30d range pills must all map to valid hour windows."""
+    """The 1h/4h/12h/24h/7d/30d range pills must all map to valid hour windows."""
     from aibroker.routes.dashboard import _RANGE_HOURS
+    assert _RANGE_HOURS["1h"] == 1
+    assert _RANGE_HOURS["4h"] == 4
+    assert _RANGE_HOURS["12h"] == 12
     assert _RANGE_HOURS["24h"] == 24
     assert _RANGE_HOURS["7d"] == 168
     assert _RANGE_HOURS["30d"] == 720
+    # short-first ordering — drives the pill display order on the drill-down page
+    assert list(_RANGE_HOURS.keys()) == ["1h", "4h", "12h", "24h", "7d", "30d"]
 
 
 # ─── Project-detail rendering (unit, no DB) ────────────────────────────────
@@ -787,6 +792,9 @@ def test_render_project_detail_smoke():
     # it duplicated this exact split via a second query)
     assert "3 ok" in body and "1 err" in body
     # Range pills present + 24h active
+    assert 'href="?range=1h"' in body
+    assert 'href="?range=4h"' in body
+    assert 'href="?range=12h"' in body
     assert 'href="?range=24h"' in body
     assert 'href="?range=7d"' in body
     assert 'href="?range=30d"' in body

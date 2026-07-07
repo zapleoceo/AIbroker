@@ -1226,7 +1226,10 @@ async def dashboard(
 
 # ─── Project drill-down ─────────────────────────────────────────────────────
 
-_RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+_RANGE_HOURS = {
+    "1h": 1, "4h": 4, "12h": 12,
+    "24h": 24, "7d": 24 * 7, "30d": 24 * 30,
+}
 
 # Latency histogram: fixed edges (ms). width_bucket(x, edges) → 0..len(edges),
 # giving len(edges)+1 buckets that must line up 1:1 with the labels below.
