@@ -71,3 +71,27 @@ async def test_probe_unknown_provider_returns_alive():
     verdict, http, hint = await probe("nonexistent-provider", "fake-key")
     assert verdict == "alive"
     assert "no probe" in hint
+
+
+def test_probe_models_are_live_not_dead_or_paid():
+    """REGRESSION (2026-07-10): probes must target live/free models. voyage-3
+    billed real $ (zero free allocation) and nvidia's kimi-k2.6 404s (removed
+    from routing), which made a revoked nvidia key read as alive."""
+    from aibroker.providers.health_probes import _PROBES
+    _, _, _, voyage_body = _PROBES["voyage"]("k")
+    assert voyage_body["model"] == "voyage-4"
+    _, _, _, nvidia_body = _PROBES["nvidia"]("k")
+    assert "kimi" not in nvidia_body["model"]
+    assert "nemotron" in nvidia_body["model"]
+    # openai + cloudflare gaps: openai now has a probe (dead keys detectable).
+    assert "openai" in _PROBES
+
+
+def test_gemini_probe_key_in_header_not_url():
+    """REGRESSION: the gemini key must ride the x-goog-api-key header, never the
+    URL query string (a URL key can leak into logged request URLs)."""
+    from aibroker.providers.health_probes import _PROBES
+    _, url, headers, _ = _PROBES["gemini"]("SECRET_KEY")
+    assert "SECRET_KEY" not in url
+    assert "key=" not in url
+    assert headers.get("x-goog-api-key") == "SECRET_KEY"

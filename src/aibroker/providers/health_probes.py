@@ -196,15 +196,21 @@ _PROBES = {
                               "content-type": "application/json"},
                              {"model": "claude-haiku-4-5", "max_tokens": 1,
                               "messages": [{"role": "user", "content": "."}]}),
+    # Key goes in the x-goog-api-key header, NOT the URL query string — a key in
+    # the URL can leak into any proxy/exception that renders the request URL.
     "gemini": lambda k: ("POST",
-                          f"https://generativelanguage.googleapis.com/v1beta/models/"
-                          f"gemini-2.5-flash:generateContent?key={k}",
-                          {"content-type": "application/json"},
+                          "https://generativelanguage.googleapis.com/v1beta/models/"
+                          "gemini-2.5-flash:generateContent",
+                          {"content-type": "application/json", "x-goog-api-key": k},
                           {"contents": [{"parts": [{"text": "."}]}],
                            "generationConfig": {"maxOutputTokens": 1}}),
+    # voyage-4, NOT voyage-3: the voyage-3 family has zero free-token allocation
+    # (real $ from token 1 — see litellm_adapter migration 2026-07-07), so a
+    # probe on voyage-3 billed real money every monitor sweep. voyage-4 has the
+    # 200M/month free allocation.
     "voyage": lambda k: ("POST", "https://api.voyageai.com/v1/embeddings",
                           _bearer(k),
-                          {"model": "voyage-3", "input": "."}),
+                          {"model": "voyage-4", "input": "."}),
     "mistral": lambda k: ("POST", "https://api.mistral.ai/v1/chat/completions",
                            _bearer(k),
                            {"model": "mistral-small-latest",
@@ -229,13 +235,23 @@ _PROBES = {
                           {"model": "gpt-4o-mini",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
-    # Confirmed live 2026-07-04. Probes with kimi-k2.6, NOT the chat:deep
-    # default (nemotron-3-ultra) — nemotron took ~27s for 5 tokens on the free
-    # pool in a live test, which would stall the monitor's probe_all sweep
-    # across every other provider's keys every cycle.
+    # openai — probe with the cheapest current model. A revoked key 401s
+    # (correctly dead); a live key returns 200/429 (alive).
+    "openai": lambda k: ("POST", "https://api.openai.com/v1/chat/completions",
+                          _bearer(k),
+                          {"model": "gpt-4o-mini",
+                           "messages": [{"role": "user", "content": "."}],
+                           "max_tokens": 1}),
+    # Probe with nemotron — the ONLY confirmed-live nvidia model (it's the
+    # chat:deep default). It used to probe kimi-k2.6, but that model now 404s
+    # "Function not found for account" (removed from routing 2026-07-10), and a
+    # 404 fell through to the "alive/uncertain" catch-all — so a genuinely
+    # revoked nvidia key read as alive and never got flagged. nemotron is slow
+    # to GENERATE (~27s), but a revoked key 401s on auth *before* generation, so
+    # dead keys are still detected fast; only a live key's probe runs long.
     "nvidia": lambda k: ("POST", "https://integrate.api.nvidia.com/v1/chat/completions",
                           _bearer(k),
-                          {"model": "moonshotai/kimi-k2.6",
+                          {"model": "nvidia/nemotron-3-ultra-550b-a55b",
                            "messages": [{"role": "user", "content": "."}],
                            "max_tokens": 1}),
     # 2026-07-05: confirmed live — 200 OK on glm-4.5-flash (the only free
