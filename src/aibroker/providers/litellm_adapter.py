@@ -34,9 +34,17 @@ litellm.drop_params = True
 # Enforced by tests/test_providers.py::test_every_chain_pair_resolves_to_a_model.
 _OSS = "gpt-oss-120b"
 DEFAULT_MODEL: dict[str, dict[str, str]] = {
+    # 2026-07-10: cerebras added gemma-4-31b + zai-glm-4.7 to its free tier.
+    # gemma-4-31b is a fast NON-reasoning model (verified: instant, finish=stop) —
+    # unlike gpt-oss-120b which "thinks" ~16s even on a one-line prompt. So it's
+    # wired for the latency-sensitive utility lanes (translate, prefilter) where
+    # cerebras' gpt-oss was previously excluded/slow, giving those a free
+    # cerebras-speed option. zai-glm-4.7 evaluated but skipped: it's reasoning
+    # like gpt-oss (content=None at low max_tokens), no gain over what we have.
+    # chat:* stay on gpt-oss-120b (proven at volume).
     "cerebras": {"chat:fast": f"cerebras/{_OSS}", "chat:smart": f"cerebras/{_OSS}",
-                 "chat:code": f"cerebras/{_OSS}", "prefilter": f"cerebras/{_OSS}",
-                 "structured": f"cerebras/{_OSS}"},
+                 "chat:code": f"cerebras/{_OSS}", "prefilter": "cerebras/gemma-4-31b",
+                 "structured": f"cerebras/{_OSS}", "translate": "cerebras/gemma-4-31b"},
     "groq": {"chat:fast": f"groq/openai/{_OSS}", "chat:smart": f"groq/openai/{_OSS}",
              "chat:code": f"groq/openai/{_OSS}", "prefilter": f"groq/openai/{_OSS}",
              "structured": f"groq/openai/{_OSS}",

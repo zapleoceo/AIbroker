@@ -1,8 +1,13 @@
 # Routing, scopes & cost guard
 
-> **2026-07-10 (token-cost optimization)**: three DEFAULT_MODEL changes after a
+> **2026-07-10 (token-cost optimization)**: DEFAULT_MODEL + chain changes after a
 > live usage review of Stepan (project 4, hitting its $4/day cap with a ~40%
-> error rate):
+> error rate). Also: cerebras `gemma-4-31b` (new free non-reasoning model) wired
+> for `translate`/`prefilter` + added to the translate chain (fast, unlike
+> cerebras gpt-oss's ~16s think); `zai-glm-4.7` skipped (reasoning, no gain).
+> **anthropic REMOVED** from chat:fast/smart/code/edit/structured — its one key is
+> out of credit ("credit balance is too low") so it only flapped errors;
+> DEFAULT_MODEL entries kept, re-add to the chains once the balance is topped up.
 > - **deepseek `deepseek-chat`/`deepseek-coder` → `deepseek-v4-flash`**: the old
 >   models are retired from DeepSeek's API (`GET /models` lists only v4-flash +
 >   v4-pro; chat deprecates 2026-07-24). v4-flash is the cheaper successor
