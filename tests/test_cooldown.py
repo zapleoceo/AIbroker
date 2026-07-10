@@ -166,20 +166,28 @@ async def test_cooldown_until_short_hint_escalates_when_key_keeps_failing():
     literally re-picked the dead key ~100x/hr — burning attempts, inflating
     errors, starving reserve keys. cooldown_until now floors a short hint at the
     escalating adaptive backoff, so a repeatedly-failing key gets parked."""
+    import os as _os
     from datetime import datetime as _dt
 
     from sqlalchemy import insert
 
+    from aibroker.crypto import encrypt
     from aibroker.db import get_session
-    from aibroker.db.models import UsageLogRow
+    from aibroker.db.models import ApiKeyRow, UsageLogRow
     from aibroker.routing.cooldown import cooldown_until
 
     async with get_session() as s:
+        key = ApiKeyRow(provider="gemini", label=f"cd-{_os.urandom(4).hex()}",
+                        tier="free", scopes=["llm:chat"],
+                        token_encrypted=encrypt("x"))
+        s.add(key)
+        await s.flush()
+        kid = key.id
         for _ in range(6):  # 6 recent 429s → adaptive escalates well past a 5s hint
             await s.execute(insert(UsageLogRow).values(
-                api_key_id=90210, provider="gemini", status="error",
+                api_key_id=kid, provider="gemini", status="error",
                 http_status=429, created_at=_dt.now(UTC).replace(tzinfo=None)))
-    until = await cooldown_until(90210, "gemini", "RESOURCE_EXHAUSTED retry in 5s.")
+    until = await cooldown_until(kid, "gemini", "RESOURCE_EXHAUSTED retry in 5s.")
     delta = (until - datetime.now(UTC)).total_seconds()
     assert delta > 120   # 5s hint ignored — parked on the escalated backoff
 
