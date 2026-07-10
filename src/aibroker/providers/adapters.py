@@ -29,13 +29,14 @@ class ProviderAdapter:
 
 class _GeminiAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
-        # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat
-        # the whole budget and truncate the object mid-string. Disable thinking
-        # so the JSON fits (mirrors Stepan's thinkingBudget=0). Other providers
-        # ignore reasoning_effort=disable — that's why it's scoped to gemini.
-        rf = kwargs.get("response_format")
-        if rf and rf.get("type") in ("json_object", "json_schema"):
-            kwargs["reasoning_effort"] = "disable"
+        # Gemini 2.5 "thinks" against max_tokens. On JSON that truncates the
+        # object mid-string; on any reply it adds latency that overran our call
+        # timeout (measured Timeouts on gemini-2.5-flash chat:fast/smart, 2026-
+        # 07-10). The broker never wants gemini to deep-reason — long reasoning
+        # is the chat:deep/nvidia lane — so disable thinking UNCONDITIONALLY
+        # (was JSON-only). Mirrors Stepan's thinkingBudget=0. Other providers
+        # ignore reasoning_effort=disable, so it stays scoped to gemini.
+        kwargs["reasoning_effort"] = "disable"
 
 
 class _DeepseekAdapter(ProviderAdapter):

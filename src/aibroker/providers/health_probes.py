@@ -186,11 +186,12 @@ _PROBES = {
                               {"model": "openai/gpt-oss-120b:free",
                                "messages": [{"role": "user", "content": "."}],
                                "max_tokens": 1}),
-    # deepseek-v4-flash, NOT deepseek-chat: the latter is retired from the API
-    # (deprecates 2026-07-24) — probing it would 404 a live key after that date.
+    # deepseek-chat (matches DEFAULT_MODEL — reverted from v4-flash, which is a
+    # reasoning model that broke our JSON replies; see litellm_adapter). Watch
+    # the ~2026-07-24 deprecation — swap the probe with the model.
     "deepseek": lambda k: ("POST", "https://api.deepseek.com/chat/completions",
                             _bearer(k),
-                            {"model": "deepseek-v4-flash",
+                            {"model": "deepseek-chat",
                              "messages": [{"role": "user", "content": "."}],
                              "max_tokens": 1}),
     "anthropic": lambda k: ("POST", "https://api.anthropic.com/v1/messages",

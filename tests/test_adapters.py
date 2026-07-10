@@ -34,18 +34,17 @@ def test_schema_capable_providers_keep_json_schema():
     assert _prepared("gemini", response_format=dict(_SCHEMA))["response_format"] == _SCHEMA
 
 
-def test_gemini_disables_thinking_on_json():
-    """Gemini 2.5 'thinks' against max_tokens and truncates JSON — the adapter
-    sets reasoning_effort=disable for any JSON response_format."""
+def test_gemini_disables_thinking_unconditionally():
+    """2026-07-10: gemini thinking is disabled on EVERY call, not just JSON —
+    its thinking truncated JSON AND added latency that overran the call timeout.
+    The broker never wants gemini to deep-reason (that's chat:deep/nvidia)."""
     assert _prepared("gemini", response_format={"type": "json_object"}
                      )["reasoning_effort"] == "disable"
     assert _prepared("gemini", response_format=dict(_SCHEMA)
                      )["reasoning_effort"] == "disable"
-
-
-def test_gemini_no_thinking_flag_without_json():
-    assert "reasoning_effort" not in _prepared("gemini")
-    assert "reasoning_effort" not in _prepared("gemini", response_format=None)
+    # non-JSON and no-format calls also get thinking disabled now
+    assert _prepared("gemini")["reasoning_effort"] == "disable"
+    assert _prepared("gemini", response_format=None)["reasoning_effort"] == "disable"
 
 
 def test_non_special_provider_is_noop():

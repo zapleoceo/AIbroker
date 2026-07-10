@@ -71,7 +71,7 @@ computed and discarded:
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | — | — |
 | **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — |
 | **gemini** | gemini-2.5-flash | gemini-2.5-flash | — | gemini-2.5-flash | — |
-| **deepseek** | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | — | — |
+| **deepseek** | deepseek-chat | deepseek-chat | deepseek-chat | — | — |
 | **openrouter** | openai/gpt-oss-120b:free | openai/gpt-oss-120b:free | — | — | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | claude-sonnet-5 | claude-sonnet-5 | — |
 | **openai** | gpt-5-mini | gpt-5 | — | — | — |

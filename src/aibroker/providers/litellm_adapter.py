@@ -65,18 +65,22 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash",
                "vision": "gemini/gemini-2.5-flash"},
-    # 2026-07-10: deepseek-chat / deepseek-coder RETIRED from DeepSeek's API
-    # (GET /models returns only deepseek-v4-flash + deepseek-v4-pro; deepseek-chat
-    # deprecates 2026-07-24). Migrated to deepseek-v4-flash — the direct
-    # successor to deepseek-chat and HALF the price ($0.14/$0.28 per 1M vs
-    # $0.28/$0.42; cached input $0.0028 vs $0.028, 10x cheaper — decisive for our
-    # repeated-context RAG traffic). v4-pro is the pricier reasoning tier (3x),
-    # not needed for the sales-chat / triage workload. Verified live via the paid
-    # key + litellm prices it correctly (cost-guard/cap stays accurate).
-    "deepseek": {"chat:fast": "deepseek/deepseek-v4-flash",
-                 "chat:smart": "deepseek/deepseek-v4-flash",
-                 "chat:edit": "deepseek/deepseek-v4-flash",
-                 "chat:code": "deepseek/deepseek-v4-flash"},
+    # 2026-07-10: REVERTED to deepseek-chat after a live-data regression.
+    # Briefly moved to deepseek-v4-flash (cheaper), but v4-flash is a REASONING
+    # model — its hidden reasoning_content eats the max_tokens budget, so on our
+    # short-max_tokens JSON replies the actual content is truncated/empty →
+    # InvalidJSON (measured ~49% on chat:fast, 12% on chat:smart) + slower →
+    # Timeout. reasoning_effort="disable" does NOT stop v4-flash thinking
+    # (verified). deepseek-chat is NON-reasoning and returns clean JSON at any
+    # max_tokens (verified: valid JSON at mt=120 vs v4-flash empty). It still
+    # works today though DeepSeek's /models only lists v4-* and flags chat for
+    # deprecation ~2026-07-24 — MUST pick a non-reasoning JSON-reliable paid
+    # fallback (or a max_tokens floor for v4-flash) before then. deepseek-coder
+    # is gone → chat:code also uses deepseek-chat.
+    "deepseek": {"chat:fast": "deepseek/deepseek-chat",
+                 "chat:smart": "deepseek/deepseek-chat",
+                 "chat:edit": "deepseek/deepseek-chat",
+                 "chat:code": "deepseek/deepseek-chat"},
     "openrouter": {"chat:fast": f"openrouter/openai/{_OSS}:free",
                    "chat:smart": f"openrouter/openai/{_OSS}:free",
                    "chat:code": f"openrouter/openai/{_OSS}:free",

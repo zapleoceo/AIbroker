@@ -96,14 +96,16 @@ def test_default_model_has_voyage_embedding():
     assert "embedding" in DEFAULT_MODEL["voyage"]
 
 
-def test_deepseek_uses_live_v4_flash_not_retired_chat_or_coder():
-    """REGRESSION (2026-07-10): deepseek-chat/deepseek-coder are retired from the
-    DeepSeek API (GET /models returns only v4-flash + v4-pro; chat deprecates
-    2026-07-24). Every deepseek slot must be a live model, and v4-flash is the
-    cheaper direct successor to chat ($0.14/$0.28 vs $0.28/$0.42)."""
+def test_deepseek_stays_on_nonreasoning_chat_not_v4_flash():
+    """REGRESSION (2026-07-10): deepseek-v4-flash is a REASONING model — its
+    hidden reasoning eats the max_tokens budget, truncating our short JSON
+    replies (measured ~49% InvalidJSON on chat:fast) + Timeouts. deepseek-chat
+    is non-reasoning and returns clean JSON at any max_tokens, so every deepseek
+    slot stays on it. (Watch the ~07-24 deprecation — needs a non-reasoning
+    JSON-reliable replacement, NOT a blind swap to a reasoning model.)"""
     for cap, model in DEFAULT_MODEL["deepseek"].items():
-        assert model == "deepseek/deepseek-v4-flash", cap
-        assert "deepseek-chat" not in model and "deepseek-coder" not in model
+        assert model == "deepseek/deepseek-chat", cap
+        assert "v4-flash" not in model and "v4-pro" not in model
 
 
 def test_gemini_smart_is_flash_not_starved_pro():
@@ -282,7 +284,7 @@ async def test_call_llm_disables_gemini_thinking_for_json():
     assert captured.get("reasoning_effort") == "disable"
 
 
-async def test_call_llm_no_thinking_disable_for_non_gemini_or_non_json():
+async def test_call_llm_thinking_disable_is_gemini_only():
     captured = {}
 
     async def fake_acompletion(**kwargs):
@@ -295,16 +297,16 @@ async def test_call_llm_no_thinking_disable_for_non_gemini_or_non_json():
 
     with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
                 side_effect=fake_acompletion):
-        # non-gemini + JSON → no reasoning_effort
+        # non-gemini (cerebras) → never gets reasoning_effort, even on JSON
         await call_llm(model="cerebras/gpt-oss-120b",
                        messages=[{"role": "user", "content": "x"}], api_key="k",
                        response_format={"type": "json_object"})
         assert "reasoning_effort" not in captured
         captured.clear()
-        # gemini + no JSON → no reasoning_effort
+        # gemini + no JSON → NOW disabled unconditionally (2026-07-10)
         await call_llm(model="gemini/gemini-2.5-flash",
                        messages=[{"role": "user", "content": "x"}], api_key="k")
-    assert "reasoning_effort" not in captured
+    assert captured["reasoning_effort"] == "disable"
 
 
 async def test_call_llm_extra_kwargs_passed_through():
