@@ -128,3 +128,56 @@ async def test_requeue_stale_running_reclaims_dead_worker_job():
         assert row.status == "pending"
         assert row.started_at is None
         assert row.retry_count == 1
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")
+async def test_drain_once_requeues_when_run_chat_raises():
+    """REGRESSION (2026-07-10): an unexpected exception from run_chat must not
+    kill the job — it re-queues (retry_count+1) so the queue's 'always reaches a
+    terminal or requeued state' guarantee holds even on a crash, not just on a
+    clean None."""
+    pid = await _make_project(["llm:chat"])
+    jid = await _enqueue(pid)
+    with patch("aibroker.services.job_queue.run_chat",
+               AsyncMock(side_effect=RuntimeError("boom"))):
+        assert await drain_once() == 1
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "pending"
+        assert row.retry_count == 1
+        assert row.started_at is None
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session claim state needs Postgres")
+async def test_finish_claim_guard_ignores_stale_worker():
+    """REGRESSION (2026-07-10): a stale worker returning late must not clobber a
+    job another worker has since re-claimed. _finish with a mismatched
+    expect_started_at is a no-op; with the matching token it writes."""
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    from aibroker.services.deep_jobs import _finish
+
+    pid = await _make_project(["llm:chat"])
+    jid = await _enqueue(pid)
+    live_started = datetime(2026, 6, 1, 12, 0, 0)
+    async with get_session() as s:
+        await s.execute(
+            text("UPDATE deep_jobs SET status='running', started_at=:t WHERE id=:id"),
+            {"t": live_started, "id": jid},
+        )
+    # Stale worker (claimed with an OLDER started_at) tries to finish → ignored.
+    await _finish(jid, status="done", result_text="STALE",
+                  expect_started_at=datetime(2026, 6, 1, 11, 0, 0))
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "running"
+        assert row.result_text is None
+    # The live claim (matching token) writes.
+    await _finish(jid, status="done", result_text="LIVE",
+                  expect_started_at=live_started)
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "done"
+        assert row.result_text == "LIVE"

@@ -522,12 +522,14 @@ async def test_deep_poll_error_job_returns_error_message():
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="cross-session read-after-write needs Postgres")
-async def test_deep_poll_stale_pending_job_times_out():
-    """A job stuck 'pending' past _STALE_AFTER_S (worker restarted mid-call)
-    resolves to a timeout error on poll instead of hanging forever."""
+async def test_deep_poll_long_pending_job_stays_pending():
+    """REGRESSION (2026-07-10): a long-pending job is NOT failed by poll — poll
+    is a pure read. get_job used to flip a >20-min pending row to error, which
+    raced the dispatcher and killed jobs still legitimately retrying under
+    backoff. The dispatcher (job_queue) owns give-up now (after _MAX_RETRIES)."""
     from datetime import UTC, datetime, timedelta
     plain, pid = await _make_project(["llm:deep"])
-    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=25)
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=45)
     async with get_session() as s:
         await s.execute(insert(DeepJobRow).values(
             id=5005, project_id=pid, status="pending",
@@ -536,8 +538,13 @@ async def test_deep_poll_stale_pending_job_times_out():
     r = client.get("/v1/deep/5005", headers={"X-Project-Key": plain})
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "error"
-    assert "timed out" in data["error"]
+    assert data["status"] == "pending"
+    assert data["poll_after_s"] is not None
+    # unchanged in the DB — poll wrote nothing
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, 5005)
+        assert row.status == "pending"
+        assert row.error_message is None
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")

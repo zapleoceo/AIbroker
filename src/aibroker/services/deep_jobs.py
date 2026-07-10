@@ -12,13 +12,11 @@ endpoint at its own pace and get a guaranteed answer (exhaustive rotation, no
 held connection). Sync endpoints stay — this is additive, backward-compatible.
 `submit_deep_job` is a thin wrapper over `submit_job(capability="chat:deep")`.
 
-Submit creates a `deep_jobs` row and schedules the real call in the background
-(asyncio.create_task on whichever uvicorn worker handled the submit) — the HTTP
-response returns immediately. Poll reads the row from Postgres, so it works no
-matter which worker answers; no in-process handle needs to survive.
-
-A worker restart mid-job leaves the row stuck at "pending" — `get_job` lazily
-marks anything past `_STALE_AFTER_S` a timeout error, no separate sweeper.
+Submit only ENQUEUES a `pending` row and returns its id immediately; the
+dispatcher loop (services/job_queue.py) claims and runs it. Poll reads the row
+from Postgres, so it works no matter which worker answers; no in-process handle
+needs to survive. All lifecycle transitions (running → done/error, requeue,
+give-up after retries) are owned by the dispatcher — `get_job` is a pure read.
 """
 from __future__ import annotations
 
@@ -32,10 +30,6 @@ from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 
 log = logging.getLogger(__name__)
-
-# Longest observed real call was ~8 min; give real margin before calling a
-# stuck "pending" row a timeout rather than a still-legitimately-running job.
-_STALE_AFTER_S = 20 * 60
 
 
 # BIGSERIAL id needs a real autoincrementing PK — SQLite doesn't do that for
@@ -97,10 +91,17 @@ async def _finish(  # pragma: no cover — job execution is the dispatcher's (jo
     result_text: str | None = None,
     result_meta: dict[str, Any] | None = None,
     error_message: str | None = None,
+    expect_started_at: datetime | None = None,
 ) -> None:
     async with get_session() as s:
         row = await s.get(DeepJobRow, job_id)
         if row is None:  # pragma: no cover — job row deleted underneath us
+            return
+        # Claim guard: if the caller passes the started_at it claimed the job
+        # with and the row now holds a different value, the job was re-queued
+        # (started_at→NULL) and re-claimed by another worker — this is a stale
+        # worker returning late; don't clobber the live claim's result.
+        if expect_started_at is not None and row.started_at != expect_started_at:
             return
         row.status = status
         row.result_text = result_text
@@ -110,37 +111,17 @@ async def _finish(  # pragma: no cover — job execution is the dispatcher's (jo
 
 
 async def get_job(job_id: int, project_id: int) -> DeepJobRow | None:
-    """Fetch a job, scoped to the caller's own project. Lazily resolves a
-    stuck "pending" row into a timeout error instead of polling forever."""
+    """Fetch a job, scoped to the caller's own project. Pure read — every
+    lifecycle transition (running → done/error, requeue, give-up after
+    retries) is owned by the dispatcher (services/job_queue.py). It used to
+    lazily flip a stale `pending` row to error, but that raced the dispatcher
+    and prematurely failed jobs still legitimately retrying under backoff."""
     async with get_session() as s:
         row = (await s.execute(
             select(DeepJobRow).where(
                 DeepJobRow.id == job_id, DeepJobRow.project_id == project_id
             )
         )).scalar_one_or_none()
-        # coverage.py has a measurement gap right after this await (an
-        # SQLAlchemy async/greenlet boundary) — test_deep_poll_404_for_unknown_job
-        # exercises this branch for real (asserts a 404), it just doesn't
-        # register as hit.
-        if row is None:  # pragma: no cover
-            return None  # pragma: no cover
-        # A row read back here was inserted by a SEPARATE session/request
-        # (the submit call, or a test's direct insert) — on SQLite that
-        # cross-session read doesn't see the row at all (each connection to
-        # `:memory:` is effectively isolated), so everything below only runs
-        # for real on Postgres. Covered by test_deep_poll_pending_job_*,
-        # test_deep_poll_scoped_to_owning_project, test_deep_poll_done_job_*,
-        # test_deep_poll_error_job_*, test_deep_poll_stale_pending_job_times_out
-        # (all skipif ON_SQLITE).
-        if row.status == "pending":  # pragma: no cover
-            age_s = (datetime.now(UTC).replace(tzinfo=None) - row.created_at).total_seconds()
-            if age_s > _STALE_AFTER_S:
-                row.status = "error"
-                row.error_message = (
-                    f"timed out after {int(age_s)}s with no result — the worker "
-                    "handling this job likely restarted mid-call"
-                )
-                row.completed_at = datetime.now(UTC).replace(tzinfo=None)
         return row  # pragma: no cover
 
 

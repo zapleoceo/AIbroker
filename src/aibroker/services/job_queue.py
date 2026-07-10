@@ -40,10 +40,14 @@ log = logging.getLogger(__name__)
 _MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "8"))
 _POLL_INTERVAL_S = float(os.environ.get("JOB_POLL_INTERVAL_S", "1.0"))
 _MAX_RETRIES = int(os.environ.get("JOB_MAX_RETRIES", "8"))
-# A `running` row whose worker died mid-call is re-queued after this long.
-# Comfortably past nemotron's ~8-min worst case so we don't re-queue a job
-# that's still legitimately running.
-_STALE_RUNNING_S = 20 * 60
+# A `running` row whose worker died mid-call is re-queued after this long. Must
+# sit safely ABOVE the longest a live worker can hold a job: run_chat's own hard
+# backstop is _DEEP_CALL_TIMEOUT_S (19 min via asyncio.wait_for), so a live
+# worker always returns within ~19 min. 25 min gives a 6-min margin — a job
+# still `running` past it means the worker really died, not that it's slow.
+# (At 20 min the margin was ~1 min: a legit 19-min deep call could be re-queued
+# and double-executed. See fix 2026-07-10.)
+_STALE_RUNNING_S = 25 * 60
 
 
 def _backoff_s(retry_count: int) -> int:
@@ -156,6 +160,7 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             "cache_read_tokens": outcome.cache_read_tokens,
             "cache_write_tokens": outcome.cache_write_tokens,
         },
+        expect_started_at=row.started_at,
     )
 
 
