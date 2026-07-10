@@ -206,14 +206,25 @@ async def test_project_block_does_not_corrupt_uncapped_paid_key_counter():
     """A paid key with NO per-key cap, blocked by the PROJECT cap: reserve took
     nothing (no per-key cap), so the project-block refund must NOT decrement the
     key's daily counter. Pre-fix it wrongly dropped 1.0 → 0.95."""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
-    from aibroker.db.models import UsageLogRow
-    proj = _project(cap=0.01)
+    from aibroker.db.models import ProjectRow, UsageLogRow
+    # A REAL persisted project (usage_log.project_id has an FK to projects).
+    async with get_session() as s:
+        pr = await s.execute(insert(ProjectRow).returning(ProjectRow.id), {
+            "name": f"p-{os.urandom(3).hex()}", "project_key_hash": "x",
+            "project_key_prefix": "x", "allowed_scopes": ["llm:chat"],
+            "daily_cost_cap_usd": 0.01, "is_active": True, "notes": "",
+        })
+        pid = int(pr.scalar_one())
+    proj = ProjectRow(
+        id=pid, name="x", project_key_hash="x", project_key_prefix="x",
+        allowed_scopes=["llm:chat"], daily_cost_cap_usd=0.01, is_active=True, notes="",
+    )
     key = await _add_key(tier="paid", daily_cost_cap_usd=None, daily_cost_used_usd=1.0)
     async with get_session() as s:
-        s.add(UsageLogRow(project_id=proj.id, provider="x", status="ok",
-                          cost_usd=0.02, created_at=datetime.utcnow()))
+        s.add(UsageLogRow(project_id=pid, provider="x", status="ok",
+                          cost_usd=0.02, created_at=datetime.now(UTC).replace(tzinfo=None)))
     with pytest.raises(CostGuardError) as exc:
         await reserve_cost(api_key=key, project=proj, estimated_cost=0.05)
     assert exc.value.kind == "project"
