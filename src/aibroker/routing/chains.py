@@ -37,7 +37,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        "github", "sambanova", "zai",
+        "sambanova", "zai",
         # 2026-07-07: cloudflare (gpt-oss-120b) — confirmed live with the
         # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
         # idle capacity (only vision was wired).
@@ -58,7 +58,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        "github", "sambanova",
+        "sambanova",
         # 2026-07-10: nvidia REMOVED from chat:smart. Its deepseek-v4-pro model
         # now times out on 100% of calls (~91s wall, confirmed live, past our
         # 60s ceiling) — the free NVIDIA pool is oversubscribed. Pure wasted
@@ -72,7 +72,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
         "mistral",
-        "github", "sambanova",
+        "sambanova",
         "cloudflare",
         # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
         "deepseek", "openai",
@@ -104,7 +104,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        "github", "sambanova", "zai",
+        "sambanova", "zai",
         "cloudflare",
     ],
     # Trivial utility task (message translation): does NOT need premium/reasoning

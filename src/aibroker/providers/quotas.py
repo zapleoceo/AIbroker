@@ -72,15 +72,6 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     # one-time trial grant — but a hard 20 req/day per key.
     "sambanova": Quota(req_per_day=20,
                         doc="https://docs.sambanova.ai/cloud/docs/get-started/rate-limits"),
-    # Confirmed live 2026-07-04 (gpt-4o-mini, real token). The response
-    # headers (x-ratelimit-limit-requests: 20000, renewalperiod: 60s) are the
-    # backend Azure deployment's raw capacity, NOT the per-account cap GitHub
-    # actually enforces — they're misleading and must not be auto-discovered
-    # (github deliberately excluded from extract_quota_headers' openai-compat
-    # family). Using GitHub's own documented per-account daily cap for the
-    # Free Copilot tier / low-tier models instead: 150 req/day.
-    "github": Quota(req_per_day=150,
-                     doc="https://docs.github.com/en/github-models/prototyping-with-ai-models#rate-limits"),
     # Confirmed live 2026-07-04, but genuinely uncappable from here: NVIDIA
     # exposes NO rate-limit headers at all (only nvcf-status: fulfilled), and
     # the free tier is 1,000 ONE-TIME inference credits (not a daily/monthly

@@ -11,6 +11,9 @@
 > **cloudflare added to chat:smart + chat:code** — same free @cf/openai/gpt-oss-120b
 > it already serves on chat:fast (quality-neutral, same model family as
 > cerebras/groq smart), extra free burst before the paid tail.
+> **github REMOVED entirely** (provider + key + chains/DEFAULT_MODEL/quotas/probe) —
+> free tier is ~150 req/day on 1 key with a non-UTC reset window, so the key sat
+> exhausted (155 attempts / 0 success / all 429 on its last full day). Dead weight.
 > - **deepseek `deepseek-chat`/`deepseek-coder` → `deepseek-v4-flash`**: the old
 >   models are retired from DeepSeek's API (`GET /models` lists only v4-flash +
 >   v4-pro; chat deprecates 2026-07-24). v4-flash is the cheaper successor
@@ -61,13 +64,13 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → **cloudflare** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. cloudflare = gpt-oss-120b (2026-07-07). nvidia REMOVED 2026-07-10 (kimi-k2.6 → 404). |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last. nvidia REMOVED 2026-07-10 (deepseek-v4-pro → 91s timeout). |
-| `chat:code` | cerebras → groq → openrouter → gemini → mistral → **github** → **sambanova** → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry |
-| `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
-| `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
-| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → **cloudflare** | `llm:chat` | No paid; cheap pre-filter |
-| `translate` | mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first (mistral-small / gemini-flash / cohere-r7b, ~0.3-2s). mistral leads — as reliable at "translate, don't answer" as gpt-oss but 40x faster; cohere-r7b is fastest (~300ms) but occasionally answers instead of translating on ambiguous input, so it's a fallback. cerebras/groq gpt-oss is a REASONING model that "thinks" ~16s on one phrase → starved the caller's timeout. Reuses `llm:chat` keys but hits models the chat chains reach last, so it barely competes with live replies. |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare → deepseek → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last. cloudflare = gpt-oss-120b. nvidia REMOVED (kimi-k2.6 → 404), anthropic REMOVED (out of credit), github REMOVED (exhausted, 0 success) — all 2026-07-10. |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → cloudflare → openai → deepseek | `llm:chat` | Strict free-first; deepseek-v4-flash last. gemini = 2.5-flash (2026-07-10). cloudflare added for free burst; nvidia/anthropic/github removed 2026-07-10. |
+| `chat:code` | cerebras → groq → openrouter → gemini → mistral → sambanova → cloudflare → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry. anthropic/github removed 2026-07-10. |
+| `chat:edit` | **gemini → deepseek** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-v4-flash. anthropic dropped 2026-07-10 (out of credit). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
+| `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only** — `POST /v1/chat` returns **410 Gone** (all capabilities); use `POST /v1/jobs?capability=chat:deep` (or `/v1/deep`) + `GET /v1/jobs/{id}`. |
+| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras = gemma-4-31b (fast non-reasoning, 2026-07-10). github removed. |
+| `translate` | cerebras → mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
 | `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare tried and pulled same day 2026-07-04, see below. |
 | `transcription` | groq → openai | `llm:audio` | Whisper: groq whisper-large-v3-turbo (free) → openai whisper-1. `/v1/transcribe` route |

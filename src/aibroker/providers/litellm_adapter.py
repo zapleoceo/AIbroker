@@ -142,15 +142,11 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                   "chat:smart": "sambanova/Meta-Llama-3.3-70B-Instruct",
                   "chat:code": "sambanova/Meta-Llama-3.3-70B-Instruct",
                   "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
-    # 2026-07-04: GitHub Models (models.inference.ai.azure.com via LiteLLM's
-    # github/ prefix) — confirmed live with a real token (200 OK, gpt-4o-mini).
-    # gpt-4o-mini everywhere, not gpt-4o: GitHub's "high" tier models (gpt-4o)
-    # have a much stricter free-account daily cap than "low" tier (gpt-4o-mini)
-    # per GitHub's own docs — gpt-4o unverified, don't default chat:smart to it.
-    "github": {"chat:fast": "github/gpt-4o-mini",
-               "chat:smart": "github/gpt-4o-mini",
-               "chat:code": "github/gpt-4o-mini",
-               "prefilter": "github/gpt-4o-mini"},
+    # 2026-07-10: GitHub Models REMOVED entirely. Its free tier is tiny (~150
+    # req/day on 1 key) and its reset window doesn't align with UTC midnight, so
+    # the one key sat exhausted — 155 attempts / 0 success / all 429 on the last
+    # full day — pure dead-weight. Key deleted from the DB and provider dropped
+    # from chains/quotas/probes.
     # 2026-07-04/05: nvidia — no LiteLLM pricing entry (cost_usd always 0;
     # daily_limit is the only real guard), no card on file (worst case is a
     # 402, not a real charge).

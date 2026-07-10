@@ -231,12 +231,6 @@ _PROBES = {
                              {"model": "Meta-Llama-3.3-70B-Instruct",
                               "messages": [{"role": "user", "content": "."}],
                               "max_tokens": 1}),
-    # GitHub Models — routes through Azure AI Inference. Confirmed live 2026-07-04.
-    "github": lambda k: ("POST", "https://models.inference.ai.azure.com/chat/completions",
-                          _bearer(k),
-                          {"model": "gpt-4o-mini",
-                           "messages": [{"role": "user", "content": "."}],
-                           "max_tokens": 1}),
     # openai — probe with the cheapest current model. A revoked key 401s
     # (correctly dead); a live key returns 200/429 (alive).
     "openai": lambda k: ("POST", "https://api.openai.com/v1/chat/completions",

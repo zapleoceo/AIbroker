@@ -560,7 +560,6 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div class="prov">openrouter <span class="badge">free</span></div>
       <div class="prov">voyage <span class="badge">free</span></div>
       <div class="prov">sambanova <span class="badge">free</span></div>
-      <div class="prov">github <span class="badge">free</span></div>
       <div class="prov">nvidia nim <span class="badge">free</span></div>
       <div class="prov">cloudflare <span class="badge">free</span></div>
       <div class="prov">zai <span class="badge">free</span></div>
