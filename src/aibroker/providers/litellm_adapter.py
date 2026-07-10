@@ -14,6 +14,7 @@ from typing import Any
 
 import litellm
 
+from aibroker.providers.adapters import adapter_for
 from aibroker.providers.peak_pricing import peak_multiplier
 
 log = logging.getLogger(__name__)
@@ -156,21 +157,11 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     "zai": {"chat:fast": "zai/glm-4.5-flash", "prefilter": "zai/glm-4.5-flash"},
 }
 
-# cloudflare needs its account ID embedded in the request URL — LiteLLM has no
-# separate kwarg for it, just a full api_base override that already includes
-# the model path prefix. See ApiKeyRow.account_id.
-_CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/"
-
-
 def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] | None:
-    """Provider-specific `extra` kwargs for `call_llm`, beyond model/api_key.
-
-    Only cloudflare needs this right now. Returns None when there's nothing
-    to add (including cloudflare with no account_id set — that call will fail
-    downstream with a clear connection error rather than silently here)."""
-    if provider == "cloudflare" and account_id:
-        return {"api_base": _CLOUDFLARE_API_BASE.format(account_id=account_id)}
-    return None
+    """Per-KEY `extra` kwargs for `call_llm`, beyond model/api_key — thin
+    delegate to the provider's adapter (cloudflare's account-scoped api_base is
+    the only one today). See providers/adapters.py."""
+    return adapter_for(provider).key_extra(account_id)
 
 
 def model_for(provider: str, capability: str) -> str | None:
@@ -266,33 +257,6 @@ def _cache_tokens(usage: Any) -> tuple[int, int]:
     return read, write
 
 
-# Providers that reject the strict `{"type":"json_schema"}` response_format
-# sub-type but DO accept `{"type":"json_object"}`. deepseek confirmed live
-# (2026-07-07): a json_schema request 400s with "This response_format type is
-# unavailable now" on every key (~2414 triage calls/6h wasted), while plain
-# json_object returns valid JSON fine. litellm.supports_response_schema is NOT
-# a reliable gate here — it reports deepseek supports json_schema (stale/
-# optimistic). Downgrading to json_object keeps the JSON intent; the broker's
-# post-hoc JSON gate (run_chat._is_valid_json) plus caller-side validation
-# replace the lost server-side grammar enforcement. Re-remove deepseek here if
-# it re-enables json_schema.
-_JSON_SCHEMA_UNSUPPORTED: frozenset[str] = frozenset({"deepseek"})
-
-
-def _effective_response_format(
-    model: str, response_format: dict[str, Any] | None
-) -> dict[str, Any] | None:
-    """Downgrade a strict json_schema request to json_object for providers that
-    reject the json_schema sub-type (see _JSON_SCHEMA_UNSUPPORTED). No-op for
-    non-JSON, for json_object, and for providers that support json_schema."""
-    if not response_format or response_format.get("type") != "json_schema":
-        return response_format
-    provider = model.split("/", 1)[0]
-    if provider in _JSON_SCHEMA_UNSUPPORTED:
-        return {"type": "json_object"}
-    return response_format
-
-
 async def call_llm(
     *,
     model: str,
@@ -325,16 +289,11 @@ async def call_llm(
     if timeout is not None:
         kwargs["timeout"] = timeout
     if response_format:
-        rf = _effective_response_format(model, response_format)
-        kwargs["response_format"] = rf
-        # Gemini 2.5 "thinks" against max_tokens; on a JSON request that can eat
-        # the whole budget and truncate the object mid-string. Disable thinking
-        # so the JSON fits (mirrors Stepan's thinkingBudget=0). Other providers
-        # ignore reasoning_effort=disable, so gate it to gemini.
-        if model.startswith("gemini/") and rf.get("type") in (
-            "json_object", "json_schema"
-        ):
-            kwargs["reasoning_effort"] = "disable"
+        kwargs["response_format"] = response_format
+    # Per-provider request quirks (json_schema downgrade, gemini thinking-off,
+    # …) live in one adapter each — see providers/adapters.py. adapter.prepare
+    # mutates kwargs in place; the default adapter is a no-op.
+    adapter_for(model.split("/", 1)[0]).prepare(model, kwargs)
     if extra:
         kwargs.update(extra)
 

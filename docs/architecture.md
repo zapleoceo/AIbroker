@@ -81,8 +81,8 @@ claimed chat job:
      reserved keys are picked last (the reserved-lane mechanism). Touches
      `last_used_at` in the same TX.
    - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
-   - `litellm_adapter.call_llm` invokes LiteLLM (gemini+JSON also gets
-     `reasoning_effort=disable` so thinking doesn't truncate the object).
+   - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
+     **adapter** first (see below).
    - `classify_provider_error`: 429 → cooldown 5 min; 401/403 → mark dead.
    - JSON quality gate: a JSON request whose body doesn't parse is billed but
      treated as a failure → next provider.
@@ -90,6 +90,21 @@ claimed chat job:
 5. Walks to the next provider on failure. Returns 503 if all exhausted. The
    success response includes the chosen key's `key_label` for client-side
    cost/usage display.
+
+## Provider adapters (2026-07-10)
+
+Providers differ in small, specific ways LiteLLM doesn't paper over: deepseek
+rejects the strict `json_schema` sub-type (downgrade to `json_object`), gemini
+2.5 needs `reasoning_effort=disable` on JSON so thinking doesn't truncate the
+object, cloudflare needs an account-scoped `api_base`. Each quirk used to be
+another `if provider == …` branch in `call_llm`. They now live one-per-provider
+in `providers/adapters.py`: `adapter_for(provider)` returns a `ProviderAdapter`
+with two no-op-by-default hooks — `prepare(model, kwargs)` (request-shape
+quirks, applied inside `call_llm`) and `key_extra(account_id)` (per-key kwargs
+like cloudflare's api_base, applied by `run_chat` via `extra_for_provider`).
+Adding a provider's quirk is a new adapter class, not an edit to the shared
+call path (open/closed). The default adapter is a no-op, so providers with no
+quirks need no entry.
 
 ## Async jobs — the drained queue (2026-07-10)
 
