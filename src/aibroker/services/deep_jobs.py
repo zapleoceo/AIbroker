@@ -22,7 +22,6 @@ marks anything past `_STALE_AFTER_S` a timeout error, no separate sweeper.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -31,7 +30,6 @@ from sqlalchemy import select
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
-from aibroker.services.llm_service import run_chat
 
 log = logging.getLogger(__name__)
 
@@ -56,8 +54,13 @@ async def submit_job(  # pragma: no cover
     response_format: dict[str, Any] | None,
     workflow: str | None,
 ) -> int:
-    """Create a pending job row for any chat `capability`, schedule the real
-    call in the background, return the job id immediately."""
+    """ENQUEUE a job for any chat `capability` and return its id immediately.
+
+    Submit no longer runs the call — it only inserts a `pending` row. The
+    dispatcher loop (services/job_queue.py) claims and drains pending rows with
+    bounded concurrency. This is what makes the queue survive a worker restart
+    (a deploy) and apply backpressure: the request is durably enqueued the
+    moment submit returns, whatever the broker/provider pool is doing."""
     request = {
         "messages": messages, "model": model,
         "max_tokens": max_tokens, "temperature": temperature,
@@ -68,9 +71,7 @@ async def submit_job(  # pragma: no cover
                           status="pending", request=request)
         s.add(row)
         await s.flush()
-        job_id = row.id
-    asyncio.create_task(_run_job(job_id, project, capability, request))
-    return job_id
+        return row.id
 
 
 async def submit_deep_job(  # pragma: no cover
@@ -91,39 +92,7 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
-async def _run_job(  # pragma: no cover
-    job_id: int, project: ProjectRow, capability: str, request: dict[str, Any],
-) -> None:
-    try:
-        outcome = await run_chat(
-            project=project, capability=capability,
-            messages=request["messages"], model=request["model"],
-            max_tokens=request["max_tokens"], temperature=request["temperature"],
-            response_format=request.get("response_format"),
-            workflow=request["workflow"],
-        )
-    except Exception as e:  # noqa: BLE001 — any failure must still resolve the job
-        log.warning("job %d (%s) failed: %s", job_id, capability, e)
-        await _finish(job_id, status="error", error_message=str(e))
-        return
-    if outcome is None:
-        await _finish(job_id, status="error",
-                       error_message=f"no provider available for capability={capability}")
-        return
-    await _finish(
-        job_id, status="done", result_text=outcome.text,
-        result_meta={
-            "provider": outcome.provider, "model": outcome.model,
-            "tokens_in": outcome.tokens_in, "tokens_out": outcome.tokens_out,
-            "cost_usd": outcome.cost_usd, "latency_ms": outcome.latency_ms,
-            "key_label": outcome.key_label, "request_id": outcome.request_id,
-            "cache_read_tokens": outcome.cache_read_tokens,
-            "cache_write_tokens": outcome.cache_write_tokens,
-        },
-    )
-
-
-async def _finish(  # pragma: no cover — only reached via _run_job, see above
+async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
     job_id: int, *, status: str,
     result_text: str | None = None,
     result_meta: dict[str, Any] | None = None,

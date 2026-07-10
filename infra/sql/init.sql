@@ -109,12 +109,17 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
   id BIGSERIAL PRIMARY KEY,
   project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   capability VARCHAR(30) NOT NULL DEFAULT 'chat:deep',
-  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|done|error
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|running|done|error
   request JSONB NOT NULL,
   result_text TEXT,
   result_meta JSONB,
   error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  run_after TIMESTAMP,          -- earliest eligible time (backoff); NULL = now
+  started_at TIMESTAMP,         -- when a dispatcher claimed it (→ running)
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   completed_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);
+-- Dispatcher claim scan (services/job_queue.py): eligible pending rows.
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after, created_at);

@@ -1,9 +1,10 @@
 """FastAPI app entry point."""
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import structlog
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ from fastapi import FastAPI
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
 from aibroker.routes import admin, dashboard, health, landing, proxy, vending
+from aibroker.services.job_queue import dispatcher_loop
 
 
 def _configure_logging() -> None:
@@ -32,9 +34,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _configure_logging()
     await init_engine()
     log = structlog.get_logger()
+    # Drain the async-job queue from inside each web worker — the 2 workers
+    # coordinate via FOR UPDATE SKIP LOCKED, so this scales with them and needs
+    # no separate container. Cancelled cleanly on shutdown; any job left
+    # `running` is re-queued by the next worker (see services/job_queue.py).
+    stop = asyncio.Event()
+    dispatcher = asyncio.create_task(dispatcher_loop(stop))
     log.info("aibroker started", host=get_settings().PUBLIC_HOST)
-    yield
-    await close_engine()
+    try:
+        yield
+    finally:
+        stop.set()
+        try:
+            await asyncio.wait_for(dispatcher, timeout=10)
+        except (TimeoutError, asyncio.CancelledError):
+            dispatcher.cancel()
+        await close_engine()
 
 
 app = FastAPI(

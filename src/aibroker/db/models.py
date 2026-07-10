@@ -189,10 +189,14 @@ class DeepJobRow(Base):
     # Which capability this async job runs. Built for chat:deep; now generic
     # (POST /v1/jobs?capability=X) — the table/model name stays for continuity.
     capability: Mapped[str] = mapped_column(String(30), default="chat:deep", nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending|running|done|error
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result_text: Mapped[str | None] = mapped_column(Text)
     result_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # Queue state (migration 009): submit only enqueues; a dispatcher drains.
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    run_after: Mapped[datetime | None] = mapped_column(DateTime)   # backoff; NULL = eligible now
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)  # claimed → running
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)

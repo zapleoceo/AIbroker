@@ -605,18 +605,13 @@ async def test_deep_poll_stale_pending_job_times_out():
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
 async def test_deep_submit_creates_job_and_runs_in_background():
-    """Full loop on real Postgres: submit → background task runs (mocked
-    run_chat) → poll sees status=done with the result.
+    """Full loop on real Postgres: submit ENQUEUES → the lifespan-started
+    dispatcher (job_queue) claims + runs it (mocked run_chat) → poll sees done.
 
     Needs `with TestClient(app) as local_client:` (NOT the module-level
-    `client`) — Starlette's TestClient only keeps its ASGI portal (and
-    therefore any asyncio.create_task scheduled during a request) alive for
-    the duration of that `with` block. The plain module-level instantiation
-    used everywhere else tears the portal down after each call, silently
-    cancelling submit_deep_job's background task before a later poll could
-    ever see it finish — this isn't a real production bug (a live uvicorn
-    worker's event loop just keeps running), it's specific to how this one
-    test needs to observe fire-and-forget background work."""
+    `client`) — it's the `with` block that runs the app lifespan, which starts
+    the dispatcher loop; without it the queue would never be drained. run_chat
+    is patched in job_queue (where the dispatcher calls it), not deep_jobs."""
     import asyncio
 
     from aibroker.services.llm_service import ChatOutcome
@@ -628,7 +623,7 @@ async def test_deep_submit_creates_job_and_runs_in_background():
         tokens_in=40, tokens_out=15, cost_usd=0.0, latency_ms=45000,
         key_label="demoniwwwe", request_id=777,
     )
-    with patch("aibroker.services.deep_jobs.run_chat",
+    with patch("aibroker.services.job_queue.run_chat",
                 AsyncMock(return_value=fake_outcome)), \
          TestClient(app) as local_client:
         r = local_client.post(
@@ -691,8 +686,8 @@ async def test_jobs_poll_404_for_unknown_job():
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
 async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
     """Generic async loop on Postgres: submit chat:fast (with response_format)
-    → background run_chat (mocked) → poll sees done. Confirms the capability is
-    threaded through and the job carries response_format (unlike /v1/deep)."""
+    → the dispatcher claims + runs it (mocked run_chat) → poll sees done.
+    Confirms the capability + response_format are threaded through the queue."""
     import asyncio
 
     from aibroker.services.llm_service import ChatOutcome
@@ -708,7 +703,7 @@ async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
             key_label="eatmeat", request_id=888,
         )
 
-    with patch("aibroker.services.deep_jobs.run_chat", fake_run_chat), \
+    with patch("aibroker.services.job_queue.run_chat", fake_run_chat), \
          TestClient(app) as local_client:
         r = local_client.post(
             "/v1/jobs?capability=chat:fast",
