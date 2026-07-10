@@ -58,11 +58,10 @@ def test_chat_first_3_are_free(capability):
 
 def test_chat_fast_paid_at_the_very_tail():
     """2026-07-05: paid providers sit at the LAST entries, after every free
-    provider. 2026-07-10: anthropic removed (out of credit), so the paid tail
-    is now [deepseek, openai] — deepseek is the working paid fallback."""
+    provider. Paid tail = [deepseek, anthropic, openai] (anthropic re-added
+    2026-07-10 after its balance was topped up)."""
     chain = chain_for("chat:fast")
-    assert chain[-2:] == ["deepseek", "openai"]
-    assert "anthropic" not in chain
+    assert chain[-3:] == ["deepseek", "anthropic", "openai"]
 
 
 def test_vision_only_vision_providers():
@@ -114,12 +113,11 @@ def test_chain_returns_copy():
 
 def test_chat_edit_json_reliable_only():
     """Coach edit chain: JSON-reliable providers ONLY —
-    gemini (free) → deepseek. 2026-07-10: anthropic dropped (out of credit).
-    Providers that returned malformed/Bahasa-drifted JSON (mistral, cohere) or
-    reasoning JSON (cerebras, groq, openrouter) are excluded — a bad edit breaks
-    Coach."""
+    gemini (free) → deepseek → anthropic (paid). Providers that returned
+    malformed/Bahasa-drifted JSON (mistral, cohere) or reasoning JSON
+    (cerebras, groq, openrouter) are excluded — a bad edit breaks Coach."""
     chain = chain_for("chat:edit")
-    assert chain == ["gemini", "deepseek"]
+    assert chain == ["gemini", "deepseek", "anthropic"]
     assert chain[0] == "gemini"
     assert chain.index("gemini") < chain.index("deepseek")
     flaky_json = {"mistral", "cohere", "cerebras", "groq", "openrouter"}

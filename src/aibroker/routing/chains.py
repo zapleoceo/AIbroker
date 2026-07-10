@@ -47,12 +47,10 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # for account" (confirmed live, ~30 errors/hr). The model vanished from
         # our account's provisioning even though it's still in NVIDIA's catalog
         # listing. nvidia STAYS in chat:deep (nemotron, confirmed still alive).
-        # 2026-07-10: anthropic REMOVED from the chat/structured chains — its one
-        # key is OUT OF CREDIT ("credit balance is too low"), so it only flapped
-        # errors (marked dead → monitor revives → 1-2 real calls fail → dead).
-        # DEFAULT_MODEL["anthropic"] entries kept; re-add to these chains once the
-        # Anthropic balance is topped up. deepseek is the working paid tail.
-        "deepseek", "openai",
+        # 2026-07-10: anthropic re-added — balance topped up (was removed while
+        # out of credit "credit balance is too low"). Quality paid fallback at
+        # the very tail, reached only after deepseek.
+        "deepseek", "anthropic", "openai",
     ],
     "chat:smart": [
         "cerebras", "groq", "gemini",
@@ -63,19 +61,19 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # now times out on 100% of calls (~91s wall, confirmed live, past our
         # 60s ceiling) — the free NVIDIA pool is oversubscribed. Pure wasted
         # attempts + timeout waits. Stays in chat:deep (nemotron alive).
-        # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
         # 2026-07-10: cloudflare added — extra free gpt-oss-120b burst (see
-        # DEFAULT_MODEL), tried before the paid tail.
+        # DEFAULT_MODEL), tried before the paid tail. anthropic re-added (balance
+        # topped up) as the quality paid fallback.
         "cloudflare",
-        "openai", "deepseek",
+        "anthropic", "openai", "deepseek",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
         "mistral",
         "sambanova",
         "cloudflare",
-        # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
-        "deepseek", "openai",
+        # 2026-07-10: anthropic re-added (balance topped up).
+        "anthropic", "deepseek", "openai",
     ],
     # Coach editor (Stepan): JSON-reliable providers ONLY. gemini first
     # (thinking disabled → JSON fits), deepseek the paid fallback that stays
@@ -86,9 +84,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # JSON when gemini was on cooldown, breaking Coach; the free breadth isn't
     # worth a malformed edit. cerebras/groq/openrouter stay excluded for the
     # same reason.
-    # 2026-07-10: anthropic dropped (out of credit — see chat:fast note); gemini
-    # (JSON, thinking-disabled) + deepseek-v4-flash cover Coach. Re-add on top-up.
-    "chat:edit": ["gemini", "deepseek"],
+    # 2026-07-10: anthropic re-added (balance topped up) — Coach's top-quality
+    # JSON fallback after gemini (free, thinking-disabled) and deepseek.
+    "chat:edit": ["gemini", "deepseek", "anthropic"],
     # 2026-07-04: long-context / async reasoning lane. nvidia's Nemotron 3
     # Ultra (nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b) is a 550B MoE with a
     # real 1M-token context (95% RULER@1M) and strong agentic benchmarks
@@ -127,8 +125,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
-        "openai",
+        # 2026-07-10: anthropic re-added (balance topped up).
+        "anthropic", "openai",
     ],
     # 2026-07-01: anthropic dropped from vision. gemini's free tier is
     # RPM-capped, so vision fell to anthropic ~1.4k/wk — every call 400'd with
