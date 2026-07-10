@@ -54,6 +54,11 @@ _COOLDOWN = timedelta(minutes=5)
 # keeps the full breadth.
 _MAX_KEYS_PER_PROVIDER = 5
 _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
+# Empty/whitespace JSON bodies: retry the same provider at most this many times
+# (transient throttle recovers on retry) before treating it as a real miss and
+# moving on — a deterministic empty (e.g. DeepSeek json_object on a 30k prompt)
+# must not burn every key of the provider.
+_MAX_EMPTY_RETRIES = 1
 
 # Absolute runaway backstop on provider-call attempts for a single request.
 # The real budget is dynamic — sum of per-provider key allowances across the
@@ -405,6 +410,7 @@ async def run_chat(
     call_timeout = _call_timeout(capability)
     attempts = 0
     for provider in chain:
+        empty_retries = 0  # bounded per provider — see the empty-body branch below
         for _ in range(_max_keys(provider)):
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
@@ -506,10 +512,18 @@ async def run_chat(
                     error_kind="EmptyBody" if empty else "InvalidJSON",
                     http_status=200,
                 )
-                if empty:
+                if empty and empty_retries < _MAX_EMPTY_RETRIES:
+                    # Retry the SAME provider's next key ONCE — that rescues a
+                    # transient throttle. But cap it: some prompts make DeepSeek's
+                    # json_object return empty DETERMINISTICALLY (verified: a
+                    # 30k-char system prompt is empty on every key/call), and
+                    # retrying every key there just burns the whole provider for
+                    # nothing. After the cap, treat it like any other JSON miss and
+                    # move to the next provider.
+                    empty_retries += 1
                     log.warning("provider %s returned empty body — retrying next key", provider)
-                    continue  # next key of THIS provider (transient throttle)
-                log.warning("provider %s returned unparseable JSON, next provider", provider)
+                    continue
+                log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
                 break  # next provider, not next key of the same model
 
             request_id = await record_usage(

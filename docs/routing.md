@@ -20,6 +20,11 @@
 > random per key/call). run_chat retries the SAME provider's next key (usually
 > valid) instead of skipping the provider; recorded as `EmptyBody` (vs the
 > `InvalidJSON` used for non-empty malformed bodies, which still skip the model).
+> CAPPED at `_MAX_EMPTY_RETRIES=1`: some prompts make json_object empty
+> DETERMINISTICALLY (a full ~30k-char system prompt is empty on every key/call —
+> verified 30k→empty 4/4 vs 16k→OK 4/4), so retrying every key just burns the
+> provider. After the cap it's a normal miss → next provider. Root trigger is the
+> caller's oversized system prompt, not the broker.
 > - **deepseek stays on `deepseek-chat`** (chat:fast/smart/edit/code). A brief
 >   move to the cheaper `deepseek-v4-flash` was REVERTED same day: v4-flash is a
 >   REASONING model whose hidden reasoning eats the max_tokens budget, so our
