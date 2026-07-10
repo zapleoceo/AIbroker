@@ -52,6 +52,19 @@ def test_classify_auth():
     assert classify_provider_error(Exception("invalid auth token")) == "auth"
 
 
+def test_classify_credits_depleted_429_is_auth_not_rate_limit():
+    """REGRESSION (2026-07-10): a PAID Gemini key out of money returns HTTP 429
+    'Your prepayment credits are depleted' — a billing/auth state, not a
+    throttle. The generic 429/rate-limit signs matched it first and cooled it on
+    a short cycle (churn) instead of mark_dead. Billing exhaustion is now checked
+    BEFORE the rate-limit signs → 'auth' → mark_dead; the monitor revives it once
+    topped up."""
+    msg = ('litellm.RateLimitError: GeminiException - {"error": {"code": 429, '
+           '"message": "Your prepayment credits are depleted. Please go to AI Studio"}}')
+    assert classify_provider_error(RuntimeError(msg), provider="gemini") == "auth"
+    assert classify_provider_error(RuntimeError("429: insufficient balance")) == "auth"
+
+
 def test_classify_timeout_is_rate_limit():
     """REGRESSION (2026-07-07): our own call-timeout backstop
     (litellm_adapter.call_llm's asyncio.wait_for) raises a bare TimeoutError

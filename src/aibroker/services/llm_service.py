@@ -154,6 +154,18 @@ _AUTH_SIGNS = (
     "credit balance is too low",
 )
 
+# Billing exhaustion that arrives as an HTTP 429 (not 401/403), so it would
+# otherwise match the generic rate-limit signs and churn on a short cooldown
+# forever instead of being marked dead. Gemini returns 429 "Your prepayment
+# credits are depleted" for a PAID key that ran out of money (confirmed live
+# 2026-07-10). Treat as auth → mark_dead; the monitor's probe auto-revives the
+# key the moment the balance is topped up. Checked BEFORE the rate-limit signs.
+_BILLING_DEPLETED_SIGNS = (
+    "prepayment credits are depleted",
+    "credits are depleted",
+    "insufficient balance",
+)
+
 # Provider-SCOPED signatures: applied ONLY when the failing key belongs to that
 # provider. These are narrow, provider-specific error strings we caught live;
 # putting them in the global lists risked mis-penalising an unrelated
@@ -212,6 +224,10 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     if isinstance(exc, TimeoutError):
         return "rate_limit"
     emsg = str(exc).lower()
+    # Billing exhaustion first — a "credits depleted" 429 is an out-of-money
+    # (auth) state, NOT a throttle; it must not fall through to rate_limit below.
+    if any(s in emsg for s in _BILLING_DEPLETED_SIGNS):
+        return "auth"
     if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
         return "rate_limit"
     if provider and any(s in emsg for s in _PROVIDER_RATE_LIMIT_SIGNS.get(provider, ())):
