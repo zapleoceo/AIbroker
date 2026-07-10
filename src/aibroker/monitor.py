@@ -59,13 +59,13 @@ async def tick() -> None:
         return
 
     plain_keys = []
-    decrypt_failed: set[int] = set()
+    decrypt_failed: set[int] = set()  # pragma: no cover — needs a real key row (Postgres)
     for r in rows:
         try:
             plain_keys.append((r.id, r.provider, decrypt(r.token_encrypted)))
         except Exception as e:
             log.warning("decrypt %s/%s failed: %s", r.provider, r.label, e)
-            decrypt_failed.add(r.id)
+            decrypt_failed.add(r.id)  # pragma: no cover — see test_tick_marks_undecryptable_key_dead_and_alerts
 
     results = await probe_all(plain_keys)
 
