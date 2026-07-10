@@ -51,10 +51,14 @@ def _backoff_s(retry_count: int) -> int:
     return min(5 * (2 ** max(0, retry_count - 1)), 300)
 
 
-async def _requeue_stale_running() -> None:
+async def _requeue_stale_running() -> None:  # pragma: no cover
     """A `running` row past the stale window means its worker died mid-call
     (a deploy/crash). Re-queue it (or error it if it's out of retries) so the
-    request isn't stuck forever. Idempotent; safe to run every tick."""
+    request isn't stuck forever. Idempotent; safe to run every tick.
+
+    Postgres-only (make_interval) — covered for real by the SKIP-LOCKED
+    Postgres run: test_job_queue.py::test_requeue_stale_running_reclaims_dead_
+    worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
     async with get_session() as s:
         await s.execute(
             text(
@@ -72,10 +76,11 @@ async def _requeue_stale_running() -> None:
         )
 
 
-async def _claim_batch(limit: int) -> list[DeepJobRow]:
+async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
     """Atomically claim up to `limit` eligible pending rows → running. FOR
     UPDATE SKIP LOCKED lets every worker's loop claim in parallel without ever
-    grabbing the same job. Postgres-only (SKIP LOCKED)."""
+    grabbing the same job. Postgres-only (SKIP LOCKED) — covered via the
+    Postgres drain_once tests in test_job_queue.py (skipif ON_SQLITE)."""
     if limit <= 0:
         return []
     async with get_session() as s:
@@ -95,9 +100,11 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:
     return [DeepJobRow(**dict(r)) for r in rows]
 
 
-async def _requeue_or_fail(job_id: int, retry_count: int, reason: str) -> None:
+async def _requeue_or_fail(job_id: int, retry_count: int, reason: str) -> None:  # pragma: no cover
     """A job attempt didn't produce a result (no capacity, or an error). Retry
-    with backoff until `_MAX_RETRIES`, then give up and mark it error."""
+    with backoff until `_MAX_RETRIES`, then give up and mark it error. Covered
+    by test_job_queue.py's Postgres tests (test_drain_once_requeues_when_no_
+    provider / test_drain_once_errors_after_max_retries), skipif ON_SQLITE."""
     if retry_count + 1 > _MAX_RETRIES:
         await _finish(job_id, status="error",
                        error_message=f"{reason} (gave up after {retry_count} retries)")
@@ -113,8 +120,10 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str) -> None:
         )
 
 
-async def _execute(row: DeepJobRow) -> None:
-    """Run one claimed job to a terminal state (done) or re-queue/fail it."""
+async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
+    """Run one claimed job to a terminal state (done) or re-queue/fail it.
+    Reached only from a real claimed row → Postgres-only; covered by
+    test_job_queue.py's drain_once tests (skipif ON_SQLITE)."""
     req = row.request
     async with get_session() as s:
         project = await s.get(ProjectRow, row.project_id)
@@ -150,10 +159,12 @@ async def _execute(row: DeepJobRow) -> None:
     )
 
 
-async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:
+async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     """One dispatch pass: re-queue stale, claim up to `limit`, run them all to
     completion. Returns how many were claimed. Used directly by tests (awaits
-    every job, deterministic) and by the forever loop."""
+    every job, deterministic) and by the forever loop. Postgres-only (its claim
+    uses SKIP LOCKED) — exercised by test_job_queue.py's Postgres tests and the
+    async submit→drain→poll integration tests (all skipif ON_SQLITE)."""
     await _requeue_stale_running()
     claimed = await _claim_batch(limit)
     if claimed:

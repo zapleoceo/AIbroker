@@ -30,7 +30,10 @@ def _configure_logging() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
+    # App start/stop wiring — run only by a real uvicorn (or the Postgres
+    # integration tests' `with TestClient`), never by the SQLite unit run that
+    # instantiates the module-level TestClient without entering its context.
     _configure_logging()
     await init_engine()
     log = structlog.get_logger()
