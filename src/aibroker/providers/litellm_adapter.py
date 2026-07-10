@@ -42,18 +42,33 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
              "structured": f"groq/openai/{_OSS}",
              "translate": f"groq/openai/{_OSS}",
              "transcription": "groq/whisper-large-v3-turbo"},
+    # 2026-07-10: chat:smart gemini-2.5-pro → gemini-2.5-flash. On the free tier
+    # 2.5-pro is capped at ~50-100 req/day @ 5 RPM per key, so under Stepan's
+    # smart volume it 429'd ~100% (4096 errors / 0 ok in 3 days) — pure wasted
+    # attempts that fell straight through to paid deepseek. 2.5-flash gets
+    # ~250 req/day @ 10 RPM per key (~2000/day across our 8 keys, covering the
+    # ~1200 smart calls/day) at near-pro quality — moving most smart traffic
+    # back onto FREE gemini and off the paid tail.
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
-               "chat:smart": "gemini/gemini-2.5-pro",
+               "chat:smart": "gemini/gemini-2.5-flash",
                "chat:code": "gemini/gemini-2.5-flash",
                "chat:edit": "gemini/gemini-2.5-flash",
                "prefilter": "gemini/gemini-2.5-flash",
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash",
                "vision": "gemini/gemini-2.5-flash"},
-    "deepseek": {"chat:fast": "deepseek/deepseek-chat",
-                 "chat:smart": "deepseek/deepseek-chat",
-                 "chat:edit": "deepseek/deepseek-chat",
-                 "chat:code": "deepseek/deepseek-coder"},
+    # 2026-07-10: deepseek-chat / deepseek-coder RETIRED from DeepSeek's API
+    # (GET /models returns only deepseek-v4-flash + deepseek-v4-pro; deepseek-chat
+    # deprecates 2026-07-24). Migrated to deepseek-v4-flash — the direct
+    # successor to deepseek-chat and HALF the price ($0.14/$0.28 per 1M vs
+    # $0.28/$0.42; cached input $0.0028 vs $0.028, 10x cheaper — decisive for our
+    # repeated-context RAG traffic). v4-pro is the pricier reasoning tier (3x),
+    # not needed for the sales-chat / triage workload. Verified live via the paid
+    # key + litellm prices it correctly (cost-guard/cap stays accurate).
+    "deepseek": {"chat:fast": "deepseek/deepseek-v4-flash",
+                 "chat:smart": "deepseek/deepseek-v4-flash",
+                 "chat:edit": "deepseek/deepseek-v4-flash",
+                 "chat:code": "deepseek/deepseek-v4-flash"},
     "openrouter": {"chat:fast": f"openrouter/openai/{_OSS}:free",
                    "chat:smart": f"openrouter/openai/{_OSS}:free",
                    "chat:code": f"openrouter/openai/{_OSS}:free",
@@ -86,9 +101,15 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                 "translate":   "mistral/mistral-small-latest"},
     # 2026-06-26: command-r/r-plus retired 2025-09-15. command-a-03-2025 is
     # flagship; command-r7b-12-2024 is the small/fast model.
+    # 2026-07-10: chat:smart/chat:code command-a → command-r7b. command-a is
+    # flagship-priced and it was billing ~$2.4/day on Stepan — mostly on FAILED
+    # calls (only ~2 ok/day, 96% error) since cohere sits mid-chain behind the
+    # free providers and its own free keys are monthly-exhausted, so only the one
+    # PAID cohere key reached it, expensively. As a deep fallback, the cheap r7b
+    # is the right tier; deepseek remains the quality paid tail.
     "cohere": {"chat:fast":   "cohere/command-r7b-12-2024",
-               "chat:smart":  "cohere/command-a-03-2025",
-               "chat:code":   "cohere/command-a-03-2025",
+               "chat:smart":  "cohere/command-r7b-12-2024",
+               "chat:code":   "cohere/command-r7b-12-2024",
                "prefilter":   "cohere/command-r7b-12-2024",
                "structured":  "cohere/command-r7b-12-2024",
                "translate":   "cohere/command-r7b-12-2024",

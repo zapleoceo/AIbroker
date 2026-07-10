@@ -1,9 +1,25 @@
 # Routing, scopes & cost guard
 
+> **2026-07-10 (token-cost optimization)**: three DEFAULT_MODEL changes after a
+> live usage review of Stepan (project 4, hitting its $4/day cap with a ~40%
+> error rate):
+> - **deepseek `deepseek-chat`/`deepseek-coder` → `deepseek-v4-flash`**: the old
+>   models are retired from DeepSeek's API (`GET /models` lists only v4-flash +
+>   v4-pro; chat deprecates 2026-07-24). v4-flash is the cheaper successor
+>   ($0.14/$0.28 vs $0.28/$0.42 per 1M; cached input $0.0028, 10x cheaper).
+>   Verified live: valid plain + JSON output (the earlier "empty completion"
+>   rejection no longer reproduces).
+> - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
+>   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
+>   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
+> - **cohere `chat:smart`/`chat:code` `command-a-03-2025` → `command-r7b-12-2024`**:
+>   flagship command-a billed ~$2.4/day mostly on FAILED calls; r7b is the cheap
+>   fallback tier.
+>
 > **2026-06-26**: Cohere retired `command-r` / `command-r-plus` on 2025-09-15.
 > Cohere chain now routes through `command-r7b-12-2024` (small/fast) for
-> `chat:fast` / `prefilter` / `structured` and `command-a-03-2025` (flagship)
-> for `chat:smart` / `chat:code`. Embed model `embed-english-v3.0` unchanged.
+> `chat:fast` / `prefilter` / `structured` / `chat:smart` / `chat:code`.
+> Embed model `embed-english-v3.0` unchanged.
 >
 > **2026-07-01**: `chat:edit` narrowed to JSON-reliable providers only —
 > `[gemini, deepseek, anthropic]`. mistral / cohere were dropped (and their
@@ -201,11 +217,7 @@ returns the scope the **project** must hold and the **key** must carry.
 > cerebras/groq. This was previously-idle free capacity (10k neurons/day, no
 > card on file) — only `vision` used this key before.
 >
-> Two other candidates from the same audit were tested live and REJECTED:
-> - **`deepseek/deepseek-v4-flash`** (candidate to replace `deepseek-chat`
->   for a cheaper chat:fast, $0.14/$0.28 vs $0.28/$0.42 per 1M) — returned
->   an EMPTY completion on a plain non-JSON prompt and cost MORE than
->   `deepseek-chat` for the same trivial request. Not a valid swap.
+> One other candidate from the same audit was tested live and REJECTED:
 > - **`groq/llama-3.1-8b-instant`** (candidate to replace `gpt-oss-120b` for
 >   more throughput per token-day budget) — failed the real triage
 >   `json_schema` outright ("Failed to call a function. Please adjust your

@@ -96,6 +96,29 @@ def test_default_model_has_voyage_embedding():
     assert "embedding" in DEFAULT_MODEL["voyage"]
 
 
+def test_deepseek_uses_live_v4_flash_not_retired_chat_or_coder():
+    """REGRESSION (2026-07-10): deepseek-chat/deepseek-coder are retired from the
+    DeepSeek API (GET /models returns only v4-flash + v4-pro; chat deprecates
+    2026-07-24). Every deepseek slot must be a live model, and v4-flash is the
+    cheaper direct successor to chat ($0.14/$0.28 vs $0.28/$0.42)."""
+    for cap, model in DEFAULT_MODEL["deepseek"].items():
+        assert model == "deepseek/deepseek-v4-flash", cap
+        assert "deepseek-chat" not in model and "deepseek-coder" not in model
+
+
+def test_gemini_smart_is_flash_not_starved_pro():
+    """REGRESSION (2026-07-10): gemini-2.5-pro's free tier (~50-100 RPD/5 RPM)
+    can't serve smart volume — moved chat:smart to 2.5-flash (~250 RPD/10 RPM)."""
+    assert model_for("gemini", "chat:smart") == "gemini/gemini-2.5-flash"
+
+
+def test_cohere_smart_is_cheap_r7b_not_flagship_command_a():
+    """REGRESSION (2026-07-10): command-a-03-2025 (flagship) billed ~$2.4/day
+    mostly on failed calls — smart/code fall back to the cheap r7b."""
+    assert model_for("cohere", "chat:smart") == "cohere/command-r7b-12-2024"
+    assert model_for("cohere", "chat:code") == "cohere/command-r7b-12-2024"
+
+
 # ─── estimate_llm_cost ────────────────────────────────────────────────────
 
 
