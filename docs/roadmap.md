@@ -188,7 +188,7 @@ ModelHandler(provider, model):
 - Тесты: юнит на каждый ModelHandler.
 
 ### Фаза 4 — общий async-слой (submit/poll для всех capability) ✅ БРОКЕР ГОТОВ (2026-07-10)
-- ✅ Обобщил `deep_jobs` → колонка `capability` (миграция 008) + `POST /v1/jobs?capability=…` + `GET /v1/jobs/{id}`.
+- ✅ Обобщил `deep_jobs` → колонка `capability` (миграция 008) + `POST /v1/jobs?capability=…` (`jobs_submit`) + `GET /v1/jobs/{id}` (`jobs_poll`).
 - ✅ sync-эндпоинты остаются; `submit_deep_job` — тонкий wrapper над `submit_job(capability="chat:deep")`.
 - ✅ chat:deep — единственная async-only capability; `/v1/deep` + `/v1/deep/{id}` оставлены как обратно-совместимые алиасы.
 - ✅ Тесты: submit+poll chat:fast с response_format; валидация capability/scope; 404; backward-compat `/v1/deep`.
