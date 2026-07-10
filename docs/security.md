@@ -51,7 +51,7 @@ If `X-Project-Key` leaks:
 
 ## What's NOT covered
 
-- **No rate limiting** on `/v1/chat`/`/v1/embed` (proxy mode) per project beyond cost caps. A buggy client can hammer the broker; you'll see it in `calls_1h` on the dashboard. (Vending mode's `/v1/key` IS rate-limited — see threat model above.)
+- **No rate limiting** on `/v1/jobs`/`/v1/embed` (proxy mode) per project beyond cost caps. A buggy client can hammer the broker; you'll see it in `calls_1h` on the dashboard. (Vending mode's `/v1/key` IS rate-limited — see threat model above.)
 - **No mTLS** between projects and broker. We rely on `X-Project-Key` over TLS to CF, then HTTP from CF to origin.
 - **No KMS** — `TOKEN_SECRET` is on disk. If someone roots the box, all keys can be decrypted.
 - **No PII redaction** in audit_log. Today we don't log message bodies — but if that changes, redact first.

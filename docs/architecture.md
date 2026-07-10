@@ -108,10 +108,10 @@ quirks need no entry.
 
 ## Async jobs — the drained queue (2026-07-10)
 
-A parallel, additive path to sync `/v1/chat`, for clients that would rather
-guarantee an answer than hold a connection (a slow/oversubscribed provider can
-504 a sync call before the broker finishes its fallback chain). Sync is
-untouched — this is opt-in, migrate at your own pace (see `docs/api.md`).
+The chat path. Sync `/v1/chat` was removed (`410 Gone`); every chat now goes
+through the drained queue, which guarantees an answer without holding a
+connection (a slow/oversubscribed provider can 504 a sync call before the
+broker finishes its fallback chain). See `docs/api.md`.
 
 - **Submit = enqueue.** `POST /v1/jobs?capability=X` (`routes/proxy.py`) →
   `services/deep_jobs.submit_job` inserts one `pending` row in `deep_jobs` and

@@ -27,7 +27,7 @@ Verified live: the key reaches `claude-sonnet-5`, and `litellm.drop_params`
 fires only after gemini and deepseek both fail. Both projects already reach it
 with zero code change: `stepan` runs `llm_backend=broker` (its
 `stepan_shared.llm.broker_client.BrokerLLMClient` posts
-`/v1/chat?capability=chat:edit` to this broker) and already carries the
+`/v1/jobs?capability=chat:edit` to this broker) and already carries the
 `llm:edit` scope; `stepan2`'s `coach_service.py` does the same via its own
 `BrokerLLM` adapter — its project was missing `llm:edit` until 2026-07-02
 (added via the same `dash_edit_project` code path, audit-logged). Stepan's own

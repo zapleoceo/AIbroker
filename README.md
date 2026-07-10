@@ -92,13 +92,17 @@ AIbroker/
 │   │   ├── chains.py           # capability → provider order
 │   │   └── cost_guard.py       # daily/monthly cap enforcement
 │   ├── routes/
-│   │   ├── proxy.py            # /v1/proxy/{provider}/*
+│   │   ├── proxy.py            # /v1/jobs, /v1/embed, /v1/transcribe, /v1/deep, /v1/chat (410)
 │   │   ├── vending.py          # /v1/key, /v1/usage, /v1/release
 │   │   ├── admin.py            # /admin/projects, /admin/keys
 │   │   ├── health.py           # /healthz, /v1/health
-│   │   └── dashboard.py        # /dashboard
+│   │   ├── dashboard.py        # /dashboard (routes)
+│   │   ├── dashboard_assets.py # dashboard CSS/JS assets
+│   │   ├── dashboard_data.py   # dashboard data queries
+│   │   ├── dashboard_render.py # dashboard HTML render
+│   │   └── dashboard_scopes.py # dashboard scope helpers
 │   ├── providers/
-│   │   ├── base.py             # Provider ABC
+│   │   ├── adapters.py         # ProviderAdapter registry (adapter_for)
 │   │   ├── litellm_adapter.py  # LLM chat/embed via litellm SDK
 │   │   └── health_probes.py    # cheapest call per provider
 │   ├── telemetry/

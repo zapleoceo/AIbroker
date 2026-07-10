@@ -880,7 +880,8 @@ _LLMS_TXT = """# AIbroker
 - [/openapi.json](https://aib.zapleo.com/openapi.json) — OpenAPI 3 schema
 - [/healthz](https://aib.zapleo.com/healthz) — liveness probe
 - [/v1/health](https://aib.zapleo.com/v1/health) — per-provider key health
-- `POST /v1/chat?capability=chat:fast` — proxy mode chat (needs `X-Project-Key`)
+- `POST /v1/jobs?capability=...` — submit a chat job, returns a `job_id` (needs `X-Project-Key`)
+- `GET /v1/jobs/{id}` — poll for the job result
 - `POST /v1/embed?provider=voyage` — proxy mode embed
 - `POST /v1/deep` + `GET /v1/deep/{job_id}` — async job API for
   `capability=chat:deep` (long-context/reasoning; latency observed up to

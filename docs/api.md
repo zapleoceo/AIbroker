@@ -93,8 +93,8 @@ your client read timeout and the broker's own nginx/Cloudflare read timeout
 (~60–120s). A slow/oversubscribed provider can 504 you *before* the broker has
 finished walking its fallback chain. The async job has no such ceiling — the
 broker can exhaustively rotate every available key and you still get the answer
-when you next poll. **Sync stays supported**; this is additive — migrate at
-your own pace, starting with your longest/most-important calls.
+when you next poll. **Sync `/v1/chat` is gone (`410 Gone`)** — the job API is
+the only way to do chat.
 
 ```
 POST /v1/jobs?capability=chat:smart
@@ -110,11 +110,14 @@ GET /v1/jobs/123
 
 `poll_after_s` is the broker's suggested wait before the next poll (widens for
 long jobs). A job belongs to exactly one project — polling someone else's
-`job_id` is a `404`. A worker restart mid-job is lazily resolved to an `error`
-(timeout) after ~20 min, so a poll never hangs forever. `chat:deep` is
-**async-only** (nemotron runs minutes); `POST /v1/chat?capability=chat:deep`
-returns `400`. `POST /v1/deep` + `GET /v1/deep/{job_id}` remain as
-backward-compatible aliases of the generic endpoints.
+`job_id` is a `404`. Poll is a pure read; the dispatcher owns the lifecycle —
+a job whose worker died mid-run sits in `running` past the stale window and is
+re-queued by the next tick (so a deploy delays answers, never drops them), and
+a job with no capacity is re-queued with backoff until it succeeds or gives up
+after the retry cap. `chat:deep` is **async-only** (nemotron runs minutes);
+`POST /v1/chat` returns `410 Gone` for every capability. `POST /v1/deep` +
+`GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
+endpoints.
 
 ### `/v1/embed?provider=<p>` (default `voyage`)
 
@@ -147,9 +150,9 @@ instead of grepping timestamps against provider/model/workflow.
 
 | Endpoint | Required scope |
 |---|---|
-| `/v1/chat` (chat:*) | `llm:chat` |
-| `/v1/chat?capability=vision` | `llm:vision` |
-| `/v1/jobs?capability=<cap>` | same scope as the sync capability (`chat:*`→`llm:chat`, `vision`→`llm:vision`, `chat:deep`→`llm:deep`) |
+| `/v1/jobs?capability=chat:*` | `llm:chat` |
+| `/v1/jobs?capability=vision` | `llm:vision` |
+| `/v1/jobs?capability=<cap>` | scope per capability (`chat:*`→`llm:chat`, `vision`→`llm:vision`, `chat:deep`→`llm:deep`) |
 | `/v1/deep` | `llm:deep` |
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |

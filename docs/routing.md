@@ -117,8 +117,8 @@ returns the scope the **project** must hold and the **key** must carry.
 > rows despite the caller-visible failures, because the timeout happens at
 > the proxy layer, before the broker's own response.
 >
-> `POST /v1/chat?capability=chat:deep` now returns `400` unconditionally.
-> Use the job API instead:
+> `POST /v1/chat` now returns `410 Gone` for **every** capability (sync chat
+> was removed 2026-07-10). Use the job API instead:
 > - `POST /v1/deep` — same body shape as `/v1/chat` minus `response_format`
 >   (nemotron isn't JSON-reliable, don't ask it for structured output).
 >   Returns `202` immediately with `{job_id, poll_url, poll_after_s}`.
@@ -128,15 +128,16 @@ returns the scope the **project** must hold and the **key** must carry.
 >   returns (`text`, `provider`, `tokens_in/out`, `cost_usd`, `latency_ms`,
 >   `key_label`, `request_id`).
 >
-> New `deep_jobs` table backs this — the submitting request creates a
-> `pending` row and schedules the real call via `asyncio.create_task` on
-> whichever of the broker's 2 uvicorn workers handled the submit; the HTTP
-> response returns immediately. Poll requests read straight from Postgres,
-> so they work regardless of which of the 2 workers answers them — no
-> in-process task handle has to survive across workers. A worker restart
-> mid-job leaves a row stuck `pending`; `get_job` lazily resolves anything
-> older than 20 minutes into a timeout `error` on the next poll, rather than
-> needing a separate sweeper process.
+> A drained queue backs this — `submit_job` only INSERTs a `pending` row and
+> returns the `job_id` immediately; it does **not** run the call in-process.
+> A background `dispatcher_loop`/`drain_once` per uvicorn worker claims eligible
+> rows atomically (`UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED)`, so
+> workers never double-claim) and runs each through `run_chat`. Poll requests
+> read straight from Postgres, so they work regardless of which worker answers.
+> Because the work is a durable row rather than an in-process task, a job
+> survives the worker that submitted it restarting — a `running` row whose
+> worker died is re-queued by a later tick. See `docs/architecture.md` for the
+> full drained-queue model.
 > **cloudflare tried in `vision`, then pulled the SAME DAY (2026-07-04).**
 > Confirmed live (real token + account ID, 200 OK) against a garbage-bytes
 > probe — but that only proved auth+connectivity. A follow-up test with a

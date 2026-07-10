@@ -38,7 +38,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 
 | Scope | Meaning |
 |---|---|
-| `llm:chat` | `/v1/chat` access — any capability |
+| `llm:chat` | `/v1/jobs?capability=chat:*` access |
 | `llm:embed` | `/v1/embed` access — any provider |
 | `llm:vision` | reserved for future image-modality endpoint |
 | `vending:*` | `/v1/key` access — broker hands out plain keys |
