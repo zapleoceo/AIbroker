@@ -604,19 +604,25 @@ async def test_deep_poll_stale_pending_job_times_out():
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
-async def test_deep_submit_creates_job_and_runs_in_background():
-    """Full loop on real Postgres: submit ENQUEUES → the lifespan-started
-    dispatcher (job_queue) claims + runs it (mocked run_chat) → poll sees done.
-
-    Needs `with TestClient(app) as local_client:` (NOT the module-level
-    `client`) — it's the `with` block that runs the app lifespan, which starts
-    the dispatcher loop; without it the queue would never be drained. run_chat
-    is patched in job_queue (where the dispatcher calls it), not deep_jobs."""
-    import asyncio
-
+async def test_deep_submit_enqueues_and_dispatcher_drains_to_done():
+    """Full path on real Postgres: submit ENQUEUES a pending row (202) →
+    drain_once() (the deterministic one dispatcher wave) claims + runs it
+    (mocked run_chat) → poll sees done. We drive drain_once() explicitly
+    instead of racing the lifespan's background loop through TestClient's
+    portal (a cross-event-loop timing dance); prod runs the same claim/execute
+    code from dispatcher_loop on a normal uvicorn loop."""
+    from aibroker.services.job_queue import drain_once
     from aibroker.services.llm_service import ChatOutcome
 
     plain, _ = await _make_project(["llm:deep"])
+    r = client.post(
+        "/v1/deep", headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    assert r.json()["poll_url"] == f"/v1/deep/{job_id}"
+
     fake_outcome = ChatOutcome(
         text="deep answer", provider="nvidia",
         model="nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
@@ -624,25 +630,10 @@ async def test_deep_submit_creates_job_and_runs_in_background():
         key_label="demoniwwwe", request_id=777,
     )
     with patch("aibroker.services.job_queue.run_chat",
-                AsyncMock(return_value=fake_outcome)), \
-         TestClient(app) as local_client:
-        r = local_client.post(
-            "/v1/deep",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-        assert r.status_code == 202
-        job_id = r.json()["job_id"]
-        assert r.json()["poll_url"] == f"/v1/deep/{job_id}"
+                AsyncMock(return_value=fake_outcome)):
+        assert await drain_once() == 1
 
-        # Background task runs on the portal's event loop — give it a beat
-        # to complete before polling.
-        for _ in range(100):
-            await asyncio.sleep(0.1)
-            poll = local_client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
-            if poll.json()["status"] != "pending":
-                break
-
+    poll = client.get(f"/v1/deep/{job_id}", headers={"X-Project-Key": plain})
     assert poll.status_code == 200
     data = poll.json()
     assert data["status"] == "done"
@@ -685,14 +676,22 @@ async def test_jobs_poll_404_for_unknown_job():
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
 async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
-    """Generic async loop on Postgres: submit chat:fast (with response_format)
-    → the dispatcher claims + runs it (mocked run_chat) → poll sees done.
-    Confirms the capability + response_format are threaded through the queue."""
-    import asyncio
-
+    """Generic async path on Postgres: submit chat:fast (with response_format)
+    → drain_once() claims + runs it (mocked run_chat) → poll sees done. Confirms
+    the capability + response_format are threaded through the queue."""
+    from aibroker.services.job_queue import drain_once
     from aibroker.services.llm_service import ChatOutcome
 
     plain, _ = await _make_project(["llm:chat"])
+    r = client.post(
+        "/v1/jobs?capability=chat:fast", headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}],
+              "response_format": {"type": "json_object"}},
+    )
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    assert r.json()["poll_url"] == f"/v1/jobs/{job_id}"
+
     captured: dict = {}
 
     async def fake_run_chat(**kw):
@@ -703,24 +702,10 @@ async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
             key_label="eatmeat", request_id=888,
         )
 
-    with patch("aibroker.services.job_queue.run_chat", fake_run_chat), \
-         TestClient(app) as local_client:
-        r = local_client.post(
-            "/v1/jobs?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}],
-                  "response_format": {"type": "json_object"}},
-        )
-        assert r.status_code == 202
-        job_id = r.json()["job_id"]
-        assert r.json()["poll_url"] == f"/v1/jobs/{job_id}"
+    with patch("aibroker.services.job_queue.run_chat", fake_run_chat):
+        assert await drain_once() == 1
 
-        for _ in range(100):
-            await asyncio.sleep(0.1)
-            poll = local_client.get(f"/v1/jobs/{job_id}", headers={"X-Project-Key": plain})
-            if poll.json()["status"] != "pending":
-                break
-
+    poll = client.get(f"/v1/jobs/{job_id}", headers={"X-Project-Key": plain})
     assert poll.json()["status"] == "done"
     assert poll.json()["text"] == '{"ok":true}'
     # capability + response_format actually threaded through to run_chat
