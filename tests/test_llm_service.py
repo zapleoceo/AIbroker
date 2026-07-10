@@ -143,6 +143,92 @@ def test_classify_generic_error():
     assert classify_provider_error(ValueError("connection reset by peer")) == "error"
 
 
+# ─── model-unavailable (404) detection ───────────────────────────────────────
+
+
+def test_is_model_unavailable_by_signature():
+    """A vanished/unprovisioned MODEL (not a dead key, not a rate limit).
+    Confirmed live 2026-07-10: nvidia kimi-k2.6 → 404 'Function not found for
+    account' ~30x/hr. Must be detected so run_chat breaks to the next provider
+    WITHOUT penalizing the key (its other models still work)."""
+    from aibroker.services.llm_service import _is_model_unavailable
+
+    real = ("litellm.NotFoundError: Nvidia_nimException - Error code: 404 - "
+            "{'status': 404, 'detail': \"Function '23d4': Not found for account 'kgN3'\"}")
+    assert _is_model_unavailable(RuntimeError(real)) is True
+    assert _is_model_unavailable(RuntimeError("model_not_found")) is True
+    assert _is_model_unavailable(RuntimeError("The model does not exist")) is True
+    # a plain rate limit / generic error is NOT model-unavailable
+    assert _is_model_unavailable(RuntimeError("429 rate limit")) is False
+    assert _is_model_unavailable(RuntimeError("boom")) is False
+
+
+def test_is_model_unavailable_by_exception_type():
+    """litellm raises NotFoundError as its own class — detect by type name too,
+    independent of the message wording."""
+    from aibroker.services.llm_service import _is_model_unavailable
+
+    class NotFoundError(Exception):
+        pass
+
+    assert _is_model_unavailable(NotFoundError("anything")) is True
+
+
+async def test_run_chat_model_unavailable_skips_provider_without_penalty(monkeypatch):
+    """A 404 model-gone breaks to the NEXT provider and does NOT cooldown/
+    mark_dead the key (the key's other models still work)."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    penalized: list[int] = []
+    tried: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
+                                token_encrypted="x", account_id=None)
+
+    async def fake_call_llm(**kw):
+        tried.append(kw["model"])
+        if kw["model"].startswith("dead/"):
+            raise RuntimeError("404 - Function 'x': Not found for account 'y'")
+        return "hi", {"model": kw["model"], "tokens_in": 1, "tokens_out": 1,
+                      "cost_usd": 0.0, "latency_ms": 5,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    async def fake_penalize(k, e):
+        penalized.append(k.id)
+        return "error"
+
+    async def fake_caps(**kw):
+        return None
+
+    async def fake_record(**kw):
+        return 1
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
+    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(svc, "model_for",
+                        lambda p, c: "dead/model" if p == "deadprov" else "good/model")
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deadprov", "goodprov"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=4, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="x",
+    )
+    assert out is not None
+    assert out.provider == "goodprov"          # fell through to next provider
+    assert penalized == []                      # key was NOT penalized on the 404
+    assert tried == ["dead/model", "good/model"]  # broke after ONE dead try, not N keys
+
+
 # ─── size-aware provider filter in run_chat ──────────────────────────────────
 
 

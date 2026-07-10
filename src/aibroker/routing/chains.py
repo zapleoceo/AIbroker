@@ -42,9 +42,11 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
         # idle capacity (only vision was wired).
         "cloudflare",
-        # 2026-07-05: nvidia (kimi-k2.6, ~1.4s, confirmed valid JSON) — no
-        # card on file, so no silent-billing risk (see litellm_adapter.py).
-        "nvidia",
+        # 2026-07-10: nvidia REMOVED from chat:fast. Its kimi-k2.6 model (wired
+        # 2026-07-05) went dead — every call now 404s "Function 'x': Not found
+        # for account" (confirmed live, ~30 errors/hr). The model vanished from
+        # our account's provisioning even though it's still in NVIDIA's catalog
+        # listing. nvidia STAYS in chat:deep (nemotron, confirmed still alive).
         "deepseek", "anthropic", "openai",
     ],
     "chat:smart": [
@@ -52,9 +54,10 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "mistral", "cohere",
         "openrouter",
         "github", "sambanova",
-        # 2026-07-05: nvidia (deepseek-v4-pro, ~7.4s — slower but chat:smart's
-        # latency budget is looser) — confirmed valid JSON, no card on file.
-        "nvidia",
+        # 2026-07-10: nvidia REMOVED from chat:smart. Its deepseek-v4-pro model
+        # now times out on 100% of calls (~91s wall, confirmed live, past our
+        # 60s ceiling) — the free NVIDIA pool is oversubscribed. Pure wasted
+        # attempts + timeout waits. Stays in chat:deep (nemotron alive).
         "anthropic", "openai", "deepseek",
     ],
     "chat:code": [

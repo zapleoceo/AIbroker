@@ -206,6 +206,28 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     return "error"
 
 
+# Signatures that mean "this specific MODEL is gone/unprovisioned" (not the
+# key, not a rate limit). The key itself is fine — its OTHER models still work
+# — so we must NOT cooldown/mark_dead the key; we break to the next provider
+# (sibling keys of this provider run the same dead model). Interim, model-level
+# fix for the drift problem (nvidia kimi-k2.6 → 404 "Function not found for
+# account", ~30 err/hr) until the per-(provider,model) handler lands (roadmap
+# §3.1). litellm raises NotFoundError; the body carries these phrasings.
+_MODEL_UNAVAILABLE_SIGNS = (
+    "not found for account",
+    "model_not_found",
+    "does not exist",
+    "no such model",
+)
+
+
+def _is_model_unavailable(exc: Exception) -> bool:
+    if type(exc).__name__ == "NotFoundError":
+        return True
+    emsg = str(exc).lower()
+    return any(sign in emsg for sign in _MODEL_UNAVAILABLE_SIGNS)
+
+
 async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
     kind = classify_provider_error(exc, key.provider)
@@ -405,6 +427,19 @@ async def run_chat(
                 # Attempt is over (however it ends) — release the reservation.
                 # record_usage below books the real cost (0 here — no response).
                 await release_cost(api_key=key, estimated_cost=estimated_cost)
+                # Model gone/unprovisioned (404) — it's a MODEL problem, not a
+                # KEY one: this key's OTHER models still work, and sibling keys
+                # of this provider run the same dead model. Do NOT penalize the
+                # key; break straight to the next provider. (Interim model-level
+                # fix — see _is_model_unavailable / roadmap §3.1.)
+                if _is_model_unavailable(e):
+                    await _record_error(
+                        key=key, project=project, provider=provider,
+                        model=use_model, capability=capability, workflow=workflow, exc=e,
+                    )
+                    log.warning("provider %s model %s unavailable (%s) — next provider",
+                                provider, use_model, type(e).__name__)
+                    break  # next provider, not next key of the same dead model
                 kind = await _penalize(key, e)
                 # Self-learn the size ceiling: if the provider rejected the
                 # prompt for being too big, remember it so we skip this

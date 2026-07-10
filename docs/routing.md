@@ -37,8 +37,8 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → **cloudflare** → **nvidia** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. nvidia = kimi-k2.6 here. cloudflare = gpt-oss-120b (2026-07-07). |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **nvidia** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last. nvidia = deepseek-v4-pro here (slower, looser latency budget). |
+| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → **zai** → **cloudflare** → deepseek → anthropic → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last, see below. cloudflare = gpt-oss-120b (2026-07-07). nvidia REMOVED 2026-07-10 (kimi-k2.6 → 404). |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → **github** → **sambanova** → anthropic → openai → deepseek | `llm:chat` | Strict free-first; expensive last. nvidia REMOVED 2026-07-10 (deepseek-v4-pro → 91s timeout). |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → **github** → **sambanova** → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek → anthropic (paid). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only since 2026-07-05** — `POST /v1/chat?capability=chat:deep` returns 400; use `POST /v1/deep` + `GET /v1/deep/{job_id}`. See below. |
@@ -807,6 +807,23 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > provider)` only applies them when the failing key matches (`_penalize`
 > passes `key.provider`). The genuinely-generic signs (`429`, `quota`, `credit
 > balance is too low`, …) stay global. Each fix is now surgical.
+
+> **Model-gone (404) breaks to next provider WITHOUT penalizing the key
+> (2026-07-10, roadmap Phase 0).** A vanished/unprovisioned MODEL is neither a
+> dead key nor a rate limit: the key's OTHER models still work, and sibling
+> keys of the same provider run the same dead model. Confirmed live: nvidia
+> `kimi-k2.6` (chat:fast) started 404-ing "Function not found for account"
+> ~30x/hr, and `deepseek-v4-pro` (chat:smart) began timing out at ~91s — both
+> models silently vanished from our account's provisioning while nemotron
+> (chat:deep) stayed alive. Two-part fix: (1) both dead models **removed from
+> their chains** (nvidia stays in chat:deep only) — the real, immediate fix;
+> (2) `_is_model_unavailable(exc)` (litellm `NotFoundError` type, or "not found
+> for account"/"model_not_found"/"does not exist" in the body) makes `run_chat`
+> `break` to the next provider and record the error but **skip `_penalize`** —
+> so a future model that dies mid-chain doesn't wrongly cooldown/mark_dead a
+> key whose other models are fine. This is the interim, model-level fix for the
+> drift problem; the durable one is the per-(provider, model) handler with
+> its own liveness/cooldown/quota/timeout — see `docs/roadmap.md` §3.1.
 
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
