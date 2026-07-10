@@ -654,3 +654,80 @@ async def test_deep_submit_creates_job_and_runs_in_background():
     assert data["text"] == "deep answer"
     assert data["provider"] == "nvidia"
     assert data["request_id"] == 777
+
+
+# ─── generic async jobs — POST /v1/jobs (Phase 4) ─────────────────────────────
+
+
+async def test_jobs_submit_rejects_non_job_capability():
+    """embedding/transcription are sync-only; unknown capabilities too. The
+    async job API serves only run_chat capabilities."""
+    plain, _ = await _make_project(["llm:chat", "llm:embed"])
+    for cap in ("embedding", "transcription", "chat:nonsense"):
+        r = client.post(
+            f"/v1/jobs?capability={cap}",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 400, cap
+
+
+async def test_jobs_submit_requires_capability_scope():
+    plain, _ = await _make_project(["llm:embed"])  # no llm:chat
+    r = client.post(
+        "/v1/jobs?capability=chat:fast",
+        headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 403
+
+
+async def test_jobs_poll_404_for_unknown_job():
+    plain, _ = await _make_project(["llm:chat"])
+    r = client.get("/v1/jobs/999999", headers={"X-Project-Key": plain})
+    assert r.status_code == 404
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
+async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
+    """Generic async loop on Postgres: submit chat:fast (with response_format)
+    → background run_chat (mocked) → poll sees done. Confirms the capability is
+    threaded through and the job carries response_format (unlike /v1/deep)."""
+    import asyncio
+
+    from aibroker.services.llm_service import ChatOutcome
+
+    plain, _ = await _make_project(["llm:chat"])
+    captured: dict = {}
+
+    async def fake_run_chat(**kw):
+        captured.update(kw)
+        return ChatOutcome(
+            text='{"ok":true}', provider="cerebras", model="cerebras/gpt-oss-120b",
+            tokens_in=10, tokens_out=3, cost_usd=0.0, latency_ms=800,
+            key_label="eatmeat", request_id=888,
+        )
+
+    with patch("aibroker.services.deep_jobs.run_chat", fake_run_chat), \
+         TestClient(app) as local_client:
+        r = local_client.post(
+            "/v1/jobs?capability=chat:fast",
+            headers={"X-Project-Key": plain},
+            json={"messages": [{"role": "user", "content": "hi"}],
+                  "response_format": {"type": "json_object"}},
+        )
+        assert r.status_code == 202
+        job_id = r.json()["job_id"]
+        assert r.json()["poll_url"] == f"/v1/jobs/{job_id}"
+
+        for _ in range(100):
+            await asyncio.sleep(0.1)
+            poll = local_client.get(f"/v1/jobs/{job_id}", headers={"X-Project-Key": plain})
+            if poll.json()["status"] != "pending":
+                break
+
+    assert poll.json()["status"] == "done"
+    assert poll.json()["text"] == '{"ok":true}'
+    # capability + response_format actually threaded through to run_chat
+    assert captured["capability"] == "chat:fast"
+    assert captured["response_format"] == {"type": "json_object"}

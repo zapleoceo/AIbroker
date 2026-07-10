@@ -102,10 +102,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS ix_audit_actor_date ON audit_log(actor, created_at);
 CREATE INDEX IF NOT EXISTS ix_audit_action_date ON audit_log(action, created_at);
 
--- ─── Async chat:deep jobs (nemotron latency exceeds CF/nginx proxy timeouts) ─
+-- ─── Async jobs (submit + poll). Built for chat:deep, now generic over any ──
+-- chat capability (POST /v1/jobs?capability=X) — see services/deep_jobs.py.
+-- Table name kept as `deep_jobs`; `capability` records the real type.
 CREATE TABLE IF NOT EXISTS deep_jobs (
   id BIGSERIAL PRIMARY KEY,
   project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  capability VARCHAR(30) NOT NULL DEFAULT 'chat:deep',
   status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|done|error
   request JSONB NOT NULL,
   result_text TEXT,

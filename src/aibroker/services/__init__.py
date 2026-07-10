@@ -1,4 +1,9 @@
-from aibroker.services.deep_jobs import get_job, next_poll_after_s, submit_deep_job
+from aibroker.services.deep_jobs import (
+    get_job,
+    next_poll_after_s,
+    submit_deep_job,
+    submit_job,
+)
 from aibroker.services.llm_service import (
     ChatOutcome,
     EmbedFailed,
@@ -24,4 +29,5 @@ __all__ = [
     "run_embed",
     "run_transcribe",
     "submit_deep_job",
+    "submit_job",
 ]

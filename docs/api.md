@@ -24,9 +24,13 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| `POST` | `/v1/chat?capability=<cap>` | `ChatRequest` | `ChatResponse` |
-| `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` |
-| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` |
+| `POST` | `/v1/chat?capability=<cap>` | `ChatRequest` | `ChatResponse` (sync) |
+| `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`) |
+| `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
+| `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
+| `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
+| `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (sync) |
+| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (sync) |
 | `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key). `429` if the project exceeds `VENDING_RATE_LIMIT_PER_MINUTE` (default 30/min) — see **Threat model** in [security.md](security.md). |
 | `POST` | `/v1/usage` | `UsageReport` | `{recorded: true, request_id}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
@@ -64,6 +68,44 @@ the call routed through anthropic and hit its prompt cache — see
 and `request_id` (the `usage_log` row id — match your own logs against the
 broker's).
 
+### Async jobs — `/v1/jobs` (submit + poll)
+
+Same request body as `/v1/chat` (incl. `response_format`), but the broker
+**never holds the connection**: it returns `202` with a `job_id` immediately,
+runs the call in the background, and you **poll** `GET /v1/jobs/{job_id}` until
+`status` is `done` or `error`. Available for every chat capability
+(`chat:fast`/`smart`/`code`/`edit`/`deep`, `structured`, `prefilter`,
+`translate`, `vision`) — `embedding`/`transcription` stay sync-only (fast, no
+held-connection problem to solve).
+
+**Why migrate off sync `/v1/chat` onto this:** a synchronous call is bounded by
+your client read timeout and the broker's own nginx/Cloudflare read timeout
+(~60–120s). A slow/oversubscribed provider can 504 you *before* the broker has
+finished walking its fallback chain. The async job has no such ceiling — the
+broker can exhaustively rotate every available key and you still get the answer
+when you next poll. **Sync stays supported**; this is additive — migrate at
+your own pace, starting with your longest/most-important calls.
+
+```
+POST /v1/jobs?capability=chat:smart
+  → 202 {"job_id": 123, "status": "pending",
+         "poll_url": "/v1/jobs/123", "poll_after_s": 2}
+
+GET /v1/jobs/123
+  → 200 {"job_id":123,"status":"pending","poll_after_s":2}      # keep polling
+  → 200 {"job_id":123,"status":"done","text":"…","provider":…,  # done
+         "tokens_in":…,"tokens_out":…,"cost_usd":…,"request_id":…}
+  → 200 {"job_id":123,"status":"error","error":"…"}             # failed
+```
+
+`poll_after_s` is the broker's suggested wait before the next poll (widens for
+long jobs). A job belongs to exactly one project — polling someone else's
+`job_id` is a `404`. A worker restart mid-job is lazily resolved to an `error`
+(timeout) after ~20 min, so a poll never hangs forever. `chat:deep` is
+**async-only** (nemotron runs minutes); `POST /v1/chat?capability=chat:deep`
+returns `400`. `POST /v1/deep` + `GET /v1/deep/{job_id}` remain as
+backward-compatible aliases of the generic endpoints.
+
 ### `/v1/embed?provider=<p>` (default `voyage`)
 
 The broker retries **up to 5 keys of the same provider** on failure
@@ -97,6 +139,8 @@ instead of grepping timestamps against provider/model/workflow.
 |---|---|
 | `/v1/chat` (chat:*) | `llm:chat` |
 | `/v1/chat?capability=vision` | `llm:vision` |
+| `/v1/jobs?capability=<cap>` | same scope as the sync capability (`chat:*`→`llm:chat`, `vision`→`llm:vision`, `chat:deep`→`llm:deep`) |
+| `/v1/deep` | `llm:deep` |
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |
 | `/v1/key` | the scope passed in the body |

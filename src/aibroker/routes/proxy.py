@@ -25,7 +25,17 @@ from aibroker.services import (
     run_embed,
     run_transcribe,
     submit_deep_job,
+    submit_job,
 )
+
+# Capabilities the async job API serves — everything run_chat handles. embed
+# and transcription stay sync-only (fast, no held-connection problem async
+# solves). chat:deep is included (it's a run_chat capability) and is the one
+# capability that is async-ONLY.
+_JOB_CAPABILITIES = frozenset({
+    "chat:fast", "chat:smart", "chat:code", "chat:edit", "chat:deep",
+    "structured", "prefilter", "translate", "vision",
+})
 
 router = APIRouter(tags=["proxy"])
 
@@ -274,6 +284,28 @@ async def deep_submit(
     )
 
 
+def _job_response(row: Any) -> DeepJobResponse:  # pragma: no cover
+    """Shape a deep_jobs row into the poll response — shared by /v1/deep and
+    /v1/jobs. pending/error/done branches read a row inserted by a SEPARATE
+    session/request; cross-session reads don't see it on SQLite (see
+    deep_jobs.get_job), so these are Postgres-only-tested (skipif ON_SQLITE)."""
+    if row.status == "pending":
+        return DeepJobResponse(
+            job_id=row.id, status="pending",
+            poll_after_s=next_poll_after_s(row.created_at),
+        )
+    if row.status == "error":
+        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
+    meta = row.result_meta or {}
+    return DeepJobResponse(
+        job_id=row.id, status="done", text=row.result_text,
+        provider=meta.get("provider"), model=meta.get("model"),
+        tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
+        cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
+        key_label=meta.get("key_label"), request_id=meta.get("request_id"),
+    )
+
+
 @router.get("/deep/{job_id}", response_model=DeepJobResponse)
 async def deep_poll(
     job_id: int,
@@ -282,24 +314,59 @@ async def deep_poll(
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
-    # pending/error/done branches read a row inserted by a SEPARATE
-    # session/request — cross-session reads on SQLite don't see it (see
-    # deep_jobs.get_job) — so these are Postgres-only-tested (skipif
-    # ON_SQLITE): test_deep_poll_pending_job_returns_poll_after_s,
-    # test_deep_poll_error_job_returns_error_message,
-    # test_deep_poll_done_job_returns_result_meta.
-    if row.status == "pending":  # pragma: no cover
-        return DeepJobResponse(
-            job_id=row.id, status="pending",
-            poll_after_s=next_poll_after_s(row.created_at),
+    return _job_response(row)  # pragma: no cover
+
+
+# ─── Generic async jobs — submit+poll for ANY chat capability (Phase 4) ─────
+#
+# Same submit/poll shape as /v1/deep, opened to every chat capability so
+# clients (Vera, Stepan) can migrate off the sync /v1/chat endpoint at their
+# own pace: they get a guaranteed answer (exhaustive rotation, no held
+# connection that a slow provider could 504). Sync /v1/chat stays — additive,
+# backward-compatible. See docs/routing.md and services/deep_jobs.py.
+
+
+class JobSubmitResponse(BaseModel):
+    job_id: int
+    status: str = "pending"
+    poll_url: str
+    poll_after_s: int = Field(description="suggested wait before the first poll")
+
+
+@router.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
+async def jobs_submit(
+    body: ChatRequest,
+    capability: str = Query("chat:fast"),
+    ctx: ProjectCtx = Depends(require_project),
+) -> JobSubmitResponse:
+    """Submit any chat `capability` as an async job. Returns a job_id
+    immediately — poll GET /v1/jobs/{job_id}. Mirrors POST /v1/chat's body
+    (incl. response_format), but never holds the connection."""
+    if capability not in _JOB_CAPABILITIES:
+        raise HTTPException(
+            400,
+            f"capability={capability} is not available as an async job "
+            f"(sync-only or unknown). Async job capabilities: "
+            f"{sorted(_JOB_CAPABILITIES)}",
         )
-    if row.status == "error":  # pragma: no cover
-        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
-    meta = row.result_meta or {}  # pragma: no cover
-    return DeepJobResponse(  # pragma: no cover
-        job_id=row.id, status="done", text=row.result_text,
-        provider=meta.get("provider"), model=meta.get("model"),
-        tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
-        cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
-        key_label=meta.get("key_label"), request_id=meta.get("request_id"),
+    _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    job_id = await submit_job(  # pragma: no cover
+        project=ctx.project, capability=capability,
+        messages=[m.model_dump() for m in body.messages],
+        model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
+        response_format=body.response_format, workflow=body.workflow,
     )
+    return JobSubmitResponse(  # pragma: no cover
+        job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
+    )
+
+
+@router.get("/jobs/{job_id}", response_model=DeepJobResponse)
+async def jobs_poll(
+    job_id: int,
+    ctx: ProjectCtx = Depends(require_project),
+) -> DeepJobResponse:
+    row = await get_job(job_id, ctx.project.id)
+    if row is None:
+        raise HTTPException(404, "job not found")
+    return _job_response(row)  # pragma: no cover

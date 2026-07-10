@@ -186,6 +186,9 @@ class DeepJobRow(Base):
     project_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
+    # Which capability this async job runs. Built for chat:deep; now generic
+    # (POST /v1/jobs?capability=X) — the table/model name stays for continuity.
+    capability: Mapped[str] = mapped_column(String(30), default="chat:deep", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     result_text: Mapped[str | None] = mapped_column(Text)

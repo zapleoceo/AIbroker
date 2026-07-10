@@ -1,21 +1,24 @@
-"""Async job wrapper around capability=chat:deep.
+"""Async jobs (submit + poll) — generic over any chat capability.
 
-Why this exists: nemotron-3-ultra (the only chat:deep provider) has been
-observed taking up to ~8 minutes on NVIDIA's free, oversubscribed pool.
-Cloudflare's edge (~100s) and this broker's own nginx (proxy_read_timeout
-120s, see infra/nginx-aib.conf) both time out well before that — the
-client got a 504 while the broker was still waiting on the provider and
-would eventually log a perfectly good "ok" that nobody was left to see.
+Why this exists: originally for chat:deep — nemotron-3-ultra has been observed
+taking up to ~8 minutes on NVIDIA's free pool, past Cloudflare's (~100s) and
+this broker's nginx (proxy_read_timeout 120s) read timeouts, so a sync HTTP
+response can't carry the result: the client 504s while the broker is still
+waiting and later logs a perfectly good "ok" nobody's left to see.
 
-Submit creates a `deep_jobs` row and schedules the real call in the
-background (asyncio.create_task on whichever of the 2 uvicorn workers
-handled the submit) — the HTTP response returns immediately. Poll reads
-the job row from Postgres, so it works no matter which worker answers the
-poll request; no in-process task handle needs to survive across workers.
+The same submit/poll shape now serves EVERY chat capability (POST
+/v1/jobs?capability=X, roadmap Phase 4): a client can migrate off the sync
+endpoint at its own pace and get a guaranteed answer (exhaustive rotation, no
+held connection). Sync endpoints stay — this is additive, backward-compatible.
+`submit_deep_job` is a thin wrapper over `submit_job(capability="chat:deep")`.
 
-A worker restart mid-job leaves the row stuck at "pending" — `get_job`
-lazily marks anything past `_STALE_AFTER_S` as a timeout error instead of
-needing a separate sweeper process.
+Submit creates a `deep_jobs` row and schedules the real call in the background
+(asyncio.create_task on whichever uvicorn worker handled the submit) — the HTTP
+response returns immediately. Poll reads the row from Postgres, so it works no
+matter which worker answers; no in-process handle needs to survive.
+
+A worker restart mid-job leaves the row stuck at "pending" — `get_job` lazily
+marks anything past `_STALE_AFTER_S` a timeout error, no separate sweeper.
 """
 from __future__ import annotations
 
@@ -42,6 +45,34 @@ _STALE_AFTER_S = 20 * 60
 # schedules downstream) is exercised only by the Postgres-only integration
 # test test_deep_submit_creates_job_and_runs_in_background, not the SQLite
 # coverage run — hence `# pragma: no cover` on this and the next two defs.
+async def submit_job(  # pragma: no cover
+    *,
+    project: ProjectRow,
+    capability: str,
+    messages: list[dict[str, Any]],
+    model: str | None,
+    max_tokens: int,
+    temperature: float,
+    response_format: dict[str, Any] | None,
+    workflow: str | None,
+) -> int:
+    """Create a pending job row for any chat `capability`, schedule the real
+    call in the background, return the job id immediately."""
+    request = {
+        "messages": messages, "model": model,
+        "max_tokens": max_tokens, "temperature": temperature,
+        "response_format": response_format, "workflow": workflow,
+    }
+    async with get_session() as s:
+        row = DeepJobRow(project_id=project.id, capability=capability,
+                          status="pending", request=request)
+        s.add(row)
+        await s.flush()
+        job_id = row.id
+    asyncio.create_task(_run_job(job_id, project, capability, request))
+    return job_id
+
+
 async def submit_deep_job(  # pragma: no cover
     *,
     project: ProjectRow,
@@ -51,38 +82,33 @@ async def submit_deep_job(  # pragma: no cover
     temperature: float,
     workflow: str | None,
 ) -> int:
-    """Create a pending job row, schedule the real call in the background,
-    return the job id immediately."""
-    request = {
-        "messages": messages, "model": model,
-        "max_tokens": max_tokens, "temperature": temperature,
-        "workflow": workflow,
-    }
-    async with get_session() as s:
-        row = DeepJobRow(project_id=project.id, status="pending", request=request)
-        s.add(row)
-        await s.flush()
-        job_id = row.id
-    asyncio.create_task(_run_job(job_id, project, request))
-    return job_id
+    """Backward-compatible chat:deep wrapper (POST /v1/deep). nemotron isn't
+    JSON-reliable, so response_format is always None here — see chains.py."""
+    return await submit_job(
+        project=project, capability="chat:deep", messages=messages, model=model,
+        max_tokens=max_tokens, temperature=temperature, response_format=None,
+        workflow=workflow,
+    )
 
 
-async def _run_job(job_id: int, project: ProjectRow, request: dict[str, Any]) -> None:  # pragma: no cover
+async def _run_job(  # pragma: no cover
+    job_id: int, project: ProjectRow, capability: str, request: dict[str, Any],
+) -> None:
     try:
         outcome = await run_chat(
-            project=project, capability="chat:deep",
+            project=project, capability=capability,
             messages=request["messages"], model=request["model"],
             max_tokens=request["max_tokens"], temperature=request["temperature"],
-            response_format=None,  # nemotron isn't JSON-reliable — see chains.py
+            response_format=request.get("response_format"),
             workflow=request["workflow"],
         )
     except Exception as e:  # noqa: BLE001 — any failure must still resolve the job
-        log.warning("deep_job %d failed: %s", job_id, e)
+        log.warning("job %d (%s) failed: %s", job_id, capability, e)
         await _finish(job_id, status="error", error_message=str(e))
         return
     if outcome is None:
         await _finish(job_id, status="error",
-                       error_message="no provider available for capability=chat:deep")
+                       error_message=f"no provider available for capability={capability}")
         return
     await _finish(
         job_id, status="done", result_text=outcome.text,
