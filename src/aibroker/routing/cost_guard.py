@@ -167,9 +167,13 @@ async def release_cost(*, api_key: ApiKeyRow, estimated_cost: float) -> None:
     ends up debited by exactly the real cost, never the estimate.
 
     `GREATEST(0, ...)` guards float rounding from ever pushing the counter
-    negative. No-op for free-tier keys / a zero estimate, mirroring
-    `reserve_cost`'s own skip condition (nothing was ever reserved for them)."""
-    if api_key.tier == "free" or estimated_cost <= 0:
+    negative. Must mirror `reserve_cost`'s PER-KEY skip condition exactly —
+    reserve only debits the counter when `daily_cost_cap_usd is not None`, so
+    release must skip on the same condition. (It used to skip on `tier=="free"`
+    instead: a paid key with NO per-key cap but a project/global cap took no
+    reservation yet got refunded on a project/global block, corrupting its daily
+    counter. See fix 2026-07-10.)"""
+    if api_key.daily_cost_cap_usd is None or estimated_cost <= 0:
         return
     async with get_session() as s:
         await s.execute(

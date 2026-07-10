@@ -189,3 +189,32 @@ async def test_reserve_cost_resets_stale_counter():
     row = await _read_key(key.id)
     assert row.daily_cost_used_usd == pytest.approx(0.5)
     assert row.daily_reset_at == date.today()
+
+
+async def test_release_cost_paid_key_without_per_key_cap_is_a_noop():
+    """REGRESSION (2026-07-10): a paid key with NO per-key cap took no
+    reservation (reserve_cost skips when daily_cost_cap_usd is None), so release
+    must skip too. It used to skip only on tier=='free' and would decrement such
+    a key's counter on a project/global block, corrupting real spend."""
+    k = ApiKeyRow(id=999_997, provider="x", label="x", tier="paid",
+                  token_encrypted="x", scopes=["llm:chat"], daily_cost_cap_usd=None)
+    await release_cost(api_key=k, estimated_cost=5.0)  # returns early, no DB touch
+
+
+@pytest.mark.skipif(not ON_POSTGRES, reason="reserve_cost + usage_log need a real DB")
+async def test_project_block_does_not_corrupt_uncapped_paid_key_counter():
+    """A paid key with NO per-key cap, blocked by the PROJECT cap: reserve took
+    nothing (no per-key cap), so the project-block refund must NOT decrement the
+    key's daily counter. Pre-fix it wrongly dropped 1.0 → 0.95."""
+    from datetime import datetime
+
+    from aibroker.db.models import UsageLogRow
+    proj = _project(cap=0.01)
+    key = await _add_key(tier="paid", daily_cost_cap_usd=None, daily_cost_used_usd=1.0)
+    async with get_session() as s:
+        s.add(UsageLogRow(project_id=proj.id, provider="x", status="ok",
+                          cost_usd=0.02, created_at=datetime.utcnow()))
+    with pytest.raises(CostGuardError) as exc:
+        await reserve_cost(api_key=key, project=proj, estimated_cost=0.05)
+    assert exc.value.kind == "project"
+    assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(1.0)
