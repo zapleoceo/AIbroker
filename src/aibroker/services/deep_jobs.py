@@ -117,12 +117,11 @@ async def get_job(job_id: int, project_id: int) -> DeepJobRow | None:
     lazily flip a stale `pending` row to error, but that raced the dispatcher
     and prematurely failed jobs still legitimately retrying under backoff."""
     async with get_session() as s:
-        row = (await s.execute(
+        return (await s.execute(  # pragma: no cover
             select(DeepJobRow).where(
                 DeepJobRow.id == job_id, DeepJobRow.project_id == project_id
             )
         )).scalar_one_or_none()
-        return row  # pragma: no cover
 
 
 def next_poll_after_s(created_at: datetime) -> int:
