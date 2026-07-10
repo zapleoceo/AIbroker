@@ -463,6 +463,57 @@ async def test_run_chat_invalid_json_skips_provider_not_key(monkeypatch):
     assert out.text == '{"ok": true}'
 
 
+async def test_run_chat_empty_body_retries_same_provider(monkeypatch):
+    """REGRESSION (2026-07-10): a blank/whitespace body is a TRANSIENT provider
+    throttle (deepseek json_object intermittently returns an empty string on
+    large prompts under load), not a model JSON defect. run_chat must RETRY the
+    same provider's next key — which almost always returns valid JSON — instead
+    of skipping the whole provider like it does for genuinely malformed JSON."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    calls = {"n": 0}
+    k1 = SimpleNamespace(id=1, label="a", tier="paid", provider="deepseek", token_encrypted="x")
+    k2 = SimpleNamespace(id=2, label="b", tier="paid", provider="deepseek", token_encrypted="x")
+    ds = iter([k1, k2])
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return next(ds, None) if provider == "deepseek" else None
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        calls["n"] += 1
+        body = "   \n  " if calls["n"] == 1 else '{"ok": true}'  # empty first, valid on retry
+        return body, {"model": kw["model"], "tokens_in": 100, "tokens_out": 50,
+                      "cost_usd": 0.0, "latency_ms": 100,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
+    monkeypatch.setattr(svc, "_max_keys", lambda p: 3)
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7,
+        response_format={"type": "json_object"}, workflow=None,
+    )
+    assert picks.count("deepseek") == 2   # retried the SAME provider, not skipped
+    assert out.text == '{"ok": true}'     # got valid JSON on the retry
+
+
 async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
     """A JSON request must reorder the live chain via deprioritize_for_json —
     cerebras (unreliable) tried after gemini even though it's first in the raw

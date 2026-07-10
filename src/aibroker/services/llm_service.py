@@ -485,6 +485,16 @@ async def run_chat(
             # Deterministic JSON quality gate: an unparseable JSON body (gemini
             # truncated, deepseek rogue) is billed but treated as a failure.
             if _wants_json(response_format) and not _is_valid_json(text):
+                # An EMPTY/whitespace body is a TRANSIENT provider throttle, not a
+                # model JSON defect: DeepSeek's json_object mode intermittently
+                # returns a blank string on large prompts under load (verified
+                # 2026-07-10 — ~24% on Stepan's 52k-char follow-up prompt, random
+                # per call, unrelated to the key). A retry of the SAME provider
+                # almost always returns valid JSON, so retry within the provider
+                # rather than burning the whole chain. Non-empty-but-malformed is
+                # still a MODEL property (cerebras gpt-oss mangles the same prompt
+                # on every key) → skip straight to the next provider.
+                empty = not (text or "").strip()
                 await record_usage(
                     api_key_id=key.id, project_id=project.id, lease_id=None,
                     provider=provider, model=use_model, capability=capability,
@@ -493,12 +503,12 @@ async def run_chat(
                     cache_read_tokens=meta.get("cache_read_tokens", 0),
                     cache_write_tokens=meta.get("cache_write_tokens", 0),
                     latency_ms=meta["latency_ms"], status="error",
-                    error_kind="InvalidJSON", http_status=200,
+                    error_kind="EmptyBody" if empty else "InvalidJSON",
+                    http_status=200,
                 )
-                # Malformed JSON is a MODEL property, not a key one: cerebras
-                # gpt-oss mangles the same prompt on every key. Retrying sibling
-                # keys of this provider just burns tokens N more times (~80% of
-                # the InvalidJSON waste). Skip straight to the next provider.
+                if empty:
+                    log.warning("provider %s returned empty body — retrying next key", provider)
+                    continue  # next key of THIS provider (transient throttle)
                 log.warning("provider %s returned unparseable JSON, next provider", provider)
                 break  # next provider, not next key of the same model
 
