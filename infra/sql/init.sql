@@ -1,5 +1,8 @@
--- Initial broker schema. Idempotent. Runs on first postgres start
--- via /docker-entrypoint-initdb.d. After this Alembic takes over migrations.
+-- Full broker schema. Idempotent. Runs on first postgres start via
+-- /docker-entrypoint-initdb.d, and is the disaster-recovery source of truth for
+-- a fresh volume — so it MUST stay in sync with infra/sql/migrations/*.sql.
+-- There is no Alembic; migrations are hand-applied via psql on prod, and every
+-- one of them is folded in below. When you add a migration, fold it in here too.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -123,3 +126,36 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);
 -- Dispatcher claim scan (services/job_queue.py): eligible pending rows.
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after, created_at);
+
+-- ─── Folded-in migrations (kept in sync with infra/sql/migrations/) ─────────
+-- 002 discovered free-tier limits (parsed from provider response headers)
+-- 003 per-key manual quota overrides (4 axes; win over discovered_* / defaults)
+ALTER TABLE api_keys
+  ADD COLUMN IF NOT EXISTS discovered_req_limit  BIGINT,
+  ADD COLUMN IF NOT EXISTS discovered_tok_limit  BIGINT,
+  ADD COLUMN IF NOT EXISTS limits_discovered_at  TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS manual_req_limit      BIGINT,
+  ADD COLUMN IF NOT EXISTS manual_tok_limit      BIGINT,
+  ADD COLUMN IF NOT EXISTS manual_tok_in_limit   BIGINT,
+  ADD COLUMN IF NOT EXISTS manual_tok_out_limit  BIGINT;
+
+-- 006 prompt-cache token columns on usage_log
+ALTER TABLE usage_log
+  ADD COLUMN IF NOT EXISTS cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- 004 self-learned provider-level facts (size ceiling, etc.)
+CREATE TABLE IF NOT EXISTS provider_observations (
+  provider                   TEXT PRIMARY KEY,
+  learned_max_request_tokens BIGINT,
+  learned_at                 TIMESTAMP,
+  sample_count               INTEGER NOT NULL DEFAULT 0
+);
+
+-- 005 plain btree on usage_log.created_at (created_at-only dashboard queries).
+-- 007 index backing the per-project vending rate limit.
+-- No CONCURRENTLY here: init runs against an empty DB (nothing to lock) and
+-- CONCURRENTLY can't run inside the init transaction. The migration files use
+-- CONCURRENTLY because they apply to a live, populated prod table.
+CREATE INDEX IF NOT EXISTS ix_usage_created_at ON usage_log (created_at);
+CREATE INDEX IF NOT EXISTS ix_leases_project_leased_at ON leases (project_id, leased_at);
