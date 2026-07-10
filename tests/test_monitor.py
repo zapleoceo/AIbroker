@@ -11,9 +11,23 @@ from sqlalchemy import insert, select
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
-from aibroker.monitor import tick
+from aibroker.monitor import _cooldown_end, tick
 
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
+
+
+def test_cooldown_end_monthly_vs_short():
+    """A 'monthly quota' hint parks until next month; anything else ~5 min."""
+    from aibroker.routing.cooldown import next_utc_month_start
+
+    monthly = _cooldown_end("monthly quota")
+    # ~= next UTC month start (naive), far more than a day out.
+    assert abs((monthly - next_utc_month_start().replace(tzinfo=None)).total_seconds()) < 2
+    assert (monthly - datetime.now(UTC).replace(tzinfo=None)).total_seconds() > 86400
+
+    short = _cooldown_end("rate limit")
+    delta = (short - datetime.now(UTC).replace(tzinfo=None)).total_seconds()
+    assert 250 < delta < 350   # ~5 min
 
 
 async def test_tick_with_no_keys_logs_and_returns():

@@ -35,6 +35,17 @@ log = logging.getLogger(__name__)
 INTERVAL_S = int(os.environ.get("MONITOR_INTERVAL_S", "600"))
 
 
+def _cooldown_end(hint: str) -> datetime:
+    """Naive-UTC cooldown end for a monitor 'cooldown' verdict. A monthly-quota
+    hint (mistral's monthly Vibe cap) parks the key until the billing cycle
+    resets — anything shorter would re-cool it every probe all month; any other
+    cooldown (a transient 429) is the usual short 5-min park."""
+    from aibroker.routing.cooldown import next_utc_month_start
+    if hint == "monthly quota":
+        return next_utc_month_start().replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+
+
 async def tick() -> None:
     async with get_session() as s:
         rows = (
@@ -77,15 +88,7 @@ async def tick() -> None:
                     await recover(f"key:{r.id}", f"{r.provider}/{r.label} back alive")
             elif verdict == "cooldown":
                 cooldown_count += 1
-                # A monthly-quota cooldown (mistral's monthly Vibe cap) parks
-                # the key until the billing cycle resets, not a token 5 min —
-                # otherwise the probe re-cools it every 5 min all month. Any
-                # other cooldown (a transient 429) is the usual short park.
-                if hint == "monthly quota":
-                    from aibroker.routing.cooldown import next_utc_month_start
-                    cd_until = next_utc_month_start().replace(tzinfo=None)
-                else:
-                    cd_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+                cd_until = _cooldown_end(hint)  # pragma: no cover — Postgres-only tick
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
                         is_alive=True,
