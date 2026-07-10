@@ -125,7 +125,7 @@ def test_add_key_form_has_four_manual_limit_fields():
 
 
 def test_validate_scope_list_strips_dups_and_empties():
-    from aibroker.routes.dashboard import _validate_scope_list
+    from aibroker.routes.dashboard_scopes import _validate_scope_list
     assert _validate_scope_list(["llm:chat", "llm:edit", "llm:chat"]) == [
         "llm:chat", "llm:edit"
     ]
@@ -133,14 +133,14 @@ def test_validate_scope_list_strips_dups_and_empties():
 
 
 def test_validate_scope_list_rejects_unknown():
-    from aibroker.routes.dashboard import _validate_scope_list
+    from aibroker.routes.dashboard_scopes import _validate_scope_list
     assert _validate_scope_list(["llm:chat", "admin:write"]) is None
     assert _validate_scope_list([]) is None
     assert _validate_scope_list(["", " "]) is None
 
 
 def test_scope_checkboxes_renders_4_options_with_checked_state():
-    from aibroker.routes.dashboard import _scope_checkboxes
+    from aibroker.routes.dashboard_scopes import _scope_checkboxes
     html = _scope_checkboxes(["llm:chat", "llm:edit"])
     # All 4 known scopes rendered
     for s in ("llm:chat", "llm:embed", "llm:vision", "llm:edit"):
@@ -539,7 +539,7 @@ def test_dashboard_create_project_form_requires_auth():
 
 def test_parse_scopes_validation():
     """Multi-scope CSV parsing for the key reassignment form."""
-    from aibroker.routes.dashboard import _parse_scopes
+    from aibroker.routes.dashboard_scopes import _parse_scopes
     assert _parse_scopes("llm:chat,llm:edit") == ["llm:chat", "llm:edit"]
     assert _parse_scopes("  llm:edit  ") == ["llm:edit"]
     assert _parse_scopes("") is None

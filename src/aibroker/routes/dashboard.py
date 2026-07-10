@@ -37,6 +37,10 @@ from aibroker.routes.dashboard_data import (
     _gather_project_detail,
     _parse_date_range,
 )
+from aibroker.routes.dashboard_scopes import (
+    _scope_checkboxes,
+    _validate_scope_list,
+)
 from aibroker.telemetry import audit
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
@@ -188,8 +192,6 @@ def _dash_html(*, body: str, flash: str = "") -> str:
 <script src="/dashboard/assets.js?v={__version__}"></script>
 
 </body></html>"""
-
-
 
 
 # Known failure signatures → a short actionable label instead of raw
@@ -912,30 +914,6 @@ async def dashboard_project_detail(
 # ─── Form handlers ──────────────────────────────────────────────────────────
 
 
-_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep")
-
-
-def _parse_scopes(csv: str) -> list[str] | None:
-    """Parse a comma-separated scope list; None if empty or any scope unknown.
-    Kept for legacy callers (project allowed_scopes form is still CSV)."""
-    scopes = [x.strip() for x in csv.split(",") if x.strip()]
-    if not scopes or any(s not in _KNOWN_SCOPES for s in scopes):
-        return None
-    return scopes
-
-
-def _validate_scope_list(scopes: list[str]) -> list[str] | None:
-    """For checkbox-driven forms — strip dups, reject empty / unknown."""
-    seen: list[str] = []
-    for s in scopes:
-        s = s.strip()
-        if not s:
-            continue
-        if s not in _KNOWN_SCOPES:
-            return None
-        if s not in seen:
-            seen.append(s)
-    return seen or None
 
 
 def _positive_int_or_none(v: str) -> int | None:
@@ -962,16 +940,6 @@ def _apply_manual_limits(key: ApiKeyRow, *, req: str, tok: str,
     key.manual_tok_out_limit = _positive_int_or_none(tok_out)
 
 
-def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
-    """Render the 4 known scopes as checkboxes (multi-select via repeated POST)."""
-    sel = set(selected or [])
-    return "".join(
-        f'<label class="scope-cb">'
-        f'<input type="checkbox" name="{name}" value="{s}"'
-        f'{" checked" if s in sel else ""}> {s}'
-        f'</label>'
-        for s in _KNOWN_SCOPES
-    )
 
 
 @router.post("/dashboard/keys/create")
