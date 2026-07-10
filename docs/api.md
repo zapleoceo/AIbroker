@@ -24,20 +24,30 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| `POST` | `/v1/chat?capability=<cap>` | `ChatRequest` | `ChatResponse` (sync) |
-| `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`) |
+| `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
+| `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
-| `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (sync) |
-| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (sync) |
+| `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
+| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key). `429` if the project exceeds `VENDING_RATE_LIMIT_PER_MINUTE` (default 30/min) — see **Threat model** in [security.md](security.md). |
 | `POST` | `/v1/usage` | `UsageReport` | `{recorded: true, request_id}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
 
-### Capabilities for `/v1/chat`
+### Chat is async-only (2026-07-10)
 
-`chat:fast`, `chat:smart`, `chat:code`, `chat:edit`, `prefilter`,
+**Sync `POST /v1/chat` was removed — it returns `410 Gone`.** Do all chat via
+the async job API (`POST /v1/jobs?capability=X` → poll `GET /v1/jobs/{id}`, see
+below). A synchronous chat call could 504 through the proxy read-timeout before
+the fallback chain finished; the job queue has no such ceiling and exhaustively
+rotates keys. `embed`/`transcribe` **stay synchronous** — they're fast (~1s),
+never hit that timeout, and routing them through submit/poll would only add
+latency for no benefit.
+
+### Capabilities (for `/v1/jobs`)
+
+`chat:fast`, `chat:smart`, `chat:code`, `chat:edit`, `chat:deep`, `prefilter`,
 `structured`, `translate`, `vision`.
 
 `translate` routes to small fast non-reasoning models first

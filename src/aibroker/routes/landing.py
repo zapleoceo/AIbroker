@@ -119,7 +119,7 @@ _HTML = """<!doctype html>
           "name": "What happens if all keys for a provider fail?",
           "acceptedAnswer": {{
             "@type": "Answer",
-            "text": "The capability chain falls back to the next provider. If every provider in the chain is exhausted, /v1/chat returns HTTP 503."
+            "text": "The capability chain falls back to the next provider, rotating keys until one answers. Chat runs as an async job (POST /v1/jobs, poll GET /v1/jobs/{{id}}), so a slow provider never times the caller out."
           }}
         }},
         {{
@@ -267,6 +267,7 @@ h3{{font-size:18px}}
 .ep .verb{{color:var(--accent);font-weight:600;font-size:11px;text-align:center;
   background:var(--accent-soft);padding:3px 0;border-radius:3px}}
 .ep .verb.post{{color:var(--good);background:rgba(81,207,102,.1)}}
+.ep .verb.get{{color:var(--accent);background:var(--accent-soft)}}
 .ep .path{{color:var(--text)}}
 .ep .note{{color:var(--dim);font-size:11px;font-family:var(--sans)}}
 
@@ -417,11 +418,13 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
           <span class="mode-tag" data-i18n="how.proxy.tag" data-en="Recommended" data-ru="Рекомендуется"></span>
         </div>
         <p data-i18n="how.proxy.desc"
-           data-en="POST /v1/chat or /v1/embed. Broker picks the best key, calls the provider, returns the response. Your code never touches provider credentials."
-           data-ru="POST /v1/chat или /v1/embed. Брокер выбирает лучший ключ, вызывает провайдера, возвращает ответ. Ваш код не касается креденшелов провайдера."></p>
-        <pre><code>curl -X POST https://aib.zapleo.com/v1/chat \\
+           data-en="Chat is async: POST /v1/jobs to submit, poll GET /v1/jobs/{{id}} for the result. Broker rotates keys until it has an answer — no held connection, no timeout. Embeddings stay synchronous on /v1/embed. Your code never touches provider credentials."
+           data-ru="Чат асинхронный: POST /v1/jobs — отправить, GET /v1/jobs/{{id}} — забрать результат. Брокер ротирует ключи до ответа, без удержания соединения и таймаутов. Эмбеддинги синхронно на /v1/embed. Ваш код не касается креденшелов провайдера."></p>
+        <pre><code>curl -X POST "https://aib.zapleo.com/v1/jobs?capability=chat:fast" \\
   -H "X-Project-Key: aib_prj_..." \\
-  -d '{{ "messages": [{{"role":"user","content":"hi"}}] }}'</code></pre>
+  -d '{{ "messages": [{{"role":"user","content":"hi"}}] }}'
+# → {{"job_id": 123, "poll_url": "/v1/jobs/123"}}
+curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></pre>
       </div>
       <div class="mode">
         <div class="mode-head">
@@ -580,8 +583,9 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
       <div class="api-block">
         <h3 data-i18n="api.client" data-en="For clients · X-Project-Key" data-ru="Для клиентов · X-Project-Key"></h3>
         <div class="endpoints">
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/chat</span><span class="note">proxy</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/embed</span><span class="note">proxy</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/jobs</span><span class="note">chat · async</span></div>
+          <div class="ep"><span class="verb get">GET</span><span class="path">/v1/jobs/{{id}}</span><span class="note">poll</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/embed</span><span class="note">sync</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/key</span><span class="note">vending</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/usage</span><span class="note">vending</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/release</span><span class="note">vending</span></div>
@@ -682,8 +686,8 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
 
         <h3 data-i18n="faq.q2" data-en="What happens if all keys for a provider fail?" data-ru="Что если все ключи провайдера упали?"></h3>
         <p style="color:var(--muted);font-size:14px" data-i18n="faq.a2"
-           data-en="Chain falls back to the next provider in the capability chain. If the whole chain is exhausted, /v1/chat returns 503."
-           data-ru="Цепочка переключается на следующего провайдера. Если вся цепочка исчерпана, /v1/chat вернёт 503."></p>
+           data-en="Chain falls back to the next provider, rotating keys until one answers. Chat is an async job (POST /v1/jobs → poll GET /v1/jobs/{{id}}), so a slow or saturated provider never times the caller out."
+           data-ru="Цепочка переключается на следующего провайдера, ротируя ключи до ответа. Чат — асинхронная задача (POST /v1/jobs → опрос GET /v1/jobs/{{id}}), поэтому медленный или перегруженный провайдер не отваливает клиента по таймауту."></p>
       </div>
       <div>
         <h3 data-i18n="faq.q3" data-en="How is the dashboard secured?" data-ru="Как защищена панель?"></h3>

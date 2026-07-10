@@ -9,7 +9,7 @@
            ▼
 ┌──────────────────────────────────────────────────────┐
 │ aibroker-api (FastAPI, async)                        │
-│   POST /v1/chat?capability=...   → LiteLLM SDK       │
+│   POST /v1/jobs?capability=...   → queue → LiteLLM   │
 │   POST /v1/embed?provider=...    → LiteLLM SDK       │
 │   POST /v1/key, /v1/usage, /v1/release  (vending)    │
 │   GET  /v1/health, /admin/*, /dashboard, /login      │
@@ -44,25 +44,36 @@ sets `is_alive=True` and fires the same `recover()` alert as `alive` does.
 ## Operating modes
 
 ### Proxy mode (default for LLM)
-`POST /v1/chat`, `POST /v1/embed` — broker holds the keys, calls the provider
-through LiteLLM, returns text + cost meta. Client never sees the API key.
+`POST /v1/jobs` (chat, async submit+poll) and `POST /v1/embed` (sync) — broker
+holds the keys, calls the provider through LiteLLM, returns text + cost meta.
+Client never sees the API key. (Sync `POST /v1/chat` was removed 2026-07-10 —
+`410 Gone` → use `/v1/jobs`.)
 
 ### Vending mode (for non-LLM HTTP APIs)
 `POST /v1/key` returns the plain key with a short TTL lease. Client calls the
 provider directly, reports usage back via `POST /v1/usage`. Used when the
 broker doesn't know the wire format (e.g. weird custom auth flows).
 
-## Request flow (proxy mode)
+## Request flow (chat is async-only since 2026-07-10)
 
 Routes are thin (`routes/proxy.py`): authenticate, gate scope, delegate to
 `services/llm_service`, shape the response. All orchestration lives in the
 service (SRP — no business logic in the route layer).
 
-1. Client sends `POST /v1/chat?capability=chat:fast` with `X-Project-Key`.
-2. `auth.require_project` looks up project by hashed key, attaches scopes.
-3. The route checks `is_known_capability` (else 400) and that the project holds
-   `scope_for(capability)` (else 403) — so `vision` needs `llm:vision`,
-   `chat:edit` needs `llm:edit`, not a blanket `llm:chat`.
+**Chat runs through the async job queue, not a sync call.** `POST /v1/chat`
+was removed (returns `410 Gone`); clients submit `POST /v1/jobs?capability=X`
+and poll `GET /v1/jobs/{id}`. The dispatcher (see "Async jobs" below) claims the
+job and runs `run_chat` — the SAME orchestration described here. `embed` and
+`transcribe` stay synchronous on `/v1/embed` / `/v1/transcribe` (fast, no proxy
+read-timeout problem). So the steps below are what the DISPATCHER does per
+claimed chat job:
+
+1. Client submits `POST /v1/jobs?capability=chat:fast` with `X-Project-Key`;
+   the dispatcher later claims the pending row.
+2. `auth.require_project` (at submit) looks up project by hashed key, attaches scopes.
+3. Submit checks the capability is a known async-job capability (else 400) and
+   the project holds `scope_for(capability)` (else 403) — `vision` needs
+   `llm:vision`, `chat:edit` needs `llm:edit`, not a blanket `llm:chat`.
 4. `services.llm_service.run_chat` walks `chain_for(capability)`. For each
    provider:
    - `selector.pick_and_reserve(provider, scope_for(capability))` does atomic

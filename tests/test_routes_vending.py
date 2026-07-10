@@ -114,8 +114,9 @@ def test_release_missing_lease_id_400():
     assert r.status_code in (400, 401)
 
 
-def test_chat_requires_project_key():
-    r = client.post("/v1/chat?capability=chat:fast",
+def test_jobs_requires_project_key():
+    """chat is async-only now — the submit endpoint still needs a project key."""
+    r = client.post("/v1/jobs?capability=chat:fast",
                      json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 401
 
@@ -125,18 +126,18 @@ def test_embed_requires_project_key():
     assert r.status_code == 401
 
 
-def test_chat_rejects_invalid_capability():
-    """Capability validation happens after auth — but we can still check route exists."""
-    r = client.post("/v1/chat?capability=made-up",
+def test_jobs_rejects_invalid_capability():
+    """Capability validation on the async submit endpoint (after auth)."""
+    r = client.post("/v1/jobs?capability=made-up",
                      headers={"X-Project-Key": "fake"},
                      json={"messages": [{"role": "user", "content": "x"}]})
     # 401 (auth) before 400 (cap check)
     assert r.status_code in (400, 401)
 
 
-def test_chat_validates_messages_required():
+def test_jobs_validates_messages_required():
     """Empty messages list violates min_length=1."""
-    r = client.post("/v1/chat?capability=chat:fast",
+    r = client.post("/v1/jobs?capability=chat:fast",
                      headers={"X-Project-Key": "fake"},
                      json={"messages": []})
     # Pydantic validates min_length=1 BEFORE auth (depends on order)

@@ -15,13 +15,12 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from pydantic import BaseModel, Field
 
 from aibroker.auth import ProjectCtx, require_project
-from aibroker.routing import is_known_capability, scope_for
+from aibroker.routing import scope_for
 from aibroker.services import (
     EmbedFailed,
     TranscribeFailed,
     get_job,
     next_poll_after_s,
-    run_chat,
     run_embed,
     run_transcribe,
     submit_deep_job,
@@ -62,23 +61,6 @@ class ChatRequest(BaseModel):
     workflow: str | None = None
 
 
-class ChatResponse(BaseModel):
-    text: str
-    provider: str
-    model: str
-    tokens_in: int
-    tokens_out: int
-    cost_usd: float
-    latency_ms: int
-    key_label: str
-    request_id: int = Field(
-        description="usage_log.id for this call. Log it — quote it back to us "
-                     "to find the exact call in this broker's dashboard/DB."
-    )
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-
-
 class EmbedRequest(BaseModel):
     input: list[str] = Field(min_length=1, max_length=128)
     model: str | None = None
@@ -107,45 +89,20 @@ def _require_capability_scope(ctx: ProjectCtx, scope: str) -> None:
 # ─── Endpoints ──────────────────────────────────────────────────────────────
 
 
-@router.post("/chat", response_model=ChatResponse)
-async def chat(
-    body: ChatRequest,
-    capability: str = Query("chat:fast"),
-    ctx: ProjectCtx = Depends(require_project),
-) -> ChatResponse:
-    if not is_known_capability(capability):
-        raise HTTPException(400, f"unknown capability: {capability}")
-    if capability == "chat:deep":
-        # Real latency has been observed up to ~8 minutes on the free NVIDIA
-        # pool — well past Cloudflare's and this broker's own nginx read
-        # timeouts. A synchronous call here reliably 504s the caller while
-        # the broker is still waiting on the provider. Use the async job API.
-        raise HTTPException(
-            400,
-            "capability=chat:deep is async-only — POST /v1/deep to submit, "
-            "GET /v1/deep/{job_id} to poll (see docs/routing.md)",
-        )
-    _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+@router.post("/chat")
+async def chat_removed(capability: str = Query("chat:fast")) -> None:
+    """Sync chat was removed (2026-07-10) — the broker is async-only for chat.
+    A slow/oversubscribed provider could 504 a synchronous call before the
+    fallback chain finished; the async job queue has no such ceiling and
+    exhaustively rotates keys. Kept as a `410 Gone` with a migration hint so a
+    caller still on the old endpoint gets a clear signal, not a bare 404.
 
-    outcome = await run_chat(
-        project=ctx.project, capability=capability,
-        messages=[m.model_dump() for m in body.messages],
-        model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
-        response_format=body.response_format, workflow=body.workflow,
-    )
-    if outcome is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"no provider available for capability={capability}",
-        )
-    return ChatResponse(
-        text=outcome.text, provider=outcome.provider, model=outcome.model,
-        tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
-        cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
-        key_label=outcome.key_label,
-        cache_read_tokens=outcome.cache_read_tokens,
-        cache_write_tokens=outcome.cache_write_tokens,
-        request_id=outcome.request_id,
+    (embed/transcribe stay synchronous — they're fast and never hit the proxy
+    read-timeout that async solves; see docs/api.md.)"""
+    raise HTTPException(
+        status.HTTP_410_GONE,
+        f"sync /v1/chat is removed — POST /v1/jobs?capability={capability} to "
+        "submit, GET /v1/jobs/{job_id} to poll (see docs/api.md).",
     )
 
 

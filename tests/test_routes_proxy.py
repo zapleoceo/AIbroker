@@ -6,6 +6,7 @@ so they don't need real Postgres / real LLM providers.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, DeepJobRow, ProjectRow
 from aibroker.main import app
 from aibroker.services.deep_jobs import next_poll_after_s
+from aibroker.services.llm_service import run_chat
 
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
@@ -62,41 +64,48 @@ def _fake_key():
     )
 
 
-# ─── /v1/chat ──────────────────────────────────────────────────────────────
+# ─── sync /v1/chat removed — chat is async-only via /v1/jobs (2026-07-10) ────
+#
+# The broker is async-only for chat. run_chat's orchestration is unchanged
+# (the job dispatcher runs it) — these tests exercise it DIRECTLY (the mocks
+# already patch it at the service level), rather than through the removed HTTP
+# endpoint. Capability/scope validation lives on /v1/jobs now (see the jobs
+# tests below). The one HTTP assertion left is that /v1/chat returns 410.
+
+_PROJ = SimpleNamespace(id=1, name="t")
+_MSGS = [{"role": "user", "content": "hi"}]
 
 
-async def test_chat_validates_capability():
-    plain, _ = await _make_project(["llm:chat"])
-    r = client.post(
-        "/v1/chat?capability=made-up",
-        headers={"X-Project-Key": plain},
-        json={"messages": [{"role": "user", "content": "x"}]},
+def _run(messages=None, capability="chat:fast", response_format=None):
+    return run_chat(
+        project=_PROJ, capability=capability, messages=messages or _MSGS,
+        model=None, max_tokens=1024, temperature=0.7,
+        response_format=response_format, workflow=None,
     )
-    assert r.status_code == 400
-    assert "unknown capability" in r.json()["detail"]
 
 
-async def test_chat_503_when_no_key_available():
-    """pick_and_reserve returns None for every provider → 503."""
+async def test_sync_chat_endpoint_returns_410_gone():
+    """POST /v1/chat is removed — callers get a 410 with a migration hint to
+    /v1/jobs (not a bare 404), for every capability incl. the old chat:deep."""
     plain, _ = await _make_project(["llm:chat"])
+    for cap in ("chat:fast", "chat:smart", "chat:deep"):
+        r = client.post(f"/v1/chat?capability={cap}",
+                        headers={"X-Project-Key": plain},
+                        json={"messages": _MSGS})
+        assert r.status_code == 410, cap
+        assert "/v1/jobs" in r.json()["detail"]
+
+
+async def test_run_chat_none_when_no_key_available():
+    """pick_and_reserve returns None for every provider → None (route → 503)."""
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=None)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 503
-    assert "no provider available" in r.json()["detail"]
+        assert await _run() is None
 
 
-async def test_chat_happy_path_returns_response():
-    plain, _ = await _make_project(["llm:chat"])
-    fake_meta = {
-        "model": "cerebras/gpt-oss-120b",
-        "tokens_in": 12, "tokens_out": 8,
-        "cost_usd": 0.0, "latency_ms": 234,
-    }
+async def test_run_chat_happy_path_returns_outcome():
+    fake_meta = {"model": "cerebras/gpt-oss-120b", "tokens_in": 12, "tokens_out": 8,
+                 "cost_usd": 0.0, "latency_ms": 234}
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
@@ -104,25 +113,18 @@ async def test_chat_happy_path_returns_response():
          patch("aibroker.services.llm_service.call_llm",
                 AsyncMock(return_value=("hello dima", fake_meta))), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 200
-    data = r.json()
-    assert data["text"] == "hello dima"
-    assert data["provider"] == "cerebras"
-    assert data["tokens_in"] == 12
-    assert data["tokens_out"] == 8
-    assert data["key_label"] == "t"  # surfaced for the Stepan UI chip
-    assert data["request_id"] == 101  # usage_log.id — caller correlates own logs
+        out = await _run()
+    assert out is not None
+    assert out.text == "hello dima"
+    assert out.provider == "cerebras"
+    assert out.tokens_in == 12
+    assert out.key_label == "t"
+    assert out.request_id == 101
 
 
-async def test_chat_falls_back_on_cap_block():
-    """When check_caps raises, _try_one_provider returns None → next provider tried."""
+async def test_run_chat_falls_back_on_cap_block():
+    """reserve_cost raising CostGuardError → break to next provider."""
     from aibroker.routing import CostGuardError
-    plain, _ = await _make_project(["llm:chat"])
     call_count = {"n": 0}
 
     async def fake_check(api_key, project, estimated_cost):
@@ -130,11 +132,8 @@ async def test_chat_falls_back_on_cap_block():
         if call_count["n"] == 1:
             raise CostGuardError(kind="key", limit=5.0, used=4.9, attempted=0.2)
 
-    fake_meta = {
-        "model": "groq/llama", "tokens_in": 1, "tokens_out": 1,
-        "cost_usd": 0.0, "latency_ms": 100,
-    }
-
+    fake_meta = {"model": "groq/llama", "tokens_in": 1, "tokens_out": 1,
+                 "cost_usd": 0.0, "latency_ms": 100}
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.reserve_cost", side_effect=fake_check), \
@@ -143,27 +142,20 @@ async def test_chat_falls_back_on_cap_block():
                 AsyncMock(return_value=("ok", fake_meta))), \
          patch("aibroker.services.llm_service.audit", AsyncMock()), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 200
-    assert call_count["n"] >= 2  # at least one fallback attempted
+        out = await _run()
+    assert out is not None
+    assert call_count["n"] >= 2
 
 
-async def test_chat_call_llm_failure_records_and_falls_back():
-    plain, _ = await _make_project(["llm:chat"])
+async def test_run_chat_call_llm_failure_records_and_falls_back():
     call_count = {"n": 0}
 
     async def fake_call_llm(*a, **kw):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("rate_limit hit")
-        return ("recovered", {
-            "model": "x", "tokens_in": 1, "tokens_out": 1,
-            "cost_usd": 0.0, "latency_ms": 10,
-        })
+        return ("recovered", {"model": "x", "tokens_in": 1, "tokens_out": 1,
+                              "cost_usd": 0.0, "latency_ms": 10})
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
@@ -172,19 +164,13 @@ async def test_chat_call_llm_failure_records_and_falls_back():
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()) as cd, \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 200
-    cd.assert_awaited()  # rate_limit triggered cooldown
+        out = await _run()
+    assert out is not None
+    cd.assert_awaited()
 
 
-async def test_chat_auth_error_marks_key_dead():
-    """401 from provider → mark_dead is called."""
-    plain, _ = await _make_project(["llm:chat"])
-
+async def test_run_chat_auth_error_marks_key_dead():
+    """401 from provider on every key → None (route → 503), mark_dead called."""
     async def fake_call_llm(*a, **kw):
         raise RuntimeError("401 unauthorized")
 
@@ -195,23 +181,18 @@ async def test_chat_auth_error_marks_key_dead():
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_dead", AsyncMock()) as md, \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 503  # all providers errored
+        out = await _run()
+    assert out is None
     md.assert_awaited()
 
 
-async def test_chat_retries_multiple_keys_of_same_provider():
+async def test_run_chat_retries_multiple_keys_of_same_provider():
     """One rate-limited free key shouldn't sink the request — try the next key."""
-    plain, _ = await _make_project(["llm:chat"])
     calls = {"n": 0}
 
     async def fake_call_llm(*a, **kw):
         calls["n"] += 1
-        if calls["n"] < 3:                       # first two keys are rate-limited
+        if calls["n"] < 3:
             raise RuntimeError("429 rate_limit hit")
         return ("recovered", {"model": "x", "tokens_in": 1, "tokens_out": 1,
                               "cost_usd": 0.0, "latency_ms": 1})
@@ -223,18 +204,13 @@ async def test_chat_retries_multiple_keys_of_same_provider():
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.mark_cooldown", AsyncMock()), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}]},
-        )
-    assert r.status_code == 200
-    assert calls["n"] == 3  # tried 3 keys of the same provider before success
+        out = await _run()
+    assert out is not None
+    assert calls["n"] == 3
 
 
-async def test_chat_invalid_json_falls_through_to_next_provider():
+async def test_run_chat_invalid_json_falls_through_to_next_provider():
     """JSON request: a provider that returns unparseable JSON is skipped."""
-    plain, _ = await _make_project(["llm:chat"])
     call_count = {"n": 0}
 
     async def fake_call_llm(*a, **kw):
@@ -242,8 +218,8 @@ async def test_chat_invalid_json_falls_through_to_next_provider():
         meta = {"model": "x", "tokens_in": 1, "tokens_out": 1,
                 "cost_usd": 0.0, "latency_ms": 1}
         if call_count["n"] == 1:
-            return ("{ broken json", meta)   # unparseable → skip
-        return ('{"ok": true}', meta)        # valid → win
+            return ("{ broken json", meta)
+        return ('{"ok": true}', meta)
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
@@ -251,15 +227,10 @@ async def test_chat_invalid_json_falls_through_to_next_provider():
          patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=chat:fast",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": "hi"}],
-                  "response_format": {"type": "json_object"}},
-        )
-    assert r.status_code == 200
-    assert r.json()["text"] == '{"ok": true}'
-    assert call_count["n"] >= 2  # first (broken JSON) was skipped
+        out = await _run(response_format={"type": "json_object"})
+    assert out is not None
+    assert out.text == '{"ok": true}'
+    assert call_count["n"] >= 2
 
 
 # ─── /v1/embed ─────────────────────────────────────────────────────────────
@@ -322,17 +293,6 @@ async def test_embed_502_on_provider_failure():
 # ─── Scope guards ──────────────────────────────────────────────────────────
 
 
-async def test_chat_requires_llm_chat_scope():
-    """Project with only embed scope → 403 on /v1/chat."""
-    plain, _ = await _make_project(["llm:embed"])
-    r = client.post(
-        "/v1/chat?capability=chat:fast",
-        headers={"X-Project-Key": plain},
-        json={"messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert r.status_code == 403
-
-
 async def test_embed_requires_llm_embed_scope():
     plain, _ = await _make_project(["llm:chat"])
     r = client.post(
@@ -346,10 +306,9 @@ async def test_embed_requires_llm_embed_scope():
 # ─── Vision (multimodal chat content) ──────────────────────────────────────
 
 
-async def test_chat_accepts_multimodal_content():
-    """content as a list of blocks (text + image_url) must validate and reach
-    the provider unchanged — this is what media-worker sends for vision."""
-    plain, _ = await _make_project(["llm:vision"])
+async def test_run_chat_accepts_multimodal_content():
+    """content as a list of blocks (text + image_url) reaches the provider
+    unchanged — what media-worker sends for vision. Tests run_chat directly."""
     captured = {}
 
     async def fake_call_llm(*, model, messages, api_key, **kw):
@@ -359,35 +318,29 @@ async def test_chat_accepts_multimodal_content():
             "cost_usd": 0.0, "latency_ms": 30,
         }
 
+    multimodal = [{"role": "user", "content": [
+        {"type": "text", "text": "что на фото?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/xxx"}},
+    ]}]
     with patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.reserve_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.release_cost", AsyncMock()), \
          patch("aibroker.services.llm_service.call_llm", side_effect=fake_call_llm), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/chat?capability=vision",
-            headers={"X-Project-Key": plain},
-            json={"messages": [{"role": "user", "content": [
-                {"type": "text", "text": "что на фото?"},
-                {"type": "image_url",
-                 "image_url": {"url": "data:image/jpeg;base64,/9j/xxx"}},
-            ]}]},
-        )
-    assert r.status_code == 200
-    assert r.json()["text"] == "это кот на диване"
-    # multimodal list survived round-trip to the provider call
+        out = await _run(messages=multimodal, capability="vision")
+    assert out is not None
+    assert out.text == "это кот на диване"
     assert isinstance(captured["messages"][0]["content"], list)
     assert captured["messages"][0]["content"][0]["type"] == "text"
 
 
-async def test_chat_vision_requires_llm_vision_scope():
-    plain, _ = await _make_project(["llm:chat"])
-    r = client.post(
-        "/v1/chat?capability=vision",
-        headers={"X-Project-Key": plain},
-        json={"messages": [{"role": "user", "content": "x"}]},
-    )
+async def test_jobs_vision_requires_llm_vision_scope():
+    """Scope guard for vision on the async endpoint (chat is async-only now)."""
+    plain, _ = await _make_project(["llm:chat"])   # no llm:vision
+    r = client.post("/v1/jobs?capability=vision",
+                    headers={"X-Project-Key": plain},
+                    json={"messages": [{"role": "user", "content": "x"}]})
     assert r.status_code == 403
 
 
@@ -476,22 +429,6 @@ def test_next_poll_after_s_widens_over_time():
     assert next_poll_after_s(now) == 5
     assert next_poll_after_s(now - timedelta(seconds=45)) == 10
     assert next_poll_after_s(now - timedelta(minutes=5)) == 20
-
-
-async def test_chat_deep_rejected_on_sync_chat_endpoint():
-    """chat:deep must never be reachable via the synchronous /v1/chat — its
-    real latency (up to ~8 min observed) exceeds Cloudflare's and this
-    broker's own nginx read timeouts, so a blocking call here would 504
-    the caller while the broker is still waiting on the provider."""
-    plain, _ = await _make_project(["llm:deep"])
-    r = client.post(
-        "/v1/chat?capability=chat:deep",
-        headers={"X-Project-Key": plain},
-        json={"messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert r.status_code == 400
-    assert "async-only" in r.json()["detail"]
-    assert "/v1/deep" in r.json()["detail"]
 
 
 async def test_deep_submit_requires_llm_deep_scope():
