@@ -64,12 +64,16 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # 60s ceiling) — the free NVIDIA pool is oversubscribed. Pure wasted
         # attempts + timeout waits. Stays in chat:deep (nemotron alive).
         # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
+        # 2026-07-10: cloudflare added — extra free gpt-oss-120b burst (see
+        # DEFAULT_MODEL), tried before the paid tail.
+        "cloudflare",
         "openai", "deepseek",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
         "mistral",
         "github", "sambanova",
+        "cloudflare",
         # 2026-07-10: anthropic REMOVED (out of credit — see chat:fast note).
         "deepseek", "openai",
     ],

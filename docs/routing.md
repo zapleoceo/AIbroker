@@ -8,6 +8,9 @@
 > **anthropic REMOVED** from chat:fast/smart/code/edit/structured — its one key is
 > out of credit ("credit balance is too low") so it only flapped errors;
 > DEFAULT_MODEL entries kept, re-add to the chains once the balance is topped up.
+> **cloudflare added to chat:smart + chat:code** — same free @cf/openai/gpt-oss-120b
+> it already serves on chat:fast (quality-neutral, same model family as
+> cerebras/groq smart), extra free burst before the paid tail.
 > - **deepseek `deepseek-chat`/`deepseek-coder` → `deepseek-v4-flash`**: the old
 >   models are retired from DeepSeek's API (`GET /models` lists only v4-flash +
 >   v4-pro; chat deprecates 2026-07-24). v4-flash is the cheaper successor

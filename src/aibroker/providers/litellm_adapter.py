@@ -174,8 +174,15 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # like zai). Same gpt-oss-120b family already proven reliable on
     # cerebras/groq. Previously only vision was wired here — this was idle
     # free capacity (10k neurons/day, no card on file).
+    # 2026-07-10: chat:smart + chat:code added — same @cf/openai/gpt-oss-120b
+    # that already serves chat:fast (proven: valid JSON, ~1.6s) and the same
+    # model family cerebras/groq run on chat:smart, so it's quality-neutral extra
+    # FREE burst capacity for the smart lane (kept off `structured` — gpt-oss
+    # emits malformed JSON there, same reason cerebras was dropped from it).
     "cloudflare": {"vision": "cloudflare/@cf/llava-hf/llava-1.5-7b-hf",
                    "chat:fast": "cloudflare/@cf/openai/gpt-oss-120b",
+                   "chat:smart": "cloudflare/@cf/openai/gpt-oss-120b",
+                   "chat:code": "cloudflare/@cf/openai/gpt-oss-120b",
                    "prefilter": "cloudflare/@cf/openai/gpt-oss-120b"},
     # 2026-07-05: Z.ai (Zhipu) — confirmed live. Only glm-4.5-flash is
     # actually free on this account: glm-4.5/glm-4.5-air both 429'd with
