@@ -23,15 +23,19 @@ class Settings(BaseSettings):
 
     # Auth
     ADMIN_KEY: str = Field(..., min_length=20)
-    INTERNAL_SECRET: str = Field(..., min_length=8)
+    INTERNAL_SECRET: str = Field(..., min_length=20)
 
     # Alerts + TG login widget for dashboard
     TELEGRAM_BOT_TOKEN: str = ""
     OWNER_TELEGRAM_ID: int = 0
     TELEGRAM_BOT_USERNAME: str = ""   # widget needs it, e.g. "Dimondra_Ai_Bot"
 
-    # Session cookie HMAC (for /dashboard browser sessions)
-    SESSION_SECRET: str = ""
+    # Session cookie HMAC (for /dashboard browser sessions). Empty is allowed
+    # (dashboard just fails closed — auth_session raises), but any value that IS
+    # set must be strong enough not to be brute-forceable: a weak secret means
+    # forgeable admin cookies. min_length only constrains a provided value; an
+    # absent one keeps the "" default (unvalidated) and fails closed at runtime.
+    SESSION_SECRET: str = Field("", min_length=32)
 
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
