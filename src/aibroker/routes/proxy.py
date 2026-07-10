@@ -241,18 +241,24 @@ async def deep_submit(
     )
 
 
-def _job_response(row: Any) -> DeepJobResponse:  # pragma: no cover
+def _job_response(row: Any) -> DeepJobResponse:
     """Shape a deep_jobs row into the poll response — shared by /v1/deep and
-    /v1/jobs. pending/error/done branches read a row inserted by a SEPARATE
-    session/request; cross-session reads don't see it on SQLite (see
-    deep_jobs.get_job), so these are Postgres-only-tested (skipif ON_SQLITE)."""
-    if row.status == "pending":
+    /v1/jobs.
+
+    `done` is the ONLY terminal-success status. Everything not-yet-terminal —
+    `pending` AND `running` (the dispatcher claims a job as `running` while it
+    executes, a state the old fire-and-forget path never had) — must map to a
+    `pending` response so the client keeps polling; falling through to `done`
+    would hand back status=done with text=null and the client would stop
+    polling on an empty answer. Any unexpected status defaults to pending for
+    the same fail-safe reason."""
+    if row.status == "error":
+        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
+    if row.status != "done":
         return DeepJobResponse(
             job_id=row.id, status="pending",
             poll_after_s=next_poll_after_s(row.created_at),
         )
-    if row.status == "error":
-        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
     meta = row.result_meta or {}
     return DeepJobResponse(
         job_id=row.id, status="done", text=row.result_text,

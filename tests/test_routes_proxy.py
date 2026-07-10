@@ -648,3 +648,63 @@ async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
     # capability + response_format actually threaded through to run_chat
     assert captured["capability"] == "chat:fast"
     assert captured["response_format"] == {"type": "json_object"}
+
+
+# ─── _job_response status mapping (regression: running → pending, not empty done) ──
+
+def _fake_job_row(**kw):
+    from datetime import UTC, datetime
+    base = {
+        "id": 7, "status": "pending", "result_text": None, "result_meta": None,
+        "error_message": None,
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC).replace(tzinfo=None),
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_job_response_running_maps_to_pending_not_empty_done():
+    """REGRESSION: the queue dispatcher claims a job as `running` while it
+    executes — a state the old fire-and-forget path never had. _job_response
+    must treat it as pending, else it falls through to status=done with
+    text=null and the client stops polling on an empty answer."""
+    from aibroker.routes.proxy import _job_response
+    resp = _job_response(_fake_job_row(status="running"))
+    assert resp.status == "pending"
+    assert resp.text is None
+    assert resp.poll_after_s is not None
+
+
+def test_job_response_pending_stays_pending():
+    from aibroker.routes.proxy import _job_response
+    resp = _job_response(_fake_job_row(status="pending"))
+    assert resp.status == "pending"
+    assert resp.poll_after_s is not None
+
+
+def test_job_response_unknown_status_defaults_to_pending():
+    """Fail-safe: any unexpected status keeps the client polling rather than
+    handing back an empty done."""
+    from aibroker.routes.proxy import _job_response
+    assert _job_response(_fake_job_row(status="queued_weird")).status == "pending"
+
+
+def test_job_response_done_returns_result():
+    from aibroker.routes.proxy import _job_response
+    row = _fake_job_row(
+        status="done", result_text="hello",
+        result_meta={"provider": "cerebras", "model": "m", "tokens_in": 5,
+                     "tokens_out": 2, "cost_usd": 0.0, "latency_ms": 100,
+                     "key_label": "k", "request_id": 1},
+    )
+    resp = _job_response(row)
+    assert resp.status == "done"
+    assert resp.text == "hello"
+    assert resp.provider == "cerebras"
+
+
+def test_job_response_error_returns_message():
+    from aibroker.routes.proxy import _job_response
+    resp = _job_response(_fake_job_row(status="error", error_message="boom"))
+    assert resp.status == "error"
+    assert resp.error == "boom"
