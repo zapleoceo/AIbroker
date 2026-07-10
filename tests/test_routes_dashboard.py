@@ -115,7 +115,7 @@ def test_create_and_edit_key_persist_manual_limits():
 def test_add_key_form_has_four_manual_limit_fields():
     """The ADD-key form must expose all four optional quota overrides
     (regression: it only had the $ cost cap)."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     body = _render(_fake_main_data()).body.decode()
     # add-key form id present
     assert 'id="add-key-form"' in body
@@ -151,7 +151,7 @@ def test_scope_checkboxes_renders_4_options_with_checked_state():
 
 def test_provider_catalogue_lists_known_providers():
     """Helper that drives the add-key dropdown."""
-    from aibroker.routes.dashboard import _provider_catalogue
+    from aibroker.routes.dashboard_render import _provider_catalogue
     cat = _provider_catalogue()
     names = [p["provider"] for p in cat]
     assert "cerebras" in names
@@ -177,7 +177,7 @@ def test_provider_catalogue_lists_known_providers():
 def test_provider_meta_json_is_parseable():
     import json
 
-    from aibroker.routes.dashboard import _provider_meta_json
+    from aibroker.routes.dashboard_render import _provider_meta_json
     meta = json.loads(_provider_meta_json())
     assert "cerebras" in meta
     assert meta["voyage"]["default_scope"] == "llm:embed"
@@ -200,7 +200,7 @@ def test_login_page_is_no_store():
 def test_no_store_constant_applied_to_renders():
     """_render and _render_project_detail must carry the no-store header
     (they hit Postgres-only SQL via the route, so assert at the unit level)."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     resp = _render(_fake_main_data())
     assert "no-store" in resp.headers.get("cache-control", "")
 
@@ -212,7 +212,7 @@ def test_login_page_links_to_favicon():
 
 def test_dashboard_html_links_to_favicon():
     """_dash_html wrapper used by /dashboard + /dashboard/projects/{id} drill-down."""
-    from aibroker.routes.dashboard import _dash_html
+    from aibroker.routes.dashboard_render import _dash_html
     html = _dash_html(body="<p>x</p>")
     assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in html
 
@@ -780,7 +780,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
 
 
 def test_render_project_detail_smoke():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     r = _render_project_detail(_fake_proj_detail())
     body = r.body.decode()
     # KPI values
@@ -803,7 +803,7 @@ def test_render_project_detail_smoke():
 
 def test_render_project_detail_sortable_recent_rows():
     """Bug regression: recent table rows must carry 'data-row' for the JS to sort."""
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     body = _render_project_detail(_fake_proj_detail(recent_n=5)).body.decode()
     assert body.count('tr class="data-row"') >= 5
     # And each cell that drives a sort must expose data-sort
@@ -816,7 +816,7 @@ def test_render_project_detail_recent_rows_show_request_id():
     """The recent-calls table's leading column is usage_log.id — the same
     request_id returned to the API caller — so admins/callers can correlate a
     specific call. data-row-id must use the real id, not a synthetic key."""
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     body = _render_project_detail(_fake_proj_detail(recent_n=2)).body.decode()
     assert 'data-row-id="90000"' in body
     assert 'data-row-id="90001"' in body
@@ -825,7 +825,7 @@ def test_render_project_detail_recent_rows_show_request_id():
 
 
 def test_render_project_detail_handles_no_recent_calls():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     body = _render_project_detail(_fake_proj_detail(recent_n=0)).body.decode()
     assert "no calls yet" in body
 
@@ -834,14 +834,14 @@ def test_render_project_detail_no_status_mix_tile():
     """Status mix tile was removed — usage_log only ever has status
     ok/error, so it duplicated the Calls KPI card's ok/err split via a
     second query. The split still lives in the KPI card only."""
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     body = _render_project_detail(_fake_proj_detail()).body.decode()
     assert "Status mix" not in body
     assert "Статусы" not in body
 
 
 def test_render_project_detail_handles_empty_breakdowns():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail()
     d["by_provider"] = []
     d["by_capability"] = []
@@ -873,7 +873,7 @@ def test_lat_hist_counts_maps_sparse_to_dense():
 
 
 def test_render_project_detail_shows_latency_histogram():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     # busiest bucket (10) → full-width bar; empty buckets → 0%.
     d = _fake_proj_detail(lat_hist=[10, 5, 0, 0, 0, 0, 0, 0])
     body = _render_project_detail(d).body.decode()
@@ -884,7 +884,7 @@ def test_render_project_detail_shows_latency_histogram():
 
 
 def test_render_project_detail_hides_empty_histogram():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail(lat_hist=[0] * 8)
     body = _render_project_detail(d).body.decode()
     assert "Latency distribution" not in body
@@ -894,12 +894,12 @@ def test_render_project_detail_hides_empty_histogram():
 
 
 def test_cache_card_empty_when_no_activity():
-    from aibroker.routes.dashboard import _cache_card
+    from aibroker.routes.dashboard_render import _cache_card
     assert _cache_card(0, 0) == ""
 
 
 def test_cache_card_shows_read_write_and_reuse_ratio():
-    from aibroker.routes.dashboard import _cache_card
+    from aibroker.routes.dashboard_render import _cache_card
     html = _cache_card(9000, 1000)
     assert "9,000" in html and "1,000" in html
     assert "9.0" in html          # reuse ratio: 9000/1000 reads-per-write
@@ -908,14 +908,14 @@ def test_cache_card_shows_read_write_and_reuse_ratio():
 def test_cache_card_handles_read_without_write():
     """A cache read can outlive the write bucket that created it (anthropic's
     cache TTL/window semantics) — must not divide by zero."""
-    from aibroker.routes.dashboard import _cache_card
+    from aibroker.routes.dashboard_render import _cache_card
     html = _cache_card(500, 0)
     assert "500" in html
     assert "—" in html            # no reuse ratio when write=0
 
 
 def test_render_project_detail_shows_cache_card_when_active():
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail(cache_read=9000, cache_write=1000)
     body = _render_project_detail(d).body.decode()
     assert "Prompt cache" in body
@@ -924,7 +924,7 @@ def test_render_project_detail_shows_cache_card_when_active():
 
 def test_render_project_detail_hides_cache_card_when_inactive():
     """Most projects never touch anthropic's cache — no permanent 0/0 card."""
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail()  # cache_read=cache_write=0 by default
     body = _render_project_detail(d).body.decode()
     assert "Prompt cache" not in body
@@ -955,7 +955,7 @@ def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
 
 
 def test_main_render_with_empty_db():
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     r = _render(_fake_main_data())
     body = r.body.decode()
     # KPI cards present (new range-driven labels)
@@ -991,7 +991,7 @@ def test_range_pill_today_is_active_when_selected():
     state, so it visually looked stuck 'pressed' no matter what was selected."""
     from datetime import date
 
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     today = date.today()
     body = _render(_fake_main_data(date_from=today, date_to=today)).body.decode()
     assert '>today</a>' in body
@@ -1003,7 +1003,7 @@ def test_range_pill_today_is_active_when_selected():
 def test_range_pill_7d_is_active_when_selected():
     from datetime import date, timedelta
 
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     today = date.today()
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=6), date_to=today
@@ -1016,7 +1016,7 @@ def test_range_pill_7d_is_active_when_selected():
 def test_range_pill_30d_is_active_when_selected():
     from datetime import date, timedelta
 
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     today = date.today()
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=29), date_to=today
@@ -1031,7 +1031,7 @@ def test_range_pill_none_active_for_custom_range():
     pill un-highlighted — no false 'active' on the wrong button."""
     from datetime import date, timedelta
 
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     today = date.today()
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=3), date_to=today - timedelta(days=1)
@@ -1045,7 +1045,7 @@ def test_range_pill_none_active_for_custom_range():
 def test_main_render_shows_recent_error_rate_per_provider():
     """#3b: the provider summary surfaces last-hour errors so a 429-storm is
     visible without digging logs. Fixture: gemini has 42 err/1h, cerebras 0."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     body = _render(_fake_main_data()).body.decode()
     assert "⚠42/1h" in body                       # gemini storm shown
     assert "⚠0/1h" not in body                     # zero-error provider stays quiet
@@ -1053,7 +1053,7 @@ def test_main_render_shows_recent_error_rate_per_provider():
 
 def test_render_project_detail_shows_workflow_breakdown():
     """#4: cost/calls attributed by workflow in the project drill-down."""
-    from aibroker.routes.dashboard import _render_project_detail
+    from aibroker.routes.dashboard_render import _render_project_detail
     body = _render_project_detail(_fake_proj_detail()).body.decode()
     assert "By workflow" in body
     assert "triage" in body and "rel_extract" in body
@@ -1062,7 +1062,7 @@ def test_render_project_detail_shows_workflow_breakdown():
 def test_main_render_renders_key_rows_with_data_row_marker():
     """Each key row needs class='data-row' for the sorter to pick it up."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     fake_key = ApiKeyRow(
         id=1, provider="cerebras", label="t", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1079,7 +1079,7 @@ def test_main_render_renders_key_rows_with_data_row_marker():
 def test_main_render_keys_show_request_axis_when_dominant():
     """Gemini is request-metered (no token quota) — shows the req axis chip."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     # gemini 1500 RPD. 750 req → 50% (token axis disabled for gemini).
     k = ApiKeyRow(
         id=7, provider="gemini", label="t", tier="free",
@@ -1097,7 +1097,7 @@ def test_main_render_keys_show_both_axes_for_groq():
     """Groq has BOTH req + tok caps — both chips shown, tok dominant.
     Demonstrates same-cap visibility: tooltip spells out used/cap per axis."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=10, provider="groq", label="shaboldas1", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1122,7 +1122,7 @@ def test_main_render_dead_key_shows_reason():
     tooltip, so 'no money' is distinguishable from 'auth failed' at a
     glance."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=20, provider="anthropic", label="default", tier="paid",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1140,7 +1140,7 @@ def test_main_render_dead_key_shows_friendly_actionable_label():
     VISIBLE text, not the raw litellm dump — the raw text is still the
     hover tooltip, for anyone who wants the exact wording."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=23, provider="anthropic", label="default", tier="paid",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1160,7 +1160,7 @@ def test_main_render_cooldown_key_shows_friendly_label_and_time():
     from datetime import UTC, datetime, timedelta
 
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
     k = ApiKeyRow(
         id=24, provider="deepseek", label="x", tier="paid",
@@ -1174,12 +1174,12 @@ def test_main_render_cooldown_key_shows_friendly_label_and_time():
 
 
 def test_friendly_reason_unrecognized_falls_back_to_raw_text():
-    from aibroker.routes.dashboard import _friendly_reason
+    from aibroker.routes.dashboard_render import _friendly_reason
     assert _friendly_reason("some brand new provider error nobody's seen") is None
 
 
 def test_friendly_reason_recognizes_billing_and_outage_signs():
-    from aibroker.routes.dashboard import _friendly_reason
+    from aibroker.routes.dashboard_render import _friendly_reason
     assert _friendly_reason("Your credit balance is too low") == (
         "top up balance", "пополнить баланс"
     )
@@ -1193,7 +1193,7 @@ def test_main_render_cooldown_key_shows_until_time():
     from datetime import UTC, datetime, timedelta
 
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     until = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=30)
     k = ApiKeyRow(
         id=21, provider="deepseek", label="x", tier="paid",
@@ -1210,7 +1210,7 @@ def test_main_render_alive_key_has_no_status_detail():
     """A healthy key shows no stray reason/time — detail only appears for
     dead/cooldown keys with a last_error set."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=22, provider="groq", label="x", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1224,7 +1224,7 @@ def test_main_render_cerebras_token_axis_only():
     """Cerebras is token-metered — its req-day header isn't a hard cap, so the
     req axis is dropped. Only the tok chip shows (no req chip)."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=10, provider="cerebras", label="shaboldas1", tier="free",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1244,7 +1244,7 @@ def test_main_render_corp_gemini_output_axis_saturates():
     """Corp Gemini key: 3M in / 80k out manual caps. 76k out (95%) is the
     dominant chip + red bar even though input (1.5M of 3M) is only 50%."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=11, provider="gemini", label="corp", tier="free",
         scopes=["llm:chat", "llm:edit"], token_encrypted="x",
@@ -1266,7 +1266,7 @@ def test_main_render_corp_gemini_output_axis_saturates():
 def test_main_render_keys_paid_provider_no_bar():
     """Paid providers (no quota) just show the count, no bar, sort sentinel -1."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=8, provider="anthropic", label="t", tier="paid",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1282,7 +1282,7 @@ def test_main_render_paid_key_no_free_tier_quota_bar():
     column shows just the count, not a misleading 200%+ req bar. Its $/day cap
     is rendered in the separate cost column."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(
         id=16, provider="gemini", label="demoniwwwe", tier="paid",
         scopes=["llm:chat"], token_encrypted="x",
@@ -1314,7 +1314,7 @@ def test_tables_have_row_number_column():
     count isn't confused with the DB id (which has gaps from deletions —
     e.g. 51 rows but max id 77)."""
     from aibroker.db.models import ApiKeyRow, ProjectRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     k = ApiKeyRow(id=77, provider="cerebras", label="t", tier="free",
                    scopes=["llm:chat"], token_encrypted="x",
                    is_active=True, is_alive=True, daily_used=0)
@@ -1337,7 +1337,7 @@ def test_tables_have_row_number_column():
 
 def test_keys_table_header_renamed_daily_pct():
     """Column header should read 'daily %' (not 'used') after this change."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     body = _render(_fake_main_data()).body.decode()
     assert 'data-en="daily %"' in body
     assert 'data-ru="% дня"' in body
@@ -1346,7 +1346,7 @@ def test_keys_table_header_renamed_daily_pct():
 def test_main_render_keys_totals_row():
     """tfoot must sum the daily_used, daily_cost_used_usd, error_count cells."""
     from aibroker.db.models import ApiKeyRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     keys = [
         ApiKeyRow(id=1, provider="cerebras", label="a", tier="free",
                    scopes=["llm:chat"], token_encrypted="x",
@@ -1373,7 +1373,7 @@ def test_main_render_keys_totals_row():
 def test_main_render_projects_spend_in_range_column():
     """Each project row shows its spend in the active range; total = sum."""
     from aibroker.db.models import ProjectRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     p1 = ProjectRow(id=2, name="vera", project_key_prefix="aib_prj_a",
                      project_key_hash="h", allowed_scopes=["llm:chat"],
                      is_active=True, daily_cost_cap_usd=10.0, notes="")
@@ -1391,7 +1391,7 @@ def test_main_render_projects_spend_in_range_column():
 
 def test_main_render_renders_project_rows_with_drill_link():
     from aibroker.db.models import ProjectRow
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     proj = ProjectRow(
         id=7, name="stepan", project_key_prefix="aib_prj_xy",
         project_key_hash="hash", allowed_scopes=["llm:chat"],
@@ -1405,7 +1405,7 @@ def test_main_render_renders_project_rows_with_drill_link():
 
 def test_main_render_shows_new_project_key_flash():
     """When a project is created the one-time key is rendered prominently."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     body = _render(
         _fake_main_data(), new_project_key="aib_prj_ABCDEFGH"
     ).body.decode()
@@ -1444,7 +1444,7 @@ def test_dashboard_assets_js_served_without_auth():
 def test_dashboard_html_links_versioned_assets_not_inline():
     """Regression: the dashboard HTML must reference the cacheable asset
     routes, not re-embed the CSS/JS inline on every request."""
-    from aibroker.routes.dashboard import _render
+    from aibroker.routes.dashboard_render import _render
     body = _render(_fake_main_data()).body.decode()
     assert '<link rel="stylesheet" href="/dashboard/assets.css?v=' in body
     assert '<script src="/dashboard/assets.js?v=' in body

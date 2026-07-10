@@ -8,6 +8,11 @@ brace escaping is needed here.
 """
 from __future__ import annotations
 
+# Authenticated, always-fresh admin pages must never be cached — without this
+# Chrome heuristic-caches the HTML (CF already serves it DYNAMIC) and shows a
+# stale key list. Applied to every dashboard/login HTMLResponse.
+_NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
 _LOGIN_HTML = """<!doctype html><html><head>
 <meta charset="utf-8"><title>AIbroker — login</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
