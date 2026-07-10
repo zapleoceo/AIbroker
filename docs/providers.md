@@ -60,8 +60,8 @@ computed and discarded:
   real bill).
 - `usage_log.cache_read_tokens` / `cache_write_tokens` (migration 006)
   persist every call's cache activity.
-- `run_chat` → `ChatOutcome.cache_read_tokens/cache_write_tokens` →
-  `ChatResponse` — `/v1/chat` callers can see their own cache hit rate.
+- `run_chat` → `ChatOutcome.cache_read_tokens/cache_write_tokens` → the chat
+  `JobResponse` — `/v1/jobs` callers can see their own cache hit rate.
 - `/dashboard/projects/{id}` shows a **Prompt cache** KPI card (read/write
   token totals + reuse ratio) for the selected range — hidden entirely when a
   project never touches caching (most calls don't route through anthropic).

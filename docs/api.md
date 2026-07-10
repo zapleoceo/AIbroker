@@ -72,7 +72,7 @@ LiteLLM forwards both shapes to vision-capable models (gemini → openai). Pass
 images as base64 data URLs — anthropic was removed from the vision chain because
 it 400s on fetch-gated image URLs.
 
-`ChatResponse` carries `cache_read_tokens` / `cache_write_tokens` (0 unless
+A completed chat `JobResponse` carries `cache_read_tokens` / `cache_write_tokens` (0 unless
 the call routed through anthropic and hit its prompt cache — see
 [providers.md](providers.md#prompt-caching-2026-07-01-wired-end-to-end-2026-07-02))
 and `request_id` (the `usage_log` row id — match your own logs against the
@@ -136,7 +136,7 @@ Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
 
 ### `request_id` — correlating a call across both sides
 
-`ChatResponse`/`EmbedResponse`/`TranscribeResponse` and `/v1/usage`'s reply
+A completed chat `JobResponse`, `EmbedResponse`/`TranscribeResponse`, and `/v1/usage`'s reply
 all carry `request_id` — the `usage_log.id` for that exact call. Log it on
 your side (Stepan/Vera); if a call misbehaves, quote it back to us and we can
 look the row up directly (`/dashboard/projects/{id}` — the "Recent 50 calls"
