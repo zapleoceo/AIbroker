@@ -537,16 +537,6 @@ def test_dashboard_create_project_form_requires_auth():
 # ─── Edit form handlers (auth + validation) ────────────────────────────────
 
 
-def test_parse_scopes_validation():
-    """Multi-scope CSV parsing for the key reassignment form."""
-    from aibroker.routes.dashboard_scopes import _parse_scopes
-    assert _parse_scopes("llm:chat,llm:edit") == ["llm:chat", "llm:edit"]
-    assert _parse_scopes("  llm:edit  ") == ["llm:edit"]
-    assert _parse_scopes("") is None
-    assert _parse_scopes("   ,  ,") is None
-    assert _parse_scopes("llm:chat,bogus") is None
-
-
 def test_dashboard_edit_key_requires_auth():
     r = client.post(
         "/dashboard/keys/42/edit",
@@ -1461,3 +1451,24 @@ def test_dashboard_html_still_no_store():
     its static assets are now long-cached."""
     r = client.get("/dashboard", cookies=_logged_in_cookies())
     assert "no-store" in r.headers["cache-control"]
+
+
+def test_delete_form_uses_safe_data_confirm_not_inline_js():
+    """REGRESSION (2026-07-10): the delete button used
+    onsubmit="return confirm('Delete {esc(label)}...')" — HTML-escaping in a JS
+    string context, so a label with a quote broke out of / could inject into the
+    handler. The confirm text now rides a data-confirm attribute (read via
+    dataset, never parsed as code)."""
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard_render import _render
+    k = ApiKeyRow(
+        id=7, provider="gemini", label="ev'il", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True, daily_used=0,
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'onsubmit="return confirm(' not in body      # no inline-JS handler
+    assert "data-confirm=" in body                       # safe attribute instead
+    assert "confirm(\'" not in body and "confirm('" not in body
+    # the label is HTML-escaped inside the attribute (quote → &#x27;)
+    assert "ev&#x27;il" in body

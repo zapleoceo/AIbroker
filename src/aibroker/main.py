@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
+from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
 from aibroker.routes import admin, dashboard, health, landing, proxy, vending
@@ -57,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
 
 app = FastAPI(
     title="AIbroker",
-    version="0.1.0",
+    version=__version__,
     description="Centralized key broker for AI provider API keys",
     lifespan=lifespan,
     redoc_url=None,  # Swagger UI at /docs is enough

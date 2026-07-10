@@ -382,4 +382,15 @@ _DASHBOARD_JS = """
     });
   });
 })();
+// Delegated confirm for destructive forms. The prompt text lives in a
+// data-confirm attribute (HTML-attribute-escaped server-side) and is read as a
+// plain string via dataset — never interpolated into inline JS, so a key label
+// containing a quote can't break out of / inject into the handler.
+(function() {
+  document.querySelectorAll("form[data-confirm]").forEach(f => {
+    f.addEventListener("submit", e => {
+      if (!window.confirm(f.dataset.confirm)) e.preventDefault();
+    });
+  });
+})();
 """

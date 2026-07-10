@@ -73,7 +73,7 @@ def _dash_html(*, body: str, flash: str = "") -> str:
 
 <nav>
   <h1>AIbroker</h1>
-  <span class="pill">v0.1.0</span>
+  <span class="pill">v{__version__}</span>
   <span class="right">
     <span class="lang-toggle">
       <button type="button" data-lang="en" class="active">EN</button>
@@ -396,7 +396,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
             + "</button>"
             f'</form> '
             f'<form class="inline" method="post" action="/dashboard/keys/{k.id}/delete"'
-            f' onsubmit="return confirm(\'Delete {esc(k.provider)}/{esc(k.label)}?\')">'
+            f' data-confirm="Delete {esc(k.provider)}/{esc(k.label)}?">'
             f'<button class="danger" type="submit" data-i18n '
             f'data-en="del" data-ru="удал.">del</button>'
             f'</form>'
