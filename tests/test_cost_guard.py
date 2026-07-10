@@ -90,8 +90,14 @@ async def test_release_cost_free_tier_is_a_noop():
 
 
 async def test_invalidate_global_cache_resets_ttl():
+    """invalidate_global_cache must zero fetched_at so the next
+    _global_cost_today re-queries instead of serving a stale cached total
+    (previously this test asserted nothing)."""
+    from aibroker.routing import cost_guard as cg
+    cg._global_cache["value"] = 5.0
+    cg._global_cache["fetched_at"] = 10_000_000.0   # pretend recently fetched
     invalidate_global_cache()
-    invalidate_global_cache()
+    assert cg._global_cache["fetched_at"] == 0.0
 
 
 # ─── Atomic per-key reservation — needs a real Postgres row ─────────────────

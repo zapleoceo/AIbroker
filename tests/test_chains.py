@@ -154,16 +154,17 @@ def test_is_known_capability():
     assert not is_known_capability("nope")
 
 
-def test_dead_providers_not_in_any_chain():
-    """Providers without DEFAULT_MODEL entries must not be in any chain.
-    Mistral + cohere were added 2026-06-26 — they have DEFAULT_MODEL coverage
-    so are no longer dead. Sambanova was added 2026-07-04 (confirmed live,
-    req_per_day=20) — also no longer dead. nvidia now has a DEFAULT_MODEL
-    entry too (chat:deep only, see chains.py) — no "dead" providers remain to
-    check, but the test stays as a guard rail for the next removal."""
+def test_every_chained_provider_has_a_model_config():
+    """Every provider referenced in a capability chain must have a DEFAULT_MODEL
+    entry — a chain pointing at a provider with no configured model is a dead
+    route that silently always fails over. (Replaces a vacuous `for dead in ():`
+    guard that could never fail; this actually asserts the invariant, so adding
+    a provider to a chain without wiring its model trips it.)"""
+    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
     for cap, chain in CAPABILITY_CHAINS.items():
-        for dead in ():
-            assert dead not in chain, f"{dead} still routed in {cap}"
+        for provider in chain:
+            assert provider in DEFAULT_MODEL, \
+                f"{provider} is routed in {cap} but has no DEFAULT_MODEL entry"
 
 
 # ─── deprioritize_for_json — JSON-reliable ordering ──────────────────────────
