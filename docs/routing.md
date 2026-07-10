@@ -808,6 +808,31 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > passes `key.provider`). The genuinely-generic signs (`429`, `quota`, `credit
 > balance is too low`, …) stay global. Each fix is now surgical.
 
+> **mistral's bare 401 is monthly quota, not a dead key (2026-07-10).** Live
+> probe confirmed mistral returns `AuthenticationError - {"detail":
+> "Unauthorized"}` with NOTHING in the text about quota — indistinguishable
+> from a genuinely revoked key. But on our 7 accounts it's the monthly Vibe-
+> plan call allowance being exhausted (confirmed via Mistral's admin console),
+> and the key returns fine on the billing-cycle reset. It was classified
+> `auth` → `mark_dead` (dashboard: "мёртв/auth failed") — technically true
+> (401 = unauthorized *right now*) but misleading, and it recovered only via
+> the monitor's periodic re-probe. Now handled **consistently across BOTH
+> classification paths** (fixing a latent DRY gap — the request path and the
+> monitor probe each classify errors independently and must agree):
+> - request path: `_PROVIDER_RATE_LIMIT_SIGNS["mistral"] = ("unauthorized",)`
+>   → `rate_limit`, and `cooldown.cooldown_until` has a provider-scoped
+>   `_is_provider_monthly` rule → cools to `next_utc_month_start`, key stays
+>   `is_alive`.
+> - monitor: `health_probes` returns `("cooldown", 401, "monthly quota")` for
+>   mistral (not `dead`), and `monitor.tick` parks it until next month on that
+>   hint (not the token 5 min — else it re-cools every 5 min all month).
+> Net: mistral shows the honest "monthly quota, resets DATE" cooled state, not
+> "dead", and comes back automatically on reset. Assumption (documented):
+> EVERY mistral 401 is treated as monthly — a genuinely revoked mistral key
+> would stay cooled-and-retried-monthly rather than dead, which is harmless
+> (still out of rotation). The durable answer is per-(provider, model) state
+> (roadmap §3.1); this is the correct interim for the one provider it affects.
+
 > **Model-gone (404) breaks to next provider WITHOUT penalizing the key
 > (2026-07-10, roadmap Phase 0).** A vanished/unprovisioned MODEL is neither a
 > dead key nor a rate limit: the key's OTHER models still work, and sibling

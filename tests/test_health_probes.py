@@ -40,6 +40,22 @@ async def test_probe_dead_with_no_funds_hint():
     assert "fund" in hint.lower()
 
 
+async def test_probe_mistral_401_is_monthly_cooldown_not_dead():
+    """mistral's bare 401 = monthly Vibe quota, not a revoked key — the probe
+    must return 'cooldown' with a 'monthly quota' hint (key stays alive, monitor
+    cools it to next month), NOT 'dead'. Other providers' 401 stays dead."""
+    fake = AsyncMock()
+    fake.status_code = 401
+    fake.text = '{"detail":"Unauthorized"}'
+    with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
+        ctx = m.return_value.__aenter__.return_value
+        ctx.request = AsyncMock(return_value=fake)
+        verdict, http, hint = await probe("mistral", "fake-key")
+    assert verdict == "cooldown"
+    assert http == 401
+    assert hint == "monthly quota"
+
+
 async def test_probe_neterr_on_exception():
     with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
         ctx = m.return_value.__aenter__.return_value

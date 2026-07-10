@@ -166,6 +166,21 @@ def is_monthly_quota_error(msg: str) -> bool:
     return any(marker in m for marker in _MONTHLY_QUOTA_MARKERS)
 
 
+# Provider-scoped monthly signatures: strings that mean "monthly quota" for one
+# provider but nothing generic. mistral's bare 401 "Unauthorized" is its
+# monthly Vibe-plan exhaustion on our accounts (see llm_service
+# _PROVIDER_RATE_LIMIT_SIGNS["mistral"]) — indistinguishable from a revoked key
+# in the API text, so scoped to mistral only.
+_PROVIDER_MONTHLY_SIGNS: dict[str, tuple[str, ...]] = {
+    "mistral": ("unauthorized",),
+}
+
+
+def _is_provider_monthly(provider: str, msg: str) -> bool:
+    m = msg.lower()
+    return any(s in m for s in _PROVIDER_MONTHLY_SIGNS.get(provider, ()))
+
+
 def next_utc_month_start(now: datetime | None = None) -> datetime:
     """First instant of next UTC calendar month — when a monthly call
     allowance (e.g. a trial-tier plan) resets."""
@@ -187,7 +202,7 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
     if retry is not None:
         # Provider told us exactly — honour it (no jitter; it knows its window).
         return datetime.now(UTC) + timedelta(seconds=retry)
-    if is_monthly_quota_error(error_msg):
+    if is_monthly_quota_error(error_msg) or _is_provider_monthly(provider, error_msg):
         return next_utc_month_start() + _boundary_jitter()
     if is_daily_quota_error(error_msg):
         return next_utc_midnight() + _boundary_jitter()

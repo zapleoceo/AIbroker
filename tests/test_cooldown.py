@@ -142,6 +142,23 @@ async def test_cooldown_until_prefers_retry_hint():
     assert 25 < delta < 35   # ~30s
 
 
+async def test_cooldown_until_mistral_unauthorized_goes_to_next_month():
+    """mistral's bare 401 'Unauthorized' carries no monthly marker in its text,
+    but on our accounts it IS monthly Vibe exhaustion — the provider-scoped
+    rule cools it to next month, not the adaptive few-seconds backoff."""
+    from aibroker.routing.cooldown import cooldown_until
+    until = await cooldown_until(
+        1, "mistral", 'MistralException - {"detail":"Unauthorized"}')
+    offset = (until - next_utc_month_start()).total_seconds()
+    assert 0 <= offset <= 90                                    # + anti-herd jitter
+    assert (until - datetime.now(UTC)).total_seconds() > 86400  # far more than a day
+    # Scoped to mistral: the same text for another provider is NOT monthly (it
+    # would fall through to the adaptive short backoff, not next-month).
+    from aibroker.routing.cooldown import _is_provider_monthly
+    assert _is_provider_monthly("mistral", "Unauthorized") is True
+    assert _is_provider_monthly("openai", "Unauthorized") is False
+
+
 async def test_cooldown_until_daily_goes_to_midnight():
     """Daily-quota error with no hint → cool until UTC midnight (not 60s)."""
     from aibroker.routing.cooldown import cooldown_until

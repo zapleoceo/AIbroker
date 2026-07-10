@@ -164,6 +164,16 @@ _PROVIDER_RATE_LIMIT_SIGNS: dict[str, tuple[str, ...]] = {
     # TPM" — confirmed live (2026-07-07). The account is throttled to a lower
     # ceiling, not dead/unauthorized: cooldown, don't mark_dead.
     "voyage": ("reduced rate limits",),
+    # Mistral bare 401 "Unauthorized" — on OUR 7 accounts this is the monthly
+    # Vibe-plan call allowance being exhausted, NOT a revoked key (confirmed
+    # 2026-07 via Mistral's admin console; the API text is indistinguishable
+    # from a real revocation, so we treat every mistral 401 as monthly). Was
+    # classified `auth` → mark_dead (dashboard: "мёртв/auth failed") when the
+    # key is actually fine and returns on the billing-cycle reset. As a
+    # rate_limit it cools instead; `cooldown.cooldown_until` resolves it to
+    # next-month (see the provider-monthly rule there), and the key stays
+    # is_alive — the honest state: "monthly quota, resets DATE", not dead.
+    "mistral": ("unauthorized",),
 }
 _PROVIDER_AUTH_SIGNS: dict[str, tuple[str, ...]] = {
     # zai "Invalid API parameter, please check the documentation" — confirmed

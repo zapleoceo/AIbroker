@@ -50,6 +50,13 @@ async def probe_with_headers(
     if r.status_code in (401, 403):
         if "insufficient" in b or "balance" in b or "payment" in b:
             return "dead", r.status_code, "no funds", h
+        # mistral's bare 401 "Unauthorized" on our accounts = monthly Vibe-plan
+        # quota exhausted, not a revoked key (see llm_service / cooldown). Treat
+        # it as a cooldown (key stays alive, cooled to the billing-cycle reset
+        # by the monitor's monthly branch), so the probe doesn't re-kill a key
+        # the request path correctly cooled.
+        if provider == "mistral":
+            return "cooldown", r.status_code, "monthly quota", h
         return "dead", r.status_code, "auth failed", h
     if r.status_code == 402:
         return "dead", 402, "payment required", h

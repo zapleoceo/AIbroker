@@ -138,6 +138,17 @@ def test_classify_voyage_no_payment_method():
     assert classify_provider_error(RuntimeError(real_message)) == "error"
 
 
+def test_classify_mistral_unauthorized_is_monthly_rate_limit():
+    """mistral's bare 401 'Unauthorized' on our accounts is monthly Vibe-plan
+    exhaustion, not a revoked key — must classify as rate_limit (→ cooled to
+    next month, key stays alive), NOT auth (→ mark_dead). Provider-scoped so a
+    genuine 401 from another provider still marks that key dead."""
+    real = 'litellm.AuthenticationError: MistralException - {"detail":"Unauthorized"}'
+    assert classify_provider_error(RuntimeError(real), "mistral") == "rate_limit"
+    # Same 'Unauthorized' from another provider is still a dead-key auth verdict.
+    assert classify_provider_error(RuntimeError(real), "openai") == "auth"
+
+
 def test_classify_generic_error():
     assert classify_provider_error(RuntimeError("boom")) == "error"
     assert classify_provider_error(ValueError("connection reset by peer")) == "error"
