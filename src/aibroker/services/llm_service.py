@@ -266,15 +266,23 @@ async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
 ) -> None:
-    """Book a failed attempt in usage_log (zero tokens/cost, no HTTP status).
-    Shared by run_chat/run_embed/run_transcribe — the shape is identical; only
-    the capability differs."""
+    """Book a failed attempt in usage_log. Shared by run_chat/run_embed/
+    run_transcribe — the shape is identical; only the capability differs.
+
+    http_status is derived from the error class, NOT left NULL: a rate_limit
+    books 429 specifically because adaptive_cooldown counts recent
+    `http_status = 429` rows to escalate its backoff. With NULL that count was
+    always 0, so the exponential step never fired and a per-minute-429 key got
+    re-picked every base-cooldown and re-stormed the provider — the exact retry
+    storm the adaptive backoff exists to damp (fix 2026-07-10)."""
+    kind = classify_provider_error(exc, provider)
+    http_status = 429 if kind == "rate_limit" else (401 if kind == "auth" else None)
     await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=model, capability=capability,
         workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
         latency_ms=None, status="error", error_kind=type(exc).__name__,
-        http_status=None,
+        http_status=http_status,
     )
 
 

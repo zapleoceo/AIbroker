@@ -1179,3 +1179,43 @@ async def test_run_embed_succeeds_first_try_records_usage(monkeypatch):
     assert out.tokens_in == 42
     assert recorded["status"] == "ok"
     assert recorded["tokens_in"] == 42
+
+
+async def test_record_error_books_429_for_rate_limit(monkeypatch):
+    """REGRESSION (2026-07-10): _record_error must book http_status=429 for a
+    rate_limit — adaptive_cooldown counts recent `http_status = 429` rows to
+    escalate backoff; with NULL the exponential step never fired."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    captured: dict = {}
+
+    async def fake_record(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    await svc._record_error(
+        key=SimpleNamespace(id=1, provider="cerebras"), project=SimpleNamespace(id=2),
+        provider="cerebras", model="m", capability="chat:fast", workflow=None,
+        exc=RuntimeError("RateLimitError - Tokens per day limit exceeded"),
+    )
+    assert captured["http_status"] == 429
+    assert captured["status"] == "error"
+
+
+async def test_record_error_books_none_for_generic_error(monkeypatch):
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    captured: dict = {}
+
+    async def fake_record(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    await svc._record_error(
+        key=SimpleNamespace(id=1, provider="x"), project=SimpleNamespace(id=2),
+        provider="x", model="m", capability="chat:fast", workflow=None,
+        exc=RuntimeError("some unclassifiable failure"),
+    )
+    assert captured["http_status"] is None
