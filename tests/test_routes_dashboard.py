@@ -302,7 +302,7 @@ def test_dashboard_renders_with_session_cookie():
 
 
 def test_range_where_no_filter_returns_empty():
-    from aibroker.routes.dashboard import _range_where
+    from aibroker.routes.dashboard_data import _range_where
     where, bind_ = _range_where(None, None)
     assert where == "" and bind_ == {}
 
@@ -310,7 +310,7 @@ def test_range_where_no_filter_returns_empty():
 def test_range_where_both_sides_is_sargable_half_open():
     from datetime import date, datetime, timedelta
 
-    from aibroker.routes.dashboard import _range_where
+    from aibroker.routes.dashboard_data import _range_where
     df, dt = date(2026, 6, 1), date(2026, 6, 3)
     where, bind_ = _range_where(df, dt)
     assert "::date" not in where            # non-sargable cast must be gone
@@ -323,7 +323,7 @@ def test_range_where_both_sides_is_sargable_half_open():
 def test_range_where_from_only_open_ended():
     from datetime import date, datetime
 
-    from aibroker.routes.dashboard import _range_where
+    from aibroker.routes.dashboard_data import _range_where
     where, bind_ = _range_where(date(2026, 6, 1), None)
     assert where == "WHERE created_at >= :start"
     assert bind_ == {"start": datetime(2026, 6, 1)}
@@ -332,7 +332,7 @@ def test_range_where_from_only_open_ended():
 def test_range_where_to_only_exclusive_next_day():
     from datetime import date, datetime
 
-    from aibroker.routes.dashboard import _range_where
+    from aibroker.routes.dashboard_data import _range_where
     where, bind_ = _range_where(None, date(2026, 6, 1))
     assert where == "WHERE created_at < :end"
     assert bind_ == {"end": datetime(2026, 6, 2)}   # inclusive of the whole day
@@ -348,7 +348,7 @@ def test_fetch_range_and_proj_spend_merges_one_scan():
 
     from aibroker.db import get_session
     from aibroker.db.models import ProjectRow, UsageLogRow
-    from aibroker.routes.dashboard import _fetch_range_and_proj_spend
+    from aibroker.routes.dashboard_data import _fetch_range_and_proj_spend
 
     # Explicit ids: BigInteger PKs don't autoincrement under SQLite/aiosqlite
     # (same reason other tests skipif ON_SQLITE) — supplying ids sidesteps
@@ -396,7 +396,7 @@ def test_fetch_range_and_proj_spend_date_range_excludes_out_of_range_rows():
 
     from aibroker.db import get_session
     from aibroker.db.models import UsageLogRow
-    from aibroker.routes.dashboard import _fetch_range_and_proj_spend, _range_where
+    from aibroker.routes.dashboard_data import _fetch_range_and_proj_spend, _range_where
 
     async def _seed():
         async with get_session() as s:
@@ -426,7 +426,7 @@ def test_fetch_tokens_today_aggregates_only_todays_rows():
 
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow, UsageLogRow
-    from aibroker.routes.dashboard import _fetch_tokens_today
+    from aibroker.routes.dashboard_data import _fetch_tokens_today
 
     today = datetime.now(UTC).replace(tzinfo=None)
     yesterday = today - timedelta(days=1)
@@ -456,7 +456,7 @@ def test_fetch_projects_and_keys_return_seeded_rows():
 
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow, ProjectRow
-    from aibroker.routes.dashboard import _fetch_keys, _fetch_projects
+    from aibroker.routes.dashboard_data import _fetch_keys, _fetch_projects
 
     async def _seed():
         async with get_session() as s:
@@ -484,7 +484,7 @@ def test_gather_data_runs_concurrently_without_session_conflicts():
     must still return every expected key."""
     import asyncio
 
-    from aibroker.routes.dashboard import _gather_data
+    from aibroker.routes.dashboard_data import _gather_data
     data = asyncio.get_event_loop().run_until_complete(_gather_data())
     for key in ("projects", "keys", "range_spend", "proj_spend",
                  "tokens_today", "calls_1h", "provider_summary"):
@@ -668,7 +668,7 @@ def test_project_detail_404_when_missing():
 
 def test_parse_date_range_defaults_to_all_time_when_both_missing():
     """Empty inputs ⇒ (None, None) so _gather_data drops the WHERE clause."""
-    from aibroker.routes.dashboard import _parse_date_range
+    from aibroker.routes.dashboard_data import _parse_date_range
     assert _parse_date_range(None, None) == (None, None)
     assert _parse_date_range("", "") == (None, None)
 
@@ -676,7 +676,7 @@ def test_parse_date_range_defaults_to_all_time_when_both_missing():
 def test_parse_date_range_parses_valid_iso():
     from datetime import date
 
-    from aibroker.routes.dashboard import _parse_date_range
+    from aibroker.routes.dashboard_data import _parse_date_range
     df, dt = _parse_date_range("2026-06-01", "2026-06-10")
     assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
 
@@ -685,7 +685,7 @@ def test_parse_date_range_swaps_inverted_range():
     """If user passes from>to, swap them rather than throw."""
     from datetime import date
 
-    from aibroker.routes.dashboard import _parse_date_range
+    from aibroker.routes.dashboard_data import _parse_date_range
     df, dt = _parse_date_range("2026-06-10", "2026-06-01")
     assert df == date(2026, 6, 1) and dt == date(2026, 6, 10)
 
@@ -694,7 +694,7 @@ def test_parse_date_range_falls_back_on_garbage_when_partial():
     """Garbage on one side becomes today; swap then puts the older one first."""
     from datetime import UTC, date, datetime
 
-    from aibroker.routes.dashboard import _parse_date_range
+    from aibroker.routes.dashboard_data import _parse_date_range
     today = datetime.now(UTC).date()
     # garbage 'from' → today; given to=2026-06-10 (older than today) → swap
     df, dt = _parse_date_range("not-a-date", "2026-06-10")
@@ -709,7 +709,7 @@ def test_parse_date_range_falls_back_on_garbage_when_partial():
 def test_parse_date_range_one_sided_inputs():
     from datetime import UTC, date, datetime
 
-    from aibroker.routes.dashboard import _parse_date_range
+    from aibroker.routes.dashboard_data import _parse_date_range
     today = datetime.now(UTC).date()
     # only from → to = today
     df, dt = _parse_date_range("2026-06-01", None)
@@ -721,7 +721,7 @@ def test_parse_date_range_one_sided_inputs():
 
 def test_range_hours_table_complete():
     """The 1h/4h/12h/24h/7d/30d range pills must all map to valid hour windows."""
-    from aibroker.routes.dashboard import _RANGE_HOURS
+    from aibroker.routes.dashboard_data import _RANGE_HOURS
     assert _RANGE_HOURS["1h"] == 1
     assert _RANGE_HOURS["4h"] == 4
     assert _RANGE_HOURS["12h"] == 12
@@ -856,7 +856,7 @@ def test_render_project_detail_handles_empty_breakdowns():
 
 def test_lat_labels_align_with_edges():
     """width_bucket yields len(edges)+1 buckets — labels must match 1:1."""
-    from aibroker.routes.dashboard import _LAT_EDGES_MS, _LAT_LABELS
+    from aibroker.routes.dashboard_data import _LAT_EDGES_MS, _LAT_LABELS
     assert len(_LAT_LABELS) == len(_LAT_EDGES_MS) + 1
 
 
@@ -864,7 +864,7 @@ def test_lat_hist_counts_maps_sparse_to_dense():
     """width_bucket returns only non-empty buckets; missing ones become 0."""
     from collections import namedtuple
 
-    from aibroker.routes.dashboard import _LAT_LABELS, _lat_hist_counts
+    from aibroker.routes.dashboard_data import _LAT_LABELS, _lat_hist_counts
     Row = namedtuple("Row", "b n")
     counts = _lat_hist_counts([Row(0, 5), Row(3, 2), Row(7, 1)])
     assert len(counts) == len(_LAT_LABELS)
