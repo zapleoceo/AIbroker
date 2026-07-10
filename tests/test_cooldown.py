@@ -97,6 +97,16 @@ def test_parse_retry_after_variants():
     assert parse_retry_after("Retry in 5s please") == 5.0
 
 
+def test_parse_retry_after_unitless_and_seconds_word():
+    """REGRESSION (2026-07-10): the docstring claimed to support the unitless
+    OpenAI-style 'retry after 30' but the regex required a trailing 's'. Now a
+    bare number at end-of-string parses; a following non-seconds unit does NOT
+    (so 'retry after 30 minutes' is not mis-read as 30 seconds)."""
+    assert parse_retry_after("retry after 30") == 30.0
+    assert parse_retry_after("please retry after 45 seconds") == 45.0
+    assert parse_retry_after("retry after 2 minutes") is None
+
+
 def test_parse_retry_after_absent():
     assert parse_retry_after("CerebrasException - Tokens per day limit exceeded") is None
     assert parse_retry_after("plain rate limit") is None

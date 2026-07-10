@@ -9,7 +9,7 @@ in providers/quotas.py when headers don't carry usable values.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 
@@ -42,16 +42,19 @@ async def discover_and_store(api_key_id: int, provider: str, plain_token: str) -
     async with get_session() as s:
         await s.execute(
             text(
+                # COALESCE so a probe that returns only ONE axis doesn't clobber
+                # a previously-discovered value on the other with NULL (we only
+                # reach here when at least one of :req/:tok is non-NULL).
                 "UPDATE api_keys "
-                "SET discovered_req_limit = :req, "
-                "    discovered_tok_limit = :tok, "
+                "SET discovered_req_limit = COALESCE(:req, discovered_req_limit), "
+                "    discovered_tok_limit = COALESCE(:tok, discovered_tok_limit), "
                 "    limits_discovered_at = :ts "
                 "WHERE id = :id"
             ),
             {
                 "req": req_limit,
                 "tok": tok_limit,
-                "ts": datetime.now(timezone.utc).replace(tzinfo=None),
+                "ts": datetime.now(UTC).replace(tzinfo=None),
                 "id": api_key_id,
             },
         )

@@ -59,12 +59,14 @@ _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
 # The real budget is dynamic — sum of per-provider key allowances across the
 # actual chain (see `_attempt_budget`), so every provider (incl. the paid tail)
 # is reachable before we 503. This flat ceiling only guards against a
-# pathological chain; it's set well above the longest real chain's key sum so
-# it never starves the tail. Was a flat 12 — but chat:fast grew to 14
-# providers, so 12 could be consumed by early free providers and the paid tail
+# pathological chain; it must stay ABOVE the longest real chain's key sum so it
+# never starves the tail. Was a flat 12 — but chat:fast grew to 14 providers,
+# so 12 could be consumed by early free providers and the paid tail
 # (deepseek/anthropic/openai) was never reached: long dialogs 503'd during the
-# 2026-07-07 incident precisely because of this.
-_MAX_ATTEMPTS_ABS = 60
+# 2026-07-07 incident precisely because of this. 2026-07-10: 60 → 100 — the
+# chat:fast key sum had reached 61 (13 providers, cerebras/gemini 3 each + the
+# rest 5), so 60 clipped the last attempt; 100 restores real headroom.
+_MAX_ATTEMPTS_ABS = 100
 
 # Per-provider-call timeout (seconds). A safety net against a hung upstream —
 # normal calls finish in ~1-8s; this only cuts a genuine hang so the chain can

@@ -86,8 +86,13 @@ _DAILY_QUOTA_MARKERS = (
 # Providers tell us exactly how long to wait via a retry hint — honour it
 # instead of guessing. Covers Gemini "Please retry in 24.5s", OpenAI-style
 # "retry after 30", Google "retryDelay: 24s".
+# The number is followed by a seconds unit (s / sec / seconds) OR the end of
+# the string — the latter catches the unitless "retry after 30". Deliberately
+# NOT a bare number mid-string: "retry after 30 minutes" must NOT parse as 30s,
+# so a trailing non-seconds word fails the match (falls through to adaptive).
 _RETRY_AFTER_RE = re.compile(
-    r"(?:retry(?:[ -]?after| in)|retrydelay)\D{0,4}?(\d+(?:\.\d+)?)\s*s",
+    r"(?:retry(?:[ -]?after| in)|retrydelay)\D{0,4}?(\d+(?:\.\d+)?)"
+    r"\s*(?:s(?:ec(?:onds?)?)?\b|$)",
     re.IGNORECASE,
 )
 

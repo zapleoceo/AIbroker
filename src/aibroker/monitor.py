@@ -59,17 +59,35 @@ async def tick() -> None:
         return
 
     plain_keys = []
+    decrypt_failed: set[int] = set()
     for r in rows:
         try:
             plain_keys.append((r.id, r.provider, decrypt(r.token_encrypted)))
         except Exception as e:
             log.warning("decrypt %s/%s failed: %s", r.provider, r.label, e)
+            decrypt_failed.add(r.id)
 
     results = await probe_all(plain_keys)
 
     alive_count, cooldown_count, dead_count = 0, 0, 0
     async with get_session() as s:
         for r in rows:
+            if r.id in decrypt_failed:  # pragma: no cover — Postgres-only tick
+                # Can't decrypt → the key can't be used or probed. Mark it dead
+                # and alert, rather than silently leaving it is_alive but never
+                # health-checked (it just vanished from `results`).
+                dead_count += 1
+                await s.execute(
+                    update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
+                        is_alive=False,
+                        last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
+                        last_error="token decrypt failed",
+                    )
+                )
+                if r.is_alive:
+                    await alert(f"key:{r.id}",
+                                f"{r.provider}/{r.label} unusable: token decrypt failed")
+                continue
             res = results.get(r.id)
             if res is None:
                 continue
