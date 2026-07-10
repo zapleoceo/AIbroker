@@ -14,6 +14,12 @@
 > **github REMOVED entirely** (provider + key + chains/DEFAULT_MODEL/quotas/probe) —
 > free tier is ~150 req/day on 1 key with a non-UTC reset window, so the key sat
 > exhausted (155 attempts / 0 success / all 429 on its last full day). Dead weight.
+> **Empty-body retry (JSON gate)**: a blank/whitespace response is now a TRANSIENT
+> throttle, not a model defect — DeepSeek's json_object intermittently returns an
+> empty string on very large prompts (~24% on Stepan's 52k-char follow-up prompt,
+> random per key/call). run_chat retries the SAME provider's next key (usually
+> valid) instead of skipping the provider; recorded as `EmptyBody` (vs the
+> `InvalidJSON` used for non-empty malformed bodies, which still skip the model).
 > - **deepseek stays on `deepseek-chat`** (chat:fast/smart/edit/code). A brief
 >   move to the cheaper `deepseek-v4-flash` was REVERTED same day: v4-flash is a
 >   REASONING model whose hidden reasoning eats the max_tokens budget, so our
