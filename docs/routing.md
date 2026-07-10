@@ -825,7 +825,9 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 >   `is_alive`.
 > - monitor: `health_probes` returns `("cooldown", 401, "monthly quota")` for
 >   mistral (not `dead`), and `monitor.tick` parks it until next month on that
->   hint (not the token 5 min — else it re-cools every 5 min all month).
+>   hint (not the token 5 min — else it re-cools every 5 min all month). The
+>   monthly-vs-short decision is a pure `monitor._cooldown_end(hint)` helper
+>   (unit-tested) so tick stays thin.
 > Net: mistral shows the honest "monthly quota, resets DATE" cooled state, not
 > "dead", and comes back automatically on reset. Assumption (documented):
 > EVERY mistral 401 is treated as monthly — a genuinely revoked mistral key
