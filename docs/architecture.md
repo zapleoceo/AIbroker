@@ -80,6 +80,44 @@ service (SRP — no business logic in the route layer).
    success response includes the chosen key's `key_label` for client-side
    cost/usage display.
 
+## Async jobs — the drained queue (2026-07-10)
+
+A parallel, additive path to sync `/v1/chat`, for clients that would rather
+guarantee an answer than hold a connection (a slow/oversubscribed provider can
+504 a sync call before the broker finishes its fallback chain). Sync is
+untouched — this is opt-in, migrate at your own pace (see `docs/api.md`).
+
+- **Submit = enqueue.** `POST /v1/jobs?capability=X` (`routes/proxy.py`) →
+  `services/deep_jobs.submit_job` inserts one `pending` row in `deep_jobs` and
+  returns a `job_id` immediately. That's it — a cheap durable INSERT that
+  always succeeds, whatever the provider pool is doing. (`/v1/deep` is a
+  backward-compatible alias for `capability=chat:deep`.)
+- **Dispatcher = drain.** `services/job_queue.py`'s `dispatcher_loop` runs once
+  per uvicorn worker (started from the app lifespan). Every `_POLL_INTERVAL_S`
+  it claims up to `JOB_MAX_CONCURRENCY` eligible `pending` rows — an atomic
+  `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *`, so the
+  workers never double-claim — flips them to `running`, and runs each through
+  the SAME `run_chat` the sync path uses. On success → `done`; the client's
+  next `GET /v1/jobs/{id}` poll reads the result row from Postgres (works on
+  whichever worker answers).
+- **Resilience (why a queue, not fire-and-forget).**
+  - *Survives a deploy.* A `running` row whose worker died mid-call is detected
+    (`started_at` past `_STALE_RUNNING_S`) and re-queued by the next tick —
+    a few minutes of broker downtime delays answers, never drops them.
+  - *Backpressure.* A flood of submits no longer means a flood of concurrent
+    provider calls — at most `JOB_MAX_CONCURRENCY` per worker; the rest wait.
+  - *Retries transient no-capacity.* If `run_chat` returns None (whole pool
+    cooling), the job is re-queued with exponential backoff (`run_after`,
+    `retry_count`) up to `JOB_MAX_RETRIES`, then errors. The queue drains as
+    capacity frees up.
+- `drain_once()` is one deterministic pass (claim + run to completion) — what
+  the loop repeats, and what tests drive directly.
+- Queue state lives on `deep_jobs` (migrations 008 `capability`, 009
+  `started_at`/`retry_count`/`run_after` + claimable index). The DB-touching
+  code is Postgres-only (SKIP LOCKED / `make_interval`), covered by the
+  Postgres CI job (`tests/test_job_queue.py`) and `# pragma: no cover`'d for
+  the SQLite diff-cover run.
+
 ## Tests & CI
 
 `.github/workflows/ci.yml` runs on every push/PR: a **unit** job on in-memory
