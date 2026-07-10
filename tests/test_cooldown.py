@@ -1,7 +1,12 @@
 """routing.cooldown — adaptive cooldown table + exponential backoff math."""
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
+
+import pytest
+
+ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 from aibroker.routing.cooldown import (
     COOLDOWN_BASE_S,
@@ -143,13 +148,40 @@ def test_next_utc_midnight_just_before_midnight():
     assert next_utc_midnight(base) == datetime(2026, 6, 30, 0, 0, tzinfo=UTC)
 
 
-async def test_cooldown_until_prefers_retry_hint():
-    """retry-after hint wins over everything — no DB needed (adaptive not hit)."""
+async def test_cooldown_until_honours_retry_hint_above_base():
+    """A retry-after hint LONGER than the adaptive base wins — the provider knows
+    its own window. (A sub-base hint is floored to the base and escalates when
+    the key keeps failing; see the escalation test.)"""
     from aibroker.routing.cooldown import cooldown_until
     until = await cooldown_until(1, "gemini",
-                                 "RESOURCE_EXHAUSTED Please retry in 30s.")
+                                 "RESOURCE_EXHAUSTED Please retry in 600s.")
     delta = (until - datetime.now(UTC)).total_seconds()
-    assert 25 < delta < 35   # ~30s
+    assert 590 < delta < 620   # ~600s honored (> gemini base 60s)
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session usage_log seed needs Postgres")
+async def test_cooldown_until_short_hint_escalates_when_key_keeps_failing():
+    """REGRESSION (2026-07-10): a free key that 429s every few seconds is
+    EXHAUSTED, but Gemini still returns a short retryDelay (~24s). Honouring that
+    literally re-picked the dead key ~100x/hr — burning attempts, inflating
+    errors, starving reserve keys. cooldown_until now floors a short hint at the
+    escalating adaptive backoff, so a repeatedly-failing key gets parked."""
+    from datetime import datetime as _dt
+
+    from sqlalchemy import insert
+
+    from aibroker.db import get_session
+    from aibroker.db.models import UsageLogRow
+    from aibroker.routing.cooldown import cooldown_until
+
+    async with get_session() as s:
+        for _ in range(6):  # 6 recent 429s → adaptive escalates well past a 5s hint
+            await s.execute(insert(UsageLogRow).values(
+                api_key_id=90210, provider="gemini", status="error",
+                http_status=429, created_at=_dt.now(UTC).replace(tzinfo=None)))
+    until = await cooldown_until(90210, "gemini", "RESOURCE_EXHAUSTED retry in 5s.")
+    delta = (until - datetime.now(UTC)).total_seconds()
+    assert delta > 120   # 5s hint ignored — parked on the escalated backoff
 
 
 async def test_cooldown_until_mistral_unauthorized_goes_to_next_month():

@@ -1,5 +1,20 @@
 # Routing, scopes & cost guard
 
+> **2026-07-10 (cooldown — stop exhausted keys churning + reach reserve keys)**:
+> `cooldown_until` honoured a provider's `retryDelay` literally. A free Gemini key
+> whose DAILY quota is used up still returns a short `retryDelay` (~24s), so the
+> broker re-picked the dead key ~100×/hr — burning the per-provider attempt
+> budget, inflating the error count, and starving reserve (`is_reserve`) keys:
+> because the shared pool never stayed exhausted, `pick_and_reserve` never fell
+> through to the reserve key (it sorts last). Fix: floor a retry hint at the
+> escalating adaptive backoff — `max(retry_after, adaptive_cooldown)`. A one-off
+> blip still waits ~the hint; a key that keeps 429-ing gets parked up to
+> `MAX_COOLDOWN_S` (30 min) and drops out of rotation, so working keys (incl.
+> reserve) are selected and the request stops wasting attempts. `is_reserve` is a
+> per-key flag, NOT tied to paid tier — a reserve key IS used, just after the
+> shared pool is genuinely exhausted. (Also made `adaptive_cooldown`'s window
+> query portable so the SQLite gate exercises the retry-after path.)
+
 > **2026-07-10 (token-cost optimization)**: DEFAULT_MODEL + chain changes after a
 > live usage review of Stepan (project 4, hitting its $4/day cap with a ~40%
 > error rate). Also: cerebras `gemma-4-31b` (new free non-reasoning model) wired

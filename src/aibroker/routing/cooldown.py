@@ -205,8 +205,19 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
-        # Provider told us exactly — honour it (no jitter; it knows its window).
-        return datetime.now(UTC) + timedelta(seconds=retry)
+        # Honour the provider's hint — BUT never park for LESS than the
+        # escalating adaptive backoff. A free key that keeps 429-ing every few
+        # seconds is EXHAUSTED (e.g. daily quota used up), not momentarily
+        # throttled, yet Gemini still returns a short retryDelay (~24s) for it.
+        # Trusting that literally re-picked the dead key ~100x/hr — burning
+        # attempts, inflating errors, and starving reserve keys (the chain never
+        # exhausts the shared pool, so is_reserve keys are never reached). Taking
+        # the max with the adaptive escalation parks a repeatedly-failing key for
+        # up to MAX_COOLDOWN_S so it drops out of rotation; a one-off blip (low
+        # recent count → tiny adaptive) still just waits the provider's hint.
+        retry_until = datetime.now(UTC) + timedelta(seconds=retry)
+        adaptive = await adaptive_cooldown(api_key_id, provider)
+        return max(retry_until, adaptive)
     if is_monthly_quota_error(error_msg) or _is_provider_monthly(provider, error_msg):
         return next_utc_month_start() + _boundary_jitter()
     if is_daily_quota_error(error_msg):
@@ -222,14 +233,18 @@ async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:
     Counts how many times this key was cool-down-marked in the last
     BACKOFF_WINDOW_S; the more recent cool-downs, the longer the next one.
     """
+    # Threshold computed in Python (not Postgres `now() - INTERVAL`) so the query
+    # is portable to the SQLite test DB — cooldown_until now reaches this on the
+    # retry-after path too, which the SQLite deploy gate exercises.
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=BACKOFF_WINDOW_S)
     async with get_session() as s:
         recent = int((await s.execute(
             text(
                 "SELECT COUNT(*) FROM usage_log "
                 "WHERE api_key_id = :id AND http_status = 429 "
-                "  AND created_at > now() - (:w * INTERVAL '1 second')"
+                "  AND created_at > :since"
             ),
-            {"id": api_key_id, "w": BACKOFF_WINDOW_S},
+            {"id": api_key_id, "since": since},
         )).scalar() or 0)
     secs = _adaptive_jitter(cooldown_seconds(provider, recent))
     return datetime.now(UTC) + timedelta(seconds=secs)
