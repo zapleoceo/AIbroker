@@ -101,14 +101,29 @@ def _dash_html(*, body: str, flash: str = "") -> str:
 # reads as generic breakage, not "go add money". Order matters (first match
 # wins); nothing here duplicates classify_provider_error's signs — this is
 # purely a display-layer translation, not a routing decision.
+# Billing-exhaustion signs — a VALID key that's just out of money (not a broken
+# credential). Kept as their own group so the status can render "нет средств"
+# (needs top-up, recovers on top-up) instead of the alarming "мёртв".
+_TOP_UP_SIGNS: tuple[str, ...] = (
+    "credit balance is too low",
+    "prepayment credits are depleted",
+    "credits are depleted",
+    "insufficient",
+    "payment required",
+    "no funds",
+)
 _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
-    ("credit balance is too low", "top up balance", "пополнить баланс"),
-    ("insufficient", "top up balance", "пополнить баланс"),
-    ("payment required", "top up balance", "пополнить баланс"),
-    ("no funds", "top up balance", "пополнить баланс"),
+    *((s, "top up balance", "пополнить баланс") for s in _TOP_UP_SIGNS),
     ("response_format type is unavailable", "provider feature outage",
      "сбой фичи у провайдера"),
 )
+
+
+def _is_top_up(raw: str | None) -> bool:
+    """True if the error is a billing-exhaustion (out of money) — a valid key
+    that recovers on top-up, not a dead credential."""
+    low = (raw or "").lower()
+    return any(s in low for s in _TOP_UP_SIGNS)
 
 
 def _friendly_reason(raw: str) -> tuple[str, str] | None:
@@ -270,13 +285,23 @@ def _render(data: dict[str, Any], *, flash: str = "",
         if k.is_alive and not (k.cooldown_until and k.cooldown_until > now):
             keys_alive += 1
         in_cd = k.cooldown_until and k.cooldown_until > now
+        # A key that's is_alive=False only because its BALANCE ran out isn't a
+        # dead credential — it's valid and auto-recovers the moment it's topped
+        # up (the monitor's probe revives it). Show "нет средств" (warn), not the
+        # alarming "мёртв" (bad), so the operator knows to top up, not replace.
+        no_credits = not k.is_alive and not in_cd and _is_top_up(k.last_error)
         status_label = (
             "alive" if (k.is_alive and not in_cd)
             else "cooldown" if in_cd
+            else "no_credits" if no_credits
             else "dead"
         )
-        status_class = {"alive": "ok", "cooldown": "warn", "dead": "bad"}[status_label]
-        status_ru = {"alive": "жив", "cooldown": "пауза", "dead": "мёртв"}[status_label]
+        status_class = {"alive": "ok", "cooldown": "warn",
+                        "no_credits": "warn", "dead": "bad"}[status_label]
+        status_en = {"alive": "alive", "cooldown": "cooldown",
+                     "no_credits": "no credits", "dead": "dead"}[status_label]
+        status_ru = {"alive": "жив", "cooldown": "пауза",
+                     "no_credits": "нет средств", "dead": "мёртв"}[status_label]
         # Reason + (for cooldown) when it ends — 2026-07-05: status used to be
         # just "мёртв"/"пауза" with no way to tell "no money" from "rate
         # limited" apart, or when a cooldown actually ends. last_error is set
@@ -310,7 +335,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
         )
         status_html = (
             f'<span class="{status_class}" data-i18n title="{detail_title}" '
-            f'data-en="{status_label}" data-ru="{status_ru}">{status_label}</span>'
+            f'data-en="{status_en}" data-ru="{status_ru}">{status_en}</span>'
             f'{detail_sub}'
         )
 

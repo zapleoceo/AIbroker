@@ -1173,9 +1173,32 @@ def test_friendly_reason_recognizes_billing_and_outage_signs():
     assert _friendly_reason("Your credit balance is too low") == (
         "top up balance", "пополнить баланс"
     )
+    # Gemini's out-of-money 429 (2026-07-10) — was showing a raw litellm dump
+    assert _friendly_reason("Your prepayment credits are depleted.") == (
+        "top up balance", "пополнить баланс"
+    )
     assert _friendly_reason("This response_format type is unavailable now") == (
         "provider feature outage", "сбой фичи у провайдера"
     )
+
+
+def test_out_of_credit_key_shows_no_credits_not_dead():
+    """REGRESSION (2026-07-10): a paid key that's is_alive=False only because its
+    BALANCE ran out ('prepayment credits are depleted') is valid and auto-recovers
+    on top-up — render it as 'нет средств' (warn), NOT the alarming 'мёртв' (bad)."""
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard_render import _render
+    k = ApiKeyRow(
+        id=16, provider="gemini", label="demoniwwwe", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x", is_active=True, is_alive=False,
+        last_error="litellm.RateLimitError: Your prepayment credits are depleted.",
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-ru="нет средств"' in body
+    assert 'data-en="no credits"' in body
+    assert 'data-en="top up balance" data-ru="пополнить баланс"' in body
+    assert 'data-ru="мёртв"' not in body  # not shown as dead
 
 
 def test_main_render_cooldown_key_shows_until_time():
