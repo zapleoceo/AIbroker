@@ -1196,6 +1196,21 @@ def test_friendly_reason_recognizes_billing_and_outage_signs():
     )
 
 
+def test_friendly_reason_humanizes_rate_limit_dumps():
+    """A throttled key's raw last_error ranges from a tidy 'rate limit' to a
+    multi-line litellm/gemini JSON dump — all collapse to one clean label."""
+    from aibroker.routes.dashboard_render import _friendly_reason
+    for raw in (
+        "rate limit",
+        "litellm.RateLimitError: litellm.RateLimitError: geminiException - {\n"
+        '  "error": {\n    "code": 429, "status": "RESOURCE_EXHAUSTED"',
+        "Error code: 429 - too many requests",
+    ):
+        assert _friendly_reason(raw) == ("rate limited", "лимит запросов"), raw
+    # Mistral's monthly ceiling must NOT collapse into the generic throttle.
+    assert _friendly_reason("monthly quota") == ("monthly quota", "месячная квота")
+
+
 def test_out_of_credit_key_shows_no_credits_not_dead():
     """REGRESSION (2026-07-10): a paid key that's is_alive=False only because its
     BALANCE ran out ('prepayment credits are depleted') is valid and auto-recovers

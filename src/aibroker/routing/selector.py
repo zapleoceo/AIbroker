@@ -263,6 +263,16 @@ async def record_usage(
                 "s": status, "e": error_kind, "h": http_status,
             },
         )).scalar_one()
+        # A successful call proves the key is healthy RIGHT NOW — wipe any stale
+        # failure state immediately instead of waiting up to MONITOR_INTERVAL_S
+        # for the next probe to clear it. Without this a rate-limited key that
+        # recovered kept showing "жив" + a phantom last_error until the monitor
+        # ran (2026-07-11). Mirrors monitor.py's confirmed-alive reset.
+        succeeded = status == "ok" and error_kind is None
+        recover_sql = (
+            ", last_error = NULL, error_count = 0, cooldown_until = NULL"
+            if succeeded else ""
+        )
         await s.execute(
             text(
                 "UPDATE api_keys AS k "
@@ -270,7 +280,7 @@ async def record_usage(
                 f"    daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c, "
                 "    daily_reset_at = CURRENT_DATE, "
                 "    monthly_cost_used_usd = monthly_cost_used_usd + :c, "
-                "    total_cost_usd = total_cost_usd + :c "
+                f"    total_cost_usd = total_cost_usd + :c{recover_sql} "
                 "WHERE k.id = :id"
             ),
             {"c": cost_usd, "id": api_key_id},

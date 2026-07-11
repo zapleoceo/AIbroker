@@ -287,6 +287,49 @@ async def test_record_usage_increments_counters():
     assert abs(row.total_cost_usd - 0.01) < 1e-9
 
 
+async def test_record_usage_ok_clears_stale_error_and_cooldown():
+    """REGRESSION (2026-07-11): a rate-limited key that recovered kept showing
+    'жив' + a phantom last_error until the next monitor probe (up to 10 min). A
+    successful call must wipe last_error/error_count/cooldown_until on the spot."""
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    kid = await _add_key("openrouter", "x", tier="free")
+    await mark_cooldown(kid, future, reason="rate limit")
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+        assert row.last_error == "rate limit" and row.cooldown_until is not None
+    await record_usage(
+        api_key_id=kid, project_id=None, lease_id=None,
+        provider="openrouter", model="google/gemma-2-9b-it:free",
+        capability="chat:fast", workflow="test",
+        tokens_in=10, tokens_out=5, cost_usd=0.0,
+        latency_ms=100, status="ok", error_kind=None, http_status=200,
+    )
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+    assert row.last_error is None
+    assert row.error_count == 0
+    assert row.cooldown_until is None
+
+
+async def test_record_usage_error_keeps_failure_state():
+    """A NON-ok row (retry logged its own failure) must NOT clear the error
+    state — only a genuine success proves the key healthy."""
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    kid = await _add_key("openrouter", "y", tier="free")
+    await mark_cooldown(kid, future, reason="rate limit")
+    await record_usage(
+        api_key_id=kid, project_id=None, lease_id=None,
+        provider="openrouter", model="google/gemma-2-9b-it:free",
+        capability="chat:fast", workflow="test",
+        tokens_in=0, tokens_out=0, cost_usd=0.0,
+        latency_ms=100, status="error", error_kind="RateLimit", http_status=429,
+    )
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, kid)
+    assert row.last_error == "rate limit"
+    assert row.cooldown_until is not None
+
+
 async def test_record_usage_returns_new_row_id():
     """The returned id is the broker-side request_id — threaded through the
     outcome dataclasses to the caller's API response (Stepan/Vera correlate

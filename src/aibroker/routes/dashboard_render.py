@@ -112,8 +112,23 @@ _TOP_UP_SIGNS: tuple[str, ...] = (
     "payment required",
     "no funds",
 )
+# Rate-limit / quota signs — a healthy key that's just throttled. Every
+# provider phrases it differently and litellm often prepends its own class name,
+# so raw last_error ranges from a tidy "rate limit" to a multi-line
+# "litellm.RateLimitError: geminiException - {..json..}" dump. Collapse them all
+# to one clean label. "monthly quota" is listed FIRST (before the generic
+# "quota") so Mistral's monthly-ceiling reads as its own thing, not a transient
+# throttle. First match wins.
+_RATE_LIMIT_DISPLAY_SIGNS: tuple[str, ...] = (
+    "rate limit", "ratelimit", "too many requests", "429",
+    "resource_exhausted", "resource has been exhausted",
+)
 _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
     *((s, "top up balance", "пополнить баланс") for s in _TOP_UP_SIGNS),
+    ("monthly quota", "monthly quota", "месячная квота"),
+    *((s, "rate limited", "лимит запросов") for s in _RATE_LIMIT_DISPLAY_SIGNS),
+    ("quota", "quota exceeded", "квота исчерпана"),
+    ("timeout", "provider timeout", "таймаут провайдера"),
     ("response_format type is unavailable", "provider feature outage",
      "сбой фичи у провайдера"),
 )

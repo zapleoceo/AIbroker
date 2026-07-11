@@ -10,6 +10,22 @@
 > preserved (verified 8/8 valid, all 17 fields). A caller-supplied real
 > json_schema is left untouched.
 
+> **2026-07-11 (stale error state + humanized error display)**: a rate-limited
+> key that recovered kept showing status `жив` (alive) alongside a phantom
+> `last_error` until the next monitor probe cleared it (up to `MONITOR_INTERVAL_S`
+> = 10 min). Root cause: `mark_cooldown` writes `last_error`/`cooldown_until`, but
+> the success path (`selector.record_usage`) never cleared them — only
+> `monitor.py`'s probe did. Fix: a genuinely successful call (`status == "ok"` and
+> no `error_kind`) now resets `last_error = NULL, error_count = 0, cooldown_until
+> = NULL` inline, mirroring the monitor's confirmed-alive reset. Also, the
+> dashboard's `_friendly_reason` now collapses raw throttle dumps (a tidy
+> `rate limit`, `litellm.RateLimitError: geminiException - {..json..}`, `429`,
+> `RESOURCE_EXHAUSTED`) to one clean bilingual label (`rate limited` / `лимит
+> запросов`); `monthly quota` stays its own label so Mistral's monthly ceiling
+> doesn't read as a transient throttle. NB: error handling is per-**provider**
+> (`providers/adapters.py` request quirks + `classify_provider_error`'s
+> per-provider sign lists), NOT per-key — every key of a provider shares them.
+
 > **2026-07-10 (cooldown — stop exhausted keys churning + reach reserve keys)**:
 > `cooldown_until` honoured a provider's `retryDelay` literally. A free Gemini key
 > whose DAILY quota is used up still returns a short `retryDelay` (~24s), so the
