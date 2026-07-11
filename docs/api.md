@@ -15,10 +15,31 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 | `GET` | `/favicon.svg` | Brand favicon (hub-and-spokes, brand colours). Cache 24h. |
 | `GET` | `/favicon.ico` | Same SVG served at the legacy default path — keeps dev consoles 404-free. |
 | `GET` | `/healthz` | `{ok: true, service, ts}` — liveness probe |
-| `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts |
+| `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts — content-negotiated (see below) |
 | `GET` | `/login` | Telegram Login Widget for `/dashboard` |
 | `GET` | `/api/tg_login` | TG widget callback — sets HMAC cookie, redirects to `/dashboard` |
 | `GET` | `/logout` | Clears session cookie |
+
+### `/v1/health` — content negotiation (2026-07-11)
+
+Same public endpoint, two representations, chosen by `Accept`:
+
+- No `Accept` header, `Accept: */*`, or any non-HTML accept (curl, scripts,
+  uptime monitors — matches the TestClient default) → the original
+  `{"providers": [{"provider", "alive", "cooldown", "dead", "total"}, …]}`
+  JSON, unchanged. This is the documented, stable machine-readable contract —
+  anything already polling it keeps working with zero code change.
+- `Accept: text/html` (a browser, e.g. clicking the dashboard nav link) →
+  a small bilingual EN/RU status page: a stacked green/alive · yellow/cooldown
+  · red/dead bar per provider, plus top-line totals. No auth, no spend/usage
+  data (this endpoint never carried that) — safe to stay public.
+
+`routes/health.py`: `_fetch_provider_health()` is the single data fetch both
+representations render from; `_render_health_html()` / `_health_provider_card()`
+build the page (reuses `landing.py`'s dark-theme CSS variables + lang-toggle
+JS for visual consistency with the rest of the public site). Both paths send
+`Cache-Control: no-store` — this reflects live key state (monitor ticks,
+adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 
 ## Client (X-Project-Key required)
 
