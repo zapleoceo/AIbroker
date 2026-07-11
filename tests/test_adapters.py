@@ -28,6 +28,24 @@ def test_deepseek_leaves_json_object_and_no_format_alone():
     assert "response_format" not in _prepared("deepseek")
 
 
+def test_anthropic_upgrades_json_object_to_permissive_schema():
+    """REGRESSION (2026-07-10): Claude ignores response_format=json_object
+    (litellm drops it) and sometimes replies in plain text on follow-ups →
+    InvalidJSON. The anthropic adapter upgrades json_object to a PERMISSIVE
+    json_schema so litellm uses Claude's native tool-use (guaranteed JSON),
+    while additionalProperties keeps the caller's own fields."""
+    out = _prepared("anthropic", response_format={"type": "json_object"})
+    rf = out["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["schema"] == {"type": "object", "additionalProperties": True}
+
+
+def test_anthropic_leaves_real_json_schema_and_no_format_alone():
+    # a caller-supplied json_schema is already tool-use-capable — don't touch it
+    assert _prepared("anthropic", response_format=dict(_SCHEMA))["response_format"] == _SCHEMA
+    assert "response_format" not in _prepared("anthropic")
+
+
 def test_schema_capable_providers_keep_json_schema():
     """openai/gemini support json_schema — the adapter must NOT downgrade it."""
     assert _prepared("openai", response_format=dict(_SCHEMA))["response_format"] == _SCHEMA

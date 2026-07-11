@@ -39,6 +39,28 @@ class _GeminiAdapter(ProviderAdapter):
         kwargs["reasoning_effort"] = "disable"
 
 
+class _AnthropicAdapter(ProviderAdapter):
+    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+        # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
+        # (litellm silently drops the unsupported param), so with only a prompt
+        # instruction Claude sometimes replies in PLAIN TEXT — especially on
+        # follow-ups ("write a short friendly follow-up") — and the JSON gate
+        # rejects it as InvalidJSON (measured 2026-07-10: ~30% on chat:smart).
+        # Convert a json_object request to a PERMISSIVE json_schema: litellm
+        # routes json_schema through Claude's native tool-use, which forces a
+        # valid JSON object. Permissive (additionalProperties) so the caller's
+        # own fields — driven by the prompt, not this schema — are preserved
+        # (verified: 8/8 valid, all 17 Stepan fields present).
+        rf = kwargs.get("response_format")
+        if rf and rf.get("type") == "json_object":
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "reply",
+                                "schema": {"type": "object",
+                                           "additionalProperties": True}},
+            }
+
+
 class _DeepseekAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
@@ -68,6 +90,7 @@ class _CloudflareAdapter(ProviderAdapter):
 
 _ADAPTERS: dict[str, ProviderAdapter] = {
     "gemini": _GeminiAdapter(),
+    "anthropic": _AnthropicAdapter(),
     "deepseek": _DeepseekAdapter(),
     "cloudflare": _CloudflareAdapter(),
 }
