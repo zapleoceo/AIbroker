@@ -246,6 +246,11 @@ into N equal-width time slices and counts ok/error per slice — one query for
 capability, one for workflow (both small: buckets × distinct values, not raw
 rows). Each row's bars scale to that row's OWN busiest bucket, not the
 busiest across all rows, so a quiet workflow stays visible next to a loud one.
+`_fetch_type_sparklines` is `# pragma: no cover` like the other Postgres-only
+fetchers in `dashboard_data.py` (`_fetch_calls_1h`, `_fetch_provider_summary`)
+— `now()`/`width_bucket`/`extract(epoch)` have no SQLite equivalent, so
+diff-cover's SQLite run can't reach it; it's exercised by the Postgres-only
+`test_fetch_type_sparklines_splits_ok_and_error_by_bucket`.
 **Every aggregate is scoped to the selected range** — only the "recent 50
 calls" table ignores it. The histogram surfaces a slow tail that a single
 average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`
