@@ -214,41 +214,6 @@ def _lat_hist_counts(rows: list[Any]) -> list[int]:
     return counts
 
 
-_SPARK_BUCKETS = 24  # 24h default range → 1 bucket/hour; other ranges just rescale
-
-
-async def _fetch_type_sparklines(
-    project_id: int, hours: int, column: str, n: int = _SPARK_BUCKETS
-) -> dict[str, list[tuple[int, int]]]:
-    """(ok, err) call counts per N equal-width time buckets spanning the
-    selected range, one series per distinct `column` value ('capability' or
-    'workflow') — powers the per-row mini histogram in the drill-down's
-    capability/workflow card. `column` is one of two hardcoded literals (never
-    caller input), so it's safe to interpolate into the SQL directly."""
-    async with get_session() as s:
-        rows = (await s.execute(text(
-            f"SELECT COALESCE({column},'(none)') AS k, "
-            "  width_bucket(extract(epoch from created_at), "
-            "    extract(epoch from now() - (:h * interval '1 hour')), "
-            "    extract(epoch from now()), :n) AS bucket, "
-            "  COUNT(*) FILTER (WHERE status='ok') AS ok_n, "
-            "  COUNT(*) FILTER (WHERE status<>'ok') AS err_n "
-            "FROM usage_log WHERE project_id=:pid "
-            "  AND created_at > now() - (:h * INTERVAL '1 hour') "
-            "GROUP BY k, bucket"
-        ), {"pid": project_id, "h": hours, "n": n})).all()
-    out: dict[str, list[tuple[int, int]]] = {}
-    for r in rows:
-        # width_bucket is 1-indexed over [low, high); clamp the rare edge
-        # (float rounding can land exactly on a boundary) into range instead
-        # of silently dropping that bucket's counts.
-        b = max(0, min(n - 1, int(r.bucket) - 1))
-        series = out.setdefault(r.k, [(0, 0)] * n)
-        ok, err = series[b]
-        series[b] = (ok + int(r.ok_n), err + int(r.err_n))
-    return out
-
-
 async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] | None:
     """Pull aggregates + recent calls for one project over the last `hours`."""
     async with get_session() as s:
@@ -311,12 +276,6 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "ORDER BY created_at DESC LIMIT 50"
         ), {"pid": project_id})).all()
         # Active key count by scope intersection (informational)
-    # Each opens its own pooled connection and is independent of the block
-    # above and of each other — run concurrently rather than sequentially.
-    cap_spark, wf_spark = await asyncio.gather(
-        _fetch_type_sparklines(project_id, hours, "capability"),
-        _fetch_type_sparklines(project_id, hours, "workflow"),
-    )
     return {
         "project": project,
         "hours": hours,
@@ -325,8 +284,6 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         "by_model": by_model,
         "by_capability": by_capability,
         "by_workflow": by_workflow,
-        "cap_spark": cap_spark,
-        "wf_spark": wf_spark,
         "lat_hist": _lat_hist_counts(list(lat_hist_rows)),
         "recent": recent,
     }
