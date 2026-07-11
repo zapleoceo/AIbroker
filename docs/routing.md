@@ -1,5 +1,15 @@
 # Routing, scopes & cost guard
 
+> **2026-07-10 (anthropic JSON via tool-use)**: Claude ignores OpenAI's
+> `response_format={"type":"json_object"}` (litellm drops the unsupported param),
+> so it had no JSON enforcement and sometimes replied in PLAIN TEXT on follow-ups
+> → InvalidJSON (~30% on chat:smart). A new `_AnthropicAdapter` upgrades a
+> json_object request to a PERMISSIVE `json_schema`
+> (`{"type":"object","additionalProperties":true}`), which litellm routes through
+> Claude's native tool-use → guaranteed JSON object, with the caller's own fields
+> preserved (verified 8/8 valid, all 17 fields). A caller-supplied real
+> json_schema is left untouched.
+
 > **2026-07-10 (cooldown — stop exhausted keys churning + reach reserve keys)**:
 > `cooldown_until` honoured a provider's `retryDelay` literally. A free Gemini key
 > whose DAILY quota is used up still returns a short `retryDelay` (~24s), so the
