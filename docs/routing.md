@@ -20,7 +20,14 @@
 > openai → `[gemini, cloudflare, openai]`. anthropic stays OUT (it 400'd on image
 > URLs, 2026-07-01). Also granted project stepan2 the `llm:audio` scope so voice
 > transcription stops 403-ing (the scope existed in CAPABILITY_SCOPE but wasn't
-> in dashboard `_KNOWN_SCOPES`; see [auth.md](auth.md)).
+> in dashboard `_KNOWN_SCOPES`; see [auth.md](auth.md)). **Root cause found after
+> the chain fix:** cloudflare then WAS tried but every call raised "Missing
+> CLOUDFLARE_ACCOUNT_ID" — `pick_and_reserve`'s `ApiKeyRow` hydration (from
+> `RETURNING *`) had silently dropped the `account_id` column, so
+> `_CloudflareAdapter.key_extra` never built the account-scoped `api_base`.
+> cloudflare had 295 errors / 0 successes across every chain it sat in. Fixed by
+> hydrating `account_id`; a Postgres selector test now asserts it survives
+> selection.
 
 > **2026-07-11 (stale error state + humanized error display)**: a rate-limited
 > key that recovered kept showing status `жив` (alive) alongside a phantom
