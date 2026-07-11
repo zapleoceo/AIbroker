@@ -67,6 +67,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MONITOR_INTERVAL_S: "600"
     command: ["python", "-m", "aibroker.monitor"]
+    # No HTTP server here — the Dockerfile HEALTHCHECK curls :8000, which this
+    # worker never binds, so it would report a permanently-false "unhealthy".
+    healthcheck:
+      disable: true
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 

@@ -32,8 +32,12 @@ RUN pip install --no-cache-dir -e .
 
 # Drop root: the API decrypts provider tokens, so an RCE must not land as root
 # in the container. Non-root can still bind :8000 (>1024) and read the code.
+# /var/lib/aibroker holds the notifier's alert-dedup state files. Created here
+# owned by `app` because non-root can't mkdir under /var/lib at runtime — the
+# monitor hit PermissionError there once we dropped root (2026-07-10).
 RUN useradd --create-home --uid 10001 app \
-    && chown -R app:app /app
+    && mkdir -p /var/lib/aibroker \
+    && chown -R app:app /app /var/lib/aibroker
 USER app
 
 EXPOSE 8000
