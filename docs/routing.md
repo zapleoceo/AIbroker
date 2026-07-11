@@ -30,11 +30,15 @@
 > selection. **BUT** once cloudflare could actually reach Workers AI, its llava
 > returned empty completions (0 tokens) on vision — "done" but useless. So
 > cloudflare is pulled from vision and the free fallback is **openrouter**
-> (`meta-llama/llama-3.2-11b-vision-instruct:free`, a separate key pool from our
-> direct gemini) → final chain `[gemini, openrouter, openai]`. Granted openrouter
-> key `gemma4` the `llm:vision` scope. (cloudflare stays wired for chat where the
-> account_id fix does make it usable; anthropic stays out of vision — 400s on
-> image URLs.)
+> (`google/gemma-4-31b-it:free` — an instruct multimodal model, NOT reasoning;
+> verified live returning a real caption, cost 0) → final chain `[gemini,
+> openrouter, openai]`. First tried `meta-llama/llama-3.2-11b-vision-instruct:free`
+> but that 404s (delisted) — picked gemma-4 from openrouter's live free-vision
+> list. Granted `llm:vision` to ALL 7 openrouter keys: their free-tier limits are
+> per-account (independent), so vision gets a wide second pool (8 gemini + 7
+> openrouter) that a chat spike on any single key can't fully drain. (cloudflare
+> stays wired for chat where the account_id fix makes it usable; anthropic stays
+> out of vision — 400s on image URLs.)
 
 > **2026-07-11 (stale error state + humanized error display)**: a rate-limited
 > key that recovered kept showing status `жив` (alive) alongside a phantom
