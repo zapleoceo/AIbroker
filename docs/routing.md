@@ -10,6 +10,18 @@
 > preserved (verified 8/8 valid, all 17 fields). A caller-supplied real
 > json_schema is left untouched.
 
+> **2026-07-11 (vision free fallback)**: the `vision` chain was `[gemini,
+> openai]`. Under load every gemini key cooled down at once (vision shares the
+> gemini pool with chat) and there's no openai vision key, so vision jobs
+> starved — `run_chat` returned no provider, `deep_jobs` retried to `_MAX_RETRIES`
+> and gave up ("no provider available for vision"), leaving Stepan's image jobs
+> pending until timeout. Fix: insert **cloudflare** (free `@cf/llava-hf/llava-1.5-7b`,
+> a separate key pool that isn't rate-limited by chat traffic) between gemini and
+> openai → `[gemini, cloudflare, openai]`. anthropic stays OUT (it 400'd on image
+> URLs, 2026-07-01). Also granted project stepan2 the `llm:audio` scope so voice
+> transcription stops 403-ing (the scope existed in CAPABILITY_SCOPE but wasn't
+> in dashboard `_KNOWN_SCOPES`; see [auth.md](auth.md)).
+
 > **2026-07-11 (stale error state + humanized error display)**: a rate-limited
 > key that recovered kept showing status `жив` (alive) alongside a phantom
 > `last_error` until the next monitor probe cleared it (up to `MONITOR_INTERVAL_S`
