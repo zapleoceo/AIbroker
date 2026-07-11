@@ -217,14 +217,18 @@ def _lat_hist_counts(rows: list[Any]) -> list[int]:
 _SPARK_BUCKETS = 24  # 24h default range → 1 bucket/hour; other ranges just rescale
 
 
-async def _fetch_type_sparklines(
+async def _fetch_type_sparklines(  # pragma: no cover — Postgres-only, see below
     project_id: int, hours: int, column: str, n: int = _SPARK_BUCKETS
 ) -> dict[str, list[tuple[int, int]]]:
     """(ok, err) call counts per N equal-width time buckets spanning the
     selected range, one series per distinct `column` value ('capability' or
     'workflow') — powers the per-row mini histogram in the drill-down's
-    capability/workflow card. `column` is one of two hardcoded literals (never
-    caller input), so it's safe to interpolate into the SQL directly."""
+    capability/workflow card. `column` is one of two hardcoded literals
+    (never caller input), so it's safe to interpolate into the SQL directly.
+
+    Uses Postgres-only now()/width_bucket/extract(epoch) — exercised by the
+    Postgres-only test_fetch_type_sparklines_splits_ok_and_error_by_bucket,
+    not the SQLite diff-cover run, hence the pragma above."""
     async with get_session() as s:
         rows = (await s.execute(text(
             f"SELECT COALESCE({column},'(none)') AS k, "
