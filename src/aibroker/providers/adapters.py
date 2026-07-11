@@ -20,7 +20,7 @@ from typing import Any
 class ProviderAdapter:
     """Default adapter: no quirks. Providers with none use this."""
 
-    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         return None
 
     def key_extra(self, account_id: str | None) -> dict[str, Any] | None:
@@ -28,7 +28,7 @@ class ProviderAdapter:
 
 
 class _GeminiAdapter(ProviderAdapter):
-    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         # Gemini 2.5 "thinks" against max_tokens. On JSON that truncates the
         # object mid-string; on any reply it adds latency that overran our call
         # timeout (measured Timeouts on gemini-2.5-flash chat:fast/smart, 2026-
@@ -40,7 +40,7 @@ class _GeminiAdapter(ProviderAdapter):
 
 
 class _AnthropicAdapter(ProviderAdapter):
-    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
         # (litellm silently drops the unsupported param), so with only a prompt
         # instruction Claude sometimes replies in PLAIN TEXT — especially on
@@ -62,12 +62,25 @@ class _AnthropicAdapter(ProviderAdapter):
 
 
 class _DeepseekAdapter(ProviderAdapter):
-    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
         # "This response_format type is unavailable now") but accepts
         # json_object — confirmed live 2026-07-07. Downgrade so the provider
         # stays usable; the post-hoc JSON gate + caller validation replace the
         # lost server-side grammar enforcement.
+        rf = kwargs.get("response_format")
+        if rf and rf.get("type") == "json_schema":
+            kwargs["response_format"] = {"type": "json_object"}
+
+
+class _CerebrasAdapter(ProviderAdapter):
+    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
+        # Cerebras rejects strict json_schema whose array fields carry validation
+        # keywords it doesn't implement ("Invalid fields for schema with types
+        # ['array']: {'maxItems'}", ~194 BadRequests/45min on Stepan's chat:smart,
+        # 2026-07-11). It's already out of `structured` for emitting malformed
+        # JSON on schemas anyway, so drop the schema entirely — json_object keeps
+        # it usable and the post-hoc JSON gate + caller validation cover grammar.
         rf = kwargs.get("response_format")
         if rf and rf.get("type") == "json_schema":
             kwargs["response_format"] = {"type": "json_object"}
@@ -92,6 +105,7 @@ _ADAPTERS: dict[str, ProviderAdapter] = {
     "gemini": _GeminiAdapter(),
     "anthropic": _AnthropicAdapter(),
     "deepseek": _DeepseekAdapter(),
+    "cerebras": _CerebrasAdapter(),
     "cloudflare": _CloudflareAdapter(),
 }
 _DEFAULT_ADAPTER = ProviderAdapter()

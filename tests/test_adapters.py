@@ -28,6 +28,24 @@ def test_deepseek_leaves_json_object_and_no_format_alone():
     assert "response_format" not in _prepared("deepseek")
 
 
+def test_cerebras_downgrades_json_schema_to_json_object():
+    """REGRESSION (2026-07-11): cerebras 400s on json_schema whose array fields
+    carry keywords it doesn't implement ('Invalid fields for schema with types
+    ['array']: {'maxItems'}', ~194 BadRequests/45min on Stepan's chat:smart).
+    Drop to json_object — the JSON gate + caller validation cover grammar."""
+    schema = {"type": "json_schema", "json_schema": {"name": "r", "schema": {
+        "type": "object", "properties": {"tags": {"type": "array",
+        "maxItems": 5, "items": {"type": "string"}}}}}}
+    out = _prepared("cerebras", response_format=schema)
+    assert out["response_format"] == {"type": "json_object"}
+
+
+def test_cerebras_leaves_json_object_and_no_format_alone():
+    assert _prepared("cerebras", response_format={"type": "json_object"})[
+        "response_format"] == {"type": "json_object"}
+    assert "response_format" not in _prepared("cerebras")
+
+
 def test_anthropic_upgrades_json_object_to_permissive_schema():
     """REGRESSION (2026-07-10): Claude ignores response_format=json_object
     (litellm drops it) and sometimes replies in plain text on follow-ups →
@@ -66,9 +84,9 @@ def test_gemini_disables_thinking_unconditionally():
 
 
 def test_non_special_provider_is_noop():
-    """A provider with no adapter (e.g. cerebras) gets the default no-op — kwargs
+    """A provider with no adapter (e.g. groq) gets the default no-op — kwargs
     pass through untouched."""
-    out = _prepared("cerebras", response_format=dict(_SCHEMA), temperature=0.7)
+    out = _prepared("groq", response_format=dict(_SCHEMA), temperature=0.7)
     assert out["response_format"] == _SCHEMA
     assert "reasoning_effort" not in out
 

@@ -10,6 +10,17 @@
 > preserved (verified 8/8 valid, all 17 fields). A caller-supplied real
 > json_schema is left untouched.
 
+> **2026-07-11 (cerebras schema quirk)**: cerebras 400'd `Invalid fields for
+> schema with types ['array']: {'maxItems'}` on Stepan's chat:smart (~194
+> BadRequests/45min) — it doesn't implement array-validation keywords in strict
+> `json_schema`. Added `_CerebrasAdapter` (mirrors deepseek) downgrading
+> json_schema→json_object; the JSON gate + caller validation cover grammar
+> (cerebras is already out of `structured` for malformed JSON on schemas).
+> Separately, a cerebras free-tier slowdown that day drove `TimeoutError`s (60s
+> backstop) — left as-is on purpose: a slow-but-responding free provider should
+> finish and spend free tokens rather than be cut off for a paid one; the
+> timeout-→cooldown-→failover path already routes around a genuinely hung key.
+
 > **2026-07-11 (gemini transcription fallback)**: transcription was
 > `[groq, openai]` but there's no openai key, so it was groq-only. When groq's
 > **free daily cap** parked all 4 whisper keys (~9h until the UTC reset), voice
