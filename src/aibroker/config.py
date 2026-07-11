@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import AfterValidator, Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _validate_session_secret(v: str) -> str:
+    # Empty is allowed — services that never serve the dashboard (the monitor)
+    # set no SESSION_SECRET, and the dashboard fails closed at runtime if it
+    # tries to issue a cookie without one. But a NON-empty secret must be strong:
+    # a weak one makes admin cookies forgeable. NB: a plain Field(min_length=32)
+    # validated even the empty DEFAULT under pydantic-settings and crash-looped
+    # the monitor (2026-07-10, pinning a CPU core) — hence an AfterValidator that
+    # skips the empty case, not a field constraint.
+    if v and len(v) < 32:
+        raise ValueError("SESSION_SECRET, if set, must be at least 32 characters")
+    return v
 
 
 class Settings(BaseSettings):
@@ -30,22 +44,8 @@ class Settings(BaseSettings):
     OWNER_TELEGRAM_ID: int = 0
     TELEGRAM_BOT_USERNAME: str = ""   # widget needs it, e.g. "Dimondra_Ai_Bot"
 
-    # Session cookie HMAC (for /dashboard browser sessions).
-    SESSION_SECRET: str = ""
-
-    @field_validator("SESSION_SECRET")
-    @classmethod
-    def _session_secret_strength(cls, v: str) -> str:
-        # Empty is allowed — services that never serve the dashboard (the
-        # monitor) don't set it, and the dashboard fails closed at runtime if it
-        # tries to issue a cookie without one. But a NON-empty secret must be
-        # strong: a weak one makes admin cookies forgeable. NB: a plain
-        # Field(min_length=32) ALSO validated the empty default under
-        # pydantic-settings and crash-looped the monitor (2026-07-10) — hence a
-        # validator that skips the empty case instead of a field constraint.
-        if v and len(v) < 32:
-            raise ValueError("SESSION_SECRET, if set, must be at least 32 characters")
-        return v
+    # Session cookie HMAC (for /dashboard browser sessions). See the validator.
+    SESSION_SECRET: Annotated[str, AfterValidator(_validate_session_secret)] = ""
 
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
