@@ -1049,6 +1049,20 @@ def test_render_project_detail_shows_workflow_breakdown():
     assert "triage" in body and "rel_extract" in body
 
 
+def test_render_project_detail_merges_capability_and_workflow_into_one_card():
+    """Capability and workflow used to be two separate .brk-card grid cells;
+    now they share one card (brk-card-split), divided by a horizontal rule
+    between two .brk-section blocks — not two separate cards in the grid."""
+    from aibroker.routes.dashboard_render import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail()).body.decode()
+    assert body.count('<div class="brk-card brk-card-split">') == 1
+    card_open = body.index('<div class="brk-card brk-card-split">')
+    next_card = body.index('<div class="brk-card', card_open + 1)
+    chunk = body[card_open:next_card]
+    assert "By capability" in chunk and "By workflow" in chunk
+    assert chunk.count('class="brk-section"') == 2
+
+
 def test_main_render_renders_key_rows_with_data_row_marker():
     """Each key row needs class='data-row' for the sorter to pick it up."""
     from aibroker.db.models import ApiKeyRow

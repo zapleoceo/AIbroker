@@ -225,12 +225,15 @@ shape:
 
 **Project drill-down** (`/dashboard/projects/{id}?range=1h|4h|12h|24h|7d|30d`): KPI cards
 (calls, spend, tokens, avg latency + success %, prompt-cache when active),
-breakdown cards by provider / capability / **workflow** / model, and a
-**latency-distribution histogram** (calls per latency bucket: `<250ms … >30s`,
-bars scaled to the busiest bucket). The by-workflow card attributes cost/calls
-to each caller task (`triage`, `rel_extract`, `coach_edit`, …) — the data was
-always in `usage_log.workflow`, now surfaced so "where are we spending" isn't a
-manual query.
+breakdown cards by provider / model, a combined **capability + workflow**
+card (2026-07-10: merged into one `.brk-card` — capability on top, workflow
+below, split by a horizontal rule — they're both small slices of the same
+calls and don't need a full grid cell each), and a **latency-distribution
+histogram** (calls per latency bucket: `<250ms … >30s`, bars scaled to the
+busiest bucket). The workflow half attributes cost/calls to each caller task
+(`triage`, `rel_extract`, `coach_edit`, …) — the data was always in
+`usage_log.workflow`, now surfaced so "where are we spending" isn't a manual
+query.
 **Every aggregate is scoped to the selected range** — only the "recent 50
 calls" table ignores it. The histogram surfaces a slow tail that a single
 average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`

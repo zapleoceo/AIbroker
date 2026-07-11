@@ -170,6 +170,10 @@ tr.edit-row input, tr.edit-row select { min-width:90px; }
 .brk-card td.k { color:#4dabf7; font-family:ui-monospace,monospace; }
 .brk-card .total-row { border-top:1px solid #2a2d34; }
 .brk-card .total-row td { padding-top:6px; color:#e4e6eb; font-weight:600; }
+.brk-card-split { display:flex; flex-direction:column; }
+.brk-card-split .brk-section + .brk-section {
+  margin-top:12px; padding-top:12px; border-top:1px solid #2a2d34;
+}
 .range-pills { display:inline-flex; gap:6px; margin-left:10px; vertical-align:middle; }
 .range-pills a { font-size:11px; padding:3px 9px; border-radius:4px;
                background:#1a1d24; border:1px solid #2a2d34;

@@ -665,9 +665,11 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     </div>
     """
 
-    def _bd_card(title_en: str, title_ru: str, rows: list[tuple],
-                  fmt_row, total_label_en: str = "total",
-                  total_label_ru: str = "итого", total: tuple | None = None) -> str:
+    def _bd_section(title_en: str, title_ru: str, rows: list[tuple], fmt_row,
+                      total_label_en: str = "total", total_label_ru: str = "итого",
+                      total: tuple | None = None) -> str:
+        """h3 + table only — no wrapping .brk-card div, so two sections can share
+        one card (see cap_wf_card, split by the .brk-section CSS divider)."""
         body = "".join(fmt_row(r) for r in rows) or (
             '<tr><td colspan="3" style="color:#5a6171" data-i18n '
             'data-en="(no data in this range)" data-ru="(нет данных за период)">'
@@ -683,10 +685,17 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
                 '</tr>'
             )
         return (
-            f'<div class="brk-card">'
+            f'<div class="brk-section">'
             f'<h3 data-i18n data-en="{title_en}" data-ru="{title_ru}">{title_en}</h3>'
             f'<table><tbody>{body}{total_html}</tbody></table></div>'
         )
+
+    def _bd_card(title_en: str, title_ru: str, rows: list[tuple],
+                  fmt_row, total_label_en: str = "total",
+                  total_label_ru: str = "итого", total: tuple | None = None) -> str:
+        section = _bd_section(title_en, title_ru, rows, fmt_row,
+                               total_label_en, total_label_ru, total)
+        return f'<div class="brk-card">{section}</div>'
 
     prov_card = _bd_card("By provider", "По провайдерам", list(d["by_provider"]),
         lambda r: f'<tr><td class="k">{esc(r.provider)}</td>'
@@ -694,17 +703,21 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
                   f'<td class="num">${float(r.spend):.4f}</td></tr>',
         total=(t.calls, f"${float(t.spend):.4f}"))
 
-    cap_card = _bd_card("By capability", "По способностям",
-        list(d["by_capability"]),
-        lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
-                  f'<td class="num">{r.n}</td>'
-                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
-
-    wf_card = _bd_card("By workflow", "По workflow",
-        list(d["by_workflow"]),
-        lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
-                  f'<td class="num">{r.n}</td>'
-                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
+    # Capability + workflow are two small, related slices of the same calls —
+    # merged into one card (a horizontal divider splits it top/bottom) instead
+    # of two separate grid cells.
+    cap_wf_card = (
+        '<div class="brk-card brk-card-split">'
+        + _bd_section("By capability", "По способностям", list(d["by_capability"]),
+            lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
+                      f'<td class="num">{r.n}</td>'
+                      f'<td class="num">${float(r.spend):.4f}</td></tr>')
+        + _bd_section("By workflow", "По workflow", list(d["by_workflow"]),
+            lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
+                      f'<td class="num">{r.n}</td>'
+                      f'<td class="num">${float(r.spend):.4f}</td></tr>')
+        + '</div>'
+    )
 
     model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
         lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
@@ -774,8 +787,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     <div class="breakdown">
       {prov_card}
-      {cap_card}
-      {wf_card}
+      {cap_wf_card}
       {model_card}
       {lat_card}
     </div>
