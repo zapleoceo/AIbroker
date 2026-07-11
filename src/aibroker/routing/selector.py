@@ -214,6 +214,20 @@ async def mark_dead(api_key_id: int, reason: str | None = None) -> None:
         )
 
 
+def _recover_set_sql(status: str, error_kind: str | None) -> str:
+    """SQL SET-fragment that wipes stale failure state after a genuinely
+    successful call, else empty. A success proves the key healthy RIGHT NOW, so
+    clear last_error/error_count/cooldown_until inline rather than waiting up to
+    MONITOR_INTERVAL_S for the monitor probe (2026-07-11) — a rate-limited key
+    that recovered otherwise kept showing "жив" + a phantom last_error. Only a
+    real success (status ok, no error_kind) resets; error rows keep their state.
+    Pure + module-level so the SQLite quality gate covers the branch — the
+    record_usage UPDATE it feeds is Postgres-only (integration job)."""
+    if status == "ok" and error_kind is None:
+        return ", last_error = NULL, error_count = 0, cooldown_until = NULL"
+    return ""
+
+
 async def record_usage(
     *,
     api_key_id: int,
@@ -263,16 +277,7 @@ async def record_usage(
                 "s": status, "e": error_kind, "h": http_status,
             },
         )).scalar_one()
-        # A successful call proves the key is healthy RIGHT NOW — wipe any stale
-        # failure state immediately instead of waiting up to MONITOR_INTERVAL_S
-        # for the next probe to clear it. Without this a rate-limited key that
-        # recovered kept showing "жив" + a phantom last_error until the monitor
-        # ran (2026-07-11). Mirrors monitor.py's confirmed-alive reset.
-        succeeded = status == "ok" and error_kind is None
-        recover_sql = (
-            ", last_error = NULL, error_count = 0, cooldown_until = NULL"
-            if succeeded else ""
-        )
+        recover_sql = _recover_set_sql(status, error_kind)  # pragma: no cover
         await s.execute(
             text(
                 "UPDATE api_keys AS k "
