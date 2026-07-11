@@ -491,6 +491,45 @@ def test_gather_data_runs_concurrently_without_session_conflicts():
         assert key in data
 
 
+@pytest.mark.skipif(ON_SQLITE, reason="width_bucket/extract(epoch)/now() are Postgres-only")
+def test_fetch_type_sparklines_splits_ok_and_error_by_bucket():
+    """End-to-end against real Postgres: seeded ok/error rows at different
+    times must all land somewhere in the 24-bucket series (no row silently
+    dropped by a width_bucket edge case) and split into the right status."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import insert
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ProjectRow, UsageLogRow
+    from aibroker.routes.dashboard_data import _fetch_type_sparklines
+
+    async def _seed_and_fetch():
+        async with get_session() as s:
+            row = await s.execute(insert(ProjectRow).values(
+                name="spark-test", project_key_hash="h", project_key_prefix="p",
+                allowed_scopes=["llm:chat"], is_active=True, notes="",
+            ).returning(ProjectRow.id))
+            pid = row.scalar_one()
+            now = datetime.now(UTC).replace(tzinfo=None)
+            await s.execute(insert(UsageLogRow), [
+                {"project_id": pid, "provider": "cerebras", "capability": "chat:fast",
+                 "status": "ok", "created_at": now - timedelta(minutes=5)},
+                {"project_id": pid, "provider": "cerebras", "capability": "chat:fast",
+                 "status": "error", "created_at": now - timedelta(minutes=5)},
+                {"project_id": pid, "provider": "cerebras", "capability": "chat:fast",
+                 "status": "ok", "created_at": now - timedelta(hours=1, minutes=50)},
+            ])
+        return await _fetch_type_sparklines(pid, 2, "capability")
+
+    spark = asyncio.get_event_loop().run_until_complete(_seed_and_fetch())
+    series = spark["chat:fast"]
+    assert len(series) == 24
+    assert sum(ok for ok, _ in series) == 2
+    assert sum(err for _, err in series) == 1
+
+
 # ─── Logout ─────────────────────────────────────────────────────────────────
 
 
@@ -728,7 +767,8 @@ def test_range_hours_table_complete():
 def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
                        providers: list[tuple] | None = None,
                        lat_hist: list[int] | None = None,
-                       cache_read: int = 0, cache_write: int = 0):
+                       cache_read: int = 0, cache_write: int = 0,
+                       cap_spark: dict | None = None, wf_spark: dict | None = None):
     """Build the dict that _render_project_detail() consumes — no DB."""
     from collections import namedtuple
     from datetime import UTC, datetime
@@ -758,6 +798,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         "by_provider": providers or [Brk("cerebras", 2, 0.0), Brk("gemini", 2, 0.123)],
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
         "by_workflow": [BrkWf("triage", 3, 0.05), BrkWf("rel_extract", 1, 0.07)],
+        "cap_spark": cap_spark or {}, "wf_spark": wf_spark or {},
         "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
         "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
@@ -1061,6 +1102,37 @@ def test_render_project_detail_merges_capability_and_workflow_into_one_card():
     chunk = body[card_open:next_card]
     assert "By capability" in chunk and "By workflow" in chunk
     assert chunk.count('class="brk-section"') == 2
+
+
+def test_sparkline_svg_stacks_ok_and_error_bars():
+    from aibroker.routes.dashboard_render import _SPARK_H, _sparkline_svg
+    # 3 buckets: pure-ok, pure-error, empty. Busiest bucket = 10 (bucket 0).
+    svg = _sparkline_svg([(10, 0), (0, 4), (0, 0)])
+    assert svg.count("<rect") == 2                # empty bucket draws nothing
+    assert 'fill="#4dabf7"' in svg                 # ok = blue
+    assert 'fill="#f44336"' in svg                 # error = red
+    # bucket 0 (pure ok, the busiest) fills the full bar height
+    assert f'height="{_SPARK_H}" fill="#4dabf7"' in svg
+
+
+def test_sparkline_svg_empty_series_renders_no_bars():
+    from aibroker.routes.dashboard_render import _sparkline_svg
+    svg = _sparkline_svg([(0, 0)] * 24)
+    assert svg.count("<rect") == 0
+    assert "<svg" in svg   # still a valid (empty) chart, not blank string
+
+
+def test_render_project_detail_shows_capability_sparkline_bars():
+    """Each capability/workflow row gets its own mini ok/error histogram —
+    keyed by that row's own label, not shared/mixed with other rows'."""
+    from aibroker.routes.dashboard_render import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail(
+        cap_spark={"chat:fast": [(5, 2)] + [(0, 0)] * 23},
+        wf_spark={"triage": [(0, 3)] + [(0, 0)] * 23},
+    )).body.decode()
+    assert body.count('<svg class="spark"') == 2 + 2  # 2 cap rows + 2 wf rows
+    assert 'fill="#4dabf7"' in body   # chat:fast row has an ok segment
+    assert 'fill="#f44336"' in body   # triage row is pure error
 
 
 def test_main_render_renders_key_rows_with_data_row_marker():

@@ -234,6 +234,18 @@ busiest bucket). The workflow half attributes cost/calls to each caller task
 (`triage`, `rel_extract`, `coach_edit`, …) — the data was always in
 `usage_log.workflow`, now surfaced so "where are we spending" isn't a manual
 query.
+
+Each capability/workflow **row** also carries a mini ok/error histogram
+(`_sparkline_svg`, 2026-07-10): `_SPARK_BUCKETS` (24) thin stacked bars —
+blue=ok, red=error — spanning the selected range, so an error burst on one
+specific capability (e.g. `chat:smart` timing out) is visible per-row without
+switching to the latency histogram, which isn't filtered by capability/
+workflow. `dashboard_data._fetch_type_sparklines(project_id, hours, column)`
+buckets `usage_log` via `width_bucket(extract(epoch from created_at), …)`
+into N equal-width time slices and counts ok/error per slice — one query for
+capability, one for workflow (both small: buckets × distinct values, not raw
+rows). Each row's bars scale to that row's OWN busiest bucket, not the
+busiest across all rows, so a quiet workflow stays visible next to a loud one.
 **Every aggregate is scoped to the selected range** — only the "recent 50
 calls" table ignores it. The histogram surfaces a slow tail that a single
 average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`

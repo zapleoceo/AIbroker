@@ -16,7 +16,7 @@ from aibroker.config import get_settings
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.providers.quotas import axes_for_key, severity_class
 from aibroker.routes.dashboard_assets import _NO_STORE
-from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS
+from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
 from aibroker.routes.dashboard_scopes import _scope_checkboxes
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
@@ -636,6 +636,49 @@ def _cache_card(cache_read: int, cache_write: int) -> str:
     """
 
 
+# Sparkline geometry (px). Thin bars, 1px gaps — _SPARK_BUCKETS (24) of them
+# at these dims render ~96px wide, fitting the narrow half of the split
+# capability/workflow card.
+_SPARK_BAR_W = 3
+_SPARK_GAP = 1
+_SPARK_H = 20
+
+
+def _sparkline_svg(buckets: list[tuple[int, int]]) -> str:
+    """Thin stacked-bar histogram: one bar per time bucket, blue=ok stacked
+    below red=error, so a row's error share is visible at a glance. Each
+    bar's height is scaled to THIS row's own busiest bucket (not the busiest
+    across all rows) — a quiet workflow's bars stay visible instead of
+    vanishing next to a loud one."""
+    n = len(buckets)
+    w = n * (_SPARK_BAR_W + _SPARK_GAP)
+    max_total = max((ok + err for ok, err in buckets), default=0) or 1
+    bars: list[str] = []
+    for i, (ok, err) in enumerate(buckets):
+        total = ok + err
+        if not total:
+            continue
+        x = i * (_SPARK_BAR_W + _SPARK_GAP)
+        total_h = max(1, round(total / max_total * _SPARK_H))
+        ok_h = round(ok / total * total_h)
+        err_h = total_h - ok_h
+        if ok_h:
+            bars.append(
+                f'<rect x="{x}" y="{_SPARK_H - ok_h}" width="{_SPARK_BAR_W}" '
+                f'height="{ok_h}" fill="#4dabf7"/>'
+            )
+        if err_h:
+            bars.append(
+                f'<rect x="{x}" y="{_SPARK_H - total_h}" width="{_SPARK_BAR_W}" '
+                f'height="{err_h}" fill="#f44336"/>'
+            )
+    return (
+        f'<svg class="spark" width="{w}" height="{_SPARK_H}" '
+        f'viewBox="0 0 {w} {_SPARK_H}" preserveAspectRatio="none">'
+        f'{"".join(bars)}</svg>'
+    )
+
+
 def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     p = d["project"]
     t = d["totals"]
@@ -682,11 +725,11 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     def _bd_section(title_en: str, title_ru: str, rows: list[tuple], fmt_row,
                       total_label_en: str = "total", total_label_ru: str = "итого",
-                      total: tuple | None = None) -> str:
+                      total: tuple | None = None, colspan: int = 3) -> str:
         """h3 + table only — no wrapping .brk-card div, so two sections can share
         one card (see cap_wf_card, split by the .brk-section CSS divider)."""
         body = "".join(fmt_row(r) for r in rows) or (
-            '<tr><td colspan="3" style="color:#5a6171" data-i18n '
+            f'<tr><td colspan="{colspan}" style="color:#5a6171" data-i18n '
             'data-en="(no data in this range)" data-ru="(нет данных за период)">'
             "(no data in this range)</td></tr>"
         )
@@ -720,17 +763,27 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     # Capability + workflow are two small, related slices of the same calls —
     # merged into one card (a horizontal divider splits it top/bottom) instead
-    # of two separate grid cells.
+    # of two separate grid cells. Each row also gets a mini ok/error-over-time
+    # histogram (cap_spark/wf_spark: N buckets spanning the selected range),
+    # so a spike or an error burst on one specific capability/workflow is
+    # visible without switching to the (unfiltered) latency histogram below.
+    cap_spark = d.get("cap_spark", {})
+    wf_spark = d.get("wf_spark", {})
+    _empty_spark = [(0, 0)] * _SPARK_BUCKETS
     cap_wf_card = (
         '<div class="brk-card brk-card-split">'
         + _bd_section("By capability", "По способностям", list(d["by_capability"]),
             lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
                       f'<td class="num">{r.n}</td>'
-                      f'<td class="num">${float(r.spend):.4f}</td></tr>')
+                      f'<td class="num">${float(r.spend):.4f}</td>'
+                      f'<td>{_sparkline_svg(cap_spark.get(r.cap, _empty_spark))}</td></tr>',
+            colspan=4)
         + _bd_section("By workflow", "По workflow", list(d["by_workflow"]),
             lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
                       f'<td class="num">{r.n}</td>'
-                      f'<td class="num">${float(r.spend):.4f}</td></tr>')
+                      f'<td class="num">${float(r.spend):.4f}</td>'
+                      f'<td>{_sparkline_svg(wf_spark.get(r.wf, _empty_spark))}</td></tr>',
+            colspan=4)
         + '</div>'
     )
 
