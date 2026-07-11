@@ -38,10 +38,21 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 
 | Scope | Meaning |
 |---|---|
-| `llm:chat` | `/v1/jobs?capability=chat:*` access |
+| `llm:chat` | `/v1/jobs?capability=chat:*` (+ `structured`/`prefilter`/`translate`) access |
 | `llm:embed` | `/v1/embed` access — any provider |
-| `llm:vision` | reserved for future image-modality endpoint |
+| `llm:vision` | `capability=vision` access |
+| `llm:edit` | `capability=chat:edit` — reserved edit/coach lane |
+| `llm:deep` | `/v1/deep` — deep-reasoning models |
+| `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
 | `vending:*` | `/v1/key` access — broker hands out plain keys |
+
+The `llm:*` set must stay in sync across three places: `chains.CAPABILITY_SCOPE`
+(the scope each capability demands), `dashboard_scopes._KNOWN_SCOPES` (UI
+checkbox + edit validation), and this table. A capability whose scope is missing
+from `_KNOWN_SCOPES` can never be granted in the dashboard — the edit form
+silently rejects it — which 403'd Stepan2's voice until `llm:audio` was added
+(2026-07-11). `tests/test_scopes.py::test_every_capability_scope_is_known`
+guards the invariant.
 
 Adding scopes is a code-level change (server-side enforcement). Don't add a
 scope name to the DB without also adding the route guard.

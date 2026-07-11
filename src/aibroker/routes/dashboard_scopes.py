@@ -5,7 +5,7 @@ live in their own leaf module to keep those two from importing each other.
 """
 from __future__ import annotations
 
-_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep")
+_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep", "llm:audio")
 
 
 def _validate_scope_list(scopes: list[str]) -> list[str] | None:
@@ -23,7 +23,7 @@ def _validate_scope_list(scopes: list[str]) -> list[str] | None:
 
 
 def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
-    """Render the 4 known scopes as checkboxes (multi-select via repeated POST)."""
+    """Render the known scopes as checkboxes (multi-select via repeated POST)."""
     sel = set(selected or [])
     return "".join(
         f'<label class="scope-cb">'
