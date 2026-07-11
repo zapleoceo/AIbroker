@@ -147,7 +147,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # its own prod key test — see docs/routing.md).
     "vision": ["gemini", "openrouter", "openai"],
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
-    "transcription": ["groq", "openai"],
+    "transcription": ["groq", "gemini", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.
     "embedding": ["voyage", "cohere"],
 }

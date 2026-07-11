@@ -64,7 +64,8 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "prefilter": "gemini/gemini-2.5-flash",
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash",
-               "vision": "gemini/gemini-2.5-flash"},
+               "vision": "gemini/gemini-2.5-flash",
+               "transcription": "gemini/gemini-2.5-flash"},
     # 2026-07-10: REVERTED to deepseek-chat after a live-data regression.
     # Briefly moved to deepseek-v4-flash (cheaper), but v4-flash is a REASONING
     # model — its hidden reasoning_content eats the max_tokens budget, so on our
@@ -413,13 +414,74 @@ async def embed(
     return vectors, meta
 
 
+# Chat-based transcription providers (audio in via acompletion, not the
+# Whisper atranscription endpoint). groq/openai use real Whisper; gemini has no
+# Whisper endpoint but its multimodal chat model transcribes audio natively.
+_CHAT_TRANSCRIBE_PROVIDERS = frozenset({"gemini"})
+_TRANSCRIBE_PROMPT = (
+    "Transcribe this audio verbatim in its original language. "
+    "Output only the transcription text — no preamble, no translation, no notes."
+)
+_AUDIO_MIME: dict[str, str] = {
+    ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg",
+    ".mp3": "audio/mp3", ".m4a": "audio/mp4", ".mp4": "audio/mp4",
+    ".wav": "audio/wav", ".aac": "audio/aac", ".flac": "audio/flac",
+    ".webm": "audio/webm",
+}
+
+
+def _audio_mime(filename: str) -> str:
+    import os
+    return _AUDIO_MIME.get(os.path.splitext(filename)[1].lower(), "audio/ogg")
+
+
+def _audio_chat_messages(audio: bytes, filename: str) -> list[dict[str, Any]]:
+    import base64
+    b64 = base64.b64encode(audio).decode()
+    return [{"role": "user", "content": [
+        {"type": "text", "text": _TRANSCRIBE_PROMPT},
+        {"type": "file",
+         "file": {"file_data": f"data:{_audio_mime(filename)};base64,{b64}"}},
+    ]}]
+
+
+async def _transcribe_via_chat(
+    *, model: str, audio: bytes, filename: str, api_key: str,
+) -> tuple[str, dict[str, Any]]:  # pragma: no cover
+    kwargs: dict[str, Any] = {
+        "model": model, "messages": _audio_chat_messages(audio, filename),
+        "api_key": api_key, "temperature": 0, "max_tokens": 2048,
+    }
+    adapter_for(model.split("/", 1)[0]).prepare(model, kwargs)  # gemini: thinking off
+    t0 = time.time()
+    resp = await litellm.acompletion(**kwargs)
+    latency_ms = int((time.time() - t0) * 1000)
+    usage = getattr(resp, "usage", None)
+    tokens_in = getattr(usage, "prompt_tokens", 0) or 0
+    tokens_out = getattr(usage, "completion_tokens", 0) or 0
+    meta = {
+        "model": model,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        # Unlike Whisper (per-second, billed elsewhere), chat transcription bills
+        # per token — price it so a PAID key's cost cap is honoured (_billed_cost
+        # zeroes free-tier keys anyway). Audio tokens count as prompt tokens.
+        "cost_usd": estimate_llm_cost(model, tokens_in, tokens_out),
+        "latency_ms": latency_ms,
+    }
+    return (resp.choices[0].message.content or "").strip(), meta
+
+
 async def transcribe(
     *, model: str, audio: bytes, filename: str, api_key: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Audio → text via LiteLLM atranscription (Whisper). Returns (text, meta).
-
-    `audio` is raw bytes; `filename` carries the extension so the provider
-    infers the format (.ogg/.mp3/.m4a/.wav)."""
+    """Audio → text. Whisper providers (groq/openai) via LiteLLM atranscription;
+    chat providers (gemini) via acompletion with the audio inlined. Returns
+    (text, meta). `filename` carries the extension so the format is inferred."""
+    if model.split("/", 1)[0] in _CHAT_TRANSCRIBE_PROVIDERS:
+        return await _transcribe_via_chat(
+            model=model, audio=audio, filename=filename, api_key=api_key,
+        )
     import io
 
     t0 = time.time()

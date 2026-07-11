@@ -2,10 +2,35 @@
 from __future__ import annotations
 
 from aibroker.providers.litellm_adapter import (
+    _audio_chat_messages,
+    _audio_mime,
     estimate_llm_cost,
     extra_for_provider,
     model_for,
 )
+
+
+def test_audio_mime_maps_extensions():
+    assert _audio_mime("voice.ogg") == "audio/ogg"
+    assert _audio_mime("note.m4a") == "audio/mp4"
+    assert _audio_mime("clip.MP3") == "audio/mp3"
+    # unknown / extensionless → safe default (IG voice notes are ogg/opus)
+    assert _audio_mime("blob") == "audio/ogg"
+
+
+def test_audio_chat_messages_inlines_base64_data_uri():
+    msgs = _audio_chat_messages(b"\x00\x01\x02", "voice.ogg")
+    assert msgs[0]["role"] == "user"
+    parts = msgs[0]["content"]
+    assert parts[0]["type"] == "text"
+    assert parts[1]["file"]["file_data"].startswith("data:audio/ogg;base64,")
+
+
+def test_gemini_transcription_model_wired():
+    """gemini transcribes via chat (no Whisper endpoint) — the chain needs a
+    model or run_transcribe skips it (2026-07-11: groq daily-capped, gemini was
+    the only live transcription capacity)."""
+    assert model_for("gemini", "transcription") == "gemini/gemini-2.5-flash"
 
 
 def test_model_for_known_combos():

@@ -94,6 +94,15 @@ def test_vision_has_free_openrouter_fallback():
     assert "cloudflare" not in chain
 
 
+def test_transcription_has_gemini_fallback():
+    """REGRESSION (2026-07-11): transcription was groq-only in practice (openai
+    has no key), so when groq's free daily cap parked every key (~9h), voice had
+    zero capacity. gemini (chat-based audio, separate quota) is now a fallback."""
+    chain = chain_for("transcription")
+    assert chain[0] == "groq"          # free Whisper stays primary
+    assert "gemini" in chain
+
+
 def test_structured_excludes_cerebras():
     """cerebras dropped from structured (2026-07-01): HTTP-200 malformed JSON."""
     assert "cerebras" not in chain_for("structured")

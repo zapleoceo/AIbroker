@@ -10,6 +10,21 @@
 > preserved (verified 8/8 valid, all 17 fields). A caller-supplied real
 > json_schema is left untouched.
 
+> **2026-07-11 (gemini transcription fallback)**: transcription was
+> `[groq, openai]` but there's no openai key, so it was groq-only. When groq's
+> **free daily cap** parked all 4 whisper keys (~9h until the UTC reset), voice
+> had zero capacity and the broker 503'd `no transcription key available`.
+> Added **gemini** to the chain → `[groq, gemini, openai]`. gemini has no Whisper
+> endpoint, so `transcribe()` branches: whisper providers use
+> `litellm.atranscription`, chat providers (`_CHAT_TRANSCRIBE_PROVIDERS`) inline
+> the audio as a base64 data-URI `file` part into `acompletion` with a
+> verbatim-transcription prompt (`gemini-2.5-flash`, thinking off). Unlike
+> Whisper (per-second, billed elsewhere) this bills per token, so
+> `_transcribe_via_chat` prices it via `estimate_llm_cost` for paid keys. Granted
+> `llm:audio` to all groq (1→4) and gemini keys. NB the audio *format* is
+> verified accepted by gemini (a live probe reached 429, not a 400); the
+> transcription *output* awaits a gemini key with capacity (paid id=16 top-up).
+
 > **2026-07-11 (vision free fallback)**: the `vision` chain was `[gemini,
 > openai]`. Under load every gemini key cooled down at once (vision shares the
 > gemini pool with chat) and there's no openai vision key, so vision jobs
