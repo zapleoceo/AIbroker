@@ -81,14 +81,17 @@ def test_vision_excludes_anthropic_keeps_openai_fallback():
     assert "openai" in chain
 
 
-def test_vision_has_free_cloudflare_fallback():
+def test_vision_has_free_openrouter_fallback():
     """REGRESSION (2026-07-11): vision was [gemini, openai] only. Under load all
-    gemini keys cooled down at once and there's no openai vision key, so vision
-    jobs starved ('no provider available') and hung. cloudflare (free llava,
-    separate key pool) must sit between them as a non-rate-limited fallback."""
+    gemini keys cooled at once and there's no openai vision key, so vision jobs
+    starved ('no provider available') and hung. openrouter (free llama-3.2-vision,
+    a separate key pool) must sit between them. NB cloudflare llava was tried
+    first but returned empty completions (0 tokens) — unusable — and anthropic
+    400s on image URLs, so neither is eligible."""
     chain = chain_for("vision")
-    assert "cloudflare" in chain
-    assert chain.index("gemini") < chain.index("cloudflare") < chain.index("openai")
+    assert "openrouter" in chain
+    assert chain.index("gemini") < chain.index("openrouter")
+    assert "cloudflare" not in chain
 
 
 def test_structured_excludes_cerebras():

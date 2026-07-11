@@ -145,7 +145,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # until that conversion is written. DEFAULT_MODEL/quotas/cooldown/probe
     # entries stay (same "known but not chained" treatment as github before
     # its own prod key test — see docs/routing.md).
-    "vision": ["gemini", "cloudflare", "openai"],
+    "vision": ["gemini", "openrouter", "openai"],
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
     "transcription": ["groq", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.

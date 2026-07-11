@@ -27,7 +27,14 @@
 > `_CloudflareAdapter.key_extra` never built the account-scoped `api_base`.
 > cloudflare had 295 errors / 0 successes across every chain it sat in. Fixed by
 > hydrating `account_id`; a Postgres selector test now asserts it survives
-> selection.
+> selection. **BUT** once cloudflare could actually reach Workers AI, its llava
+> returned empty completions (0 tokens) on vision — "done" but useless. So
+> cloudflare is pulled from vision and the free fallback is **openrouter**
+> (`meta-llama/llama-3.2-11b-vision-instruct:free`, a separate key pool from our
+> direct gemini) → final chain `[gemini, openrouter, openai]`. Granted openrouter
+> key `gemma4` the `llm:vision` scope. (cloudflare stays wired for chat where the
+> account_id fix does make it usable; anthropic stays out of vision — 400s on
+> image URLs.)
 
 > **2026-07-11 (stale error state + humanized error display)**: a rate-limited
 > key that recovered kept showing status `жив` (alive) alongside a phantom
