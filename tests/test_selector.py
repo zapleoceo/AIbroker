@@ -287,6 +287,18 @@ async def test_record_usage_increments_counters():
     assert abs(row.total_cost_usd - 0.01) < 1e-9
 
 
+async def test_pick_hydrates_account_id():
+    """REGRESSION (2026-07-11): pick_and_reserve does RETURNING * but the
+    ApiKeyRow hydration dropped account_id, so cloudflare's account-scoped
+    api_base was never built → every cloudflare call 'Missing CLOUDFLARE_ACCOUNT_ID'
+    (295 errors, 0 ok). account_id must survive selection."""
+    await _add_key("cloudflare", "cf", scopes=["llm:vision"],
+                   account_id="865824c3e1d2ced02b16adb355616363")
+    key = await pick_and_reserve("cloudflare", "llm:vision")
+    assert key is not None
+    assert key.account_id == "865824c3e1d2ced02b16adb355616363"
+
+
 async def test_record_usage_ok_clears_stale_error_and_cooldown():
     """REGRESSION (2026-07-11): a rate-limited key that recovered kept showing
     'жив' + a phantom last_error until the next monitor probe (up to 10 min). A

@@ -171,6 +171,7 @@ async def pick_and_reserve(
         tier=row["tier"],
         scopes=row["scopes"],
         token_encrypted=row["token_encrypted"],
+        account_id=row["account_id"],
         is_active=row["is_active"],
         is_alive=row["is_alive"],
         is_reserve=row["is_reserve"],
