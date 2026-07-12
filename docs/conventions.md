@@ -85,9 +85,15 @@ split.
   the raw UTC stays in the span's `title`.
 - Naive-UTC datetimes (as stored) get a trailing `Z` so `new Date` parses them as
   UTC, not local. `data-tf` (`hm`/`mdhm`/`mdhms`) mirrors the JS `F` format map.
-- Day-bucketed aggregates (per-day chart, "today", quick ranges) are still
-  computed on the **UTC day** server-side — localising those needs the client tz
-  at query time (a follow-up).
+- Day-bucketed figures ("today", the selected range, per-key quota bars) also
+  align to the **viewer's** calendar day: the JS sets an `aib_tz` cookie
+  (`Intl…timeZone`) and reloads once on first visit; the server resolves it via
+  `dashboard_time.client_tz` (falls back to UTC for a missing/invalid value) and
+  `day_bounds_utc` shifts every day boundary. This stays on the naive-UTC
+  `created_at` column (Python-side bounds, no `AT TIME ZONE`), so it's
+  DB-portable and unit-tested on SQLite. `dashboard_time.py` is the single source
+  of truth for every dashboard day boundary. Needs `tzdata` (a dependency) so
+  `ZoneInfo` resolves inside the slim container.
 
 ## Tests
 

@@ -6,17 +6,19 @@ and `dashboard` render turn these dicts into markup.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
+from aibroker.routes.dashboard_time import UTC_TZ, day_bounds_utc, today_in
 
 
 def _parse_date_range(
-    date_from: str | None, date_to: str | None
+    date_from: str | None, date_to: str | None, tz: ZoneInfo = UTC_TZ
 ) -> tuple[date | None, date | None]:
     """Parse `from` and `to` strings (YYYY-MM-DD).
 
@@ -27,7 +29,7 @@ def _parse_date_range(
     """
     if not date_from and not date_to:
         return None, None
-    today = datetime.now(UTC).date()
+    today = today_in(tz)
     try:
         df = date.fromisoformat(date_from) if date_from else today
     except ValueError:
@@ -41,17 +43,18 @@ def _parse_date_range(
     return df, dt
 
 
-def _range_where(date_from: date | None, date_to: date | None) -> tuple[str, dict[str, Any]]:
+def _range_where(
+    date_from: date | None, date_to: date | None, tz: ZoneInfo = UTC_TZ
+) -> tuple[str, dict[str, Any]]:
     """Sargable half-open bounds on the bare `created_at` column — no
     `created_at::date` cast, so a plain btree index on `created_at` (migration
-    005) can actually be used instead of a forced full scan."""
+    005) can actually be used instead of a forced full scan. Bounds are the
+    selected local dates' midnights in `tz`, expressed in UTC, so the window is
+    the viewer's calendar days, not the server's."""
     if date_from is None and date_to is None:
         return "", {}
-    start = datetime.combine(date_from, datetime.min.time()) if date_from else None
-    end = (
-        datetime.combine(date_to, datetime.min.time()) + timedelta(days=1)
-        if date_to else None
-    )
+    start = day_bounds_utc(date_from, tz)[0] if date_from else None
+    end = day_bounds_utc(date_to, tz)[1] if date_to else None
     if start is not None and end is not None:
         return "WHERE created_at >= :start AND created_at < :end", {"start": start, "end": end}
     if start is not None:
@@ -94,14 +97,13 @@ async def _fetch_calls_1h() -> int:
         ))).scalar() or 0)
 
 
-async def _fetch_tokens_today() -> dict[int, dict[str, int]]:
-    """Per-key token consumption today (UTC) — drives the daily-quota bar.
-    Split in/out so manual-override caps (e.g. corp Gemini 3M in / 80k out)
-    can be tracked on each axis independently. Sargable bounds (computed in
-    Python, not `created_at::date =`) so the created_at index applies."""
-    today = datetime.now(UTC).date()
-    start = datetime(today.year, today.month, today.day)
-    end = start + timedelta(days=1)
+async def _fetch_tokens_today(tz: ZoneInfo = UTC_TZ) -> dict[int, dict[str, int]]:
+    """Per-key token consumption for the viewer's current day — drives the
+    daily-quota bar. Split in/out so manual-override caps (e.g. corp Gemini 3M in
+    / 80k out) can be tracked on each axis independently. Sargable bounds
+    (computed in Python, not `created_at::date =`) so the created_at index
+    applies; the day is the viewer's, per `tz`."""
+    start, end = day_bounds_utc(today_in(tz), tz)
     async with get_session() as s:
         rows = (await s.execute(text(
             "SELECT api_key_id, "
@@ -157,9 +159,12 @@ async def _fetch_keys() -> list[ApiKeyRow]:
 
 
 async def _gather_data(date_from: date | None = None,
-                        date_to: date | None = None) -> dict[str, Any]:
-    # all-time when both None; date-clamped only when at least one is provided
-    where_clause, bind_ = _range_where(date_from, date_to)
+                        date_to: date | None = None,
+                        tz: ZoneInfo = UTC_TZ) -> dict[str, Any]:
+    # all-time when both None; date-clamped only when at least one is provided.
+    # _gather_data orchestrates Postgres-only fetches (now()/FILTER) → Postgres
+    # integration suite, not the SQLite gate; _range_where itself is unit-tested.
+    where_clause, bind_ = _range_where(date_from, date_to, tz)  # pragma: no cover
 
     # Six independent queries — none depends on another's result — so they run
     # concurrently, each on its own pooled connection (pool_size=10 +
@@ -173,7 +178,7 @@ async def _gather_data(date_from: date | None = None,
         _fetch_keys(),
         _fetch_range_and_proj_spend(where_clause, bind_),
         _fetch_calls_1h(),
-        _fetch_tokens_today(),
+        _fetch_tokens_today(tz),
         _fetch_provider_summary(),
     )
     return {

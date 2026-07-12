@@ -243,6 +243,20 @@ td.rownum::before { content: counter(rownum); }
 """
 
 _DASHBOARD_JS = """
+// Timezone cookie — tell the server the viewer's zone so DAY-bucketed figures
+// ('today', per-range spend, per-key quota bars) align to the viewer's calendar
+// day, not UTC. Set before anything else; on the very first visit (no cookie
+// yet) reload once so the server can use it. Point-in-time labels are localised
+// client-side below and need no reload. A changed zone updates silently.
+(function() {
+  const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone) || "";
+  if (!tz) return;
+  const m = document.cookie.match(/(?:^|; )aib_tz=([^;]+)/);
+  const cur = m ? decodeURIComponent(m[1]) : null;
+  if (cur === tz) return;
+  document.cookie = "aib_tz=" + encodeURIComponent(tz) + "; path=/; max-age=31536000; SameSite=Lax";
+  if (cur === null) location.reload();
+})();
 // Lang toggle — same pattern as landing page. Default EN, persisted in localStorage.
 (function() {
   const KEY = "aib_lang";

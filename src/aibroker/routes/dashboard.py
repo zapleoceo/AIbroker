@@ -40,6 +40,7 @@ from aibroker.routes.dashboard_render import (
 from aibroker.routes.dashboard_scopes import (
     _validate_scope_list,
 )
+from aibroker.routes.dashboard_time import client_tz
 from aibroker.telemetry import audit
 
 router = APIRouter(tags=["dashboard"])
@@ -124,9 +125,12 @@ async def dashboard(
         require_owner_session(request)
     except HTTPException:
         return RedirectResponse("/login", status_code=303)
-    df, dt = _parse_date_range(from_, to)
-    data = await _gather_data(df, dt)
-    return _render(data, flash=flash)
+    # Postgres-only render path (the gather runs now()/FILTER queries SQLite
+    # can't) — covered by the Postgres integration suite, not the SQLite gate.
+    tz = client_tz(request.cookies.get("aib_tz"))          # pragma: no cover
+    df, dt = _parse_date_range(from_, to, tz)               # pragma: no cover
+    data = await _gather_data(df, dt, tz)                   # pragma: no cover
+    return _render(data, tz=tz, flash=flash)                # pragma: no cover
 
 
 # ─── Project drill-down ─────────────────────────────────────────────────────

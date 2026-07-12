@@ -5,9 +5,10 @@ that drives the add-key form, and the friendly-error translation.
 """
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from html import escape as esc
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi.responses import HTMLResponse
 
@@ -18,6 +19,7 @@ from aibroker.providers.quotas import axes_for_key, severity_class
 from aibroker.routes.dashboard_assets import _NO_STORE
 from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
 from aibroker.routes.dashboard_scopes import _scope_checkboxes
+from aibroker.routes.dashboard_time import UTC_TZ, today_in
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
 
@@ -167,7 +169,7 @@ def _friendly_reason(raw: str) -> tuple[str, str] | None:
     return None
 
 
-def _render(data: dict[str, Any], *, flash: str = "",
+def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
              new_project_key: str | None = None) -> HTMLResponse:
     s = get_settings()
 
@@ -185,7 +187,7 @@ def _render(data: dict[str, Any], *, flash: str = "",
         range_label_en = f"{df_str or '…'} → {dt_str or '…'}"
         range_label_ru = f"{df_str or '…'} → {dt_str or '…'}"
 
-    today_d = date.today()
+    today_d = today_in(tz)
     today_iso = today_d.isoformat()
     d7_iso = (today_d - timedelta(days=6)).isoformat()
     d30_iso = (today_d - timedelta(days=29)).isoformat()
