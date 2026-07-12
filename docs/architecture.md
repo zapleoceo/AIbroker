@@ -43,6 +43,17 @@ daily quota, and gemini free (~1500/day) lost ~10% of budget to probing;
 dead/cooldown keys of those providers are still probed (reviving is worth
 one call).
 
+**Paid-tail alert (2026-07-12).** After the probe pass, `tick()` runs
+`_check_paid_tail`: for each capability in `_PAID_TAIL_CAPS` (`chat:fast`,
+`chat:smart` — the chains whose paid tail is the guaranteed-answer anchor,
+see `test_chains.py`'s paid-tail invariant) it checks whether ANY provider in
+`chain_for(cap)` still has at least one usable paid key — `is_active`,
+`is_alive`, not in cooldown, correctly scoped, and not over its daily cost
+cap (same freshness rule as `FRESH_DAILY_COST_SQL`). If none is left, the
+capability is silently free-only — a throttled Telegram alert fires, keyed
+`paid_tail:<capability>` so the notifier's `recover()` auto-clears it the
+moment a paid key comes back.
+
 **Cooldown revives a dead key too (2026-07-03).** `monitor.tick()`'s three
 verdicts (`alive`/`cooldown`/`dead`) used to treat `cooldown` (429) as
 orthogonal to `is_alive` — only a clean `alive` verdict reset `is_alive=True`.

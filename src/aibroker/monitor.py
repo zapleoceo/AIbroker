@@ -30,9 +30,16 @@ from aibroker.db import close_engine, get_session, init_engine
 from aibroker.db.models import ApiKeyRow
 from aibroker.providers.health_probes import probe_all
 from aibroker.providers.quotas import quota_for_key
+from aibroker.routing.chains import chain_for, scope_for
 from aibroker.telemetry import alert, recover
 
 log = logging.getLogger(__name__)
+
+# Chat capabilities whose chains end in a paid "guaranteed-answer" tail (see
+# routing/chains.py + test_chains.py's paid-tail invariant). Losing every
+# usable paid key silently degrades them to free-only best-effort — worth an
+# operator alert, not just a 503 spike later.
+_PAID_TAIL_CAPS: tuple[str, ...] = ("chat:fast", "chat:smart")
 
 
 INTERVAL_S = int(os.environ.get("MONITOR_INTERVAL_S", "600"))
@@ -60,6 +67,51 @@ def _cooldown_end(hint: str) -> datetime:
     if hint == "monthly quota":
         return next_utc_month_start().replace(tzinfo=None)
     return datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+
+
+def _paid_key_usable(key, cap_providers: set[str], scope: str,
+                     now: datetime) -> bool:
+    """Can this paid key actually serve a capability's paid tail right now?
+    Active, alive, not cooling, correctly scoped, and not over its daily cost
+    cap — cost freshness follows FRESH_DAILY_COST_SQL's rule: a stale
+    daily_reset_at means the counter belongs to a previous day and reads 0."""
+    if key.provider not in cap_providers or not key.is_active or not key.is_alive:
+        return False
+    if key.cooldown_until is not None and key.cooldown_until > now:
+        return False
+    if scope not in (key.scopes or []):
+        return False
+    if key.daily_cost_cap_usd is None:
+        return True
+    used = key.daily_cost_used_usd if key.daily_reset_at == now.date() else 0.0
+    return used < key.daily_cost_cap_usd
+
+
+async def _check_paid_tail() -> None:
+    """Alert (throttled) when a chat capability has NO usable paid key left —
+    its guaranteed-answer tail is gone and the chain is silently free-only.
+    Keyed 'paid_tail:<capability>' so notifier's recover() auto-clears the
+    moment a paid key comes back."""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with get_session() as s:
+        paid = (await s.execute(
+            select(ApiKeyRow).where(
+                ApiKeyRow.is_active.is_(True), ApiKeyRow.tier == "paid",
+            )
+        )).scalars().all()
+    for cap in _PAID_TAIL_CAPS:
+        providers = set(chain_for(cap))
+        scope = scope_for(cap)
+        usable = sum(
+            1 for k in paid if _paid_key_usable(k, providers, scope, now)
+        )
+        if usable:
+            await recover(f"paid_tail:{cap}",
+                          f"{cap}: paid tail restored ({usable} usable paid key(s))")
+        else:
+            await alert(f"paid_tail:{cap}",
+                        f"{cap}: NO usable paid key — the guaranteed-answer "
+                        "tail is gone; free-only until a paid key recovers")
 
 
 def _should_probe(key, sweep: int) -> bool:
@@ -168,6 +220,8 @@ async def tick(sweep: int = 0) -> None:
                         f"key:{r.id}",
                         f"{r.provider}/{r.label} died: HTTP {http_code} ({hint})",
                     )
+
+    await _check_paid_tail()
 
     log.info("monitor tick: alive=%d cooldown=%d dead=%d total=%d",
              alive_count, cooldown_count, dead_count, len(rows))

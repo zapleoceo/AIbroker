@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
@@ -15,7 +15,10 @@ from aibroker.db.models import ApiKeyRow
 from aibroker.monitor import (
     _ALIVE_PROBE_EVERY_N,
     _MIN_RPD_FOR_LIVE_PROBE,
+    _PAID_TAIL_CAPS,
+    _check_paid_tail,
     _cooldown_end,
+    _paid_key_usable,
     _should_probe,
     tick,
 )
@@ -100,6 +103,115 @@ async def test_tick_with_no_keys_logs_and_returns():
         await tick()   # no exception
 
 
+# ─── paid-tail alert — a chat capability losing its last usable paid key ─────
+
+
+_NOW = datetime.now(UTC).replace(tzinfo=None)
+
+
+def _paid_key(provider: str = "deepseek", **kw) -> SimpleNamespace:
+    base = {
+        "provider": provider, "is_active": True, "is_alive": True,
+        "cooldown_until": None, "scopes": ["llm:chat"],
+        "daily_cost_cap_usd": None, "daily_cost_used_usd": 0.0,
+        "daily_reset_at": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_paid_key_usable_happy_path():
+    assert _paid_key_usable(_paid_key(), {"deepseek"}, "llm:chat", _NOW) is True
+
+
+def test_paid_key_usable_rejects_wrong_provider_dead_inactive():
+    assert not _paid_key_usable(_paid_key("openai"), {"deepseek"}, "llm:chat", _NOW)
+    assert not _paid_key_usable(_paid_key(is_alive=False), {"deepseek"}, "llm:chat", _NOW)
+    assert not _paid_key_usable(_paid_key(is_active=False), {"deepseek"}, "llm:chat", _NOW)
+
+
+def test_paid_key_usable_rejects_cooldown_and_scope():
+    cooling = _paid_key(cooldown_until=_NOW + timedelta(minutes=5))
+    assert not _paid_key_usable(cooling, {"deepseek"}, "llm:chat", _NOW)
+    expired = _paid_key(cooldown_until=_NOW - timedelta(minutes=5))
+    assert _paid_key_usable(expired, {"deepseek"}, "llm:chat", _NOW)
+    assert not _paid_key_usable(_paid_key(scopes=["llm:edit"]),
+                                {"deepseek"}, "llm:chat", _NOW)
+
+
+def test_paid_key_usable_cost_cap_follows_fresh_semantics():
+    """Over-cap today → unusable; a STALE daily_reset_at means the counter
+    belongs to a previous day and reads 0 (FRESH_DAILY_COST_SQL rule)."""
+    over = _paid_key(daily_cost_cap_usd=5.0, daily_cost_used_usd=5.0,
+                     daily_reset_at=_NOW.date())
+    assert not _paid_key_usable(over, {"deepseek"}, "llm:chat", _NOW)
+    stale = _paid_key(daily_cost_cap_usd=5.0, daily_cost_used_usd=5.0,
+                      daily_reset_at=_NOW.date() - timedelta(days=1))
+    assert _paid_key_usable(stale, {"deepseek"}, "llm:chat", _NOW)
+    under = _paid_key(daily_cost_cap_usd=5.0, daily_cost_used_usd=1.0,
+                      daily_reset_at=_NOW.date())
+    assert _paid_key_usable(under, {"deepseek"}, "llm:chat", _NOW)
+
+
+async def test_check_paid_tail_alerts_when_no_paid_key():
+    """Empty key table → every paid-tail capability alerts, none recovers."""
+    with patch("aibroker.monitor.alert", AsyncMock()) as fake_alert, \
+         patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
+        await _check_paid_tail()
+    alerted = {c.args[0] for c in fake_alert.await_args_list}
+    assert alerted == {f"paid_tail:{cap}" for cap in _PAID_TAIL_CAPS}
+    fake_recover.assert_not_awaited()
+
+
+async def test_check_paid_tail_recovers_when_paid_key_usable():
+    """A live, scoped paid key in a chain provider → recover for both caps.
+    Explicit id makes the insert SQLite-safe (no BIGSERIAL dependency)."""
+    async with get_session() as s:
+        await s.execute(insert(ApiKeyRow).values(
+            id=90001, provider="deepseek", label="paid-tail",
+            token_encrypted=encrypt("t"), tier="paid",
+            is_active=True, is_alive=True, scopes=["llm:chat"],
+        ))
+    with patch("aibroker.monitor.alert", AsyncMock()) as fake_alert, \
+         patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
+        await _check_paid_tail()
+    recovered = {c.args[0] for c in fake_recover.await_args_list}
+    assert recovered == {f"paid_tail:{cap}" for cap in _PAID_TAIL_CAPS}
+    fake_alert.assert_not_awaited()
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
+async def test_tick_paid_tail_kill_then_revive():
+    """End-to-end through tick(): all paid keys dead → paid_tail alert;
+    revived → paid_tail recover."""
+    async with get_session() as s:
+        r = await s.execute(insert(ApiKeyRow).values(
+            provider="deepseek", label="pt1",
+            token_encrypted=encrypt("test-token-pt1"),
+            tier="paid", is_active=True, is_alive=False,   # ← dead paid key
+            scopes=["llm:chat"],
+        ).returning(ApiKeyRow.id))
+        kid = r.scalar_one()
+    with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})), \
+         patch("aibroker.monitor.alert", AsyncMock()) as fake_alert, \
+         patch("aibroker.monitor.recover", AsyncMock()):
+        await tick()
+    assert {c.args[0] for c in fake_alert.await_args_list} >= \
+        {f"paid_tail:{cap}" for cap in _PAID_TAIL_CAPS}
+
+    async with get_session() as s:
+        await s.execute(update(ApiKeyRow).where(ApiKeyRow.id == kid)
+                        .values(is_alive=True))
+    with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})), \
+         patch("aibroker.monitor.alert", AsyncMock()) as fake_alert, \
+         patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
+        await tick()
+    assert {c.args[0] for c in fake_recover.await_args_list} >= \
+        {f"paid_tail:{cap}" for cap in _PAID_TAIL_CAPS}
+    assert not [c for c in fake_alert.await_args_list
+                if c.args[0].startswith("paid_tail:")]
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
 async def test_tick_marks_alive_to_alive_clears_error_count():
     async with get_session() as s:
@@ -135,10 +247,10 @@ async def test_tick_marks_dead_alerts_and_bumps_error_count():
     with patch("aibroker.monitor.probe_all", AsyncMock(return_value=fake_results)), \
          patch("aibroker.monitor.alert", AsyncMock()) as fake_alert:
         await tick()
-    fake_alert.assert_awaited_once()
-    args = fake_alert.await_args.args
-    assert "key:" in args[0]
-    assert "401" in args[1]
+    # Exactly one KEY alert (paid_tail:* alerts may also fire — no paid keys here).
+    key_alerts = [c for c in fake_alert.await_args_list if c.args[0].startswith("key:")]
+    assert len(key_alerts) == 1
+    assert "401" in key_alerts[0].args[1]
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
@@ -246,7 +358,8 @@ async def test_tick_marks_undecryptable_key_dead_and_alerts():
         )).scalar_one()
     assert row.is_alive is False
     assert row.last_error == "token decrypt failed"
-    fake_alert.assert_awaited_once()
+    key_alerts = [c for c in fake_alert.await_args_list if c.args[0].startswith("key:")]
+    assert len(key_alerts) == 1
 
 
 async def _probed_ids(sweep: int) -> set[int]:

@@ -56,6 +56,16 @@ def test_chat_first_3_are_free(capability):
         )
 
 
+@pytest.mark.parametrize("capability", ["chat:fast", "chat:smart"])
+def test_paid_tail_present_for_interactive_chat(capability):
+    """The guaranteed-answer tail: every interactive chat chain must keep at
+    least one provider whose keys are typically paid, so a fully-saturated free
+    pool still ends in an answer instead of a 503. deepseek is that anchor —
+    if it's ever removed from a chain, this test forces a conscious
+    replacement, not a silent free-only chain."""
+    assert "deepseek" in chain_for(capability)
+
+
 def test_chat_fast_paid_at_the_very_tail():
     """2026-07-05: paid providers sit at the LAST entries, after every free
     provider. Paid tail = [deepseek, anthropic, openai] (anthropic re-added
