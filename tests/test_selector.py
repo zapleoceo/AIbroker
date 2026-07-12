@@ -391,7 +391,7 @@ async def test_record_usage_persists_cache_tokens():
 
 
 async def test_record_usage_cache_tokens_default_to_zero():
-    """Non-caching call sites (embed, transcribe, vending self-report) don't
+    """Non-caching call sites (embed, transcribe) don't
     pass cache_read_tokens/cache_write_tokens — must default to 0, not NULL."""
     from sqlalchemy import select
 
@@ -411,3 +411,26 @@ async def test_record_usage_cache_tokens_default_to_zero():
         )).scalar_one()
     assert row.cache_read_tokens == 0
     assert row.cache_write_tokens == 0
+
+
+async def test_pick_and_reserve_concurrent_no_double_allocation():
+    """FOR UPDATE SKIP LOCKED is this module's whole reason to exist, yet it
+    was never exercised under contention — a locking regression would ship
+    green. N concurrent picks against a pool of 2 keys must never hand the
+    SAME row to two callers within one race window: while a picker's TX holds
+    the row lock, competitors must SKIP to another key or get None."""
+    import asyncio
+
+    await _add_key("cerebras", "c1")
+    await _add_key("cerebras", "c2")
+
+    async def one_pick() -> int | None:
+        k = await pick_and_reserve("cerebras", "llm:chat")
+        return k.id if k else None
+
+    got = await asyncio.gather(*[one_pick() for _ in range(12)])
+    winners = [g for g in got if g is not None]
+    # Every call must resolve (two healthy keys — SKIP LOCKED picks the free
+    # one), and both keys must actually share the load.
+    assert len(winners) == 12
+    assert len(set(winners)) == 2

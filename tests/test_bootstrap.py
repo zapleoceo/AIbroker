@@ -37,7 +37,7 @@ async def test_bootstrap_creates_admin_ops_project():
         )).scalar_one_or_none()
     assert row is not None
     assert row.allowed_scopes == [
-        "llm:chat", "llm:embed", "llm:vision", "vending:*", "admin:read"
+        "llm:chat", "llm:embed", "llm:vision", "admin:read"
     ]
 
 

@@ -235,3 +235,29 @@ async def test_project_block_does_not_corrupt_uncapped_paid_key_counter():
         await reserve_cost(api_key=key, project=proj, estimated_cost=0.05)
     assert exc.value.kind == "project"
     assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(1.0)
+
+
+@pytest.mark.skipif(not ON_POSTGRES, reason="reserve_cost + usage_log need a real DB")
+async def test_global_cap_blocks_and_refunds_key_reservation(monkeypatch):
+    """The GLOBAL daily cap is the last-line defense against unbounded spend
+    (INCIDENTs 2026-06-01 / 2026-06-11). Seed usage_log near the cap, ask for
+    more → CostGuardError(kind='global') AND the per-key reservation taken in
+    step 1 must be refunded, not leak into the key's counter."""
+    from datetime import UTC, datetime
+
+    from aibroker.config import get_settings
+    from aibroker.db.models import UsageLogRow
+    monkeypatch.setattr(get_settings(), "GLOBAL_DAILY_CAP_USD", 0.10)
+    invalidate_global_cache()
+    async with get_session() as s:
+        s.add(UsageLogRow(provider="x", status="ok", cost_usd=0.09,
+                          created_at=datetime.now(UTC).replace(tzinfo=None)))
+    key = await _add_key(tier="paid", daily_cost_cap_usd=5.0,
+                         daily_cost_used_usd=0.0)
+    with pytest.raises(CostGuardError) as exc:
+        await reserve_cost(api_key=key, project=_project(cap=None),
+                           estimated_cost=0.05)
+    assert exc.value.kind == "global"
+    # step-1 reservation (0.05 on the key) must be rolled back
+    assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(0.0)
+    invalidate_global_cache()

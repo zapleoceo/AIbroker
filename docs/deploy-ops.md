@@ -112,7 +112,6 @@ docker compose up -d
 | `TELEGRAM_BOT_USERNAME` | for embedding the widget on `/login` |
 | `OWNER_TELEGRAM_ID` | only this Telegram user can log into dashboard |
 | `GLOBAL_DAILY_CAP_USD` | global daily spend cap |
-| `DEFAULT_LEASE_SECONDS` | vending mode default lease |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG |
 

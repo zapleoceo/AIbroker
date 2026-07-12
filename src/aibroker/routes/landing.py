@@ -99,8 +99,7 @@ _HTML = """<!doctype html>
         "JSON-reliable routing and native json_schema structured output",
         "Prompt caching with per-call cache-token metering",
         "Per-project and per-workflow cost attribution",
-        "Telegram-login dashboard with per-project usage drill-down",
-        "Two operating modes: proxy (broker holds keys) and vending (broker leases keys)"
+        "Telegram-login dashboard with per-project usage drill-down"
       ]
     }},
     {{
@@ -428,15 +427,15 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       </div>
       <div class="mode">
         <div class="mode-head">
-          <h3>Vending</h3>
-          <span class="mode-tag" data-i18n="how.vend.tag" data-en="Direct" data-ru="Прямой"></span>
+          <h3 data-i18n="how.embed.h" data-en="Sync endpoints" data-ru="Синхронные эндпоинты"></h3>
+          <span class="mode-tag" data-i18n="how.embed.tag" data-en="Fast" data-ru="Быстрые"></span>
         </div>
-        <p data-i18n="how.vend.desc"
-           data-en="POST /v1/key returns a real provider token + lease_id. Use it directly, then POST /v1/usage to report spend. Lease expires automatically."
-           data-ru="POST /v1/key возвращает реальный токен провайдера + lease_id. Используйте напрямую, потом POST /v1/usage с расходами. Аренда истекает автоматически."></p>
-        <pre><code>curl -X POST https://aib.zapleo.com/v1/key \\
+        <p data-i18n="how.embed.desc"
+           data-en="Embeddings and transcription answer inline — they finish in seconds and never hit proxy timeouts. Same key rotation and cost metering as chat."
+           data-ru="Эмбеддинги и транскрипция отвечают сразу — они укладываются в секунды и не упираются в таймауты прокси. Та же ротация ключей и учёт стоимости, что и в чате."></p>
+        <pre><code>curl -X POST https://aib.zapleo.com/v1/embed \\
   -H "X-Project-Key: aib_prj_..." \\
-  -d '{{ "provider": "cerebras", "scope": "llm:chat" }}'</code></pre>
+  -d '{{ "texts": ["hello world"] }}'</code></pre>
       </div>
     </div>
   </div>
@@ -585,9 +584,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/jobs</span><span class="note">chat · async</span></div>
           <div class="ep"><span class="verb get">GET</span><span class="path">/v1/jobs/{{id}}</span><span class="note">poll</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/embed</span><span class="note">sync</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/key</span><span class="note">vending</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/usage</span><span class="note">vending</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/release</span><span class="note">vending</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/transcribe</span><span class="note">sync</span></div>
         </div>
       </div>
       <div class="api-block">
@@ -853,10 +850,8 @@ _LLMS_TXT = """# AIbroker
 
 ## Key concepts
 
-- **Two operating modes**: `proxy` (broker calls the provider with its own
-  stored key and returns the response — client never sees credentials) and
-  `vending` (broker hands the client a short-lived lease + plaintext key
-  for direct provider calls).
+- **Proxy mode**: the broker calls the provider with its own stored key and
+  returns the response — clients never see provider credentials.
 - **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
   `chat:code`, `chat:edit`, `chat:deep`, `prefilter`, `structured`,
   `translate`, `vision`, `transcription`, `embedding`. Each maps to an
@@ -885,7 +880,7 @@ _LLMS_TXT = """# AIbroker
 - `POST /v1/deep` + `GET /v1/deep/{job_id}` — async job API for
   `capability=chat:deep` (long-context/reasoning; latency observed up to
   ~8 min, past Cloudflare/nginx proxy timeouts — submit, then poll)
-- `POST /v1/key` — vending mode (returns lease + plaintext key)
+- `POST /v1/transcribe` — proxy mode audio → text
 
 ## Code
 

@@ -52,7 +52,6 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
-| `POST` | `/v1/key` | `KeyRequest` | `KeyResponse` (lease + plaintext key). `429` if the project exceeds `VENDING_RATE_LIMIT_PER_MINUTE` (default 30/min) — see **Threat model** in [security.md](security.md). |
 | `POST` | `/v1/usage` | `UsageReport` | `{recorded: true, request_id}` |
 | `POST` | `/v1/release` | `{lease_id}` | `{released: bool}` |
 
@@ -177,7 +176,6 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/deep` | `llm:deep` |
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |
-| `/v1/key` | the scope passed in the body |
 
 ## Admin (X-Admin-Key required)
 

@@ -44,7 +44,6 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:edit` | `capability=chat:edit` — reserved edit/coach lane |
 | `llm:deep` | `/v1/deep` — deep-reasoning models |
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
-| `vending:*` | `/v1/key` access — broker hands out plain keys |
 
 The `llm:*` set must stay in sync across three places: `chains.CAPABILITY_SCOPE`
 (the scope each capability demands), `dashboard_scopes._KNOWN_SCOPES` (UI

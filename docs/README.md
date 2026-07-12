@@ -9,7 +9,7 @@ CI fails otherwise. Opt-out: `docs-not-needed` in the commit message
 | Doc | What's in it |
 |---|---|
 | [architecture.md](./architecture.md) | High-level diagram, request flow, scaling story |
-| [api.md](./api.md) | Every public endpoint (proxy + vending + admin + dashboard) |
+| [api.md](./api.md) | Every public endpoint (proxy + admin + dashboard) |
 | [auth.md](./auth.md) | X-Admin-Key / X-Project-Key / Telegram login flow, scopes |
 | [routing.md](./routing.md) | Capability → provider chains, LRU + cap-aware selector, cost guard |
 | [providers.md](./providers.md) | Per-provider mapping (model defaults, LiteLLM behavior, health probes) |

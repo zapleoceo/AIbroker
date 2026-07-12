@@ -1,7 +1,7 @@
 """Test fixtures.
 
 Default: in-memory SQLite (fast, no deps) — used for everything except the
-Postgres-only selector/vending tests, which `skipif` themselves off SQLite.
+Postgres-only selector tests, which `skipif` themselves off SQLite.
 
 CI integration job sets DATABASE_URL to a real Postgres; then this fixture
 binds the engine to it and the Postgres-only tests run for real.

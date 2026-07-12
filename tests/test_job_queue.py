@@ -181,3 +181,26 @@ async def test_finish_claim_guard_ignores_stale_worker():
         row = await s.get(DeepJobRow, jid)
         assert row.status == "done"
         assert row.result_text == "LIVE"
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")
+async def test_claim_batch_concurrent_workers_never_double_claim():
+    """Two 'workers' claiming concurrently (the real 2-uvicorn-worker setup)
+    must partition the pending set — a job claimed by both would be executed
+    and billed twice. SKIP LOCKED is the guarantee; this is its only test
+    under actual contention."""
+    import asyncio
+
+    from aibroker.services.job_queue import _claim_batch
+
+    pid = await _make_project(["llm:chat"])
+    ids = [await _enqueue(pid) for _ in range(6)]
+
+    async def worker() -> list[int]:
+        rows = await _claim_batch(limit=6)
+        return [r.id for r in rows]
+
+    a, b = await asyncio.gather(worker(), worker())
+    assert set(a) | set(b) <= set(ids)
+    assert not (set(a) & set(b)), f"double-claimed jobs: {set(a) & set(b)}"
+    assert len(a) + len(b) == 6  # nothing lost either

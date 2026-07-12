@@ -49,12 +49,6 @@ class Settings(BaseSettings):
 
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
-    DEFAULT_LEASE_SECONDS: int = 60
-    # Vending mode (POST /v1/key) hands out a REAL plaintext provider token per
-    # call — unlike proxy mode there's no per-call cost signal to gate on, so a
-    # compromised project key could otherwise drain the lease pool or exfiltrate
-    # tokens at will. Cap per-project vend calls per rolling minute.
-    VENDING_RATE_LIMIT_PER_MINUTE: int = 30
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
