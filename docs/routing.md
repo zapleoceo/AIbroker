@@ -1,5 +1,34 @@
 # Routing, scopes & cost guard
 
+> **2026-07-12 (selector: TTL saturation cache + cache-affinity picks)**: two
+> changes to `pick_and_reserve`, same motivation — the picker runs on the hot
+> path of every provider attempt (~60-100k picks/day).
+> **1. Saturation verdict cached 15s.** The pick SQL used to re-aggregate the
+> ENTIRE current-day `usage_log` slice (per-key req/token sums over a 30-60k
+> row day slice) on EVERY pick — O(day-rows × picks) work for a verdict that
+> changes at day scale (a key crosses 95% of a *daily* quota once a day, not
+> once a second). Now `_saturated_key_ids()` runs ONE query per
+> `_SATURATION_TTL_S` (15s) computing the 4-axis ≥95% verdict for ALL keys
+> (same cap resolution: manual > discovered > `PROVIDER_QUOTAS` seed); the
+> pick SQL loses the `toks_today`/`defaults` CTEs entirely and just pushes the
+> cached ids to the back of the ORDER BY — still a soft skip with the same
+> all-saturated fallback. In-process per uvicorn worker (the
+> `cost_guard._global_cache` pattern); `invalidate_saturation_cache()` for
+> tests/ops.
+> **2. Cache-affinity key selection.** Provider prompt caches (deepseek's
+> automatic prefix cache, gemini's implicit cache) are per ACCOUNT/key —
+> pure `random()` rotation fragmented a project's stable prompt prefix across
+> every key in the pool, so most calls re-paid for a prefix some other key had
+> already cached (deepseek measured 56% hit rate; a warm single key can do much
+> better). On success, `note_affinity(project_id, provider, key_id)` pins the
+> (project, provider) pair to that key for `_AFFINITY_TTL_S` (30 min ≈ the
+> provider cache windows); the next pick (`project_id` kwarg, passed by
+> `run_chat`/`run_embed`/`run_transcribe`) prefers the pinned key as a
+> TIE-BREAK only — it never overrides the reserve lane, the saturation
+> push-back, or any WHERE filter (cooldown/dead/capped), so a broken pinned
+> key just falls back to random rotation. In-process map, per worker (2
+> workers = worst case one extra cache warm each; no Redis dependency).
+
 > **2026-07-10 (anthropic JSON via tool-use)**: Claude ignores OpenAI's
 > `response_format={"type":"json_object"}` (litellm drops the unsupported param),
 > so it had no JSON enforcement and sometimes replied in PLAIN TEXT on follow-ups
@@ -498,16 +527,16 @@ best.
 
 ## Selector — fair, anti-fingerprint ordering
 
-`src/aibroker/routing/selector.py:pick_and_reserve(provider, scope)`
+`src/aibroker/routing/selector.py:pick_and_reserve(provider, scope, *, require_tier=None, project_id=None)`
 
 ```sql
 UPDATE api_keys SET last_used_at = now()
 WHERE id = (
-    SELECT id FROM api_keys
-    WHERE provider = :provider
-      AND is_active AND is_alive
-      AND scopes ? :scope
-      AND (cooldown_until IS NULL OR cooldown_until < now())
+    SELECT k.id FROM api_keys k
+    WHERE k.provider = :provider
+      AND k.is_active AND k.is_alive
+      AND k.scopes ? :scope
+      AND (k.cooldown_until IS NULL OR k.cooldown_until < now())
       -- daily_cost_used_usd/daily_used are reset-aware (FRESH_DAILY_*_SQL,
       -- see **Cost guard**) — a stale (non-today) value reads as 0, not its
       -- raw stored total.
@@ -515,25 +544,32 @@ WHERE id = (
       AND (daily_limit = 0 OR fresh(daily_used) < daily_limit)
     ORDER BY
       k.is_reserve,
-      <saturation_case>,            -- over-quota keys pushed to back
-      random()                       -- pure random rotation within bucket
+      COALESCE(k.id = ANY(:saturated_ids), FALSE),  -- over-quota keys pushed to back
+      (k.id = :aff) DESC,                           -- cache-affinity tie-break
+      random()                                      -- rotation within bucket
     LIMIT 1
     FOR UPDATE OF k SKIP LOCKED
 )
 ```
 
-(Plus a `LEFT JOIN` against `toks_today` (today's per-key req + token sum) and a
-`defaults` VALUES CTE built from `PROVIDER_QUOTAS` so the saturation check sees
-the right quota even when auto-discover hasn't populated `discovered_*_limit`
-yet.)
+`:saturated_ids` comes from the 15s TTL cache `_saturated_key_ids()`
+(2026-07-12) — one query per TTL computes the 4-axis verdict for all keys by
+joining `api_keys` with today's `usage_log` aggregate and a `defaults` VALUES
+CTE built from `PROVIDER_QUOTAS`, so the check sees the right quota even when
+auto-discover hasn't populated `discovered_*_limit` yet. `:aff` is the
+affinity key id for (`project_id`, provider), or `-1` when none.
 
-Why each column matters:
+Why each ORDER BY column matters:
 1. **`is_reserve`** — non-reserve keys first; reserved Coach safety net is last.
-2. **saturation case** — a key whose today's tokens/requests ≥ 95% of its cap
-   (per-key `discovered_*` or `PROVIDER_QUOTAS` default) gets a `1`; clean
-   peers get `0`. Soft sort, not a hard filter: when **every** peer is
+2. **saturated ids** — a key whose today's tokens/requests ≥ 95% of its cap
+   (per-key `manual_*`/`discovered_*` or `PROVIDER_QUOTAS` default) sorts
+   after clean peers. Soft sort, not a hard filter: when **every** peer is
    saturated the picker still returns one rather than fail the request.
-3. **random()** — true random rotation. Replaced the LRU+`daily_used`
+3. **affinity** (2026-07-12) — the key that last successfully served this
+   (project, provider) wins ties, keeping its provider-side prompt cache warm
+   (deepseek prefix cache, gemini implicit cache — both per-account). A pure
+   tie-break: never overrides reserve/saturation/WHERE filters.
+4. **random()** — rotation among the rest. Replaced the LRU+`daily_used`
    ordering after we caught one workload-class (Coach JSON-heavy edits)
    monopolising the same handful of cerebras keys to token saturation
    while peers sat idle. Random distributes the next pick uniformly across
@@ -542,15 +578,15 @@ Why each column matters:
 Atomic, race-free across replicas, advances LRU in one go. Postgres-only
 (JSONB `?` + SKIP LOCKED + `random()`); exercised by the Postgres CI job.
 
-**Hot-path performance (2026-07-02).** `toks_today` filters `created_at >=
-date_trunc('day', now() AT TIME ZONE 'UTC')` (half-open range), NOT
-`created_at::date = today` — the cast was non-sargable and forced a full seq
-scan of `usage_log` (450k+ rows, ~220ms) on **every** pick, i.e. every provider
-attempt of every request. The bare-column range uses `ix_usage_created_at`
-(migration 005). A vestigial `recent` (15-min per-key error count) CTE was
-also dropped — it was computed and joined but never referenced in `ORDER BY`
-(removed when the recent-error sort gave way to `random()`), so it was pure
-scan cost.
+**Hot-path performance (2026-07-02, superseded 2026-07-12).** The day
+aggregate filters `created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')`
+(half-open range), NOT `created_at::date = today` — the cast was non-sargable
+and forced a full seq scan of `usage_log` (450k+ rows, ~220ms) on **every**
+pick. A vestigial `recent` (15-min per-key error count) CTE was also dropped —
+computed and joined but never referenced in `ORDER BY`, pure scan cost. Since
+2026-07-12 the aggregate no longer runs per pick at all — it lives behind the
+15s saturation cache (see the dated note at the top), and the pick statement
+itself touches only `api_keys`.
 
 `mark_cooldown` normalises tz-aware datetimes to naive UTC — `cooldown_until` is
 a naive `TIMESTAMP` and asyncpg rejects offset-aware values.
@@ -747,9 +783,14 @@ specifically applying the header's rolling-bucket number to the *daily* axis.
 
 3. **Saturation soft-skip** (selector `ORDER BY`) — keys ≥95% on any quota
    axis (req/tok/in/out, resolved manual>discovered>seed) sink to the back;
-   used only if every peer is also full.
+   used only if every peer is also full. Verdict served from the 15s
+   in-process cache (2026-07-12), not recomputed per pick.
 
-4. **Fair rotation** — `random()` among the healthy bucket so no key is
+4. **Cache affinity** (2026-07-12) — the key that last successfully served
+   this (project, provider) breaks ties, keeping its provider-side prompt
+   cache warm. Never overrides filters or the saturation/reserve ordering.
+
+5. **Fair rotation** — `random()` among the healthy bucket so no key is
    burned first while peers idle.
 
 ### Self-learning the size ceiling

@@ -46,7 +46,12 @@ from aibroker.routing import (
     reserve_cost,
     scope_for,
 )
-from aibroker.routing.selector import mark_cooldown, mark_dead, record_usage
+from aibroker.routing.selector import (
+    mark_cooldown,
+    mark_dead,
+    note_affinity,
+    record_usage,
+)
 from aibroker.services import response_cache
 from aibroker.telemetry import audit
 
@@ -374,6 +379,9 @@ async def _run_attempt(
     # Cache deterministic (translate) successes for verbatim repeats.
     response_cache.put(capability, messages, text, model=model,
                         max_tokens=max_tokens, temperature=temperature)
+    # A success pins this (project, provider) to this key so the NEXT pick
+    # lands where the provider-side prompt cache is already warm.
+    note_affinity(project.id, provider, key.id)
     return _Flow.SUCCESS, ChatOutcome(
         text=text, provider=provider, model=meta["model"],
         tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
@@ -459,7 +467,8 @@ async def run_chat(
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)
                 return None
-            key = await pick_and_reserve(provider, scope=scope)
+            key = await pick_and_reserve(provider, scope=scope,
+                                          project_id=project.id)
             if key is None:
                 break  # no (more) available key for this provider → next provider
             attempts += 1
@@ -550,7 +559,8 @@ async def run_embed(
     any_key_seen = False
     last_exc: Exception | None = None
     for _ in range(_max_keys(provider)):
-        key = await pick_and_reserve(provider, scope=scope_for("embedding"))
+        key = await pick_and_reserve(provider, scope=scope_for("embedding"),
+                                      project_id=project.id)
         if key is None:
             break  # no (more) available key for this provider
         any_key_seen = True
@@ -574,6 +584,7 @@ async def run_embed(
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             status="ok", error_kind=None, http_status=200,
         )
+        note_affinity(project.id, provider, key.id)
         return EmbedOutcome(
             embeddings=vectors, provider=provider, model=use_model,
             tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
@@ -616,7 +627,8 @@ async def run_transcribe(
     any_key_seen = False
 
     for provider in chain_for("transcription"):
-        key = await pick_and_reserve(provider, scope=scope)
+        key = await pick_and_reserve(provider, scope=scope,
+                                      project_id=project.id)
         if key is None:
             continue
         any_key_seen = True
@@ -643,6 +655,7 @@ async def run_transcribe(
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             status="ok", error_kind=None, http_status=200,
         )
+        note_affinity(project.id, provider, key.id)
         return TranscribeOutcome(
             text=text, provider=provider, model=use_model,
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],

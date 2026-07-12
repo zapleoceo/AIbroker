@@ -98,10 +98,14 @@ claimed chat job:
    `llm:vision`, `chat:edit` needs `llm:edit`, not a blanket `llm:chat`.
 4. `services.llm_service.run_chat` walks `chain_for(capability)`. For each
    provider:
-   - `selector.pick_and_reserve(provider, scope_for(capability))` does atomic
-     `SELECT … FOR UPDATE SKIP LOCKED`, ordering `is_reserve, last_used_at` so
-     reserved keys are picked last (the reserved-lane mechanism). Touches
-     `last_used_at` in the same TX.
+   - `selector.pick_and_reserve(provider, scope_for(capability),
+     project_id=…)` does atomic `SELECT … FOR UPDATE SKIP LOCKED`, ordering
+     `is_reserve, saturated, affinity, random()` so reserved keys are picked
+     last (the reserved-lane mechanism) and, among equally-eligible keys, the
+     one that last served this (project, provider) wins — keeping the
+     provider-side prompt cache warm (see **Selector** in
+     [routing.md](routing.md), 2026-07-12). Touches `last_used_at` in the
+     same TX.
    - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
      The worst-case cost is RESERVED before the call and released after. A
      successful call books its real cost; a **timeout** books the reserved

@@ -13,9 +13,12 @@ from sqlalchemy import insert
 
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
+from aibroker.routing import selector
 from aibroker.routing.selector import (
+    invalidate_saturation_cache,
     mark_cooldown,
     mark_dead,
+    note_affinity,
     pick_and_reserve,
     record_usage,
 )
@@ -25,6 +28,15 @@ pytestmark = pytest.mark.skipif(
     "postgres" not in _DB and "asyncpg" not in _DB,
     reason="Selector uses Postgres-specific JSONB ? operator + FOR UPDATE SKIP LOCKED",
 )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_selector_caches():
+    """Key ids are reused across tests (fresh schema per test) — a stale
+    saturation/affinity entry from a previous test would poison this one."""
+    invalidate_saturation_cache()
+    selector._affinity.clear()
+    yield
 
 
 async def _add_key(provider: str, label: str, **kw) -> int:
@@ -82,6 +94,7 @@ async def test_pick_pushes_over_quota_key_to_back():
             "api_key_id": hot, "provider": "cerebras", "tokens_in": 1_100_000,
             "tokens_out": 0, "cost_usd": 0.0, "status": "ok",
         }])
+    invalidate_saturation_cache()  # seeded AFTER import-time cache state — force a fresh verdict
     # 20 picks — none should land on 'hot' while 'cold' is alive
     cold_count = hot_count = 0
     from sqlalchemy import update
@@ -117,6 +130,7 @@ async def test_pick_respects_manual_tok_out_limit():
             "api_key_id": hot, "provider": "gemini", "tokens_in": 100,
             "tokens_out": 76_000, "cost_usd": 0.0, "status": "ok",
         }])
+    invalidate_saturation_cache()
     cold_count = hot_count = 0
     for _ in range(20):
         picked = await pick_and_reserve("gemini", "llm:chat")
@@ -147,6 +161,7 @@ async def test_pick_falls_back_to_saturated_when_all_saturated():
             {"api_key_id": b, "provider": "cerebras", "tokens_in": 2_000_000,
              "tokens_out": 0, "cost_usd": 0.0, "status": "ok"},
         ])
+    invalidate_saturation_cache()
     picked = await pick_and_reserve("cerebras", "llm:chat")
     assert picked is not None
     assert picked.label in ("a", "b")
@@ -262,6 +277,48 @@ async def test_reserve_key_picked_only_when_shared_exhausted():
     picked = await pick_and_reserve("gemini", "llm:edit")
     assert picked is not None
     assert picked.label == "reserve"
+
+
+async def test_pick_affinity_sticks_to_noted_key():
+    """After note_affinity, every pick for that (project, provider) returns
+    the pinned key — the provider-side prompt cache stays on one account
+    instead of random() fragmenting it across the pool."""
+    pinned = await _add_key("deepseek", "pinned")
+    await _add_key("deepseek", "other")
+    note_affinity(1, "deepseek", pinned)
+    for _ in range(10):
+        picked = await pick_and_reserve("deepseek", "llm:chat", project_id=1)
+        assert picked is not None
+        assert picked.id == pinned
+
+
+async def test_pick_affinity_scoped_to_project():
+    """A DIFFERENT project's pick is unaffected by project 1's affinity —
+    both keys stay reachable for it (affinity is per (project, provider))."""
+    from sqlalchemy import update
+    pinned = await _add_key("deepseek", "pinned")
+    await _add_key("deepseek", "other")
+    note_affinity(1, "deepseek", pinned)
+    seen: set[int] = set()
+    for _ in range(50):
+        picked = await pick_and_reserve("deepseek", "llm:chat", project_id=2)
+        assert picked is not None
+        seen.add(picked.id)
+        async with get_session() as s:
+            await s.execute(update(ApiKeyRow).values(last_used_at=None))
+    assert len(seen) == 2, "project 2 should still rotate over both keys"
+
+
+async def test_pick_affinity_never_resurrects_cooldown_key():
+    """Affinity is a tie-break among ELIGIBLE keys only — a pinned key in
+    cooldown must not be picked; the healthy peer serves instead."""
+    pinned = await _add_key("deepseek", "pinned")
+    other = await _add_key("deepseek", "other")
+    note_affinity(1, "deepseek", pinned)
+    await mark_cooldown(pinned, datetime.now(UTC) + timedelta(minutes=10))
+    picked = await pick_and_reserve("deepseek", "llm:chat", project_id=1)
+    assert picked is not None
+    assert picked.id == other
 
 
 async def test_reserve_edit_key_invisible_to_chat_scope():
