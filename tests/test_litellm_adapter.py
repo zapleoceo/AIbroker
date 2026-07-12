@@ -46,16 +46,57 @@ def test_apply_prompt_cache_noop_for_other_providers():
     assert apply_prompt_cache("deepseek/deepseek-chat", msgs) == msgs
 
 
-def test_apply_prompt_cache_only_first_system_and_skips_empty():
+def _marked(msg: dict) -> bool:
+    c = msg["content"]
+    return isinstance(c, list) and c[0].get("cache_control") == {"type": "ephemeral"}
+
+
+def test_apply_prompt_cache_marks_every_leading_system():
     from aibroker.providers.litellm_adapter import apply_prompt_cache
-    # no system → unchanged; only the FIRST system marked
+    # no system → unchanged
     assert apply_prompt_cache("anthropic/x", [{"role": "user", "content": "a"}]) == [
         {"role": "user", "content": "a"}]
+    # Stepan sends its static prefix as SEVERAL leading system messages —
+    # all of them must be marked so the whole prefix bills as a cache read.
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "one"},
-        {"role": "system", "content": "two"}])
-    assert isinstance(out[0]["content"], list)          # first marked
-    assert out[1]["content"] == "two"                   # second left as-is
+        {"role": "system", "content": "two"},
+        {"role": "user", "content": "hi"}])
+    assert _marked(out[0]) and _marked(out[1])
+    assert out[2] == {"role": "user", "content": "hi"}
+
+
+def test_apply_prompt_cache_caps_marks_at_four():
+    from aibroker.providers.litellm_adapter import (
+        _MAX_CACHE_MARKS,
+        apply_prompt_cache,
+    )
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": f"s{i}"} for i in range(6)])
+    assert [_marked(m) for m in out] == [True] * _MAX_CACHE_MARKS + [False, False]
+
+
+def test_apply_prompt_cache_run_stops_at_first_non_system():
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": "head"},
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "late"}])   # after the head run → untouched
+    assert _marked(out[0])
+    assert out[1] == {"role": "user", "content": "hi"}
+    assert out[2] == {"role": "system", "content": "late"}
+
+
+def test_apply_prompt_cache_skips_nonstr_and_empty_in_head():
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    listy = {"role": "system", "content": [{"type": "text", "text": "x"}]}
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": "  "},   # empty → untouched
+        listy,                                  # list content → untouched
+        {"role": "system", "content": "real"}])
+    assert out[0] == {"role": "system", "content": "  "}
+    assert out[1] == listy
+    assert _marked(out[2])
 
 
 def test_cache_tokens_reads_anthropic_and_openai_shapes():

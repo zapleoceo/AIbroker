@@ -23,12 +23,25 @@
            ▲
            │
 ┌──── aibroker-monitor (loop) ─────────────┐
-│ every 600s pings each key with the       │
-│ cheapest provider call. Marks dead /     │
-│ sets cooldown. Telegram alerts on state  │
-│ flip via @aibzapleo_bot.                 │
+│ every 600s pings keys due this sweep     │
+│ with the cheapest provider call. Marks   │
+│ dead / sets cooldown. Telegram alerts on │
+│ state flip via @aibzapleo_bot.           │
 └───────────────────────────────────────────┘
 ```
+
+**Adaptive probe cadence (2026-07-12).** Probing EVERY key every sweep was
+self-harm: 144 sweeps/day × ~75 keys ≈ 10.8k real `max_tokens=1` completions
+a day spent on liveness alone. `_should_probe` now probes ALIVE keys only
+every `_ALIVE_PROBE_EVERY_N=6` sweeps (once/hour); DEAD or in-cooldown keys
+every sweep — they're the ones whose state needs re-confirmation, and
+auto-revive depends on it. Micro-RPD skip: a provider whose effective
+req/day quota (manual > discovered > `PROVIDER_QUOTAS` seed) is under
+`_MIN_RPD_FOR_LIVE_PROBE=200` never gets an ALIVE key live-probed at all —
+sambanova's `req_per_day=20` meant probes alone exceeded a key's entire
+daily quota, and gemini free (~1500/day) lost ~10% of budget to probing;
+dead/cooldown keys of those providers are still probed (reviving is worth
+one call).
 
 **Cooldown revives a dead key too (2026-07-03).** `monitor.tick()`'s three
 verdicts (`alive`/`cooldown`/`dead`) used to treat `cooldown` (429) as

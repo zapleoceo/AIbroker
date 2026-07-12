@@ -1,5 +1,26 @@
 # Routing, scopes & cost guard
 
+> **2026-07-12 (prompt-cache: mark every leading system message)**:
+> `apply_prompt_cache` used to put a `cache_control` breakpoint on only the
+> FIRST system message. Stepan sends its static prefix as one or more leading
+> system messages, so everything after the first one billed at the full input
+> rate on every call. Now every message in the contiguous leading
+> `role=="system"` run (str, non-empty content) is marked, capped at
+> `_MAX_CACHE_MARKS=4` (anthropic's breakpoint limit); the run stops at the
+> first non-system message, non-str/list content stays untouched, and the
+> function remains a no-op for non-anthropic providers.
+>
+> **2026-07-12 (PROVIDER-level affinity — considered, deliberately NOT
+> built)**: after the same-day key-level cache-affinity note below, the next
+> obvious step was pinning a whole (project → provider) pair. Rejected: the
+> static free-first chain order already yields a stable first provider per
+> capability, and key-level affinity captures the per-account prompt-cache win
+> — re-ordering chains per project would trade free-tier economics for a
+> marginal tail. Same date, monitor side (see architecture.md): adaptive probe
+> cadence — alive keys probed hourly instead of every 600s sweep,
+> dead/cooldown every sweep, micro-RPD (<200 req/day, e.g. sambanova's 20)
+> alive keys never live-probed.
+
 > **2026-07-12 (selector: TTL saturation cache + cache-affinity picks)**: two
 > changes to `pick_and_reserve`, same motivation — the picker runs on the hot
 > path of every provider attempt (~60-100k picks/day).
