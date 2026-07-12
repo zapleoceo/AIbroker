@@ -979,7 +979,7 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > models silently vanished from our account's provisioning while nemotron
 > (chat:deep) stayed alive. Two-part fix: (1) both dead models **removed from
 > their chains** (nvidia stays in chat:deep only) — the real, immediate fix;
-> (2) `_is_model_unavailable(exc)` (litellm `NotFoundError` type, or "not found
+> (2) `is_model_unavailable(exc)` (litellm `NotFoundError` type, or "not found
 > for account"/"model_not_found"/"does not exist" in the body) makes `run_chat`
 > `break` to the next provider and record the error but **skip `_penalize`** —
 > so a future model that dies mid-chain doesn't wrongly cooldown/mark_dead a

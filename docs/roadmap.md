@@ -226,7 +226,7 @@ ModelHandler(provider, model):
 | Фаза | Статус | Комментарий |
 |---|---|---|
 | Async-миграция | ✅ | sync `/v1/chat` **удалён** (410 Gone). Вера (project 2) и Степан (project 4) полностью на `/v1/jobs`. Пул очереди разгребается чисто. |
-| Фаза 0 (drift) | ✅ | nvidia убран из chat:fast/chat:smart; `_is_model_unavailable` (404/NotFound) в `run_chat` → skip provider, ключ не долбится. |
+| Фаза 0 (drift) | ✅ | nvidia убран из chat:fast/chat:smart; `is_model_unavailable` (404/NotFound) в `run_chat` → skip provider, ключ не долбится. |
 | Фаза 3 (адаптеры) | ✅ частично | `ProviderAdapter`-реестр (gemini/deepseek/cloudflare) + `adapter_for`; квирки уехали из `call_llm`. Уровень **провайдера**, не (provider,model) — см. ниже. |
 | Фаза 4 (async-очередь) | ✅ | `job_queue.py` + миграция 009, переживает рестарт, backpressure, retry-backoff. |
 | Фаза 5 (модуляризация) | ✅ | dashboard 1835 → 5 модулей (см. Фазу 5). |
@@ -236,7 +236,7 @@ ModelHandler(provider, model):
 - **Фаза 2 (единый движок `engine.execute`) — рекомендую НЕ делать.**
   Исходная мотивация («3 почти-дубля», §2.4) на проверке оказалась мелкой:
   `run_embed`/`run_transcribe` совпадают в ~5 строках (penalize→record→continue),
-  а `run_chat` — горячий путь — **осознанно ветвится иначе** (`_is_model_unavailable`
+  а `run_chat` — горячий путь — **осознанно ветвится иначе** (`is_model_unavailable`
   пишет ошибку БЕЗ penalize; `is_too_large_error` делает `break` ДО record;
   cost-reservation/attempt-budget/JSON-gate только у него). Единый движок с
   замыканиями `call_one`/`build_outcome` заменил бы три читаемых функции на

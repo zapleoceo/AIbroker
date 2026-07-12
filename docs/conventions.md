@@ -18,6 +18,7 @@ src/aibroker/
     cost_guard.py      Three-tier cap check
   providers/
     litellm_adapter.py LLM SDK wrapper
+    provider_errors.py Error classification (sign tables + verdicts)
     health_probes.py   Cheapest call per provider
   routes/
     health.py          / + /healthz + /v1/health

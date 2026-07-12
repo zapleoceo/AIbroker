@@ -108,7 +108,7 @@ claimed chat job:
      ESTIMATE (not $0) — the provider generated and billed a response we never
      received, so the daily cost cap must see that spend or it stays blind and
      never stops the key (fix 2026-07-12: Google billed $122 on the paid gemini
-     key while the broker recorded $2; `_is_timeout` gates this). Pre-processing
+     key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
    - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
      **adapter** first (see below).
@@ -134,6 +134,18 @@ like cloudflare's api_base, applied by `run_chat` via `extra_for_provider`).
 Adding a provider's quirk is a new adapter class, not an edit to the shared
 call path (open/closed). The default adapter is a no-op, so providers with no
 quirks need no entry.
+
+## Provider error classification (2026-07-12)
+
+The error-verdict logic lives in `providers/provider_errors.py` (extracted from
+`services/llm_service.py`): the incident-calibrated sign tables
+(`_RATE_LIMIT_SIGNS`, `_AUTH_SIGNS`, `_BILLING_DEPLETED_SIGNS`, the
+provider-scoped maps), `classify_provider_error(exc, provider)`,
+`is_model_unavailable(exc)` (404/model-gone → skip provider, don't penalize the
+key) and `is_timeout(exc)` (billable holds — see the cost-cap note above).
+`llm_service` re-exports `classify_provider_error` for existing import sites;
+the WHAT-to-do-about-it side (`_penalize`: cooldown vs mark_dead) stays in the
+orchestrator.
 
 ## Async jobs — the drained queue (2026-07-10)
 
