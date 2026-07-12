@@ -88,8 +88,9 @@ split.
 - Day-bucketed figures ("today", the selected range, per-key quota bars) also
   align to the **viewer's** calendar day: the JS sets an `aib_tz` cookie
   (`Intl…timeZone`) and reloads once on first visit; the server resolves it via
-  `dashboard_time.client_tz` (falls back to UTC for a missing/invalid value) and
-  `day_bounds_utc` shifts every day boundary. This stays on the naive-UTC
+  `dashboard_time.client_tz` (falls back to the `UTC_TZ` constant for a
+  missing/invalid value); `today_in` + `day_bounds_utc` then shift every day
+  boundary to that zone. This stays on the naive-UTC
   `created_at` column (Python-side bounds, no `AT TIME ZONE`), so it's
   DB-portable and unit-tested on SQLite. `dashboard_time.py` is the single source
   of truth for every dashboard day boundary. Needs `tzdata` (a dependency) so
