@@ -81,6 +81,13 @@ claimed chat job:
      reserved keys are picked last (the reserved-lane mechanism). Touches
      `last_used_at` in the same TX.
    - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
+     The worst-case cost is RESERVED before the call and released after. A
+     successful call books its real cost; a **timeout** books the reserved
+     ESTIMATE (not $0) — the provider generated and billed a response we never
+     received, so the daily cost cap must see that spend or it stays blind and
+     never stops the key (fix 2026-07-12: Google billed $122 on the paid gemini
+     key while the broker recorded $2; `_is_timeout` gates this). Pre-processing
+     rejects (429/auth/503) cost nothing and stay free.
    - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
      **adapter** first (see below).
    - `classify_provider_error`: 429 → cooldown 5 min; 401/403 → mark dead.

@@ -285,12 +285,28 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     return kind
 
 
+def _is_timeout(exc: Exception) -> bool:
+    """True if the attempt died on OUR call-timeout backstop or the provider's
+    own timeout. Distinct from a pre-processing reject (429/auth/503): on a
+    timeout the provider HELD the request long enough to generate — and BILL —
+    a response we never received (verified 2026-07-12: Google billed $122 on the
+    paid gemini key while the broker recorded $2, the gap being ~1.2k/day gemini
+    timeouts booked at $0). So a timeout must charge the cap, not be free."""
+    return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
 async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
+    billed_cost: float = 0.0,
 ) -> None:
     """Book a failed attempt in usage_log. Shared by run_chat/run_embed/
     run_transcribe — the shape is identical; only the capability differs.
+
+    `billed_cost` is normally 0 (a rejected call costs nothing), but a TIMEOUT
+    the provider still processed IS billed upstream — the caller passes the
+    reserved estimate so the per-key daily_cost_cap actually sees that spend and
+    stops the key, instead of the cap staying blind to it (fix 2026-07-12).
 
     http_status is derived from the error class, NOT left NULL: a rate_limit
     books 429 specifically because adaptive_cooldown counts recent
@@ -303,7 +319,7 @@ async def _record_error(
     await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=model, capability=capability,
-        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=billed_cost,
         latency_ms=None, status="error", error_kind=type(exc).__name__,
         http_status=http_status,
     )
@@ -491,9 +507,14 @@ async def run_chat(
                     log.info("learned: %s rejects ~%d tok prompts",
                              provider, est_tokens)
                     break  # bigger keys won't help — go straight to next provider
+                # A timeout means the provider held the request long enough to
+                # generate (and bill) a response we never got — charge the
+                # reserved estimate so the daily_cost_cap sees that spend. A
+                # pre-processing reject (429/auth/503) cost nothing → 0.
                 await _record_error(
                     key=key, project=project, provider=provider,
                     model=use_model, capability=capability, workflow=workflow, exc=e,
+                    billed_cost=estimated_cost if _is_timeout(e) else 0.0,
                 )
                 log.warning("provider %s key %s failed (%s): %s",
                             provider, key.label, kind, e)

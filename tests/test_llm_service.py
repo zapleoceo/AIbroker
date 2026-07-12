@@ -77,6 +77,23 @@ def test_classify_timeout_is_rate_limit():
     assert classify_provider_error(TimeoutError(), "zai") == "rate_limit"
 
 
+def test_is_timeout_flags_billable_holds_only():
+    """A timeout means the provider generated (and BILLED) a response we never
+    received, so it must charge the cost cap; a pre-processing reject cost
+    nothing (fix 2026-07-12: Google billed $122 on gemini while the broker saw
+    $2, the gap being timeouts booked at $0 that never tripped the $1/day cap)."""
+    from aibroker.services.llm_service import _is_timeout
+
+    class _LiteLLMTimeout(Exception):
+        pass
+    _LiteLLMTimeout.__name__ = "Timeout"
+
+    assert _is_timeout(TimeoutError())
+    assert _is_timeout(_LiteLLMTimeout())          # litellm.Timeout by class name
+    assert not _is_timeout(RuntimeError("429 rate limit"))
+    assert not _is_timeout(Exception("401 unauthorized"))
+
+
 def test_classify_anthropic_credit_balance_exhausted():
     """REGRESSION (2026-07-05): confirmed live — Anthropic's 'default' key was
     failing ~2743 times/day with this exact message (no '401'/'403'/'auth'
