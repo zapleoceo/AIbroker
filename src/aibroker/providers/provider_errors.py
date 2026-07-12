@@ -90,6 +90,14 @@ _PROVIDER_RATE_LIMIT_SIGNS: dict[str, tuple[str, ...]] = {
     # next-month (see the provider-monthly rule there), and the key stays
     # is_alive — the honest state: "monthly quota, resets DATE", not dead.
     "mistral": ("unauthorized",),
+    # Cloudflare Workers AI free tier: "you have used up your daily free
+    # allocation of 10,000 neurons" — confirmed live 2026-07-12, minutes after
+    # the provider first became reachable (account_id fix): the daily quota is
+    # tiny and litellm wraps the 429-ish body in a generic APIConnectionError,
+    # so the classifier fell through and the key was marked dead ("мёртв") for
+    # what is a DAILY quota that resets at 00:00 UTC. rate_limit + the
+    # daily-quota cooldown rule park it until midnight, keeping the key alive.
+    "cloudflare": ("daily free allocation", "neurons"),
 }
 _PROVIDER_AUTH_SIGNS: dict[str, tuple[str, ...]] = {
     # zai "Invalid API parameter, please check the documentation" — confirmed

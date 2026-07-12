@@ -80,6 +80,9 @@ _DAILY_QUOTA_MARKERS = (
     "requests per day",
     "tpd",
     "rpd",
+    # cloudflare Workers AI: "daily free allocation of 10,000 neurons" —
+    # resets at 00:00 UTC like every other daily quota here (2026-07-12).
+    "daily free allocation",
 )
 
 # Providers tell us exactly how long to wait via a retry hint — honour it

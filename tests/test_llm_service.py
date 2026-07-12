@@ -1300,3 +1300,18 @@ async def test_record_error_books_none_for_generic_error(monkeypatch):
         exc=RuntimeError("some unclassifiable failure"),
     )
     assert captured["http_status"] is None
+
+
+def test_classify_cloudflare_neurons_quota_is_rate_limit_not_auth():
+    """REGRESSION (2026-07-12): cloudflare's 'daily free allocation of 10,000
+    neurons' arrives wrapped in litellm.APIConnectionError; it fell through the
+    sign tables and the key was marked DEAD for a daily quota that resets at
+    00:00 UTC. Scoped to cloudflare so 'neurons' on another provider's message
+    can't cool an unrelated healthy key."""
+    exc = Exception(
+        'litellm.APIConnectionError: CloudflareException - {"errors":[{"message":'
+        '"AiError: you have used up your daily free allocation of 10,000 neurons, '
+        "please upgrade to Cloudflare's Workers Paid plan\"}]}"
+    )
+    assert classify_provider_error(exc, "cloudflare") == "rate_limit"
+    assert classify_provider_error(exc, "groq") == "error"  # scoped, not global

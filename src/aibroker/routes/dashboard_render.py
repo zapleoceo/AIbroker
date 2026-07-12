@@ -128,6 +128,10 @@ _RATE_LIMIT_DISPLAY_SIGNS: tuple[str, ...] = (
 _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
     *((s, "top up balance", "пополнить баланс") for s in _TOP_UP_SIGNS),
     ("monthly quota", "monthly quota", "месячная квота"),
+    # cloudflare free tier: 10k neurons/day, resets 00:00 UTC — a daily quota,
+    # not a dead key (2026-07-12).
+    ("daily free allocation", "daily free quota — resets 00:00 UTC",
+     "дневная free-квота — сброс в 00:00 UTC"),
     *((s, "rate limited", "лимит запросов") for s in _RATE_LIMIT_DISPLAY_SIGNS),
     ("quota", "quota exceeded", "квота исчерпана"),
     ("timeout", "provider timeout", "таймаут провайдера"),

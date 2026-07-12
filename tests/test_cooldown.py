@@ -305,3 +305,13 @@ async def test_cooldown_until_monthly_goes_to_next_month():
     offset = (until - next_utc_month_start()).total_seconds()
     assert 0 <= offset <= 90                                    # + anti-herd jitter
     assert (until - datetime.now(UTC)).total_seconds() > 86400  # far more than a day
+
+
+def test_is_daily_quota_error_detects_cloudflare_neurons():
+    """cloudflare free tier: 'daily free allocation of 10,000 neurons' is a
+    DAILY quota (resets 00:00 UTC) — must park until midnight, not churn."""
+    from aibroker.routing.cooldown import is_daily_quota_error
+    assert is_daily_quota_error(
+        'AiError: you have used up your daily free allocation of 10,000 '
+        "neurons, please upgrade to Cloudflare's Workers Paid plan"
+    )

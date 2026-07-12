@@ -1696,3 +1696,13 @@ def test_scope_pills_show_enabled_and_disabled_at_a_glance():
     assert ">vision<" in html and ">audio<" in html and ">chat<" in html
     assert "sc-rsv" in html                    # reserve lane visible too
     assert "sc-rsv" not in _scope_pills(["llm:chat"], False)
+
+
+def test_friendly_reason_cloudflare_daily_neurons():
+    """The neurons message must read as a daily free quota with its reset time,
+    not as a dead key or a generic quota."""
+    from aibroker.routes.dashboard_render import _friendly_reason
+    en, ru = _friendly_reason(
+        "AiError: you have used up your daily free allocation of 10,000 neurons"
+    )
+    assert "00:00 UTC" in en and "00:00 UTC" in ru
