@@ -177,8 +177,13 @@ broker finishes its fallback chain). See `docs/api.md`.
   always succeeds, whatever the provider pool is doing. (`/v1/deep` is a
   backward-compatible alias for `capability=chat:deep`.)
 - **Dispatcher = drain.** `services/job_queue.py`'s `dispatcher_loop` runs once
-  per uvicorn worker (started from the app lifespan). Every `_POLL_INTERVAL_S`
-  it claims up to `JOB_MAX_CONCURRENCY` eligible `pending` rows — an atomic
+  per uvicorn worker (started from the app lifespan). Woken instantly by
+  submit's `pg_notify('aib_jobs')` via a dedicated asyncpg LISTEN connection
+  (2026-07-12 — kills the old up-to-1s claim-latency floor; a timed
+  `_IDLE_POLL_INTERVAL_S`=5s poll stays as the fallback so a missed NOTIFY can
+  never stall jobs; on SQLite no listener starts and it degrades to plain
+  `_POLL_INTERVAL_S` polling), it claims up to `JOB_MAX_CONCURRENCY` eligible
+  `pending` rows — an atomic
   `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *`, so the
   workers never double-claim — flips them to `running`, and runs each through
   the SAME `run_chat` the sync path uses. On success → `done`; the client's

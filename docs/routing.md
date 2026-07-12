@@ -326,6 +326,15 @@ returns the scope the **project** must hold and the **key** must carry.
 > survives the worker that submitted it restarting — a `running` row whose
 > worker died is re-queued by a later tick. See `docs/architecture.md` for the
 > full drained-queue model.
+>
+> **NOTIFY-woken dispatcher (2026-07-12).** The dispatcher no longer hot-polls
+> every 1s: `submit_job` fires `pg_notify('aib_jobs')` after the enqueue
+> commits, and a dedicated LISTEN connection per worker wakes the loop
+> instantly — claim latency drops from up-to-1s to effectively zero. The timed
+> poll stays as a fallback (5s idle interval) so a missed NOTIFY (listener
+> reconnecting, notify error) can only delay a job, never stall it. On SQLite
+> (tests) no listener starts and the loop degrades to the old 1s poll.
+>
 > **cloudflare tried in `vision`, then pulled the SAME DAY (2026-07-04).**
 > Confirmed live (real token + account ID, 200 OK) against a garbage-bytes
 > probe — but that only proved auth+connectivity. A follow-up test with a

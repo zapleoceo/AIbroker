@@ -1,7 +1,9 @@
-"""Job queue dispatcher — backoff math (SQLite) + claim/execute/requeue loop
-(Postgres-only: the claim uses FOR UPDATE SKIP LOCKED)."""
+"""Job queue dispatcher — backoff math + NOTIFY wake-up plumbing (SQLite) +
+claim/execute/requeue loop (Postgres-only: the claim uses FOR UPDATE SKIP
+LOCKED)."""
 from __future__ import annotations
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, patch
 
@@ -10,7 +12,13 @@ import pytest
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.services import job_queue
-from aibroker.services.job_queue import _backoff_s, drain_once
+from aibroker.services.job_queue import (
+    _backoff_s,
+    _dialect_name,
+    _listen_dsn,
+    _wait_stop_or_wake,
+    drain_once,
+)
 from aibroker.services.llm_service import ChatOutcome
 
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
@@ -24,6 +32,81 @@ def test_backoff_s_grows_and_caps():
     assert _backoff_s(4) == 40
     assert _backoff_s(20) == 300           # capped
     assert _backoff_s(0) == 5              # floor guard (max(0, n-1))
+
+
+# ─── NOTIFY wake-up plumbing (SQLite-runnable) ───────────────────────────────
+
+
+def test_listen_dsn_strips_asyncpg_driver_suffix():
+    assert _listen_dsn("postgresql+asyncpg://u:p@h:5/db") == "postgresql://u:p@h:5/db"
+
+
+def test_listen_dsn_plain_dsn_unchanged():
+    assert _listen_dsn("postgresql://u:p@h:5/db") == "postgresql://u:p@h:5/db"
+
+
+async def test_wait_stop_or_wake_returns_immediately_on_wake():
+    """A set wake Event (a NOTIFY arrived) must not wait out the poll timeout."""
+    stop, wake = asyncio.Event(), asyncio.Event()
+    wake.set()
+    await asyncio.wait_for(_wait_stop_or_wake(stop, wake, timeout=30.0), timeout=1.0)
+
+
+async def test_wait_stop_or_wake_returns_immediately_on_stop():
+    stop, wake = asyncio.Event(), asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(_wait_stop_or_wake(stop, wake, timeout=30.0), timeout=1.0)
+
+
+async def test_wait_stop_or_wake_times_out_as_poll_fallback():
+    """Neither event set → the timed poll fallback fires (a missed NOTIFY can
+    never stall the queue)."""
+    stop, wake = asyncio.Event(), asyncio.Event()
+    await asyncio.wait_for(_wait_stop_or_wake(stop, wake, timeout=0.01), timeout=1.0)
+
+
+@pytest.mark.skipif(not ON_SQLITE, reason="asserts the SQLite degradation path")
+async def test_dispatcher_loop_sqlite_no_listener_and_clean_stop():
+    """On SQLite the LISTEN task must never start (dialect guard) and the loop
+    still polls and exits cleanly on the stop event — exactly the pre-NOTIFY
+    behaviour the SQLite tests rely on."""
+    assert await _dialect_name() == "sqlite"
+    stop = asyncio.Event()
+    with patch.object(job_queue, "_listen_for_jobs") as listener, \
+         patch.object(job_queue, "_requeue_stale_running", AsyncMock()), \
+         patch.object(job_queue, "_claim_batch", AsyncMock(return_value=[])):
+        task = asyncio.create_task(job_queue.dispatcher_loop(stop))
+        await asyncio.sleep(0.05)          # let it run at least one pass
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+    listener.assert_not_called()
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="pg_notify needs Postgres")
+async def test_submit_job_fires_pg_notify():
+    """submit_job must NOTIFY the dispatcher channel after the enqueue commits —
+    asserted end-to-end via a real LISTEN connection (the same mechanism
+    _listen_for_jobs uses)."""
+    import asyncpg
+
+    from aibroker.config import get_settings
+    from aibroker.services.deep_jobs import JOBS_CHANNEL, submit_job
+
+    got = asyncio.Event()
+    conn = await asyncpg.connect(_listen_dsn(get_settings().DATABASE_URL))
+    try:
+        await conn.add_listener(JOBS_CHANNEL, lambda *_: got.set())
+        pid = await _make_project(["llm:chat"])
+        async with get_session() as s:
+            project = await s.get(ProjectRow, pid)
+        await submit_job(
+            project=project, capability="chat:fast",
+            messages=[{"role": "user", "content": "hi"}], model=None,
+            max_tokens=64, temperature=0.7, response_format=None, workflow="t",
+        )
+        await asyncio.wait_for(got.wait(), timeout=5)
+    finally:
+        await conn.close()
 
 
 async def _make_project(scopes: list[str]) -> int:
