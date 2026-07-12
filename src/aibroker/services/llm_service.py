@@ -376,7 +376,7 @@ async def _run_attempt(
         latency_ms=meta["latency_ms"], status="ok", error_kind=None,
         http_status=200,
     )
-    # Cache deterministic (translate) successes for verbatim repeats.
+    # Cache deterministic (translate/prefilter) successes for verbatim repeats.
     response_cache.put(capability, messages, text, model=model,
                         max_tokens=max_tokens, temperature=temperature)
     # A success pins this (project, provider) to this key so the NEXT pick
@@ -432,9 +432,9 @@ async def run_chat(
     """
     scope = scope_for(capability)
 
-    # Exact-match cache for deterministic capabilities (translate): the same
-    # phrases recur verbatim, so a cached answer is correct and skips the whole
-    # LLM round-trip. No-op for chat/* (not deterministic).
+    # Exact-match cache for deterministic capabilities (translate/prefilter):
+    # the same inputs recur verbatim, so a cached answer is correct and skips
+    # the whole LLM round-trip. No-op for chat/* (not deterministic).
     cached = response_cache.get(capability, messages, model=model,
                                  max_tokens=max_tokens, temperature=temperature)
     if cached is not None:

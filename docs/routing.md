@@ -910,13 +910,19 @@ of the broker cleanly failing over. Past the budget the request 503s.
 > credential, and `cooldown_until` resolves it via the provider's normal
 > adaptive backoff (empty exception message doesn't match any quota marker).
 
-**Translate exact-match cache (2026-07-02).** `run_chat` first checks
-`services/response_cache.py` for deterministic capabilities — `is_cacheable`
-allow-lists `translate` only (same phrases recur verbatim, and a translation of
-fixed input is stable). A hit returns immediately (`provider="cache"`, cost 0)
-with no provider call; a success is stored (LRU + 24h TTL, per-replica,
-in-process, keyed on the full request signature incl. model/params). chat/* is
-never cacheable — non-deterministic.
+**Exact-match response cache — translate (2026-07-02) + prefilter
+(2026-07-12).** `run_chat` first checks `services/response_cache.py` for
+deterministic capabilities — `is_cacheable` allow-lists `translate` and
+`prefilter` (same inputs recur verbatim, and the answer for a fixed input is
+stable). A hit returns immediately (`provider="cache"`, cost 0) with no
+provider call; a success is stored (LRU, per-replica, in-process, keyed on the
+full request signature incl. model/params) with a per-capability TTL:
+`translate` 24h (a translation is stable for a day), `prefilter` 10 min —
+prefilter classifies inbound lead messages, where identical short messages
+('ok', 'thanks', emoji) recur heavily and the classification is
+deterministic-enough at temperature 0, but the TTL stays short so a
+prompt/threshold change rolls through quickly. chat/* is never cacheable —
+non-deterministic.
 
 **Skip size-filter on the small-prompt path (2026-07-02).** The learned-ceiling
 size filter (`learned_ceilings()`, a DB round-trip) runs only when
