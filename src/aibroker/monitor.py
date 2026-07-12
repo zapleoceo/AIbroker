@@ -109,9 +109,14 @@ async def _check_paid_tail() -> None:
             await recover(f"paid_tail:{cap}",
                           f"{cap}: paid tail restored ({usable} usable paid key(s))")
         else:
+            # Owner's choice (2026-07-12): first alert immediately, reminders at
+            # most once a DAY while the outage persists — recover() below still
+            # fires the ✅ the moment a paid key returns, and clears the state
+            # file so the NEXT outage alerts immediately again.
             await alert(f"paid_tail:{cap}",
                         f"{cap}: NO usable paid key — the guaranteed-answer "
-                        "tail is gone; free-only until a paid key recovers")
+                        "tail is gone; free-only until a paid key recovers",
+                        throttle_min=24 * 60)
 
 
 def _should_probe(key, sweep: int) -> bool:
