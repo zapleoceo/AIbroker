@@ -28,6 +28,7 @@ from sqlalchemy import select
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.db.resilience import retry_terminal_write
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
+@retry_terminal_write
 async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
     job_id: int, *, status: str,
     result_text: str | None = None,

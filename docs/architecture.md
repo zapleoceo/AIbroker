@@ -11,7 +11,7 @@
 │ aibroker-api (FastAPI, async)                        │
 │   POST /v1/jobs?capability=...   → queue → LiteLLM   │
 │   POST /v1/embed?provider=...    → LiteLLM SDK       │
-│   POST /v1/key, /v1/usage, /v1/release  (vending)    │
+│                                                      │
 │   GET  /v1/health, /admin/*, /dashboard, /login      │
 └──────────┬───────────────────────────────────────────┘
            │ async pool
@@ -49,10 +49,32 @@ holds the keys, calls the provider through LiteLLM, returns text + cost meta.
 Client never sees the API key. (Sync `POST /v1/chat` was removed 2026-07-10 —
 `410 Gone` → use `/v1/jobs`.)
 
-### Vending mode (for non-LLM HTTP APIs)
-`POST /v1/key` returns the plain key with a short TTL lease. Client calls the
-provider directly, reports usage back via `POST /v1/usage`. Used when the
-broker doesn't know the wire format (e.g. weird custom auth flows).
+### Vending mode — REMOVED (2026-07-12)
+`POST /v1/key` used to hand out plaintext provider tokens under a short lease
+for providers the broker "didn't know the wire format" of. LiteLLM covers every
+provider we run, the endpoint had zero production callers, and its body was an
+untested plaintext-token-exfiltration surface — deleted (routes/vending.py,
+its tests, `VENDING_RATE_LIMIT_PER_MINUTE`). The `leases` table and
+`usage_log.lease_id` column stay in the DB as historical data — no destructive
+migration.
+
+## Terminal-write resilience (2026-07-12)
+
+By the time the broker records a successful provider call, the money is already
+spent — so the two terminal writes (`selector.record_usage`, deep-job
+`_finish`) are wrapped in `db/resilience.retry_terminal_write`: up to 3
+attempts with short backoff on TRANSIENT connection failures only
+(OperationalError / InterfaceError / invalidated connections). Non-transient
+errors (IntegrityError…) surface immediately — they're bugs, not blips. Before
+this, a Postgres restart at the wrong instant produced a billed-but-unrecorded
+call and a client 500 for a response the broker had already paid for.
+
+`litellm` is PINNED (==1.92.0, pyproject + Dockerfile): the provider-error
+classification (`classify_provider_error` + cooldown sign tables) is calibrated
+against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
+`APIConnectionError`. A silent minor bump can reshuffle exception classes and
+quietly break cooldown/failover; upgrades must re-run the integration suite
+deliberately.
 
 ## Request flow (chat is async-only since 2026-07-10)
 
@@ -155,7 +177,7 @@ broker finishes its fallback chain). See `docs/api.md`.
 
 `.github/workflows/ci.yml` runs on every push/PR: a **unit** job on in-memory
 SQLite (the bulk), and an **integration** job against a real `postgres:16`
-service so the Postgres-only paths — selector, reserved-lane, vending, monitor,
+service so the Postgres-only paths — selector, reserved-lane, monitor,
 bootstrap — actually execute. `conftest` binds the engine to `DATABASE_URL`
 (NullPool on Postgres so the sync TestClient's event-loop portal doesn't collide
 with pooled asyncpg connections). The `deploy.yml` test gate keeps the coverage

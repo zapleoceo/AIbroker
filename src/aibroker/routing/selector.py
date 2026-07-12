@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
+from aibroker.db.resilience import retry_terminal_write
 
 
 class SelectionError(Exception):
@@ -229,6 +230,7 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
     return ""
 
 
+@retry_terminal_write
 async def record_usage(
     *,
     api_key_id: int,
@@ -252,7 +254,7 @@ async def record_usage(
 
     cache_read_tokens/cache_write_tokens default to 0 — only anthropic chat
     calls populate them today (see providers/litellm_adapter.py
-    apply_prompt_cache); every other call site (embed, transcribe, vending's
+    apply_prompt_cache); every other call site (embed, transcribe)
     /v1/usage self-report) has no cache concept and leaves them at 0.
 
     Returns the new row's id — the broker-side request ID. Threaded back
