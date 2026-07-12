@@ -277,6 +277,26 @@ _DASHBOARD_JS = """
   });
   apply(lang);
 })();
+// Timezone — server renders every timestamp as UTC in <span class="ts" data-utc>;
+// rewrite each into the VIEWER's local timezone so the operator reads times in
+// their own zone, not the server's. data-tf picks which fields to show. No-JS
+// falls back to the server-rendered UTC text.
+(function() {
+  const F = {
+    hm:    { hour: "2-digit", minute: "2-digit", hour12: false },
+    mdhm:  { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false },
+    mdhms: { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false },
+  };
+  function localize(root) {
+    (root || document).querySelectorAll("span.ts[data-utc]").forEach(el => {
+      const d = new Date(el.getAttribute("data-utc"));
+      if (isNaN(d.getTime())) return;
+      el.title = el.getAttribute("data-utc");            // keep UTC on hover
+      el.textContent = d.toLocaleString([], F[el.getAttribute("data-tf")] || F.mdhms);
+    });
+  }
+  localize(document);
+})();
 // Provider → scope + models hint, driven by JSON inlined into the page.
 (function() {
   const metaEl = document.getElementById("provider-meta");

@@ -1268,6 +1268,21 @@ def test_friendly_reason_recognizes_billing_and_outage_signs():
     )
 
 
+def test_ts_span_emits_utc_data_attr_and_fallback():
+    """Every displayed timestamp is a <span class="ts" data-utc="...Z"> the
+    dashboard JS localises to the viewer's timezone; the rendered text is the
+    UTC fallback (naive-UTC datetimes get a trailing Z so `new Date` reads UTC)."""
+    from datetime import datetime
+
+    from aibroker.routes.dashboard_render import _ts_span
+    dt = datetime(2026, 7, 11, 15, 45, 9)
+    html = _ts_span(dt, "mdhms")
+    assert 'class="ts"' in html
+    assert 'data-utc="2026-07-11T15:45:09Z"' in html
+    assert 'data-tf="mdhms"' in html
+    assert ">07-11 15:45:09<" in html  # UTC fallback text
+
+
 def test_friendly_reason_humanizes_rate_limit_dumps():
     """A throttled key's raw last_error ranges from a tidy 'rate limit' to a
     multi-line litellm/gemini JSON dump — all collapse to one clean label."""

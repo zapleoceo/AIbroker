@@ -75,6 +75,20 @@ split.
 - `Depends(require_admin)` or `Depends(require_project)` on every guarded route.
 - Audit-log significant ops.
 
+## Dashboard timestamps
+
+- Every timestamp shown in the dashboard is rendered server-side as **UTC** inside
+  `_ts_span(dt, tf)` → `<span class="ts" data-utc="…Z" data-tf="…">UTC fallback</span>`.
+- The dashboard JS (`_DASHBOARD_JS`) rewrites each `span.ts[data-utc]` into the
+  **viewer's** local timezone (`toLocaleString`) on load, so the operator reads
+  times in their own zone, not the server's. No-JS falls back to the UTC text;
+  the raw UTC stays in the span's `title`.
+- Naive-UTC datetimes (as stored) get a trailing `Z` so `new Date` parses them as
+  UTC, not local. `data-tf` (`hm`/`mdhm`/`mdhms`) mirrors the JS `F` format map.
+- Day-bucketed aggregates (per-day chart, "today", quick ranges) are still
+  computed on the **UTC day** server-side — localising those needs the client tz
+  at query time (a follow-up).
+
 ## Tests
 
 - One test file per source module: `test_<module>.py`.

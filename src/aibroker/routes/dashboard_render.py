@@ -134,6 +134,22 @@ _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Timestamp fields per format hint — mirrored in the dashboard JS (F map). The
+# server renders the UTC fallback; the client rewrites it to the viewer's zone.
+_TS_FMT: dict[str, str] = {
+    "hm": "%H:%M", "mdhm": "%m-%d %H:%M", "mdhms": "%m-%d %H:%M:%S",
+}
+
+
+def _ts_span(dt: datetime, tf: str) -> str:
+    """A viewer-localised timestamp. `dt` is naive UTC (as stored); the dashboard
+    JS rewrites the text into the browser's timezone. The server-rendered text is
+    the UTC fallback when JS is off; the trailing 'Z' tells `new Date` it's UTC."""
+    iso = dt.replace(microsecond=0).isoformat() + "Z"
+    return (f'<span class="ts" data-utc="{iso}" data-tf="{tf}">'
+            f'{dt.strftime(_TS_FMT[tf])}</span>')
+
+
 def _is_top_up(raw: str | None) -> bool:
     """True if the error is a billing-exhaustion (out of money) — a valid key
     that recovers on top-up, not a dead credential."""
@@ -325,13 +341,14 @@ def _render(data: dict[str, Any], *, flash: str = "",
         # (_friendly_reason) renders as a short actionable EN/RU label
         # ("top up balance"/"пополнить баланс") instead of a raw litellm
         # dump; the full raw text is always still in the hover tooltip.
-        cooldown_bit = None
+        cooldown_plain = None
+        cooldown_html = None
         if status_label == "cooldown" and k.cooldown_until:
-            same_day = k.cooldown_until.date() == now.date()
-            fmt = "%H:%M" if same_day else "%m-%d %H:%M"
-            cooldown_bit = f"until {k.cooldown_until.strftime(fmt)} UTC"
+            tf = "hm" if k.cooldown_until.date() == now.date() else "mdhm"
+            cooldown_plain = f"until {k.cooldown_until.strftime(_TS_FMT[tf])} UTC"
+            cooldown_html = "until " + _ts_span(k.cooldown_until, tf)
         detail_title = esc(" — ".join(
-            b for b in (k.last_error, cooldown_bit) if b
+            b for b in (k.last_error, cooldown_plain) if b
         ))
         reason_html = ""
         if k.last_error:
@@ -345,8 +362,8 @@ def _render(data: dict[str, Any], *, flash: str = "",
         detail_sub = (
             f'<div class="status-detail" title="{detail_title}">'
             f'{reason_html}'
-            f'{(" · " + cooldown_bit) if cooldown_bit else ""}'
-            f'</div>' if (k.last_error or cooldown_bit) else ""
+            f'{(" · " + cooldown_html) if cooldown_html else ""}'
+            f'</div>' if (k.last_error or cooldown_html) else ""
         )
         status_html = (
             f'<span class="{status_class}" data-i18n title="{detail_title}" '
@@ -820,7 +837,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'style="color:#666;font-size:11px">{r.id}</td>'
         f'<td data-sort="{r.created_at.isoformat()}" '
         f'style="color:#888;font-size:11px">'
-        f'{r.created_at.strftime("%m-%d %H:%M:%S")}</td>'
+        f'{_ts_span(r.created_at, "mdhms")}</td>'
         f'<td>{esc(r.provider)}</td>'
         f'<td style="color:#888;font-size:11px">{esc((r.model or "—")[:32])}</td>'
         f'<td><span class="pill">{esc(r.capability or "—")}</span></td>'
