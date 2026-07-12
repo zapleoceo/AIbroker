@@ -10,6 +10,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum, auto
 from typing import Any
 
 from aibroker.crypto import decrypt
@@ -222,6 +223,188 @@ class ChatOutcome:
     cache_write_tokens: int = 0
 
 
+class _Flow(Enum):
+    """Verdict of one key attempt — how run_chat's chain walk proceeds."""
+    NEXT_KEY = auto()
+    NEXT_KEY_EMPTY = auto()  # empty JSON body — retry same provider, bounded by run_chat
+    NEXT_PROVIDER = auto()
+    SUCCESS = auto()
+
+
+async def _handle_call_error(
+    *, exc: Exception, key: ApiKeyRow, project: ProjectRow, provider: str,
+    use_model: str, capability: str, workflow: str | None,
+    est_tokens: int, estimated_cost: float,
+) -> _Flow:
+    """Classify a failed call_llm, penalize/book it, return the walk verdict."""
+    # Model gone/unprovisioned (404) — it's a MODEL problem, not a
+    # KEY one: this key's OTHER models still work, and sibling keys
+    # of this provider run the same dead model. Do NOT penalize the
+    # key; break straight to the next provider. (Interim model-level
+    # fix — see is_model_unavailable / roadmap §3.1.)
+    if is_model_unavailable(exc):
+        await _record_error(
+            key=key, project=project, provider=provider,
+            model=use_model, capability=capability, workflow=workflow, exc=exc,
+        )
+        log.warning("provider %s model %s unavailable (%s) — next provider",
+                    provider, use_model, type(exc).__name__)
+        return _Flow.NEXT_PROVIDER  # not next key of the same dead model
+    kind = await _penalize(key, exc)
+    # Self-learn the size ceiling: if the provider rejected the
+    # prompt for being too big, remember it so we skip this
+    # provider for prompts ≥ this size next time (no hardcoded cap).
+    if is_too_large_error(exc):
+        await record_too_large(provider, est_tokens)
+        log.info("learned: %s rejects ~%d tok prompts",
+                 provider, est_tokens)
+        return _Flow.NEXT_PROVIDER  # bigger keys won't help
+    # A timeout means the provider held the request long enough to
+    # generate (and bill) a response we never got — charge the
+    # reserved estimate so the daily_cost_cap sees that spend. A
+    # pre-processing reject (429/auth/503) cost nothing → 0.
+    await _record_error(
+        key=key, project=project, provider=provider,
+        model=use_model, capability=capability, workflow=workflow, exc=exc,
+        billed_cost=estimated_cost if is_timeout(exc) else 0.0,
+    )
+    log.warning("provider %s key %s failed (%s): %s",
+                provider, key.label, kind, exc)
+    return _Flow.NEXT_KEY
+
+
+async def _record_json_miss(
+    *, key: ApiKeyRow, project: ProjectRow, provider: str, use_model: str,
+    capability: str, workflow: str | None, text: str, meta: dict[str, Any],
+) -> _Flow:
+    """Book a billed-but-unusable JSON body, return the walk verdict."""
+    # An EMPTY/whitespace body is a TRANSIENT provider throttle, not a
+    # model JSON defect: DeepSeek's json_object mode intermittently
+    # returns a blank string on large prompts under load (verified
+    # 2026-07-10 — ~24% on Stepan's 52k-char follow-up prompt, random
+    # per call, unrelated to the key). A retry of the SAME provider
+    # almost always returns valid JSON, so retry within the provider
+    # rather than burning the whole chain. Non-empty-but-malformed is
+    # still a MODEL property (cerebras gpt-oss mangles the same prompt
+    # on every key) → skip straight to the next provider.
+    empty = not (text or "").strip()
+    await record_usage(
+        api_key_id=key.id, project_id=project.id, lease_id=None,
+        provider=provider, model=use_model, capability=capability,
+        workflow=workflow, tokens_in=meta["tokens_in"],
+        tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+        cache_read_tokens=meta.get("cache_read_tokens", 0),
+        cache_write_tokens=meta.get("cache_write_tokens", 0),
+        latency_ms=meta["latency_ms"], status="error",
+        error_kind="EmptyBody" if empty else "InvalidJSON",
+        http_status=200,
+    )
+    if empty:
+        return _Flow.NEXT_KEY_EMPTY  # run_chat bounds this via _MAX_EMPTY_RETRIES
+    log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
+    return _Flow.NEXT_PROVIDER  # next provider, not next key of the same model
+
+
+async def _run_attempt(
+    *, key: ApiKeyRow, project: ProjectRow, provider: str, use_model: str,
+    capability: str, messages: list[dict[str, Any]], model: str | None,
+    max_tokens: int, temperature: float, response_format: dict[str, Any] | None,
+    workflow: str | None, est_tokens: int, call_timeout: float,
+) -> tuple[_Flow, ChatOutcome | None]:
+    """One chat key attempt: reserve cost → call → book the result → verdict."""
+    # Worst-case cost estimate (assumes the full max_tokens budget is
+    # generated) reserved BEFORE the call — see reserve_cost's
+    # docstring for why this closes a real concurrent-overspend race
+    # that a plain pre-loaded-object comparison couldn't. Free-tier
+    # keys always cost $0 (_billed_cost) — never estimate/reserve for
+    # them, matching reserve_cost's own free-tier skip.
+    estimated_cost = (
+        0.0 if key.tier == "free"
+        else estimate_llm_cost(use_model, est_tokens, max_tokens)
+    )
+    try:
+        await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
+    except CostGuardError as e:
+        await audit(actor=f"project:{project.name}", action="cap_block",
+                    target=f"provider={provider}", metadata={"reason": str(e)})
+        return _Flow.NEXT_PROVIDER, None  # project/global cap — more keys won't help
+    plain = decrypt(key.token_encrypted)
+    try:
+        text, meta = await call_llm(
+            model=use_model, messages=messages, api_key=plain,
+            max_tokens=max_tokens, temperature=temperature,
+            response_format=response_format,
+            extra=extra_for_provider(provider, getattr(key, "account_id", None)),
+            timeout=call_timeout,
+        )
+        meta["cost_usd"] = _billed_cost(key, meta)
+    except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+        # Attempt is over (however it ends) — release the reservation.
+        # _record_error (in _handle_call_error) books the real cost (0 — no response).
+        await release_cost(api_key=key, estimated_cost=estimated_cost)
+        return await _handle_call_error(
+            exc=e, key=key, project=project, provider=provider,
+            use_model=use_model, capability=capability, workflow=workflow,
+            est_tokens=est_tokens, estimated_cost=estimated_cost,
+        ), None
+
+    # Call resolved (successfully) — release the reservation; record_usage
+    # below books the REAL final cost (meta["cost_usd"]) on top, so the
+    # key ends up debited by exactly the real cost, never the estimate.
+    await release_cost(api_key=key, estimated_cost=estimated_cost)
+
+    # Deterministic JSON quality gate: an unparseable JSON body (gemini
+    # truncated, deepseek rogue) is billed but treated as a failure.
+    if _wants_json(response_format) and not _is_valid_json(text):
+        return await _record_json_miss(
+            key=key, project=project, provider=provider, use_model=use_model,
+            capability=capability, workflow=workflow, text=text, meta=meta,
+        ), None
+
+    request_id = await record_usage(
+        api_key_id=key.id, project_id=project.id, lease_id=None,
+        provider=provider, model=use_model, capability=capability,
+        workflow=workflow, tokens_in=meta["tokens_in"],
+        tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+        cache_read_tokens=meta.get("cache_read_tokens", 0),
+        cache_write_tokens=meta.get("cache_write_tokens", 0),
+        latency_ms=meta["latency_ms"], status="ok", error_kind=None,
+        http_status=200,
+    )
+    # Cache deterministic (translate) successes for verbatim repeats.
+    response_cache.put(capability, messages, text, model=model,
+                        max_tokens=max_tokens, temperature=temperature)
+    return _Flow.SUCCESS, ChatOutcome(
+        text=text, provider=provider, model=meta["model"],
+        tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
+        cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+        key_label=key.label, request_id=request_id,
+        cache_read_tokens=meta.get("cache_read_tokens", 0),
+        cache_write_tokens=meta.get("cache_write_tokens", 0),
+    )
+
+
+async def _size_filtered(full_chain: list[str], est_tokens: int, capability: str) -> list[str]:
+    # Size-aware provider filter: drop providers whose single-request token
+    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt — a
+    # guaranteed 413). Ceilings never drop below MIN_LEARNABLE_CEILING, so a
+    # smaller prompt fits EVERY provider — skip the learned_ceilings() DB
+    # round-trip entirely on the high-volume small-prompt path (chat:fast,
+    # translate). Above the floor, filter as before (fall back to the full
+    # chain if every provider is size-skipped, so we never starve).
+    if est_tokens < MIN_LEARNABLE_CEILING:
+        return full_chain
+    learned = await learned_ceilings()
+    sized_chain = [
+        p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
+    ]
+    if len(sized_chain) < len(full_chain):
+        log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
+                 capability, est_tokens,
+                 [p for p in full_chain if p not in sized_chain])
+    return sized_chain or full_chain
+
+
 async def run_chat(
     *,
     project: ProjectRow,
@@ -260,25 +443,7 @@ async def run_chat(
     # JSON — cuts InvalidJSON at the source, not after the wasted call.
     if _wants_json(response_format):
         full_chain = deprioritize_for_json(full_chain)
-    # Size-aware provider filter: drop providers whose single-request token
-    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt — a
-    # guaranteed 413). Ceilings never drop below MIN_LEARNABLE_CEILING, so a
-    # smaller prompt fits EVERY provider — skip the learned_ceilings() DB
-    # round-trip entirely on the high-volume small-prompt path (chat:fast,
-    # translate). Above the floor, filter as before (fall back to the full
-    # chain if every provider is size-skipped, so we never starve).
-    if est_tokens >= MIN_LEARNABLE_CEILING:
-        learned = await learned_ceilings()
-        sized_chain = [
-            p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
-        ]
-        chain = sized_chain or full_chain
-        if len(sized_chain) < len(full_chain):
-            log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
-                     capability, est_tokens,
-                     [p for p in full_chain if p not in sized_chain])
-    else:
-        chain = full_chain
+    chain = await _size_filtered(full_chain, est_tokens, capability)
 
     # Dynamic per-request attempt budget = "try every key we have across the
     # whole chain before giving up", so the paid tail is always reached before
@@ -288,7 +453,7 @@ async def run_chat(
     call_timeout = _call_timeout(capability)
     attempts = 0
     for provider in chain:
-        empty_retries = 0  # bounded per provider — see the empty-body branch below
+        empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
         for _ in range(_max_keys(provider)):
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
@@ -301,101 +466,17 @@ async def run_chat(
             use_model = model or model_for(provider, capability)
             if not use_model:
                 break  # provider can't serve this capability → next provider
-            # Worst-case cost estimate (assumes the full max_tokens budget is
-            # generated) reserved BEFORE the call — see reserve_cost's
-            # docstring for why this closes a real concurrent-overspend race
-            # that a plain pre-loaded-object comparison couldn't. Free-tier
-            # keys always cost $0 (_billed_cost) — never estimate/reserve for
-            # them, matching reserve_cost's own free-tier skip.
-            estimated_cost = (
-                0.0 if key.tier == "free"
-                else estimate_llm_cost(use_model, est_tokens, max_tokens)
+            flow, outcome = await _run_attempt(
+                key=key, project=project, provider=provider, use_model=use_model,
+                capability=capability, messages=messages, model=model,
+                max_tokens=max_tokens, temperature=temperature,
+                response_format=response_format, workflow=workflow,
+                est_tokens=est_tokens, call_timeout=call_timeout,
             )
-            try:
-                await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
-            except CostGuardError as e:
-                await audit(actor=f"project:{project.name}", action="cap_block",
-                            target=f"provider={provider}", metadata={"reason": str(e)})
-                break  # project/global cap — more keys won't help → next provider
-            plain = decrypt(key.token_encrypted)
-            try:
-                text, meta = await call_llm(
-                    model=use_model, messages=messages, api_key=plain,
-                    max_tokens=max_tokens, temperature=temperature,
-                    response_format=response_format,
-                    extra=extra_for_provider(provider, getattr(key, "account_id", None)),
-                    timeout=call_timeout,
-                )
-                meta["cost_usd"] = _billed_cost(key, meta)
-            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-                # Attempt is over (however it ends) — release the reservation.
-                # record_usage below books the real cost (0 here — no response).
-                await release_cost(api_key=key, estimated_cost=estimated_cost)
-                # Model gone/unprovisioned (404) — it's a MODEL problem, not a
-                # KEY one: this key's OTHER models still work, and sibling keys
-                # of this provider run the same dead model. Do NOT penalize the
-                # key; break straight to the next provider. (Interim model-level
-                # fix — see is_model_unavailable / roadmap §3.1.)
-                if is_model_unavailable(e):
-                    await _record_error(
-                        key=key, project=project, provider=provider,
-                        model=use_model, capability=capability, workflow=workflow, exc=e,
-                    )
-                    log.warning("provider %s model %s unavailable (%s) — next provider",
-                                provider, use_model, type(e).__name__)
-                    break  # next provider, not next key of the same dead model
-                kind = await _penalize(key, e)
-                # Self-learn the size ceiling: if the provider rejected the
-                # prompt for being too big, remember it so we skip this
-                # provider for prompts ≥ this size next time (no hardcoded cap).
-                if is_too_large_error(e):
-                    await record_too_large(provider, est_tokens)
-                    log.info("learned: %s rejects ~%d tok prompts",
-                             provider, est_tokens)
-                    break  # bigger keys won't help — go straight to next provider
-                # A timeout means the provider held the request long enough to
-                # generate (and bill) a response we never got — charge the
-                # reserved estimate so the daily_cost_cap sees that spend. A
-                # pre-processing reject (429/auth/503) cost nothing → 0.
-                await _record_error(
-                    key=key, project=project, provider=provider,
-                    model=use_model, capability=capability, workflow=workflow, exc=e,
-                    billed_cost=estimated_cost if is_timeout(e) else 0.0,
-                )
-                log.warning("provider %s key %s failed (%s): %s",
-                            provider, key.label, kind, e)
-                continue  # try the next key of this provider
-
-            # Call resolved (successfully) — release the reservation; record_usage
-            # below books the REAL final cost (meta["cost_usd"]) on top, so the
-            # key ends up debited by exactly the real cost, never the estimate.
-            await release_cost(api_key=key, estimated_cost=estimated_cost)
-
-            # Deterministic JSON quality gate: an unparseable JSON body (gemini
-            # truncated, deepseek rogue) is billed but treated as a failure.
-            if _wants_json(response_format) and not _is_valid_json(text):
-                # An EMPTY/whitespace body is a TRANSIENT provider throttle, not a
-                # model JSON defect: DeepSeek's json_object mode intermittently
-                # returns a blank string on large prompts under load (verified
-                # 2026-07-10 — ~24% on Stepan's 52k-char follow-up prompt, random
-                # per call, unrelated to the key). A retry of the SAME provider
-                # almost always returns valid JSON, so retry within the provider
-                # rather than burning the whole chain. Non-empty-but-malformed is
-                # still a MODEL property (cerebras gpt-oss mangles the same prompt
-                # on every key) → skip straight to the next provider.
-                empty = not (text or "").strip()
-                await record_usage(
-                    api_key_id=key.id, project_id=project.id, lease_id=None,
-                    provider=provider, model=use_model, capability=capability,
-                    workflow=workflow, tokens_in=meta["tokens_in"],
-                    tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-                    cache_read_tokens=meta.get("cache_read_tokens", 0),
-                    cache_write_tokens=meta.get("cache_write_tokens", 0),
-                    latency_ms=meta["latency_ms"], status="error",
-                    error_kind="EmptyBody" if empty else "InvalidJSON",
-                    http_status=200,
-                )
-                if empty and empty_retries < _MAX_EMPTY_RETRIES:
+            if flow is _Flow.SUCCESS:
+                return outcome
+            if flow is _Flow.NEXT_KEY_EMPTY:
+                if empty_retries < _MAX_EMPTY_RETRIES:
                     # Retry the SAME provider's next key ONCE — that rescues a
                     # transient throttle. But cap it: some prompts make DeepSeek's
                     # json_object return empty DETERMINISTICALLY (verified: a
@@ -408,28 +489,9 @@ async def run_chat(
                     continue
                 log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
                 break  # next provider, not next key of the same model
-
-            request_id = await record_usage(
-                api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model, capability=capability,
-                workflow=workflow, tokens_in=meta["tokens_in"],
-                tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-                cache_read_tokens=meta.get("cache_read_tokens", 0),
-                cache_write_tokens=meta.get("cache_write_tokens", 0),
-                latency_ms=meta["latency_ms"], status="ok", error_kind=None,
-                http_status=200,
-            )
-            # Cache deterministic (translate) successes for verbatim repeats.
-            response_cache.put(capability, messages, text, model=model,
-                                max_tokens=max_tokens, temperature=temperature)
-            return ChatOutcome(
-                text=text, provider=provider, model=meta["model"],
-                tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
-                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-                key_label=key.label, request_id=request_id,
-                cache_read_tokens=meta.get("cache_read_tokens", 0),
-                cache_write_tokens=meta.get("cache_write_tokens", 0),
-            )
+            if flow is _Flow.NEXT_PROVIDER:
+                break
+            # _Flow.NEXT_KEY — walk to this provider's next key
     return None
 
 
@@ -447,6 +509,18 @@ class EmbedOutcome:
 
 class EmbedFailed(Exception):
     """Every key of `provider` failed — route maps this to HTTP 502."""
+
+
+async def _handle_attempt_failure(
+    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
+    capability: str, workflow: str | None, exc: Exception,
+) -> None:
+    """Shared embed/transcribe failure tail: penalize the key, book the error row."""
+    await _penalize(key, exc)
+    await _record_error(
+        key=key, project=project, provider=provider, model=model,
+        capability=capability, workflow=workflow, exc=exc,
+    )
 
 
 async def run_embed(
@@ -486,8 +560,7 @@ async def run_embed(
             meta["cost_usd"] = _billed_cost(key, meta)
         except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
             last_exc = e
-            await _penalize(key, e)
-            await _record_error(
+            await _handle_attempt_failure(
                 key=key, project=project, provider=provider,
                 model=use_model, capability="embedding", workflow=workflow, exc=e,
             )
@@ -558,8 +631,7 @@ async def run_transcribe(
             meta["cost_usd"] = _billed_cost(key, meta)
         except Exception as e:
             last_exc = e
-            await _penalize(key, e)
-            await _record_error(
+            await _handle_attempt_failure(
                 key=key, project=project, provider=provider,
                 model=use_model, capability="transcription", workflow=workflow, exc=e,
             )
