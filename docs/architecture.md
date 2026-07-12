@@ -426,7 +426,7 @@ Render (`dashboard_render.py`): compact per-axis chips (`'84% tok · 15%
 req'`) from `axes_for_key()`, with the dominant axis driving the bar width.
 Bar coloured by `severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %).
 Tooltip spells out used/cap per axis + the cap's source. (The older
-single-label helpers `percent_used_for_key`/`bar_label_for_key` were dead
+older single-label display helpers were dead
 code after this render path landed — removed 2026-07-12.)
 
 Sortable by combined percentage via `data-sort`; paid keys get the

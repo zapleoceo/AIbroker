@@ -53,5 +53,13 @@ silently rejects it — which 403'd Stepan2's voice until `llm:audio` was added
 (2026-07-11). `tests/test_scopes.py::test_every_capability_scope_is_known`
 guards the invariant.
 
+## Client IP in audit rows
+
+`auth.client_ip(request)` is the single source of the caller IP for audit
+logging: it returns the first `X-Forwarded-For` entry when present (we sit
+behind Cloudflare + nginx, so `request.client.host` is just the proxy) and
+falls back to the direct peer address. Both admin and dashboard routes use it —
+the per-route `_ip` duplicates that logged the proxy IP are gone (2026-07-12).
+
 Adding scopes is a code-level change (server-side enforcement). Don't add a
 scope name to the DB without also adding the route guard.
