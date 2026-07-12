@@ -18,7 +18,7 @@ from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.providers.quotas import axes_for_key, severity_class
 from aibroker.routes.dashboard_assets import _NO_STORE, ASSETS_VERSION
 from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
-from aibroker.routes.dashboard_scopes import _scope_checkboxes
+from aibroker.routes.dashboard_scopes import _KNOWN_SCOPES, _scope_checkboxes
 from aibroker.routes.dashboard_time import UTC_TZ, today_in
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
@@ -150,6 +150,23 @@ def _ts_span(dt: datetime, tf: str) -> str:
     iso = dt.replace(microsecond=0).isoformat() + "Z"
     return (f'<span class="ts" data-utc="{iso}" data-tf="{tf}">'
             f'{dt.strftime(_TS_FMT[tf])}</span>')
+
+
+def _scope_pills(scopes: list[str] | None, is_reserve: bool) -> str:
+    """Every known scope as an at-a-glance pill — enabled bright, disabled
+    dimmed — so the operator sees each key's toggles right in the table
+    instead of opening the inline edit form key by key. `rsv` marks the
+    reserve lane (also otherwise visible only inside the form)."""
+    on = set(scopes or [])
+    pills = "".join(
+        f'<span class="sc {"sc-on" if s in on else "sc-off"}">'
+        f'{s.removeprefix("llm:")}</span>'
+        for s in _KNOWN_SCOPES
+    )
+    if is_reserve:
+        pills += ('<span class="sc sc-rsv" title="reserve lane — picked only '
+                  'when every shared key is exhausted">rsv</span>')
+    return pills
 
 
 def _cost_span(cost: float) -> str:
@@ -446,6 +463,8 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
             f"<td>{esc(k.provider)}</td>"
             f"<td>{esc(k.label)}</td>"
             f"<td data-sort='{esc(k.tier)}'><span class='pill'>{esc(k.tier)}</span></td>"
+            f"<td data-sort='{len(set(k.scopes or []))}'>"
+            f"{_scope_pills(k.scopes, bool(k.is_reserve))}</td>"
             f"<td data-sort='{status_label}'>{status_html}</td>"
             f"<td data-sort='{used_pct if used_pct is not None else -1}'>{used_html}</td>"
             f"<td data-sort='{cap_sort}'>{cap_html}</td>"
@@ -469,7 +488,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
             f'</form>'
             f"</td></tr>"
             # ── inline edit form row ──
-            f'<tr class="edit-row" data-edit-for="k{k.id}"><td colspan="10">'
+            f'<tr class="edit-row" data-edit-for="k{k.id}"><td colspan="11">'
             f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
             f'<input name="label" value="{esc(k.label)}" required>'
             f'<select name="tier">{tier_options}</select>'
@@ -625,6 +644,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
       <th class="sortable" data-i18n data-en="provider" data-ru="провайдер">provider</th>
       <th class="sortable" data-i18n data-en="label" data-ru="ярлык">label</th>
       <th class="sortable" data-i18n data-en="tier" data-ru="тариф">tier</th>
+      <th class="sortable" data-type="num" data-i18n data-en="scopes" data-ru="права">scopes</th>
       <th class="sortable" data-i18n data-en="status" data-ru="статус">status</th>
       <th class="sortable" data-type="num" data-i18n
           data-en="daily %" data-ru="% дня">daily %</th>
@@ -633,7 +653,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_keys}</tbody>
     <tfoot><tr>
-      <td colspan="5" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
+      <td colspan="6" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
       <td><span data-i18n data-en="{keys_alive} alive" data-ru="{keys_alive} живых">{keys_alive} alive</span> / {len(data['keys'])}</td>
       <td class="num">{keys_total_used:,}</td>
       <td class="num">${keys_total_spent:.4f} / ${keys_total_cap:.2f}</td>

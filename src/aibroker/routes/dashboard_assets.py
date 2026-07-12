@@ -103,6 +103,13 @@ td.mono, code { font-family:ui-monospace, monospace; color:#4dabf7; font-size:12
 .ok { color:#4caf50; } .bad { color:#f44336; } .warn { color:#ffd84a; }
 /* Cost column: dim free $0.0000 rows, brighten rows that actually spent money. */
 .cost-zero { color:#565b66; } .cost-pos { color:#f0f2f5; font-weight:600; }
+/* Per-key scope pills: every known scope shown; enabled bright, disabled dim —
+   the key's toggles are readable in the table without opening the edit form. */
+.sc { display:inline-block; padding:1px 5px; border-radius:6px; font-size:10px;
+      margin:0 2px 1px 0; white-space:nowrap; }
+.sc-on  { background:rgba(77,171,247,.15); color:#4dabf7; }
+.sc-off { color:#3a3f4a; border:1px solid #23262e; }
+.sc-rsv { color:#ffd84a; border:1px solid #4a4326; }
 .status-detail { font-size:10px; color:#888; margin-top:2px; white-space:nowrap;
                  max-width:160px; overflow:hidden; text-overflow:ellipsis; }
 .pill { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px;

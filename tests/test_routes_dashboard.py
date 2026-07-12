@@ -1682,3 +1682,17 @@ def test_delete_key_audits_xff_client_ip():
                         follow_redirects=False)
     assert r.status_code == 303
     assert fake_audit.await_args.kwargs["ip"] == "198.51.100.4"
+
+
+def test_scope_pills_show_enabled_and_disabled_at_a_glance():
+    """Owner request (2026-07-12): every key's scope toggles must be readable
+    right in the keys table — enabled bright (sc-on), disabled dimmed (sc-off),
+    reserve flagged — without opening the inline edit form key by key."""
+    from aibroker.routes.dashboard_render import _scope_pills
+    from aibroker.routes.dashboard_scopes import _KNOWN_SCOPES
+    html = _scope_pills(["llm:vision", "llm:audio"], True)
+    assert html.count('class="sc sc-on"') == 2
+    assert html.count('class="sc sc-off"') == len(_KNOWN_SCOPES) - 2
+    assert ">vision<" in html and ">audio<" in html and ">chat<" in html
+    assert "sc-rsv" in html                    # reserve lane visible too
+    assert "sc-rsv" not in _scope_pills(["llm:chat"], False)
