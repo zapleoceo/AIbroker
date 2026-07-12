@@ -101,6 +101,8 @@ th, td { padding:8px 12px; text-align:left; border-bottom:1px solid #2a2d34; fon
 th { background:#0f1115; color:#888; text-transform:uppercase; font-size:11px; font-weight:500; }
 td.mono, code { font-family:ui-monospace, monospace; color:#4dabf7; font-size:12px; }
 .ok { color:#4caf50; } .bad { color:#f44336; } .warn { color:#ffd84a; }
+/* Cost column: dim free $0.0000 rows, brighten rows that actually spent money. */
+.cost-zero { color:#565b66; } .cost-pos { color:#f0f2f5; font-weight:600; }
 .status-detail { font-size:10px; color:#888; margin-top:2px; white-space:nowrap;
                  max-width:160px; overflow:hidden; text-overflow:ellipsis; }
 .pill { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px;

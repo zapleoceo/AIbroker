@@ -152,6 +152,14 @@ def _ts_span(dt: datetime, tf: str) -> str:
             f'{dt.strftime(_TS_FMT[tf])}</span>')
 
 
+def _cost_span(cost: float) -> str:
+    """$-formatted cost, dimmed (`cost-zero`) for a free/zero-cost call and
+    brightened (`cost-pos`) when money was actually spent, so paid rows stand
+    out at a glance in a column that's mostly $0.0000."""
+    cls = "cost-zero" if cost == 0 else "cost-pos"
+    return f'<span class="{cls}">${cost:.4f}</span>'
+
+
 def _is_top_up(raw: str | None) -> bool:
     """True if the error is a billing-exhaustion (out of money) — a valid key
     that recovers on top-up, not a dead credential."""
@@ -277,7 +285,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
             f"<td><span class='pill'>{esc(scopes_csv)}</span></td>"
             f"<td class='{active_class}'>{active_cell}</td>"
             f"<td data-sort=\"{p.daily_cost_cap_usd or 0}\">{cap_disp}</td>"
-            f"<td data-sort=\"{p_spend}\" class='mono'>${p_spend:.4f}</td>"
+            f"<td data-sort=\"{p_spend}\" class='mono'>{_cost_span(p_spend)}</td>"
             f"<td><code>{esc(p.project_key_prefix)}…</code></td>"
             f'<td><button type="button" data-edit-toggle="p{p.id}" data-i18n '
             f'data-en="edit" data-ru="ред.">edit</button></td>'
@@ -777,7 +785,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     prov_card = _bd_card("By provider", "По провайдерам", list(d["by_provider"]),
         lambda r: f'<tr><td class="k">{esc(r.provider)}</td>'
                   f'<td class="num">{r.n}</td>'
-                  f'<td class="num">${float(r.spend):.4f}</td></tr>',
+                  f'<td class="num">{_cost_span(float(r.spend))}</td></tr>',
         total=(t.calls, f"${float(t.spend):.4f}"))
 
     # Capability + workflow are two small, related slices of the same calls —
@@ -794,13 +802,13 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         + _bd_section("By capability", "По способностям", list(d["by_capability"]),
             lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
                       f'<td class="num">{r.n}</td>'
-                      f'<td class="num">${float(r.spend):.4f}</td>'
+                      f'<td class="num">{_cost_span(float(r.spend))}</td>'
                       f'<td>{_sparkline_svg(cap_spark.get(r.cap, _empty_spark))}</td></tr>',
             colspan=4)
         + _bd_section("By workflow", "По workflow", list(d["by_workflow"]),
             lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
                       f'<td class="num">{r.n}</td>'
-                      f'<td class="num">${float(r.spend):.4f}</td>'
+                      f'<td class="num">{_cost_span(float(r.spend))}</td>'
                       f'<td>{_sparkline_svg(wf_spark.get(r.wf, _empty_spark))}</td></tr>',
             colspan=4)
         + '</div>'
@@ -809,7 +817,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
         lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
                   f'<td class="num">{r.n}</td>'
-                  f'<td class="num">${float(r.spend):.4f}</td></tr>')
+                  f'<td class="num">{_cost_span(float(r.spend))}</td></tr>')
 
     # Latency histogram: count of calls per latency bucket (same period), bars
     # scaled to the busiest bucket. Reuses the cap-bar/fill quota-bar styling.
@@ -846,7 +854,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'<td class="num" data-sort="{r.tokens_in + r.tokens_out}">'
         f'{r.tokens_in}/{r.tokens_out}</td>'
         f'<td class="num" data-sort="{float(r.cost_usd)}">'
-        f'${float(r.cost_usd):.4f}</td>'
+        f'{_cost_span(float(r.cost_usd))}</td>'
         f'<td class="num" data-sort="{r.latency_ms or 0}">'
         f'{r.latency_ms or "—"}</td>'
         f'<td class="status-{esc(r.status)}">{esc(r.status)}</td>'

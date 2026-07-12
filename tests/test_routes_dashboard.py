@@ -1281,6 +1281,12 @@ def test_asset_urls_cache_bust_by_content_hash():
     assert f"assets.js?v={ASSETS_VERSION}" in html
 
 
+def test_cost_span_dims_zero_and_brightens_nonzero():
+    from aibroker.routes.dashboard_render import _cost_span
+    assert _cost_span(0.0) == '<span class="cost-zero">$0.0000</span>'
+    assert _cost_span(0.5) == '<span class="cost-pos">$0.5000</span>'
+
+
 def test_ts_span_emits_utc_data_attr_and_fallback():
     """Every displayed timestamp is a <span class="ts" data-utc="...Z"> the
     dashboard JS localises to the viewer's timezone; the rendered text is the
