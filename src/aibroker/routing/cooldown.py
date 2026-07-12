@@ -31,7 +31,6 @@ COOLDOWN_BASE_S: dict[str, int] = {
     "openai":     120,   # paid, conservative
     "voyage":     60,    # rolling RPM window
     "sambanova":  120,   # only 20 req/day — don't hammer a near-exhausted key
-    "github":     120,   # unverified free tier — conservative until confirmed
     "nvidia":     300,   # one-time credits + invisible quota — most conservative
     "cloudflare": 120,   # invisible neuron budget, renews daily — moderate
     "zai":        60,    # no visible quota — moderate default

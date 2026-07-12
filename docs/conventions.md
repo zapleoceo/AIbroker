@@ -30,7 +30,6 @@ src/aibroker/
     notifier.py        Telegram alert + throttle
   scripts/
     bootstrap.py       create admin-ops project
-    migrate_from_vera.py  one-shot key import
   monitor.py           background health-probe loop (separate container)
 ```
 

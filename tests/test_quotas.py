@@ -5,8 +5,6 @@ from types import SimpleNamespace
 
 from aibroker.providers.quotas import (
     PROVIDER_QUOTAS,
-    bar_label_for_key,
-    percent_used_for_key,
     quota_for,
     quota_for_key,
     severity_class,
@@ -112,51 +110,6 @@ def test_paid_key_keeps_explicit_manual_limit():
 def test_free_key_still_gets_seed():
     q = quota_for_key(_key(provider="gemini", tier="free"))
     assert q.req_per_day == 1_500
-
-
-# ─── percent_used_for_key — max across 4 axes ────────────────────────────────
-
-
-def test_percent_used_total_token_axis():
-    k = _key()  # cerebras: 1M tok cap
-    assert percent_used_for_key(0, 500_000, k) == 50
-    assert percent_used_for_key(0, 1_000_000, k) == 100
-
-
-def test_percent_used_output_axis_saturates_first():
-    """Corp Gemini: 1.5M in (50% of 3M) but 76k out (95% of 80k) → 95%."""
-    k = _key(provider="gemini",
-             manual_tok_in_limit=3_000_000, manual_tok_out_limit=80_000)
-    pct = percent_used_for_key(10, 1_576_000, k,
-                                toks_in=1_500_000, toks_out=76_000)
-    assert pct == 95   # output axis dominates
-
-
-def test_percent_used_caps_at_100():
-    k = _key()
-    assert percent_used_for_key(0, 5_000_000, k) == 100
-
-
-def test_percent_used_none_for_paid():
-    assert percent_used_for_key(100, 1_000_000, _key(provider="anthropic")) is None
-
-
-# ─── bar_label_for_key — shows the dominant axis ─────────────────────────────
-
-
-def test_bar_label_picks_output_axis_when_dominant():
-    k = _key(provider="gemini",
-             manual_tok_in_limit=3_000_000, manual_tok_out_limit=80_000)
-    label = bar_label_for_key(10, 1_576_000, k,
-                               toks_in=1_500_000, toks_out=76_000)
-    assert "out" in label
-    assert "76k" in label and "80k" in label
-
-
-def test_bar_label_picks_token_axis_for_cerebras():
-    k = _key()
-    label = bar_label_for_key(100, 500_000, k)
-    assert "tok" in label and "500k" in label
 
 
 # ─── severity ────────────────────────────────────────────────────────────────

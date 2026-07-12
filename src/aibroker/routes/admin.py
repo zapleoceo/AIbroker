@@ -1,11 +1,19 @@
 """Admin API — CRUD over projects + api_keys. X-Admin-Key required."""
 from __future__ import annotations
 
+import contextlib
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from aibroker.auth import AdminCtx, generate_project_key, hash_project_key, require_admin
+from aibroker.auth import (
+    AdminCtx,
+    client_ip,
+    generate_project_key,
+    hash_project_key,
+    require_admin,
+)
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
@@ -63,7 +71,7 @@ async def create_project(body: ProjectCreate, request: Request,
         await audit(
             actor="admin", action="project.create", target=body.name,
             metadata={"scopes": body.allowed_scopes},
-            ip=_ip(request),
+            ip=client_ip(request),
         )
         return ProjectCreated(
             id=row.id, name=row.name, owner_email=row.owner_email,
@@ -179,15 +187,13 @@ async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
         await audit(actor="admin", action=action,
                     target=f"{body.provider}/{body.label}",
                     metadata={"tier": body.tier, "scopes": body.scopes},
-                    ip=_ip(request))
+                    ip=client_ip(request))
         new_id = row.id
     # Auto-discover real free-tier limits from response headers (best-effort).
     # Outside the txn so a probe failure can't roll back the key.
     from aibroker.providers.auto_discover import discover_and_store
-    try:
+    with contextlib.suppress(Exception):
         await discover_and_store(new_id, body.provider, body.token)
-    except Exception:
-        pass
     async with get_session() as s:
         refreshed = await s.get(ApiKeyRow, new_id)
         return _key_out(refreshed)
@@ -211,7 +217,7 @@ async def disable_key(key_id: int, request: Request) -> dict:
             raise HTTPException(404, "not found")
         row.is_active = False
         await audit(actor="admin", action="key.disable", target=f"id={key_id}",
-                    ip=_ip(request))
+                    ip=client_ip(request))
     return {"ok": True}
 
 
@@ -223,7 +229,7 @@ async def delete_key(key_id: int, request: Request) -> dict:
             raise HTTPException(404, "not found")
         await audit(actor="admin", action="key.delete",
                     target=f"{row.provider}/{row.label}",
-                    ip=_ip(request))
+                    ip=client_ip(request))
         await s.delete(row)
     return {"ok": True}
 
@@ -241,7 +247,3 @@ def _key_out(row: ApiKeyRow) -> ApiKeyOut:
         error_count=row.error_count,
         notes=row.notes,
     )
-
-
-def _ip(req: Request) -> str | None:
-    return req.client.host if req.client else None

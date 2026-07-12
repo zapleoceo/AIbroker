@@ -381,9 +381,10 @@ provider's free-tier daily quota. Driven by `providers/quotas.py`:
 each `Quota` carries `req_per_day`, `tok_per_day`, and a `doc` URL to the
 provider's rate-limit page (for verification — these numbers drift).
 
-Both axes apply at once for providers that meter both (e.g. Cerebras:
-14,400 req/day AND 1M tokens/day). `percent_used(req, tok, provider)`
-returns the **max** of the two — whichever you'll hit first wins.
+All capped axes apply at once for providers that meter several (e.g. groq:
+14,400 req/day AND 500k tokens/day). `axes_for_key(...)` returns the
+per-axis breakdown sorted by fill — the dominant (max) axis drives the bar,
+because whichever axis you'll hit first wins.
 Token usage is summed live from `usage_log` (today UTC) per `api_key_id`,
 so the bar reflects real consumption, not stale counters.
 
@@ -421,10 +422,12 @@ already past 100 % of the token quota (Cerebras emailed user a
 2026-06-28; regression test `test_main_render_keys_show_token_axis_when_dominant`
 locks it in.
 
-Render: `bar_label()` shows whichever axis dominates — `'525/14400'`
-(requests) or `'1.4M/1M tok'` (tokens). Bar coloured by
-`severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %). Tooltip
-exposes both axes (`'97 % · 525 req · 1,356,576 tok'`) for debugging.
+Render (`dashboard_render.py`): compact per-axis chips (`'84% tok · 15%
+req'`) from `axes_for_key()`, with the dominant axis driving the bar width.
+Bar coloured by `severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %).
+Tooltip spells out used/cap per axis + the cap's source. (The older
+single-label helpers `percent_used_for_key`/`bar_label_for_key` were dead
+code after this render path landed — removed 2026-07-12.)
 
 Sortable by combined percentage via `data-sort`; paid keys get the
 sentinel `-1` so they cluster at one end.

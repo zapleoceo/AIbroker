@@ -18,7 +18,6 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 
-
 # ─── Project key generation/verification ────────────────────────────────────
 
 
@@ -34,6 +33,16 @@ def hash_project_key(key: str) -> str:
 
 def verify_project_key(plaintext: str, stored_hash: str) -> bool:
     return hmac.compare_digest(hash_project_key(plaintext), stored_hash)
+
+
+def client_ip(request: Request) -> str:
+    """Real client IP for audit rows. Behind Cloudflare+nginx,
+    `request.client.host` is the proxy — the original address is the FIRST
+    entry of X-Forwarded-For (later entries are the proxies that appended)."""
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else ""
 
 
 # ─── FastAPI dependencies ───────────────────────────────────────────────────

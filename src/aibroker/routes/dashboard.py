@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 
+from aibroker.auth import client_ip
 from aibroker.auth_session import (
     COOKIE_NAME,
     OwnerSession,
@@ -79,7 +80,7 @@ async def tg_login_callback(request: Request) -> RedirectResponse:
         COOKIE_NAME, cookie,
         max_age=ttl, httponly=True, secure=True, samesite="lax", path="/",
     )
-    await audit(actor=f"tg:{user_id}", action="login.success", ip=_ip(request))
+    await audit(actor=f"tg:{user_id}", action="login.success", ip=client_ip(request))
     return resp
 
 
@@ -248,7 +249,7 @@ async def dash_create_key(
                 metadata={"scopes": scope_list, "is_reserve": is_reserve,
                           "manual_limits": {k: _positive_int_or_none(v)
                                             for k, v in limits.items()}},
-                ip=_ip(request))
+                ip=client_ip(request))
     # Auto-discover free-tier limits from response headers (best-effort).
     if new_id is not None:
         with contextlib.suppress(Exception):
@@ -273,7 +274,7 @@ async def dash_toggle_key(
             row.error_count = 0
         state = "enabled" if row.is_active else "disabled"
     await audit(actor="dashboard", action=f"key.{state}", target=f"id={key_id}",
-                ip=_ip(request))
+                ip=client_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+id={key_id}+{state}", status_code=303
     )
@@ -290,7 +291,7 @@ async def dash_delete_key(
             return RedirectResponse("/dashboard?flash=!Key+not+found", status_code=303)
         target = f"{row.provider}/{row.label}"
         await s.delete(row)
-    await audit(actor="dashboard", action="key.delete", target=target, ip=_ip(request))
+    await audit(actor="dashboard", action="key.delete", target=target, ip=client_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{target}+deleted", status_code=303
     )
@@ -343,7 +344,7 @@ async def dash_edit_key(
                           "manual_tok": row.manual_tok_limit,
                           "manual_tok_in": row.manual_tok_in_limit,
                           "manual_tok_out": row.manual_tok_out_limit},
-                ip=_ip(request))
+                ip=client_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Key+{target}+updated", status_code=303
     )
@@ -372,7 +373,7 @@ async def dash_edit_project(
         row.daily_cost_cap_usd = cap_v
         row.owner_email = owner_email or None
     await audit(actor="dashboard", action="project.edit", target=name,
-                metadata={"scopes": scopes, "cap": cap_v}, ip=_ip(request))
+                metadata={"scopes": scopes, "cap": cap_v}, ip=client_ip(request))
     return RedirectResponse(
         f"/dashboard?flash=Project+{name}+updated", status_code=303
     )
@@ -402,11 +403,7 @@ async def dash_create_project(
         )
         s.add(row)
     await audit(actor="dashboard", action="project.create", target=name,
-                metadata={"scopes": scopes}, ip=_ip(request))
+                metadata={"scopes": scopes}, ip=client_ip(request))
     data = await _gather_data()
     return _render(data, new_project_key=plain,
                     flash=f"Project {name} created.")
-
-
-def _ip(req: Request) -> str | None:
-    return req.client.host if req.client else None

@@ -135,50 +135,6 @@ def quota_for_key(key) -> Quota:
     )
 
 
-def _axis_pcts(q: Quota, reqs: int, toks: int, toks_in: int, toks_out: int) -> list[int]:
-    out: list[int] = []
-    if q.req_per_day:
-        out.append(min(100, int(reqs / q.req_per_day * 100)))
-    if q.tok_per_day:
-        out.append(min(100, int(toks / q.tok_per_day * 100)))
-    if q.tok_in_per_day:
-        out.append(min(100, int(toks_in / q.tok_in_per_day * 100)))
-    if q.tok_out_per_day:
-        out.append(min(100, int(toks_out / q.tok_out_per_day * 100)))
-    return out
-
-
-def percent_used_for_key(
-    reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
-) -> int | None:
-    """Highest axis usage % for this key today. None when no axis is capped."""
-    pcts = _axis_pcts(quota_for_key(key), reqs, toks, toks_in, toks_out)
-    return max(pcts) if pcts else None
-
-
-def bar_label_for_key(
-    reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
-) -> str:
-    """'X/Y' label for whichever axis is closest to its cap."""
-    q = quota_for_key(key)
-    candidates: list[tuple[float, str]] = []
-    if q.req_per_day:
-        candidates.append((reqs / q.req_per_day, f"{reqs}/{q.req_per_day}"))
-    if q.tok_per_day:
-        candidates.append((toks / q.tok_per_day,
-                            f"{_humanize(toks)}/{_humanize(q.tok_per_day)} tok"))
-    if q.tok_in_per_day:
-        candidates.append((toks_in / q.tok_in_per_day,
-                            f"{_humanize(toks_in)}/{_humanize(q.tok_in_per_day)} in"))
-    if q.tok_out_per_day:
-        candidates.append((toks_out / q.tok_out_per_day,
-                            f"{_humanize(toks_out)}/{_humanize(q.tok_out_per_day)} out"))
-    if not candidates:
-        return str(reqs)
-    candidates.sort(key=lambda c: c[0], reverse=True)
-    return candidates[0][1]
-
-
 def axes_for_key(
     reqs: int, toks: int, key, *, toks_in: int = 0, toks_out: int = 0
 ) -> list[dict]:
@@ -218,11 +174,3 @@ def severity_class(pct: int | None) -> str:
     if pct >= 70:
         return "warn"
     return ""
-
-
-def _humanize(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.0f}k"
-    return str(n)
