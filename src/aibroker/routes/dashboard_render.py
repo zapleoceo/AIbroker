@@ -16,7 +16,7 @@ from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.providers.quotas import axes_for_key, severity_class
-from aibroker.routes.dashboard_assets import _NO_STORE
+from aibroker.routes.dashboard_assets import _NO_STORE, ASSETS_VERSION
 from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
 from aibroker.routes.dashboard_scopes import _scope_checkboxes
 from aibroker.routes.dashboard_time import UTC_TZ, today_in
@@ -70,7 +70,7 @@ def _dash_html(*, body: str, flash: str = "") -> str:
 <meta charset="utf-8"><title>AIbroker</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
-<link rel="stylesheet" href="/dashboard/assets.css?v={__version__}">
+<link rel="stylesheet" href="/dashboard/assets.css?v={ASSETS_VERSION}">
 </head><body>
 
 <nav>
@@ -92,7 +92,7 @@ def _dash_html(*, body: str, flash: str = "") -> str:
 
 {body}
 
-<script src="/dashboard/assets.js?v={__version__}"></script>
+<script src="/dashboard/assets.js?v={ASSETS_VERSION}"></script>
 
 </body></html>"""
 

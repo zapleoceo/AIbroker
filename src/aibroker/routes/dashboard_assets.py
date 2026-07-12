@@ -8,6 +8,8 @@ brace escaping is needed here.
 """
 from __future__ import annotations
 
+import hashlib
+
 # Authenticated, always-fresh admin pages must never be cached — without this
 # Chrome heuristic-caches the HTML (CF already serves it DYNAMIC) and shows a
 # stale key list. Applied to every dashboard/login HTMLResponse.
@@ -433,3 +435,12 @@ _DASHBOARD_JS = """
   });
 })();
 """
+
+
+# Cache-bust the long-cached (immutable, 1y) CSS/JS by a hash of their OWN
+# content, not the package __version__ — an asset edit without a version bump
+# used to ship to the server but never reach browsers (they kept the immutable
+# ?v=<version> copy). Content-addressed, so any CSS/JS change auto-invalidates.
+ASSETS_VERSION = hashlib.sha256(
+    (_DASHBOARD_CSS + _DASHBOARD_JS).encode()
+).hexdigest()[:12]

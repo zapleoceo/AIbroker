@@ -96,6 +96,14 @@ split.
   of truth for every dashboard day boundary. Needs `tzdata` (a dependency) so
   `ZoneInfo` resolves inside the slim container.
 
+## Dashboard assets (cache-busting)
+
+- The dashboard CSS/JS are served long-cached (`immutable`, 1y). Their `?v=`
+  query is `dashboard_assets.ASSETS_VERSION` — a **hash of the CSS+JS content**,
+  NOT the package `__version__`. So any asset edit auto-invalidates the browser
+  cache; editing CSS/JS needs no manual version bump (relying on `__version__`
+  once shipped JS to the server that never reached browsers).
+
 ## Tests
 
 - One test file per source module: `test_<module>.py`.

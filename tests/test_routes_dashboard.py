@@ -1268,6 +1268,19 @@ def test_friendly_reason_recognizes_billing_and_outage_signs():
     )
 
 
+def test_asset_urls_cache_bust_by_content_hash():
+    """The immutable-cached CSS/JS must be busted by a hash of their own content,
+    not the static package __version__ — otherwise an asset edit ships to the
+    server but browsers keep the stale immutable copy (timezone JS didn't reach
+    the client until this, 2026-07-12)."""
+    from aibroker.routes.dashboard_assets import ASSETS_VERSION
+    from aibroker.routes.dashboard_render import _dash_html
+    assert len(ASSETS_VERSION) == 12 and all(c in "0123456789abcdef" for c in ASSETS_VERSION)
+    html = _dash_html(body="x")
+    assert f"assets.css?v={ASSETS_VERSION}" in html
+    assert f"assets.js?v={ASSETS_VERSION}" in html
+
+
 def test_ts_span_emits_utc_data_attr_and_fallback():
     """Every displayed timestamp is a <span class="ts" data-utc="...Z"> the
     dashboard JS localises to the viewer's timezone; the rendered text is the
