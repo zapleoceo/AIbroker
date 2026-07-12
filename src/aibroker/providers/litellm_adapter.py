@@ -247,13 +247,19 @@ def estimate_llm_cost(
 # param), gemini needs its own context-cache lifecycle — neither belongs here.
 _EXPLICIT_CACHE_PROVIDERS = ("anthropic",)
 
+# Anthropic allows at most 4 cache_control breakpoints per request.
+_MAX_CACHE_MARKS = 4
+
 
 def apply_prompt_cache(
     model: str, messages: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Mark the first system message with `cache_control` for providers that
-    support explicit prompt caching, so a repeated system prompt is billed as a
-    cache read. No-op for other providers and for non-str system content.
+    """Mark every LEADING system message (the contiguous role=="system" run at
+    the head — Stepan sends its static prefix as several) with `cache_control`
+    for providers that support explicit prompt caching, so the whole repeated
+    prefix is billed as a cache read, not just the first message. Capped at
+    _MAX_CACHE_MARKS breakpoints. No-op for other providers and for non-str
+    system content.
 
     Caching only pays off when the caller sends a byte-stable system prefix;
     the marker is harmless (silently not cached) when it doesn't or when the
@@ -261,16 +267,19 @@ def apply_prompt_cache(
     if model.split("/", 1)[0] not in _EXPLICIT_CACHE_PROVIDERS:
         return messages
     out: list[dict[str, Any]] = []
-    marked = False
+    marks = 0
+    head = True
     for m in messages:
+        if m.get("role") != "system":
+            head = False
         content = m.get("content")
-        if not marked and m.get("role") == "system" and isinstance(content, str) \
+        if head and marks < _MAX_CACHE_MARKS and isinstance(content, str) \
                 and content.strip():
             m = {**m, "content": [{
                 "type": "text", "text": content,
                 "cache_control": {"type": "ephemeral"},
             }]}
-            marked = True
+            marks += 1
         out.append(m)
     return out
 

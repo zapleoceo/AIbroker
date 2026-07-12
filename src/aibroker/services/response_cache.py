@@ -1,13 +1,13 @@
 """In-process exact-match response cache for deterministic capabilities.
 
-Scoped to `translate`: the same short phrases recur verbatim, and the
-translation of a fixed (text, target-language) input is stable — returning a
-cached answer is correct and skips a whole LLM round-trip. NOT used for chat/*:
-those aren't deterministic, so a stale cached answer would be wrong.
+Scoped to `translate` and `prefilter`: the same short inputs recur verbatim
+and the answer for a fixed input is stable — returning a cached answer is
+correct and skips a whole LLM round-trip. NOT used for chat/*: those aren't
+deterministic, so a stale cached answer would be wrong.
 
-Per-process (each broker replica keeps its own copy). translate volume is low
-(~150/day) so a small LRU+TTL is proportionate — no shared store or migration
-needed; cross-replica misses are acceptable for a cheap capability.
+Per-process (each broker replica keeps its own copy). Volumes are low enough
+that a small LRU+TTL is proportionate — no shared store or migration needed;
+cross-replica misses are acceptable for cheap capabilities.
 """
 from __future__ import annotations
 
@@ -18,10 +18,19 @@ from collections import OrderedDict
 from typing import Any
 
 _MAX_ENTRIES = 2_000
-_TTL_S = 24 * 60 * 60  # a phrase's translation is stable for a day
 
-# Only deterministic capabilities may be cached. chat/* etc. must never be here.
-_CACHEABLE: frozenset[str] = frozenset({"translate"})
+# Only deterministic capabilities may be cached — chat/* etc. must never be
+# here. Per-capability TTL:
+#   - translate: a phrase's translation is stable for a day.
+#   - prefilter (2026-07-12): classifies inbound lead messages; identical
+#     short messages ('ok', 'thanks', emoji) recur heavily and the verdict is
+#     deterministic-enough at temperature 0 — but kept SHORT (10 min) so a
+#     prompt/threshold change rolls through quickly.
+_TTL_S: dict[str, int] = {
+    "translate": 24 * 60 * 60,
+    "prefilter": 10 * 60,
+}
+_CACHEABLE: frozenset[str] = frozenset(_TTL_S)
 
 # key -> (stored_at_epoch, response_text)
 _store: OrderedDict[str, tuple[float, str]] = OrderedDict()
@@ -57,7 +66,7 @@ def get(
     if hit is None:
         return None
     stored_at, text = hit
-    if time.time() - stored_at > _TTL_S:
+    if time.time() - stored_at > _TTL_S[capability]:
         _store.pop(k, None)
         return None
     _store.move_to_end(k)  # LRU touch

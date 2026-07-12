@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
-from aibroker.routes import admin, dashboard, health, landing, proxy, vending
+from aibroker.routes import admin, dashboard, health, landing, proxy
 from aibroker.services.job_queue import dispatcher_loop
 
 
@@ -67,6 +67,5 @@ app = FastAPI(
 app.include_router(landing.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
-app.include_router(vending.router, prefix="/v1")
 app.include_router(admin.router, prefix="/admin")
 app.include_router(dashboard.router)

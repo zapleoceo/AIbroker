@@ -18,11 +18,11 @@ src/aibroker/
     cost_guard.py      Three-tier cap check
   providers/
     litellm_adapter.py LLM SDK wrapper
+    provider_errors.py Error classification (sign tables + verdicts)
     health_probes.py   Cheapest call per provider
   routes/
     health.py          / + /healthz + /v1/health
     proxy.py           /v1/jobs + /v1/embed
-    vending.py         /v1/key + /v1/usage + /v1/release
     admin.py           /admin/* (X-Admin-Key)
     dashboard*.py      /login + /dashboard + /dashboard/* (split: dashboard.py + dashboard_assets/data/render/scopes.py)
   telemetry/
@@ -30,7 +30,6 @@ src/aibroker/
     notifier.py        Telegram alert + throttle
   scripts/
     bootstrap.py       create admin-ops project
-    migrate_from_vera.py  one-shot key import
   monitor.py           background health-probe loop (separate container)
 ```
 

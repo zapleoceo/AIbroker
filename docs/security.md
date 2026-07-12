@@ -11,7 +11,6 @@
 | Dashboard sessions | Cookie theft | HMAC-SHA256 signed (`<uid>.<exp>.<sig>`), `httponly`, `secure`, `samesite=lax`, 30d TTL. Single owner. |
 | Deploy SSH key | Server takeover | Restricted in `authorized_keys`: `command="..." + no-pty + no-*-forwarding`. Worst case attacker re-runs our deploy. |
 | Telegram login | Spoofed user_id | Verify HMAC-SHA256 over sorted params with secret = `sha256(bot_token)`. Reject if user_id ≠ `OWNER_TELEGRAM_ID`. Reject if `auth_date > 24h old`. |
-| `POST /v1/key` (vending) | Compromised project key drains lease pool / exfiltrates plaintext provider tokens | Per-project rolling-minute rate limit (`VENDING_RATE_LIMIT_PER_MINUTE`, default 30), rejects with 429 before ever picking a key. See `routes/vending.py::_check_vending_rate_limit`. |
 | Cost cap (`daily_cost_cap_usd`) | Concurrent requests race past the per-key cap (TOCTOU) | `reserve_cost`/`release_cost` use a single atomic `UPDATE ... WHERE ... RETURNING` — Postgres row-locking serializes concurrent writers so the cap can never be overshot. See **Cost guard** in [`routing.md`](routing.md). |
 
 ## Audit log
@@ -51,7 +50,7 @@ If `X-Project-Key` leaks:
 
 ## What's NOT covered
 
-- **No rate limiting** on `/v1/jobs`/`/v1/embed` (proxy mode) per project beyond cost caps. A buggy client can hammer the broker; you'll see it in `calls_1h` on the dashboard. (Vending mode's `/v1/key` IS rate-limited — see threat model above.)
+- **No rate limiting** on `/v1/jobs`/`/v1/embed` (proxy mode) per project beyond cost caps. A buggy client can hammer the broker; you'll see it in `calls_1h` on the dashboard.
 - **No mTLS** between projects and broker. We rely on `X-Project-Key` over TLS to CF, then HTTP from CF to origin.
 - **No KMS** — `TOKEN_SECRET` is on disk. If someone roots the box, all keys can be decrypted.
 - **No PII redaction** in audit_log. Today we don't log message bodies — but if that changes, redact first.

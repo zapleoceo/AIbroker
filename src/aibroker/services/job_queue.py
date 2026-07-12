@@ -1,11 +1,13 @@
 """Job queue dispatcher — drains the `deep_jobs` queue with backpressure.
 
 Submit (services/deep_jobs.submit_job) only ENQUEUES a `pending` row. This
-loop is what actually runs the calls: every `_POLL_INTERVAL_S` it claims up to
-`_MAX_CONCURRENCY` pending rows (atomic UPDATE … FOR UPDATE SKIP LOCKED, so the
-2 uvicorn workers each run this loop and never double-claim a job), runs each
-via run_chat, and writes the result back. Started once per web worker from the
-app lifespan (main.py); cancelled cleanly on shutdown.
+loop is what actually runs the calls: woken instantly by submit's NOTIFY (or
+by the `_IDLE_POLL_INTERVAL_S` fallback poll; plain `_POLL_INTERVAL_S` polling
+on SQLite), it claims up to `_MAX_CONCURRENCY` pending rows (atomic UPDATE …
+FOR UPDATE SKIP LOCKED, so the 2 uvicorn workers each run this loop and never
+double-claim a job), runs each via run_chat, and writes the result back.
+Started once per web worker from the app lifespan (main.py); cancelled cleanly
+on shutdown.
 
 Why a drained queue instead of the old fire-and-forget `asyncio.create_task`:
   - Survives a worker restart (a deploy). A job whose worker died mid-run sits
@@ -28,17 +30,23 @@ import logging
 import os
 from typing import Any
 
+import asyncpg
 from sqlalchemy import text
 
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
-from aibroker.services.deep_jobs import _finish
+from aibroker.services.deep_jobs import JOBS_CHANNEL, _finish
 from aibroker.services.llm_service import run_chat
 
 log = logging.getLogger(__name__)
 
 _MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "8"))
 _POLL_INTERVAL_S = float(os.environ.get("JOB_POLL_INTERVAL_S", "1.0"))
+# With the LISTEN/NOTIFY wake-up (Postgres) the timed poll is only a fallback
+# for a missed NOTIFY, so it can be lazier than the old 1s hot poll.
+_IDLE_POLL_INTERVAL_S = 5.0
+_LISTEN_RECONNECT_MAX_S = 30.0
 _MAX_RETRIES = int(os.environ.get("JOB_MAX_RETRIES", "8"))
 # A `running` row whose worker died mid-call is re-queued after this long. Must
 # sit safely ABOVE the longest a live worker can hold a job: run_chat's own hard
@@ -177,26 +185,109 @@ async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     return len(claimed)
 
 
+def _listen_dsn(database_url: str) -> str:
+    """SQLAlchemy URL → plain asyncpg DSN: strip the '+asyncpg' driver suffix
+    ('postgresql+asyncpg://…' → 'postgresql://…') — asyncpg.connect doesn't
+    understand SQLAlchemy driver qualifiers."""
+    scheme, sep, rest = database_url.partition("://")
+    return f"{scheme.partition('+')[0]}{sep}{rest}"
+
+
+async def _dialect_name() -> str:
+    async with get_session() as s:
+        return s.bind.dialect.name
+
+
+async def _wait_stop_or_wake(stop: asyncio.Event, wake: asyncio.Event,
+                             timeout: float) -> None:
+    """Sleep until shutdown, a NOTIFY wake-up, or the poll-fallback timeout —
+    whichever comes first."""
+    waiters = [asyncio.create_task(stop.wait()), asyncio.create_task(wake.wait())]
+    try:
+        await asyncio.wait(waiters, timeout=timeout,
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters:
+            w.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
+async def _listen_for_jobs(wake: asyncio.Event, stop: asyncio.Event) -> None:  # pragma: no cover — needs a live Postgres
+    """Dedicated LISTEN connection that sets `wake` on every submit_job NOTIFY.
+
+    Raw asyncpg (not the SQLAlchemy engine): add_listener needs a connection
+    held open outside the pool, which `engine.raw_connection()` can't provide
+    cleanly. Reconnects with backoff on loss; while it's down the dispatcher's
+    timed poll keeps draining (fail-open), so a dead listener only costs
+    latency, never jobs."""
+    dsn = _listen_dsn(get_settings().DATABASE_URL)
+    backoff = 1.0
+    while not stop.is_set():
+        try:
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.add_listener(JOBS_CHANNEL, lambda *_: wake.set())
+                backoff = 1.0
+                # A dropped connection goes silent (no error surfaces here),
+                # so is_closed() is re-checked on a slow cadence.
+                while not stop.is_set() and not conn.is_closed():
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop.wait(),
+                                               timeout=_LISTEN_RECONNECT_MAX_S)
+            finally:
+                with contextlib.suppress(Exception):
+                    await conn.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — the listener must outlive any connection error
+            log.warning("job NOTIFY listener down (%s) — poll fallback active, "
+                        "reconnect in %.0fs", e, backoff)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=backoff)
+            backoff = min(backoff * 2, _LISTEN_RECONNECT_MAX_S)
+
+
 async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — loop harness
     """Forever: keep up to `_MAX_CONCURRENCY` jobs in flight, filling free slots
     each tick. Runs one instance per web worker (lifespan). Never lets one slow
-    job (nemotron minutes) block claiming others — each runs as its own task."""
+    job (nemotron minutes) block claiming others — each runs as its own task.
+
+    Hybrid wake-up (2026-07-12): on Postgres a LISTEN connection sets `wake`
+    the instant submit_job NOTIFYs, killing the old up-to-1s claim-latency
+    floor; the timed wait stays as a fallback (`_IDLE_POLL_INTERVAL_S`) so a
+    missed NOTIFY can never stall jobs. On SQLite (tests) no listener starts
+    and the loop degrades to the plain `_POLL_INTERVAL_S` poll, as before."""
     inflight: set[asyncio.Task[Any]] = set()
-    log.info("job dispatcher started (concurrency=%d, poll=%.1fs)",
-             _MAX_CONCURRENCY, _POLL_INTERVAL_S)
+    wake = asyncio.Event()
+    listener: asyncio.Task[None] | None = None
+    if await _dialect_name() == "postgresql":
+        listener = asyncio.create_task(_listen_for_jobs(wake, stop))
+    idle_timeout = _IDLE_POLL_INTERVAL_S if listener is not None else _POLL_INTERVAL_S
+    log.info("job dispatcher started (concurrency=%d, idle poll=%.1fs, notify=%s)",
+             _MAX_CONCURRENCY, idle_timeout, listener is not None)
     while not stop.is_set():
+        # Clear BEFORE claiming: a NOTIFY landing mid-pass re-sets it, so the
+        # wait below returns immediately instead of losing that wake-up.
+        wake.clear()
+        claimed = 0
         try:
             await _requeue_stale_running()
             free = _MAX_CONCURRENCY - len(inflight)
             if free > 0:
                 for row in await _claim_batch(free):
+                    claimed += 1
                     t = asyncio.create_task(_execute(row))
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
         except Exception as e:  # noqa: BLE001 — a bad tick must not kill the loop
             log.exception("dispatcher tick failed: %s", e)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=_POLL_INTERVAL_S)
+        if listener is not None and claimed:
+            continue  # queue still hot — keep draining without waiting
+        await _wait_stop_or_wake(stop, wake, idle_timeout)
+    if listener is not None:
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listener
     if inflight:
         await asyncio.gather(*inflight, return_exceptions=True)
     log.info("job dispatcher stopped")

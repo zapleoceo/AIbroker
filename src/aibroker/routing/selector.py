@@ -6,12 +6,15 @@ to advance the LRU.
 """
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import text
 
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
+from aibroker.db.resilience import retry_terminal_write
 
 
 class SelectionError(Exception):
@@ -41,12 +44,126 @@ FRESH_DAILY_COST_SQL = (
     "THEN 0 ELSE k.daily_cost_used_usd END)"
 )
 
+# Effective ∞ for an uncapped saturation axis (paid / unknown provider).
+_INF = "999999999999"
+
+# The 4-axis saturation verdict needs an aggregate over today's usage_log
+# slice (30-60k rows). Computing it inline on EVERY pick (~60-100k picks/day)
+# made the hot path O(day-rows × picks); a verdict up to 15s stale is harmless
+# — a key crosses 95% of a DAILY quota once a day, not once a second. Same
+# in-process pattern as cost_guard._global_cache: per uvicorn worker, no Redis
+# dependency, worst case each worker recomputes once per TTL.
+_SATURATION_TTL_S = 15.0
+_saturated: dict[str, Any] = {"ids": frozenset(), "fetched_at": float("-inf")}
+
+# Provider prompt caches (deepseek auto prefix-cache, gemini implicit) live
+# per ACCOUNT/key — pure random() rotation fragmented a project's stable
+# prompt prefix across every key, wasting hits (deepseek measured 56%, could
+# be much higher). Map (project_id, provider) → last successful key so repeat
+# traffic lands where the prefix is already warm. TTL ≈ provider cache
+# retention windows. In-process only: 2 uvicorn workers each keep their own
+# map — acceptable (no Redis dependency; worst case one extra cache warm per
+# worker).
+_AFFINITY_TTL_S = 30 * 60.0
+_affinity: dict[tuple[int, str], tuple[int, float]] = {}
+
+
+def note_affinity(project_id: int, provider: str, api_key_id: int) -> None:
+    """Pin the key that just successfully served (project, provider)."""
+    _affinity[(project_id, provider)] = (api_key_id, time.monotonic())
+
+
+def _affinity_for(project_id: int | None, provider: str) -> int | None:
+    if project_id is None:
+        return None
+    entry = _affinity.get((project_id, provider))
+    if entry is None:
+        return None
+    api_key_id, noted_at = entry
+    if time.monotonic() - noted_at > _AFFINITY_TTL_S:
+        del _affinity[(project_id, provider)]
+        return None
+    return api_key_id
+
+
+def invalidate_saturation_cache() -> None:
+    _saturated["fetched_at"] = float("-inf")
+
+
+def _quota_values_sql() -> str:
+    """VALUES rows for the defaults CTE — one (provider, req, tok) per seed."""
+    from aibroker.providers.quotas import PROVIDER_QUOTAS
+
+    def q(v: int | None) -> str:
+        return str(int(v)) if v else "NULL"
+
+    return ",\n          ".join(
+        f"('{p}', {q(quota.req_per_day)}, {q(quota.tok_per_day)})"
+        for p, quota in PROVIDER_QUOTAS.items()
+    )
+
+
+def _saturation_order_params(
+    saturated: frozenset[int], affinity_id: int | None
+) -> dict[str, object]:
+    """Bind params for the pick ORDER BY. saturated_ids is never empty —
+    asyncpg needs a concrete bigint[] — and -1 matches no real key id."""
+    return {
+        "saturated_ids": list(saturated) or [-1],
+        "aff": affinity_id if affinity_id is not None else -1,
+    }
+
+
+async def _saturated_key_ids() -> frozenset[int]:  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
+    now = time.monotonic()
+    if now - _saturated["fetched_at"] < _SATURATION_TTL_S:
+        return _saturated["ids"]
+    # Saturation per axis = today's usage ≥ 95% of the effective cap, resolved
+    # manual_* > discovered_* > PROVIDER_QUOTAS seed. Four axes: requests,
+    # total tokens, input, output — the corp Gemini case (3M in / 80k out) is
+    # exactly why in/out are separate: its 80k output cap saturates long
+    # before the 3M input cap.
+    stmt = text(
+        f"""
+        WITH defaults(provider, req_def, tok_def) AS (VALUES
+          {_quota_values_sql()}
+        ),
+        toks_today AS (
+            SELECT api_key_id,
+                   COALESCE(SUM(tokens_in + tokens_out), 0) AS toks,
+                   COALESCE(SUM(tokens_in), 0)  AS toks_in,
+                   COALESCE(SUM(tokens_out), 0) AS toks_out,
+                   COUNT(*) AS reqs
+            FROM usage_log
+            -- Sargable half-open bound on the bare created_at column (uses
+            -- ix_usage_created_at); a ::date cast would force a full seq scan.
+            WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
+              AND created_at <  date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day'
+              AND api_key_id IS NOT NULL
+            GROUP BY api_key_id
+        )
+        SELECT k.id FROM api_keys k
+        JOIN toks_today t   ON t.api_key_id = k.id
+        LEFT JOIN defaults d ON d.provider  = k.provider
+        WHERE t.reqs >= COALESCE(k.manual_req_limit, k.discovered_req_limit, d.req_def, {_INF}) * 0.95
+           OR t.toks >= COALESCE(k.manual_tok_limit, k.discovered_tok_limit, d.tok_def, {_INF}) * 0.95
+           OR t.toks_in  >= COALESCE(k.manual_tok_in_limit, {_INF}) * 0.95
+           OR t.toks_out >= COALESCE(k.manual_tok_out_limit, {_INF}) * 0.95
+        """
+    )
+    async with get_session() as s:
+        ids = frozenset((await s.execute(stmt)).scalars().all())
+    _saturated["ids"] = ids
+    _saturated["fetched_at"] = now
+    return ids
+
 
 async def pick_and_reserve(
     provider: str,
     scope: str,
     *,
     require_tier: str | None = None,
+    project_id: int | None = None,
 ) -> ApiKeyRow | None:
     """Pick the best available key for `provider` that supports `scope`.
 
@@ -54,7 +171,8 @@ async def pick_and_reserve(
     daily cost cap (if set). Returns None if nothing fits — caller walks the
     capability chain to the next provider.
 
-    Ordering: non-reserve keys first (is_reserve ASC), then LRU-oldest. A
+    Ordering: non-reserve keys first (is_reserve ASC), saturated keys pushed
+    back, then project→key cache affinity as a tie-break, then random(). A
     reserved key (is_reserve=True) is therefore picked only when every shared
     key in its (provider, scope) group is exhausted — the Coach safety net.
 
@@ -74,83 +192,31 @@ async def pick_and_reserve(
     if require_tier:
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
+    saturated = await _saturated_key_ids()  # pragma: no cover — Postgres-only glue, covered by tests/test_selector.py
+    params.update(_saturation_order_params(saturated, _affinity_for(project_id, provider)))  # pragma: no cover — same
 
     where = " AND ".join(conds)
-    # 2026-06-28: pure random rotation + soft skip of over-quota keys.
-    #   1. is_reserve         — non-reserve first; Coach reserve last.
-    #   2. is_quota_saturated — keys at ≥95% of their daily token/request
-    #      quota are pushed to the back of the queue. They still get picked
-    #      if every healthy peer is also saturated (fallback, not hard cut).
-    #   3. random()           — true random rotation within the bucket. No
-    #      LRU, no daily_used sort — those caused one key per workload to
-    #      monopolise its slot while others sat idle.
-    #
-    # Quota source priority per key:
-    #   - discovered_*_limit (parsed from provider response headers)
-    #   - PROVIDER_QUOTAS default (Python config, baked into VALUES CTE)
-    #   - effective ∞ when neither knows (paid / unknown provider)
-    from aibroker.providers.quotas import PROVIDER_QUOTAS
-    def _q(v: int | None) -> str:
-        return str(int(v)) if v else "NULL"
-    quota_rows = ",\n          ".join(
-        f"('{p}', {_q(q.req_per_day)}, {_q(q.tok_per_day)})"
-        for p, q in PROVIDER_QUOTAS.items()
-    )
-
-    # Saturation per axis = today's usage ≥ 95% of the effective cap, where
-    # the effective cap = manual_* > discovered_* > provider default. Four
-    # axes: requests, total tokens, input tokens, output tokens. The corp
-    # Gemini case (3M in / 80k out) is exactly why in/out are separate — its
-    # 80k output cap saturates long before the 3M input cap.
-    _INF = "999999999999"
+    # 2026-06-28 (random + soft saturation skip), 2026-07-12 (TTL cache + affinity):
+    #   1. is_reserve  — non-reserve first; Coach reserve last.
+    #   2. saturated   — keys ≥95% on any daily quota axis (verdict from the
+    #      TTL-cached _saturated_key_ids, no per-pick usage_log aggregate) are
+    #      pushed to the back. Still soft: picked if every peer is also full.
+    #   3. affinity    — the key that last successfully served this (project,
+    #      provider) wins ties, keeping its provider-side prompt cache warm.
+    #      Never overrides reserve/saturation/WHERE filters — tie-break only.
+    #   4. random()    — rotation within the bucket. No LRU, no daily_used
+    #      sort — those caused one key per workload to monopolise its slot
+    #      while others sat idle.
     stmt = text(
         f"""
-        WITH defaults(provider, req_def, tok_def) AS (VALUES
-          {quota_rows}
-        ),
-        toks_today AS MATERIALIZED (
-            SELECT api_key_id,
-                   COALESCE(SUM(tokens_in + tokens_out), 0) AS toks,
-                   COALESCE(SUM(tokens_in), 0)  AS toks_in,
-                   COALESCE(SUM(tokens_out), 0) AS toks_out,
-                   COUNT(*) AS reqs
-            FROM usage_log
-            -- Sargable half-open bound on the bare created_at column (uses the
-            -- ix_usage_created_at index). The old `created_at::date = today`
-            -- cast forced a full seq-scan of usage_log on EVERY pick — ~220ms
-            -- and rising with the table, on the hot path of every request.
-            WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')
-              AND created_at <  date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day'
-              AND api_key_id IS NOT NULL
-            GROUP BY api_key_id
-        )
         UPDATE api_keys SET last_used_at = now()
         WHERE id = (
             SELECT k.id FROM api_keys k
-            LEFT JOIN toks_today t  ON t.api_key_id = k.id
-            LEFT JOIN defaults d    ON d.provider   = k.provider
             WHERE {where}
             ORDER BY
                 k.is_reserve,
-                -- Soft saturation skip across all 4 axes. Pushed to back when
-                -- ≥95% on ANY axis; used only if every peer is also full.
-                CASE
-                  WHEN COALESCE(t.reqs, 0) >=
-                       COALESCE(k.manual_req_limit, k.discovered_req_limit, d.req_def, {_INF}) * 0.95
-                    OR COALESCE(t.toks, 0) >=
-                       COALESCE(k.manual_tok_limit, k.discovered_tok_limit, d.tok_def, {_INF}) * 0.95
-                    OR COALESCE(t.toks_in, 0) >=
-                       COALESCE(k.manual_tok_in_limit, {_INF}) * 0.95
-                    OR COALESCE(t.toks_out, 0) >=
-                       COALESCE(k.manual_tok_out_limit, {_INF}) * 0.95
-                  THEN 1 ELSE 0
-                END,
-                -- Pure random within the healthy bucket. Errors are already
-                -- reflected in is_alive (auth fails → mark_dead) and
-                -- cooldown_until (429 → adaptive_cooldown). An earlier
-                -- recent-errors sort caused one 'cleanest' key to monopolise
-                -- traffic while peers sat idle, so random() replaced it and
-                -- distributes uniformly across every healthy peer.
+                COALESCE(k.id = ANY(CAST(:saturated_ids AS bigint[])), FALSE),
+                (k.id = :aff) DESC,
                 random()
             LIMIT 1
             FOR UPDATE OF k SKIP LOCKED
@@ -229,6 +295,7 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
     return ""
 
 
+@retry_terminal_write
 async def record_usage(
     *,
     api_key_id: int,
@@ -252,7 +319,7 @@ async def record_usage(
 
     cache_read_tokens/cache_write_tokens default to 0 — only anthropic chat
     calls populate them today (see providers/litellm_adapter.py
-    apply_prompt_cache); every other call site (embed, transcribe, vending's
+    apply_prompt_cache); every other call site (embed, transcribe)
     /v1/usage self-report) has no cache concept and leaves them at 0.
 
     Returns the new row's id — the broker-side request ID. Threaded back

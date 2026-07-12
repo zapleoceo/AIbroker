@@ -17,8 +17,9 @@ _MSGS = [{"role": "user", "content": "Halo apa kabar"}]
 _KW = {"model": None, "max_tokens": 128, "temperature": 0.3}
 
 
-def test_translate_is_cacheable_chat_is_not():
+def test_translate_and_prefilter_are_cacheable_chat_is_not():
     assert response_cache.is_cacheable("translate")
+    assert response_cache.is_cacheable("prefilter")
     assert not response_cache.is_cacheable("chat:fast")
     assert not response_cache.is_cacheable("chat:smart")
 
@@ -65,6 +66,36 @@ def test_lru_evicts_oldest_over_capacity(monkeypatch):
 
 
 def test_expired_entry_is_dropped(monkeypatch):
-    monkeypatch.setattr(response_cache, "_TTL_S", -1)  # everything instantly stale
+    monkeypatch.setitem(response_cache._TTL_S, "translate", -1)  # instantly stale
     response_cache.put("translate", _MSGS, "Hello", **_KW)
     assert response_cache.get("translate", _MSGS, **_KW) is None
+
+
+# ─── prefilter — own short TTL (2026-07-12) ──────────────────────────────────
+
+
+def test_prefilter_ttl_is_ten_minutes_translate_a_day():
+    """Verdicts must roll over quickly after a prompt/threshold change; a
+    translation is stable for a day."""
+    assert response_cache._TTL_S["prefilter"] == 10 * 60
+    assert response_cache._TTL_S["translate"] == 24 * 60 * 60
+
+
+def test_prefilter_cached_within_ttl(monkeypatch):
+    t = 1_000_000.0
+    monkeypatch.setattr(response_cache.time, "time", lambda: t)
+    response_cache.put("prefilter", _MSGS, "relevant", **_KW)
+    monkeypatch.setattr(response_cache.time, "time", lambda: t + 9 * 60)
+    assert response_cache.get("prefilter", _MSGS, **_KW) == "relevant"
+
+
+def test_prefilter_expired_after_ttl_translate_unaffected(monkeypatch):
+    """11 min later a prefilter verdict is stale, but a translate entry stored
+    at the same moment still serves — the TTLs are independent."""
+    t = 1_000_000.0
+    monkeypatch.setattr(response_cache.time, "time", lambda: t)
+    response_cache.put("prefilter", _MSGS, "relevant", **_KW)
+    response_cache.put("translate", _MSGS, "Hello", **_KW)
+    monkeypatch.setattr(response_cache.time, "time", lambda: t + 11 * 60)
+    assert response_cache.get("prefilter", _MSGS, **_KW) is None
+    assert response_cache.get("translate", _MSGS, **_KW) == "Hello"

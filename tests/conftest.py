@@ -1,7 +1,7 @@
 """Test fixtures.
 
 Default: in-memory SQLite (fast, no deps) — used for everything except the
-Postgres-only selector/vending tests, which `skipif` themselves off SQLite.
+Postgres-only selector tests, which `skipif` themselves off SQLite.
 
 CI integration job sets DATABASE_URL to a real Postgres; then this fixture
 binds the engine to it and the Postgres-only tests run for real.
@@ -9,6 +9,7 @@ binds the engine to it and the Postgres-only tests run for real.
 from __future__ import annotations
 
 import os
+import tempfile
 
 # Test-time defaults for env-driven settings (BEFORE any aibroker import).
 # Default DATABASE_URL to SQLite so a bare `pytest` doesn't run the Postgres-only
@@ -17,6 +18,10 @@ import os
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-prod")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
+# The notifier's throttle-state dir defaults to /var/lib/aibroker — not
+# writable for the CI runner user, and monitor.tick() now drives the real
+# notifier (paid-tail check) in the Postgres tests that don't patch it.
+os.environ.setdefault("ALERT_STATE_DIR", tempfile.mkdtemp(prefix="aib-alert-state-"))
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine

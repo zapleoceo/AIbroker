@@ -11,7 +11,7 @@
 │ aibroker-api (FastAPI, async)                        │
 │   POST /v1/jobs?capability=...   → queue → LiteLLM   │
 │   POST /v1/embed?provider=...    → LiteLLM SDK       │
-│   POST /v1/key, /v1/usage, /v1/release  (vending)    │
+│                                                      │
 │   GET  /v1/health, /admin/*, /dashboard, /login      │
 └──────────┬───────────────────────────────────────────┘
            │ async pool
@@ -23,12 +23,36 @@
            ▲
            │
 ┌──── aibroker-monitor (loop) ─────────────┐
-│ every 600s pings each key with the       │
-│ cheapest provider call. Marks dead /     │
-│ sets cooldown. Telegram alerts on state  │
-│ flip via @aibzapleo_bot.                 │
+│ every 600s pings keys due this sweep     │
+│ with the cheapest provider call. Marks   │
+│ dead / sets cooldown. Telegram alerts on │
+│ state flip via @aibzapleo_bot.           │
 └───────────────────────────────────────────┘
 ```
+
+**Adaptive probe cadence (2026-07-12).** Probing EVERY key every sweep was
+self-harm: 144 sweeps/day × ~75 keys ≈ 10.8k real `max_tokens=1` completions
+a day spent on liveness alone. `_should_probe` now probes ALIVE keys only
+every `_ALIVE_PROBE_EVERY_N=6` sweeps (once/hour); DEAD or in-cooldown keys
+every sweep — they're the ones whose state needs re-confirmation, and
+auto-revive depends on it. Micro-RPD skip: a provider whose effective
+req/day quota (manual > discovered > `PROVIDER_QUOTAS` seed) is under
+`_MIN_RPD_FOR_LIVE_PROBE=200` never gets an ALIVE key live-probed at all —
+sambanova's `req_per_day=20` meant probes alone exceeded a key's entire
+daily quota, and gemini free (~1500/day) lost ~10% of budget to probing;
+dead/cooldown keys of those providers are still probed (reviving is worth
+one call).
+
+**Paid-tail alert (2026-07-12).** After the probe pass, `tick()` runs
+`_check_paid_tail`: for each capability in `_PAID_TAIL_CAPS` (`chat:fast`,
+`chat:smart` — the chains whose paid tail is the guaranteed-answer anchor,
+see `test_chains.py`'s paid-tail invariant) it checks whether ANY provider in
+`chain_for(cap)` still has at least one usable paid key — `is_active`,
+`is_alive`, not in cooldown, correctly scoped, and not over its daily cost
+cap (same freshness rule as `FRESH_DAILY_COST_SQL`). If none is left, the
+capability is silently free-only — a throttled Telegram alert fires, keyed
+`paid_tail:<capability>` so the notifier's `recover()` auto-clears it the
+moment a paid key comes back.
 
 **Cooldown revives a dead key too (2026-07-03).** `monitor.tick()`'s three
 verdicts (`alive`/`cooldown`/`dead`) used to treat `cooldown` (429) as
@@ -49,10 +73,32 @@ holds the keys, calls the provider through LiteLLM, returns text + cost meta.
 Client never sees the API key. (Sync `POST /v1/chat` was removed 2026-07-10 —
 `410 Gone` → use `/v1/jobs`.)
 
-### Vending mode (for non-LLM HTTP APIs)
-`POST /v1/key` returns the plain key with a short TTL lease. Client calls the
-provider directly, reports usage back via `POST /v1/usage`. Used when the
-broker doesn't know the wire format (e.g. weird custom auth flows).
+### Vending mode — REMOVED (2026-07-12)
+`POST /v1/key` used to hand out plaintext provider tokens under a short lease
+for providers the broker "didn't know the wire format" of. LiteLLM covers every
+provider we run, the endpoint had zero production callers, and its body was an
+untested plaintext-token-exfiltration surface — deleted (routes/vending.py,
+its tests, `VENDING_RATE_LIMIT_PER_MINUTE`). The `leases` table and
+`usage_log.lease_id` column stay in the DB as historical data — no destructive
+migration.
+
+## Terminal-write resilience (2026-07-12)
+
+By the time the broker records a successful provider call, the money is already
+spent — so the two terminal writes (`selector.record_usage`, deep-job
+`_finish`) are wrapped in `db/resilience.retry_terminal_write`: up to 3
+attempts with short backoff on TRANSIENT connection failures only
+(OperationalError / InterfaceError / invalidated connections). Non-transient
+errors (IntegrityError…) surface immediately — they're bugs, not blips. Before
+this, a Postgres restart at the wrong instant produced a billed-but-unrecorded
+call and a client 500 for a response the broker had already paid for.
+
+`litellm` is PINNED (==1.92.0, pyproject + Dockerfile): the provider-error
+classification (`classify_provider_error` + cooldown sign tables) is calibrated
+against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
+`APIConnectionError`. A silent minor bump can reshuffle exception classes and
+quietly break cooldown/failover; upgrades must re-run the integration suite
+deliberately.
 
 ## Request flow (chat is async-only since 2026-07-10)
 
@@ -76,17 +122,21 @@ claimed chat job:
    `llm:vision`, `chat:edit` needs `llm:edit`, not a blanket `llm:chat`.
 4. `services.llm_service.run_chat` walks `chain_for(capability)`. For each
    provider:
-   - `selector.pick_and_reserve(provider, scope_for(capability))` does atomic
-     `SELECT … FOR UPDATE SKIP LOCKED`, ordering `is_reserve, last_used_at` so
-     reserved keys are picked last (the reserved-lane mechanism). Touches
-     `last_used_at` in the same TX.
+   - `selector.pick_and_reserve(provider, scope_for(capability),
+     project_id=…)` does atomic `SELECT … FOR UPDATE SKIP LOCKED`, ordering
+     `is_reserve, saturated, affinity, random()` so reserved keys are picked
+     last (the reserved-lane mechanism) and, among equally-eligible keys, the
+     one that last served this (project, provider) wins — keeping the
+     provider-side prompt cache warm (see **Selector** in
+     [routing.md](routing.md), 2026-07-12). Touches `last_used_at` in the
+     same TX.
    - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
      The worst-case cost is RESERVED before the call and released after. A
      successful call books its real cost; a **timeout** books the reserved
      ESTIMATE (not $0) — the provider generated and billed a response we never
      received, so the daily cost cap must see that spend or it stays blind and
      never stops the key (fix 2026-07-12: Google billed $122 on the paid gemini
-     key while the broker recorded $2; `_is_timeout` gates this). Pre-processing
+     key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
    - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
      **adapter** first (see below).
@@ -113,6 +163,18 @@ Adding a provider's quirk is a new adapter class, not an edit to the shared
 call path (open/closed). The default adapter is a no-op, so providers with no
 quirks need no entry.
 
+## Provider error classification (2026-07-12)
+
+The error-verdict logic lives in `providers/provider_errors.py` (extracted from
+`services/llm_service.py`): the incident-calibrated sign tables
+(`_RATE_LIMIT_SIGNS`, `_AUTH_SIGNS`, `_BILLING_DEPLETED_SIGNS`, the
+provider-scoped maps), `classify_provider_error(exc, provider)`,
+`is_model_unavailable(exc)` (404/model-gone → skip provider, don't penalize the
+key) and `is_timeout(exc)` (billable holds — see the cost-cap note above).
+`llm_service` re-exports `classify_provider_error` for existing import sites;
+the WHAT-to-do-about-it side (`_penalize`: cooldown vs mark_dead) stays in the
+orchestrator.
+
 ## Async jobs — the drained queue (2026-07-10)
 
 The chat path. Sync `/v1/chat` was removed (`410 Gone`); every chat now goes
@@ -126,8 +188,13 @@ broker finishes its fallback chain). See `docs/api.md`.
   always succeeds, whatever the provider pool is doing. (`/v1/deep` is a
   backward-compatible alias for `capability=chat:deep`.)
 - **Dispatcher = drain.** `services/job_queue.py`'s `dispatcher_loop` runs once
-  per uvicorn worker (started from the app lifespan). Every `_POLL_INTERVAL_S`
-  it claims up to `JOB_MAX_CONCURRENCY` eligible `pending` rows — an atomic
+  per uvicorn worker (started from the app lifespan). Woken instantly by
+  submit's `pg_notify('aib_jobs')` via a dedicated asyncpg LISTEN connection
+  (2026-07-12 — kills the old up-to-1s claim-latency floor; a timed
+  `_IDLE_POLL_INTERVAL_S`=5s poll stays as the fallback so a missed NOTIFY can
+  never stall jobs; on SQLite no listener starts and it degrades to plain
+  `_POLL_INTERVAL_S` polling), it claims up to `JOB_MAX_CONCURRENCY` eligible
+  `pending` rows — an atomic
   `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *`, so the
   workers never double-claim — flips them to `running`, and runs each through
   the SAME `run_chat` the sync path uses. On success → `done`; the client's
@@ -155,7 +222,7 @@ broker finishes its fallback chain). See `docs/api.md`.
 
 `.github/workflows/ci.yml` runs on every push/PR: a **unit** job on in-memory
 SQLite (the bulk), and an **integration** job against a real `postgres:16`
-service so the Postgres-only paths — selector, reserved-lane, vending, monitor,
+service so the Postgres-only paths — selector, reserved-lane, monitor,
 bootstrap — actually execute. `conftest` binds the engine to `DATABASE_URL`
 (NullPool on Postgres so the sync TestClient's event-loop portal doesn't collide
 with pooled asyncpg connections). The `deploy.yml` test gate keeps the coverage
@@ -314,9 +381,10 @@ provider's free-tier daily quota. Driven by `providers/quotas.py`:
 each `Quota` carries `req_per_day`, `tok_per_day`, and a `doc` URL to the
 provider's rate-limit page (for verification — these numbers drift).
 
-Both axes apply at once for providers that meter both (e.g. Cerebras:
-14,400 req/day AND 1M tokens/day). `percent_used(req, tok, provider)`
-returns the **max** of the two — whichever you'll hit first wins.
+All capped axes apply at once for providers that meter several (e.g. groq:
+14,400 req/day AND 500k tokens/day). `axes_for_key(...)` returns the
+per-axis breakdown sorted by fill — the dominant (max) axis drives the bar,
+because whichever axis you'll hit first wins.
 Token usage is summed live from `usage_log` (today UTC) per `api_key_id`,
 so the bar reflects real consumption, not stale counters.
 
@@ -354,10 +422,12 @@ already past 100 % of the token quota (Cerebras emailed user a
 2026-06-28; regression test `test_main_render_keys_show_token_axis_when_dominant`
 locks it in.
 
-Render: `bar_label()` shows whichever axis dominates — `'525/14400'`
-(requests) or `'1.4M/1M tok'` (tokens). Bar coloured by
-`severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %). Tooltip
-exposes both axes (`'97 % · 525 req · 1,356,576 tok'`) for debugging.
+Render (`dashboard_render.py`): compact per-axis chips (`'84% tok · 15%
+req'`) from `axes_for_key()`, with the dominant axis driving the bar width.
+Bar coloured by `severity_class()` (blue <70 %, yellow 70-89 %, red ≥90 %).
+Tooltip spells out used/cap per axis + the cap's source. (The older
+single-label helpers `percent_used_for_key`/`bar_label_for_key` were dead
+code after this render path landed — removed 2026-07-12.)
 
 Sortable by combined percentage via `data-sort`; paid keys get the
 sentinel `-1` so they cluster at one end.

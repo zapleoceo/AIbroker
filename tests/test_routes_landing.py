@@ -210,7 +210,7 @@ def test_llms_txt_served():
     assert r.text.startswith("# AIbroker")
     assert "> Self-hosted" in r.text
     # Key concepts documented
-    for kw in ("Two operating modes", "Capabilities", "Scopes",
+    for kw in ("Proxy mode", "Capabilities", "Scopes",
                "Adaptive cooldown", "Reserved lane"):
         assert kw in r.text
     # GitHub repo + license — must match README.md's own "Proprietary,

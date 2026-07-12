@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir hatchling \
         "pydantic>=2.9" "pydantic-settings>=2.5" \
         "sqlalchemy[asyncio]>=2.0" "asyncpg>=0.30" \
         "cryptography>=43" "httpx>=0.27" \
-        "litellm>=1.50" "structlog>=24.4" \
+        "litellm==1.92.0" "structlog>=24.4" \
         "python-multipart>=0.0.9" "jinja2>=3.1" "click>=8.1" "tzdata>=2024.1"
 
 # Code

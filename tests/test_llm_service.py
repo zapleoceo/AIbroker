@@ -82,16 +82,16 @@ def test_is_timeout_flags_billable_holds_only():
     received, so it must charge the cost cap; a pre-processing reject cost
     nothing (fix 2026-07-12: Google billed $122 on gemini while the broker saw
     $2, the gap being timeouts booked at $0 that never tripped the $1/day cap)."""
-    from aibroker.services.llm_service import _is_timeout
+    from aibroker.providers.provider_errors import is_timeout
 
     class _LiteLLMTimeout(Exception):
         pass
     _LiteLLMTimeout.__name__ = "Timeout"
 
-    assert _is_timeout(TimeoutError())
-    assert _is_timeout(_LiteLLMTimeout())          # litellm.Timeout by class name
-    assert not _is_timeout(RuntimeError("429 rate limit"))
-    assert not _is_timeout(Exception("401 unauthorized"))
+    assert is_timeout(TimeoutError())
+    assert is_timeout(_LiteLLMTimeout())          # litellm.Timeout by class name
+    assert not is_timeout(RuntimeError("429 rate limit"))
+    assert not is_timeout(Exception("401 unauthorized"))
 
 
 def test_classify_anthropic_credit_balance_exhausted():
@@ -192,27 +192,27 @@ def test_is_model_unavailable_by_signature():
     Confirmed live 2026-07-10: nvidia kimi-k2.6 → 404 'Function not found for
     account' ~30x/hr. Must be detected so run_chat breaks to the next provider
     WITHOUT penalizing the key (its other models still work)."""
-    from aibroker.services.llm_service import _is_model_unavailable
+    from aibroker.providers.provider_errors import is_model_unavailable
 
     real = ("litellm.NotFoundError: Nvidia_nimException - Error code: 404 - "
             "{'status': 404, 'detail': \"Function '23d4': Not found for account 'kgN3'\"}")
-    assert _is_model_unavailable(RuntimeError(real)) is True
-    assert _is_model_unavailable(RuntimeError("model_not_found")) is True
-    assert _is_model_unavailable(RuntimeError("The model does not exist")) is True
+    assert is_model_unavailable(RuntimeError(real)) is True
+    assert is_model_unavailable(RuntimeError("model_not_found")) is True
+    assert is_model_unavailable(RuntimeError("The model does not exist")) is True
     # a plain rate limit / generic error is NOT model-unavailable
-    assert _is_model_unavailable(RuntimeError("429 rate limit")) is False
-    assert _is_model_unavailable(RuntimeError("boom")) is False
+    assert is_model_unavailable(RuntimeError("429 rate limit")) is False
+    assert is_model_unavailable(RuntimeError("boom")) is False
 
 
 def test_is_model_unavailable_by_exception_type():
     """litellm raises NotFoundError as its own class — detect by type name too,
     independent of the message wording."""
-    from aibroker.services.llm_service import _is_model_unavailable
+    from aibroker.providers.provider_errors import is_model_unavailable
 
     class NotFoundError(Exception):
         pass
 
-    assert _is_model_unavailable(NotFoundError("anything")) is True
+    assert is_model_unavailable(NotFoundError("anything")) is True
 
 
 async def test_run_chat_model_unavailable_skips_provider_without_penalty(monkeypatch):

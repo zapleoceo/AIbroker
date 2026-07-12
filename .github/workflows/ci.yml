@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Run full suite (Postgres) — selector, reserve-lane, vending run for real
+      - name: Run full suite (Postgres) — selector, reserve-lane, cost-guard run for real
         run: uv run --extra dev pytest -q
         env:
           DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test"

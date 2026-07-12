@@ -14,8 +14,7 @@ from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.db import close_engine, get_session, init_engine
 from aibroker.db.models import ProjectRow
 
-
-ALL_SCOPES = ["llm:chat", "llm:embed", "llm:vision", "vending:*", "admin:read"]
+ALL_SCOPES = ["llm:chat", "llm:embed", "llm:vision", "admin:read"]
 
 
 async def main() -> int:

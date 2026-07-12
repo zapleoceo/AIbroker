@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from aibroker.auth_session import (
     SESSION_TTL_S,
     issue_session_cookie,
@@ -39,8 +37,8 @@ def test_session_cookie_tampered_rejected():
 
 def test_session_cookie_expired_rejected():
     """Manually craft a cookie with exp in the past."""
-    import hmac
     import hashlib
+    import hmac
     secret = get_settings().SESSION_SECRET.encode()
     past = int(time.time()) - 1000
     payload = f"99.{past}"
@@ -79,4 +77,42 @@ def test_tg_widget_stale_rejected():
     very_old = int(time.time()) - 7 * 24 * 3600
     data = {"id": "169510539", "auth_date": str(very_old), "hash": "x" * 64}
     # This will fail signature OR freshness — both → None
+    assert verify_telegram_widget(data) is None
+
+
+def _signed_widget_data(bot_token: str, *, auth_date: int, user_id: int = 42) -> dict:
+    """Build widget data with a VALID Telegram HMAC — the accept path."""
+    import hashlib as _h
+    import hmac as _hm
+    data = {"id": str(user_id), "first_name": "D", "auth_date": str(auth_date)}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret = _h.sha256(bot_token.encode()).digest()
+    data["hash"] = _hm.new(secret, check.encode(), _h.sha256).hexdigest()
+    return data
+
+
+def test_widget_accepts_valid_signature(monkeypatch):
+    """REGRESSION GUARD: the owner-login ACCEPT path was never tested — only
+    the early rejects. A valid HMAC within the freshness window must yield the
+    user id; the same payload with one flipped field must not."""
+    import time as _t
+
+    from aibroker.auth_session import verify_telegram_widget
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "111:test-token")
+    data = _signed_widget_data("111:test-token", auth_date=int(_t.time()))
+    assert verify_telegram_widget(data) == 42
+    tampered = {**data, "first_name": "evil"}
+    assert verify_telegram_widget(tampered) is None
+
+
+def test_widget_rejects_stale_auth_date(monkeypatch):
+    """A perfectly-signed but day-old login must be rejected (replay window)."""
+    import time as _t
+
+    from aibroker.auth_session import TG_AUTH_FRESHNESS_S, verify_telegram_widget
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "111:test-token")
+    stale = int(_t.time()) - TG_AUTH_FRESHNESS_S - 60
+    data = _signed_widget_data("111:test-token", auth_date=stale)
     assert verify_telegram_widget(data) is None

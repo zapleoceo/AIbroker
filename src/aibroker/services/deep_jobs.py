@@ -24,12 +24,24 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.db.resilience import retry_terminal_write
 
 log = logging.getLogger(__name__)
+
+# NOTIFY channel shared with the dispatcher's LISTEN connection (job_queue.py).
+# Lives here (not job_queue) because job_queue already imports from this module.
+JOBS_CHANNEL = "aib_jobs"
+
+
+async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Postgres-only (test_submit_job_fires_pg_notify)
+    async with get_session() as s:
+        if s.bind.dialect.name != "postgresql":
+            return
+        await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
 
 
 # BIGSERIAL id needs a real autoincrementing PK — SQLite doesn't do that for
@@ -65,7 +77,17 @@ async def submit_job(  # pragma: no cover
                           status="pending", request=request)
         s.add(row)
         await s.flush()
-        return row.id
+        job_id = row.id
+    # After the enqueue COMMITS: wake the dispatcher instantly via NOTIFY so an
+    # interactive chat call doesn't eat up to a full poll interval of claim
+    # latency. Best-effort — the dispatcher's timed poll is the guaranteed
+    # fallback, so a failed NOTIFY can delay a job but never lose it.
+    try:
+        await _notify_dispatcher()
+    except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
+        log.debug("pg_notify(%s) failed: %s — poll fallback covers it",
+                  JOBS_CHANNEL, e)
+    return job_id
 
 
 async def submit_deep_job(  # pragma: no cover
@@ -86,6 +108,7 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
+@retry_terminal_write
 async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
     job_id: int, *, status: str,
     result_text: str | None = None,

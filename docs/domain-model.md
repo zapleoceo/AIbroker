@@ -43,7 +43,8 @@ The actual provider credentials.
 
 ### `leases`
 
-Active checkouts in vending mode.
+Active checkouts of the REMOVED vending mode (2026-07-12) — kept as
+historical data only; nothing writes here anymore.
 
 | Column | Notes |
 |---|---|
@@ -57,9 +58,7 @@ Expired-but-not-released leases are technically still in the table — no
 cleanup job today. Acceptable because the row count grows ~linearly with
 vend operations, not requests.
 
-Indexed on `(project_id, leased_at)` (migration 007) — backs the per-project
-vending rate limit (`routes/vending.py::_check_vending_rate_limit`, see
-[security.md](security.md)).
+Indexed on `(project_id, leased_at)` (migration 007).
 
 ### `usage_log`
 
@@ -69,7 +68,7 @@ Append-only billing + analytics.
 |---|---|
 | `api_key_id` | FK, NULL after key delete (SET NULL) |
 | `project_id` | FK, NULL after project delete |
-| `lease_id` | FK, only for vending mode |
+| `lease_id` | FK, historical (vending mode, removed 2026-07-12) |
 | `provider` | Denormalized for fast queries |
 | `model` | Actual model name from LiteLLM |
 | `capability` | `chat:fast`, `chat:smart`, ... |

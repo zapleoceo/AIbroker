@@ -1630,3 +1630,55 @@ def test_delete_form_uses_safe_data_confirm_not_inline_js():
     assert "confirm(\'" not in body and "confirm('" not in body
     # the label is HTML-escaped inside the attribute (quote → &#x27;)
     assert "ev&#x27;il" in body
+
+
+# ─── audit rows record the honest client IP (X-Forwarded-For) ────────────────
+
+
+def test_tg_login_success_audits_xff_client_ip(monkeypatch):
+    """Behind CF+nginx request.client.host is the proxy — the login.success
+    audit row must carry the FIRST X-Forwarded-For entry instead."""
+    import hashlib as _h
+    import hmac as _hm
+    import time as _t
+    from unittest.mock import AsyncMock, patch
+
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "111:test-token")
+    owner = get_settings().OWNER_TELEGRAM_ID
+    data = {"id": str(owner), "first_name": "D", "auth_date": str(int(_t.time()))}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret = _h.sha256(b"111:test-token").digest()
+    data["hash"] = _hm.new(secret, check.encode(), _h.sha256).hexdigest()
+
+    with patch("aibroker.routes.dashboard.audit", AsyncMock()) as fake_audit:
+        r = client.get("/api/tg_login", params=data,
+                       headers={"X-Forwarded-For": "203.0.113.7, 172.68.1.1"},
+                       follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/dashboard"
+    assert fake_audit.await_args.kwargs["ip"] == "203.0.113.7"
+
+
+def test_delete_key_audits_xff_client_ip():
+    """key.delete audit ip honours X-Forwarded-For. Explicit id keeps the
+    seed SQLite-portable (BigInteger PKs don't autoincrement there)."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    async def _seed():
+        async with get_session() as s:
+            s.add(ApiKeyRow(id=930, provider="cerebras", label="del-me",
+                            token_encrypted="enc", tier="free",
+                            scopes=["llm:chat"], is_active=True, is_alive=True))
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    with patch("aibroker.routes.dashboard.audit", AsyncMock()) as fake_audit:
+        r = client.post("/dashboard/keys/930/delete",
+                        cookies=_logged_in_cookies(),
+                        headers={"X-Forwarded-For": "198.51.100.4, 10.0.0.1"},
+                        follow_redirects=False)
+    assert r.status_code == 303
+    assert fake_audit.await_args.kwargs["ip"] == "198.51.100.4"
