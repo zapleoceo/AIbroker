@@ -53,6 +53,19 @@ silently rejects it — which 403'd Stepan2's voice until `llm:audio` was added
 (2026-07-11). `tests/test_scopes.py::test_every_capability_scope_is_known`
 guards the invariant.
 
+## Scopes a provider can actually serve
+
+`chains.usable_scopes_for_provider(provider)` is the single source of truth for
+"could this key ever be used for that scope": the broker only reaches a provider
+for a capability it is BOTH chained for (`CAPABILITY_CHAINS`) and has a model for
+(`DEFAULT_MODEL`), so any other scope on its key is **inert**. The dashboard's key
+forms grey out (and refuse to submit) those scopes — 2026-07-15 an anthropic key
+was scoped to `llm:vision` + `llm:audio` in the belief it would serve images and
+voice: Claude has no speech-to-text at all, and anthropic was dropped from the
+vision chain after 400-ing on image URLs, so the key silently served only Coach.
+Project forms pass no provider — a project is not tied to one, so nothing is
+greyed there.
+
 ## Client IP in audit rows
 
 `auth.client_ip(request)` is the single source of the caller IP for audit

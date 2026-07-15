@@ -20,6 +20,7 @@ from aibroker.routes.dashboard_assets import _NO_STORE, ASSETS_VERSION
 from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
 from aibroker.routes.dashboard_scopes import _KNOWN_SCOPES, _scope_checkboxes
 from aibroker.routes.dashboard_time import UTC_TZ, today_in
+from aibroker.routing.chains import usable_scopes_for_provider
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
 
@@ -53,6 +54,9 @@ def _provider_catalogue() -> list[dict[str, Any]]:
             "provider": p,
             "capabilities": caps,
             "default_scope": scope_for(caps),
+            # What this provider can actually serve — drives the add-form's
+            # greyed-out scope checkboxes (same rule as the edit form).
+            "scopes": sorted(usable_scopes_for_provider(p)),
             "models": DEFAULT_MODEL[p],
         })
     return out
@@ -496,7 +500,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
             f'<form method="post" action="/dashboard/keys/{k.id}/edit" class="row-form">'
             f'<input name="label" value="{esc(k.label)}" required>'
             f'<select name="tier">{tier_options}</select>'
-            f'<span class="scope-group">{_scope_checkboxes(k.scopes or ["llm:chat"])}</span>'
+            f'<span class="scope-group">{_scope_checkboxes(k.scopes or ["llm:chat"], provider=k.provider)}</span>'
             f'<label class="rsv" title="reserved lane: picked last in its group, '
             f'invisible to other scopes"><input type="checkbox" name="is_reserve" '
             f'value="1"{reserve_checked}> reserve</label>'

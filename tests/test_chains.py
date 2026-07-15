@@ -238,3 +238,24 @@ def test_deprioritize_for_json_demotes_zai():
     JSON-reliable providers on any JSON-format request."""
     assert "zai" in JSON_UNRELIABLE_PROVIDERS
     assert deprioritize_for_json(["zai", "gemini"]) == ["gemini", "zai"]
+
+
+def test_usable_scopes_anthropic_excludes_audio_and_vision():
+    """REGRESSION (2026-07-15): the operator scoped the anthropic key to
+    vision+audio expecting it to serve images and voice. Claude has NO
+    speech-to-text (no transcription model at all), and anthropic was dropped
+    from the vision chain after 400-ing on image URLs — so both scopes were
+    inert and the key silently served only Coach. A scope is usable only if the
+    provider is BOTH chained for the capability and has a model for it."""
+    from aibroker.routing.chains import usable_scopes_for_provider
+    assert usable_scopes_for_provider("anthropic") == frozenset({"llm:chat", "llm:edit"})
+
+
+def test_usable_scopes_match_chain_and_model_for_key_providers():
+    from aibroker.routing.chains import usable_scopes_for_provider
+    assert "llm:audio" in usable_scopes_for_provider("groq")        # whisper, chained
+    assert usable_scopes_for_provider("voyage") == frozenset({"llm:embed"})
+    assert usable_scopes_for_provider("nvidia") == frozenset({"llm:deep"})
+    # gemini is the multimodal workhorse — every lane it's chained for
+    assert usable_scopes_for_provider("gemini") >= {"llm:chat", "llm:vision", "llm:audio"}
+    assert usable_scopes_for_provider("nope-not-real") == frozenset()

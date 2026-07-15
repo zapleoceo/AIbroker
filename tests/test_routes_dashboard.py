@@ -1706,3 +1706,22 @@ def test_friendly_reason_cloudflare_daily_neurons():
         "AiError: you have used up your daily free allocation of 10,000 neurons"
     )
     assert "00:00 UTC" in en and "00:00 UTC" in ru
+
+
+def test_scope_checkboxes_disable_what_provider_cannot_serve():
+    """A key form must not offer a scope its provider can never serve — the
+    box is disabled (so it can't POST) and struck through."""
+    from aibroker.routes.dashboard_scopes import _scope_checkboxes
+    html = _scope_checkboxes(["llm:chat"], provider="anthropic")
+    assert 'value="llm:audio" disabled' in html.replace('" ', '" ')
+    assert "llm:audio" in html and "scope-na" in html
+    # what it CAN serve stays enabled
+    chat = html.split('value="llm:chat"')[1].split("</label>")[0]
+    assert "disabled" not in chat
+
+
+def test_scope_checkboxes_without_provider_disable_nothing():
+    """Project forms aren't tied to a provider — every scope stays offerable."""
+    from aibroker.routes.dashboard_scopes import _scope_checkboxes
+    html = _scope_checkboxes(["llm:chat"], "allowed_scopes")
+    assert "disabled" not in html and "scope-na" not in html

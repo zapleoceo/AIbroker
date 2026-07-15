@@ -110,6 +110,9 @@ td.mono, code { font-family:ui-monospace, monospace; color:#4dabf7; font-size:12
 .sc-on  { background:rgba(77,171,247,.15); color:#4dabf7; }
 .sc-off { color:#3a3f4a; border:1px solid #23262e; }
 .sc-rsv { color:#ffd84a; border:1px solid #4a4326; }
+/* A scope this provider can never serve — greyed + not submittable, so the
+   operator can't assign e.g. voice to a model with no speech-to-text. */
+.scope-cb.scope-na { opacity:.35; cursor:not-allowed; text-decoration:line-through; }
 .status-detail { font-size:10px; color:#888; margin-top:2px; white-space:nowrap;
                  max-width:160px; overflow:hidden; text-overflow:ellipsis; }
 .pill { display:inline-block; padding:2px 8px; border-radius:8px; font-size:11px;
@@ -347,11 +350,20 @@ _DASHBOARD_JS = """
       hint.replaceWith(originalHint.cloneNode(true));
       return;
     }
-    // Auto-set scope checkboxes: tick default; tick llm:edit too if this
-    // provider is in the chat:edit chain so operator notices the option.
+    // Scope checkboxes: grey out what this provider can NEVER serve (m.scopes =
+    // chained AND has a model), then tick the default; tick llm:edit too if the
+    // provider is in the chat:edit chain so the operator notices the option.
+    // Mirrors the edit form's server-side rule — a scope outside m.scopes is
+    // inert, and offering it just misleads (anthropic has no speech-to-text).
     const wantEdit = m.capabilities.includes("chat:edit");
+    const usable = m.scopes || [];
     scope.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-      cb.checked = (cb.value === m.default_scope) || (wantEdit && cb.value === "llm:edit");
+      const na = !usable.includes(cb.value);
+      cb.disabled = na;
+      cb.closest("label").classList.toggle("scope-na", na);
+      cb.closest("label").title = na ? (provider + " cannot serve " + cb.value) : "";
+      cb.checked = !na &&
+        ((cb.value === m.default_scope) || (wantEdit && cb.value === "llm:edit"));
     });
 
     const t = langStrings();

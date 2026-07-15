@@ -2,7 +2,7 @@
 server's UTC. Pure/deterministic, so they run on the SQLite gate."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aibroker.routes.dashboard_data import _parse_date_range, _range_where
@@ -63,7 +63,13 @@ def test_range_where_utc_default_unchanged():
 
 def test_parse_date_range_today_default_in_zone():
     # Only `to` given → `from` defaults to today IN THE ZONE (not server UTC).
+    # `to` is derived from today, never hardcoded: a literal date silently
+    # becomes "in the past" once the calendar passes it, which flips the range
+    # and swaps `from` away from today — the assertion then fails for a reason
+    # that has nothing to do with the behaviour under test (time-bomb, 2026-07-15).
     _, dt = _parse_date_range(None, None)
     assert dt is None  # both missing → all-time, tz irrelevant
-    df, dt2 = _parse_date_range(None, "2026-07-12", _JKT)
+    tomorrow = today_in(_JKT) + timedelta(days=1)
+    df, dt2 = _parse_date_range(None, tomorrow.isoformat(), _JKT)
     assert df == today_in(_JKT)
+    assert dt2 == tomorrow

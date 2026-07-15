@@ -5,6 +5,8 @@ live in their own leaf module to keep those two from importing each other.
 """
 from __future__ import annotations
 
+from aibroker.routing.chains import usable_scopes_for_provider
+
 _KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep", "llm:audio")
 
 
@@ -22,13 +24,28 @@ def _validate_scope_list(scopes: list[str]) -> list[str] | None:
     return seen or None
 
 
-def _scope_checkboxes(selected: list[str] | None, name: str = "scopes") -> str:
-    """Render the known scopes as checkboxes (multi-select via repeated POST)."""
+def _scope_checkboxes(
+    selected: list[str] | None, name: str = "scopes", provider: str | None = None,
+) -> str:
+    """Render the known scopes as checkboxes (multi-select via repeated POST).
+
+    `provider` (key forms only — a project isn't tied to one, so it passes None)
+    greys out every scope that provider can never serve. The broker only reaches
+    a provider for a capability it's BOTH chained for and has a model for, so any
+    other scope on its key is inert and the checkbox just misleads: it looked
+    like anthropic was assigned voice+images while Claude has no speech-to-text
+    at all and is off the vision chain (2026-07-15). Disabled boxes don't POST,
+    so saving a key also cleans inert scopes off it."""
     sel = set(selected or [])
-    return "".join(
-        f'<label class="scope-cb">'
-        f'<input type="checkbox" name="{name}" value="{s}"'
-        f'{" checked" if s in sel else ""}> {s}'
-        f'</label>'
-        for s in _KNOWN_SCOPES
-    )
+    usable = usable_scopes_for_provider(provider) if provider else None
+    out = []
+    for s in _KNOWN_SCOPES:
+        na = usable is not None and s not in usable
+        title = f' title="{provider} cannot serve {s}"' if na else ""
+        out.append(
+            f'<label class="scope-cb{" scope-na" if na else ""}"{title}>'
+            f'<input type="checkbox" name="{name}" value="{s}"'
+            f'{" checked" if s in sel else ""}{" disabled" if na else ""}> {s}'
+            f'</label>'
+        )
+    return "".join(out)

@@ -171,6 +171,24 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
 }
 
 
+def usable_scopes_for_provider(provider: str) -> frozenset[str]:
+    """Scopes this provider can ACTUALLY serve — it must be in the capability's
+    chain AND have a model wired for it. Any other scope on its key is inert:
+    the broker never reaches that provider for that capability, so the checkbox
+    only misleads the operator (anthropic + `llm:audio` — Claude has no
+    speech-to-text at all; anthropic + `llm:vision` — it HAS a vision model but
+    was dropped from the vision chain after 400-ing on image URLs, 2026-07-01).
+    Imported lazily: chains is a leaf table module and must not drag litellm in
+    at import time — only the dashboard calls this."""
+    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+    models = DEFAULT_MODEL.get(provider, {})
+    return frozenset(
+        CAPABILITY_SCOPE[cap]
+        for cap, chain in CAPABILITY_CHAINS.items()
+        if provider in chain and cap in models
+    )
+
+
 def is_known_capability(capability: str) -> bool:
     return capability in CAPABILITY_CHAINS
 
