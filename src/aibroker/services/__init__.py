@@ -5,6 +5,7 @@ from aibroker.services.deep_jobs import (
     submit_job,
 )
 from aibroker.services.llm_service import (
+    BUDGET_EXHAUSTED,
     ChatOutcome,
     EmbedFailed,
     EmbedOutcome,
@@ -17,6 +18,7 @@ from aibroker.services.llm_service import (
 )
 
 __all__ = [
+    "BUDGET_EXHAUSTED",
     "ChatOutcome",
     "EmbedFailed",
     "EmbedOutcome",

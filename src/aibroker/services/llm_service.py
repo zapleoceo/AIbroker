@@ -238,11 +238,23 @@ class ChatOutcome:
     cache_write_tokens: int = 0
 
 
+class _BudgetExhausted:
+    """Sentinel run_chat returns when a PROJECT/GLOBAL daily cap is spent — a
+    distinct outcome from None (no provider had free capacity). Lets the caller
+    give the job an honest 'budget cap' error and stop retrying (more retries
+    can't create budget) instead of the misleading 'no provider available'."""
+    __slots__ = ()
+
+
+BUDGET_EXHAUSTED = _BudgetExhausted()
+
+
 class _Flow(Enum):
     """Verdict of one key attempt — how run_chat's chain walk proceeds."""
     NEXT_KEY = auto()
     NEXT_KEY_EMPTY = auto()  # empty JSON body — retry same provider, bounded by run_chat
     NEXT_PROVIDER = auto()
+    BUDGET_EXHAUSTED = auto()  # project/global cap spent — abort the whole walk
     SUCCESS = auto()
 
 
@@ -342,7 +354,24 @@ async def _run_attempt(
     except CostGuardError as e:
         await audit(actor=f"project:{project.name}", action="cap_block",
                     target=f"provider={provider}", metadata={"reason": str(e)})
-        return _Flow.NEXT_PROVIDER, None  # project/global cap — more keys won't help
+        # Book the block in usage_log exactly like every other failed attempt
+        # (status=error, error_kind=CapBlock, http 402, $0) — the audit_log alone
+        # used to record it, so ~8800 cap-blocked picks in 2h vanished from the
+        # usage view and jobs died invisibly as "no provider available" (prod
+        # 2026-07-16). 402 Payment Required is the honest, greppable signal.
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model, capability=capability,
+            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+            latency_ms=None, status="error", error_kind="CapBlock",
+            http_status=402,
+        )
+        # A project/global cap blocks EVERY paid provider identically, so walking
+        # to the next paid key is futile spend — abort the whole walk. A per-key
+        # cap is local (other keys/providers may still have room) → next provider.
+        if e.kind in ("project", "global"):
+            return _Flow.BUDGET_EXHAUSTED, None
+        return _Flow.NEXT_PROVIDER, None
     plain = decrypt(key.token_encrypted)
     try:
         text, meta = await call_llm(
@@ -434,7 +463,7 @@ async def run_chat(
     response_format: dict[str, Any] | None,
     workflow: str | None,
     paid_only: bool = False,
-) -> ChatOutcome | None:
+) -> ChatOutcome | _BudgetExhausted | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
     Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
@@ -444,6 +473,10 @@ async def run_chat(
     `paid_only=True` demands a paid-tier key on every pick (the job queue's
     final-retry escalation): the same chain walk, but free keys are invisible,
     so the request lands on the paid tail or honestly returns None.
+
+    Returns `BUDGET_EXHAUSTED` (not None) when a project/global daily cap is
+    spent — the caller can then fail the job honestly instead of masking it as
+    "no provider available" and burning retries that can't create budget.
     """
     scope = scope_for(capability)
 
@@ -501,6 +534,10 @@ async def run_chat(
             )
             if flow is _Flow.SUCCESS:
                 return outcome
+            if flow is _Flow.BUDGET_EXHAUSTED:
+                log.warning("chat:%s aborted — project/global daily cap reached",
+                            capability)
+                return BUDGET_EXHAUSTED
             if flow is _Flow.NEXT_KEY_EMPTY:
                 if empty_retries < _MAX_EMPTY_RETRIES:
                     # Retry the SAME provider's next key ONCE — that rescues a

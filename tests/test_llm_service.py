@@ -440,6 +440,96 @@ async def test_run_chat_caps_gemini_retries(monkeypatch):
     assert picks.count("gemini") == 3     # capped, not 5
 
 
+# ─── cap-block honesty (visible CapBlock row + BUDGET_EXHAUSTED abort) ────────
+
+
+def _cap_block_env(monkeypatch, kind: str, chain: list[str]):
+    """Wire run_chat so every paid pick's reserve_cost raises a `kind` cap block.
+    Returns (picks, recorded) collected during the walk."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.routing import CostGuardError
+
+    picks: list[str] = []
+    recorded: list[dict] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return SimpleNamespace(id=1, label="k", tier="paid", provider=provider,
+                                token_encrypted="x", account_id=None)
+
+    async def fake_reserve(**kw):
+        raise CostGuardError(kind, 0.5, 0.5, 0.001)
+
+    async def fake_record(**kw):
+        recorded.append(kw)
+        return 1
+
+    async def fake_audit(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "audit", fake_audit)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.001)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: list(chain))
+    return svc, picks, recorded
+
+
+async def test_cap_block_books_visible_capblock_row(monkeypatch):
+    """A cap-blocked pick writes a usage_log row (status=error, CapBlock, 402,
+    $0) so the block is visible in the usage view — not audit_log only (prod
+    2026-07-16: ~8800 cap-blocked picks/2h vanished, jobs died invisibly)."""
+    from types import SimpleNamespace
+
+    svc, _picks, recorded = _cap_block_env(monkeypatch, "project", ["deepseek"])
+    await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert recorded[0]["error_kind"] == "CapBlock"
+    assert recorded[0]["http_status"] == 402
+    assert recorded[0]["cost_usd"] == 0.0
+    assert recorded[0]["status"] == "error"
+
+
+async def test_project_cap_aborts_walk_with_budget_exhausted(monkeypatch):
+    """A project/global cap blocks every paid provider identically — run_chat
+    must abort the whole walk (not step to the next paid provider) and signal
+    BUDGET_EXHAUSTED so the caller fails the job honestly."""
+    from types import SimpleNamespace
+
+    svc, picks, _rec = _cap_block_env(
+        monkeypatch, "project", ["deepseek", "anthropic", "openai"])
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is svc.BUDGET_EXHAUSTED
+    assert picks == ["deepseek"]           # aborted — anthropic/openai untried
+
+
+async def test_per_key_cap_advances_to_next_provider(monkeypatch):
+    """A per-key cap is LOCAL — other providers may still have room, so the walk
+    continues to the next provider (returns None only after all are tried)."""
+    from types import SimpleNamespace
+
+    svc, picks, _rec = _cap_block_env(
+        monkeypatch, "api_key", ["deepseek", "anthropic"])
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None                     # no capacity anywhere, but honest None
+    assert picks == ["deepseek", "anthropic"]  # advanced past the per-key block
+
+
 # ─── InvalidJSON breaks to next PROVIDER, not next key ───────────────────────
 
 

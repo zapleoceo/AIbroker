@@ -37,7 +37,8 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.services.deep_jobs import JOBS_CHANNEL, _finish
-from aibroker.services.llm_service import run_chat
+from aibroker.services.llm_service import BUDGET_EXHAUSTED, run_chat
+from aibroker.telemetry.notifier import alert
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +162,17 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}")
+        return
+    if outcome is BUDGET_EXHAUSTED:
+        # A project/global daily cap is spent — more retries can't create budget,
+        # so give up immediately with an honest message (not "no provider
+        # available"). Alert the owner once per day so a silently-capped project
+        # is visible, not just invisibly stalled until 00:00 UTC.
+        await _finish(row.id, status="error",
+                       error_message="daily budget cap reached — retry after 00:00 UTC")
+        await alert(f"budget:{row.project_id}",
+                    f"project <b>{project.name}</b> hit its daily budget cap — "
+                    "jobs paused until 00:00 UTC", throttle_min=24 * 60)
         return
     if outcome is None:
         # No provider available right now — retry as capacity frees up.
