@@ -155,9 +155,12 @@ async def submit_job(  # pragma: no cover
         # the flag flipped (bit us in CI, 2026-07-16).
         import json as _json
         async with get_session() as s:
+            # retry_count named explicitly: its 0-default is Python-side (ORM),
+            # so a raw INSERT can't rely on it existing in the DDL.
             job_id = (await s.execute(text(
-                "INSERT INTO deep_jobs (project_id, capability, status, request) "
-                "VALUES (:p, :c, 'pending', :r) RETURNING id"
+                "INSERT INTO deep_jobs "
+                "(project_id, capability, status, request, retry_count) "
+                "VALUES (:p, :c, 'pending', :r, 0) RETURNING id"
             ), {"p": project.id, "c": capability,
                 "r": _json.dumps(request)})).scalar_one()
     # After the enqueue COMMITS: wake the dispatcher instantly via NOTIFY so an
