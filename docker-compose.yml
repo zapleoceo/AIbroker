@@ -21,6 +21,32 @@ services:
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
+  # Connection pooler between the app and Postgres. Transaction pooling: a
+  # server backend is held only for the duration of a transaction, so ~15 real
+  # connections serve hundreds of client ones (threshold rationale in
+  # docs/deploy-ops.md "Connection scaling"). MAX_PREPARED_STATEMENTS lets
+  # asyncpg's protocol-level prepared statements survive transaction pooling
+  # (pgbouncer >= 1.21). AUTH_TYPE plain is confined to the compose-internal
+  # network (no published ports); pgbouncer still answers Postgres' SCRAM
+  # challenge upstream with the same secret. The deep-jobs LISTEN connection
+  # bypasses this via DIRECT_DATABASE_URL (NOTIFY needs a pinned backend).
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: aibroker-pgbouncer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "15"
+      MIN_POOL_SIZE: "3"
+      MAX_PREPARED_STATEMENTS: "500"
+      AUTH_TYPE: plain
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
   # Cross-worker selector state (affinity + saturation verdicts) — pure cache
   # semantics: LRU-evicted, never persisted, and the app fails open to its
   # in-process dicts if this container is down. No published ports on purpose.
