@@ -663,6 +663,72 @@ async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
     assert picks.index("mistral") < picks.index("cerebras")
 
 
+# ─── wall-clock gate (no double-execution) ───────────────────────────────────
+
+
+async def test_run_chat_wall_deadline_stops_starting_attempts(monkeypatch):
+    """A non-deep walk that outlasts _CHAT_WALL_DEADLINE_S stops starting NEW
+    attempts and returns None, so the job finishes before job_queue's 25-min
+    stale-reclaim window could re-execute it. The gate is checked between
+    attempts only — it never aborts an in-flight call."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    clock = {"t": 1000.0}
+
+    def fake_now() -> float:
+        return clock["t"]
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        clock["t"] += 10 * 60      # each attempt burns 10 wall-clock minutes
+        # no key returned → run_chat walks to the next provider
+
+    monkeypatch.setattr(svc, "_now", fake_now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["a", "b", "c", "d"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None
+    # deadline = 1000 + 1080 = 2080. pick a@1000→t1600, b@1600→t2200,
+    # then 2200 >= 2080 → stop before c/d.
+    assert picks == ["a", "b"]
+
+
+async def test_run_chat_deep_has_no_wall_deadline(monkeypatch):
+    """chat:deep is exempt — a legitimately long (~19min) single call must not
+    be gated. The deadline branch is skipped even when the clock is far ahead."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+
+    def fake_now() -> float:
+        return 10 ** 9        # way past any deadline
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)      # no key returned → walk continues
+
+    monkeypatch.setattr(svc, "_now", fake_now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["nvidia"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:deep",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None
+    assert picks == ["nvidia"]   # attempted despite the clock — no gate
+
+
 # ─── translate exact-match cache ─────────────────────────────────────────────
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
@@ -107,6 +108,19 @@ _MAX_ATTEMPTS_ABS = 100
 # surprise discovery.
 _CALL_TIMEOUT_S = 60.0
 _DEEP_CALL_TIMEOUT_S = 19 * 60.0
+
+# Overall wall-clock budget for a NON-deep run_chat walk (chat:deep is exempt —
+# nemotron legitimately runs ~19min as an async job). Checked BEFORE starting
+# each new attempt, NEVER mid-call (an aborted call = wasted tokens — policy).
+# Kept comfortably under job_queue's 25-min _STALE_RUNNING_S reclaim window so a
+# slow storm walk finishes and writes its result before a second worker could
+# reclaim the row and re-execute it (double-execution/double-spend). 2026-07-16.
+_CHAT_WALL_DEADLINE_S = 18 * 60.0
+
+
+def _now() -> float:
+    """Monotonic clock — indirected so the wall-clock gate is unit-testable."""
+    return time.monotonic()
 
 
 def _max_keys(provider: str) -> int:
@@ -524,6 +538,10 @@ async def run_chat(
     attempt_cap = _attempt_budget(chain)
     call_timeout = _call_timeout(capability)
     require_tier = "paid" if paid_only else None
+    # chat:deep runs a single legitimately-long call; every other capability gets
+    # an overall wall-clock deadline so a storm walk can't outlast the job's
+    # stale-reclaim window and get re-executed by another worker.
+    wall_deadline = None if capability == "chat:deep" else _now() + _CHAT_WALL_DEADLINE_S
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
@@ -531,6 +549,12 @@ async def run_chat(
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)
+                return None
+            if wall_deadline is not None and _now() >= wall_deadline:
+                log.warning("chat:%s hit the %ds wall-clock deadline mid-walk — "
+                            "stop starting attempts so the job finishes before "
+                            "stale-reclaim (no double-execution)",
+                            capability, int(_CHAT_WALL_DEADLINE_S))
                 return None
             key = await pick_and_reserve(provider, scope=scope,
                                           require_tier=require_tier,
