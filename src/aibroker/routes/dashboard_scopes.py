@@ -5,9 +5,13 @@ live in their own leaf module to keep those two from importing each other.
 """
 from __future__ import annotations
 
-from aibroker.routing.chains import usable_scopes_for_provider
+from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 
-_KNOWN_SCOPES = ("llm:chat", "llm:embed", "llm:vision", "llm:edit", "llm:deep", "llm:audio")
+# Derived from the capability table (2026-07-16) — the old hand-copied tuple
+# could silently miss a newly-routed scope, making it un-grantable in the
+# dashboard (that's how llm:audio went missing for Stepan2 voice, 2026-07-11).
+# dict.fromkeys keeps first-appearance order, so llm:chat renders first.
+_KNOWN_SCOPES = tuple(dict.fromkeys(CAPABILITY_SCOPE.values()))
 
 
 def _validate_scope_list(scopes: list[str]) -> list[str] | None:

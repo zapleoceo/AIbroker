@@ -15,10 +15,10 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.routing import selector
 from aibroker.routing.selector import (
+    _note_affinity,
     invalidate_saturation_cache,
     mark_cooldown,
     mark_dead,
-    note_affinity,
     pick_and_reserve,
     record_usage,
 )
@@ -280,12 +280,12 @@ async def test_reserve_key_picked_only_when_shared_exhausted():
 
 
 async def test_pick_affinity_sticks_to_noted_key():
-    """After note_affinity, every pick for that (project, provider) returns
+    """After _note_affinity, every pick for that (project, provider) returns
     the pinned key — the provider-side prompt cache stays on one account
     instead of random() fragmenting it across the pool."""
     pinned = await _add_key("deepseek", "pinned")
     await _add_key("deepseek", "other")
-    note_affinity(1, "deepseek", pinned)
+    _note_affinity(1, "deepseek", pinned)
     for _ in range(10):
         picked = await pick_and_reserve("deepseek", "llm:chat", project_id=1)
         assert picked is not None
@@ -298,7 +298,7 @@ async def test_pick_affinity_scoped_to_project():
     from sqlalchemy import update
     pinned = await _add_key("deepseek", "pinned")
     await _add_key("deepseek", "other")
-    note_affinity(1, "deepseek", pinned)
+    _note_affinity(1, "deepseek", pinned)
     seen: set[int] = set()
     for _ in range(50):
         picked = await pick_and_reserve("deepseek", "llm:chat", project_id=2)
@@ -314,7 +314,7 @@ async def test_pick_affinity_never_resurrects_cooldown_key():
     cooldown must not be picked; the healthy peer serves instead."""
     pinned = await _add_key("deepseek", "pinned")
     other = await _add_key("deepseek", "other")
-    note_affinity(1, "deepseek", pinned)
+    _note_affinity(1, "deepseek", pinned)
     await mark_cooldown(pinned, datetime.now(UTC) + timedelta(minutes=10))
     picked = await pick_and_reserve("deepseek", "llm:chat", project_id=1)
     assert picked is not None
