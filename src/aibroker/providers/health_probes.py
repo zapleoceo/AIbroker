@@ -183,7 +183,7 @@ _PROBES = {
                          "max_tokens": 1}),
     "openrouter": lambda k: ("POST", "https://openrouter.ai/api/v1/chat/completions",
                               _bearer(k),
-                              {"model": "openai/gpt-oss-120b:free",
+                              {"model": "google/gemma-4-31b-it:free",  # gpt-oss:free delisted 2026-07-16
                                "messages": [{"role": "user", "content": "."}],
                                "max_tokens": 1}),
     # deepseek-chat (matches DEFAULT_MODEL — reverted from v4-flash, which is a

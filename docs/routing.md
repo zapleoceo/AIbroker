@@ -1,5 +1,13 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (openrouter chat model delisted)**: `openai/gpt-oss-120b:free`
+> now 404s on OpenRouter (48 NotFoundErrors/75min; same fate as
+> llama-3.2-vision) — its whole chat presence was dead, shortening every chat
+> chain and spiking "no provider available" during free-pool saturation waves.
+> All openrouter lanes (chat:fast/smart/code, prefilter, structured, and the
+> health probe) moved to `google/gemma-4-31b-it:free` — live-verified on our
+> keys, instruct non-reasoning, 262k ctx.
+
 > **2026-07-16 (record_usage in one round-trip on Postgres)**: `record_usage`
 > ran an `INSERT INTO usage_log … RETURNING id` and then a separate
 > `UPDATE api_keys` counter bump — same session/transaction, but two

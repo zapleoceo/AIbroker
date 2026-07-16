@@ -82,11 +82,16 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                  "chat:smart": "deepseek/deepseek-chat",
                  "chat:edit": "deepseek/deepseek-chat",
                  "chat:code": "deepseek/deepseek-chat"},
-    "openrouter": {"chat:fast": f"openrouter/openai/{_OSS}:free",
-                   "chat:smart": f"openrouter/openai/{_OSS}:free",
-                   "chat:code": f"openrouter/openai/{_OSS}:free",
-                   "prefilter": f"openrouter/openai/{_OSS}:free",
-                   "structured": f"openrouter/openai/{_OSS}:free",
+    # 2026-07-16: openai/gpt-oss-120b:free DELISTED by OpenRouter (404
+    # NotFoundError, 48 errs/75min — same fate as llama-3.2-vision earlier).
+    # All chat lanes moved to google/gemma-4-31b-it:free: verified live on our
+    # keys (vision lane, real completions), instruct NON-reasoning (JSON-safe
+    # at low max_tokens, unlike the reasoning gpt-oss), 262k ctx.
+    "openrouter": {"chat:fast": "openrouter/google/gemma-4-31b-it:free",
+                   "chat:smart": "openrouter/google/gemma-4-31b-it:free",
+                   "chat:code": "openrouter/google/gemma-4-31b-it:free",
+                   "prefilter": "openrouter/google/gemma-4-31b-it:free",
+                   "structured": "openrouter/google/gemma-4-31b-it:free",
                    "vision": "openrouter/google/gemma-4-31b-it:free"},
     # 2026-07-02: chat:smart/chat:code/vision/chat:edit bumped sonnet-4-6 →
     # sonnet-5 (near-Opus coding/agentic quality at Sonnet cost; same $3/$15
