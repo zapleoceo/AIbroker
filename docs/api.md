@@ -145,6 +145,15 @@ GET /v1/jobs/123
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
 
+**Budget-cap error is honest + terminal (2026-07-16).** When a job fails
+because the project's (or the global) daily cost cap is spent, the `error`
+field reads exactly `daily budget cap reached — retry after 00:00 UTC` — NOT
+the generic `no provider available`. This is a **terminal** `error` (the broker
+burns no further retries — more retries can't create budget), so the client
+contract is: on that message, **stop resubmitting and retry after the next UTC
+midnight**, when daily caps reset. The owner also gets a 24h-throttled alert, so
+a silently-capped project is visible rather than invisibly stalled.
+
 **In-flight dedup (2026-07-16, migration 010).** An identical
 `POST /v1/jobs` payload (same project, capability, and canonical request
 body) submitted within **30 minutes** while the prior job is still

@@ -1202,7 +1202,9 @@ The fix is a two-line contract between the dispatcher and the chain walk:
   are invisible for this one request. Not a separate loop: `paid_only` only
   changes what tier the selector is allowed to hand out.
 - `job_queue._execute`: when `row.retry_count >= _MAX_RETRIES - 1` (the final
-  attempt before give-up), the job runs with `paid_only=True` and logs
+  attempt before give-up) **and** `chains.has_paid_tail(capability)` (the chain
+  reaches a paid provider — `chains.PAID_PROVIDERS` = deepseek/anthropic/openai
+  — with a wired model), the job runs with `paid_only=True` and logs
   `final retry — paid tail only, job N`. Every earlier attempt stays
   tier-agnostic (free-first via chain order, as before).
 
@@ -1210,6 +1212,64 @@ Edge case stays honest: if the paid-only pick finds nothing (all paid keys
 capped or dead), `run_chat` returns `None` and the job errors exactly as it
 did before — the escalation guarantees the paid tail is *offered* the last
 shot, not that an answer materializes without budget.
+
+> **Refinement (2026-07-16, storm-honesty wave).** The escalation used to fire
+> for EVERY capability, incl. `chat:deep` (nvidia-only, no paid provider) —
+> `paid_only=True` there is a guaranteed no-op that forced the last free-lane
+> shot to fail. It's now gated on `has_paid_tail(capability)`, so a paid-tail-less
+> capability's final retry stays a normal free-lane walk.
+
+## Storm-honesty wave (2026-07-16)
+
+A confirmed prod incident: a project's `$0.50/day` cap was spent, so
+`cost_guard` cap-blocked ~8800 paid picks in 2h — but the cap-block path wrote
+**no** `usage_log` row (only `audit_log action=cap_block`), so jobs died
+invisibly as `no provider available`. The wave makes the guarantee come from
+**honesty**, **not wasting the tiny budget**, and **free-pool resilience** —
+never by exempting anything from the caps or raising them.
+
+**Cap-block is visible + honest.** `_run_attempt`'s `except CostGuardError`
+now books a `usage_log` row (`status=error`, `error_kind=CapBlock`,
+`http_status=402`, `cost_usd=0`) exactly like any other attempt, alongside the
+existing audit call. A project/global cap blocks every paid provider
+identically, so walking to the next paid key is futile: `run_chat` aborts the
+whole walk (new `_Flow.BUDGET_EXHAUSTED`) and returns the `BUDGET_EXHAUSTED`
+sentinel; a per-key cap stays `NEXT_PROVIDER`. `job_queue._execute` finalizes a
+budget-exhausted job with `daily budget cap reached — retry after 00:00 UTC`,
+burns **no** further retries (more retries can't create budget), and fires a
+24h-throttled owner alert keyed `budget:{project_id}`.
+
+**A timeout is not billed to the admission cap.** A paid TIMEOUT used to book
+the reserved estimate so the per-key cost cap saw the upstream spend (the
+2026-07-12 `$122` gemini gap — real spend UNDERcounted). But under a `$0.50`
+cap, a few ANSWERLESS timeouts booked at the estimate exhausted the whole day's
+ADMISSION budget on zero answers. Every failed attempt now books `cost_usd=0`:
+`release_cost` fully unwinds the reservation, so an answerless timeout leaves
+`daily_cost_used_usd` untouched. Real timeout spend is reconciled off the
+provider invoice, out-of-band — not via the counter that gates whether the NEXT
+answer runs. (Provider timeouts are NEVER shortened — an aborted call = wasted
+tokens.)
+
+**Free-pool timeout circuit-breaker** (`src/aibroker/routing/circuit.py`,
+in-process, fail-open). `_penalize` calls `circuit.note_timeout(provider,
+key_id)` on every timeout. The selector then: soft-skips a free provider with
+`>= _TIMEOUT_STORM_MIN_KEYS` (2) keys in `providers_in_timeout_storm()` — pick
+returns `None` with NO call sent, so the chain fails over cheaply (paid-tier
+picks are exempt so the guaranteed-answer escalation is never starved); sinks
+`recent_timeout_key_ids()` below healthy siblings in the pick `ORDER BY` (peer
+of the saturation axis); and suppresses cache-affinity to a key that just hung.
+In `cooldown.py`, a `TimeoutError` (60s wasted) escalates one strike faster than
+a 429 (0s wasted) via `cooldown_seconds(..., timeout_bump=True)`, so a hanging
+key drops out in ~2 strikes not ~5. `job_queue._MAX_CONCURRENCY` default 8→24
+(slots are I/O waits; storm throughput was floored at 8×60s).
+
+**Wall-clock gate on `run_chat`** (`_CHAT_WALL_DEADLINE_S = 18min`, non-deep
+only). A storm walk (many providers × keys, each up to the 60s call timeout)
+could outlast `job_queue._STALE_RUNNING_S` (25min) and be reclaimed +
+re-executed by another worker (double-spend). The deadline is checked BEFORE
+starting each new attempt — never mid-call (policy: no aborted calls) — and past
+it `run_chat` stops starting attempts and returns `None`, so the job settles
+before the reclaim window.
 
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
