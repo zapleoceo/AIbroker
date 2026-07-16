@@ -44,6 +44,7 @@ services:
       MIN_POOL_SIZE: "3"
       MAX_PREPARED_STATEMENTS: "500"
       AUTH_TYPE: plain
+      LISTEN_PORT: "6432"
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -65,10 +66,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started
       redis:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET:?TOKEN_SECRET must be set}
       ADMIN_KEY: ${ADMIN_KEY:?ADMIN_KEY must be set}
@@ -97,8 +101,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      pgbouncer:
+        condition: service_started
     environment:
-      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET}
       ADMIN_KEY: ${ADMIN_KEY}            # not used by monitor, but Settings requires it
