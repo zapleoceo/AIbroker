@@ -220,7 +220,10 @@ async def _listen_for_jobs(wake: asyncio.Event, stop: asyncio.Event) -> None:  #
     cleanly. Reconnects with backoff on loss; while it's down the dispatcher's
     timed poll keeps draining (fail-open), so a dead listener only costs
     latency, never jobs."""
-    dsn = _listen_dsn(get_settings().DATABASE_URL)
+    # direct_database_url: LISTEN must bypass PgBouncer (transaction pooling
+    # detaches the server backend between transactions, dropping the
+    # subscription silently — the poll fallback would mask it as latency).
+    dsn = _listen_dsn(get_settings().direct_database_url)
     backoff = 1.0
     while not stop.is_set():
         try:

@@ -33,3 +33,19 @@ def test_session_secret_short_nonempty_is_rejected():
 
 def test_session_secret_strong_is_accepted():
     assert _settings(SESSION_SECRET="y" * 40).SESSION_SECRET == "y" * 40
+
+
+def test_direct_database_url_falls_back_to_database_url():
+    """No pooler in front (DIRECT_DATABASE_URL unset) → the LISTEN connection
+    uses the same URL as everything else."""
+    s = _settings()
+    assert s.direct_database_url == s.DATABASE_URL
+
+
+def test_direct_database_url_overrides_when_set():
+    """With PgBouncer in front, DATABASE_URL points at the pooler while the
+    LISTEN connection must keep a pinned real backend (NOTIFY subscriptions
+    silently die under transaction pooling)."""
+    s = _settings(DATABASE_URL="postgresql+asyncpg://u:p@pgbouncer:6432/db",
+                  DIRECT_DATABASE_URL="postgresql+asyncpg://u:p@postgres:5432/db")
+    assert s.direct_database_url.endswith("@postgres:5432/db")

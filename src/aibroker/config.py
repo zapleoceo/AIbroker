@@ -31,6 +31,15 @@ class Settings(BaseSettings):
 
     # DB
     DATABASE_URL: str = Field(..., description="postgres+asyncpg://...")
+    # Bypass URL for the ONE consumer PgBouncer's transaction pooling can't
+    # serve: the deep-jobs LISTEN connection (NOTIFY subscriptions need a
+    # session pinned to a real server backend). Empty = no pooler in front,
+    # fall back to DATABASE_URL — single-node setups set nothing.
+    DIRECT_DATABASE_URL: str = ""
+
+    @property
+    def direct_database_url(self) -> str:
+        return self.DIRECT_DATABASE_URL or self.DATABASE_URL
 
     # Crypto
     TOKEN_SECRET: str = Field(..., min_length=20)

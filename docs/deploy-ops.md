@@ -119,7 +119,18 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
-## Connection scaling (2026-07-16)
+## Connection scaling
+
+> **Status 2026-07-16: PgBouncer is INSTALLED** (`aibroker-pgbouncer`,
+> edoburu/pgbouncer, transaction pooling, DEFAULT_POOL_SIZE=15,
+> MAX_CLIENT_CONN=200, MAX_PREPARED_STATEMENTS=500 so asyncpg's prepared
+> statements survive pooling). `DATABASE_URL` on api/monitor points at
+> `pgbouncer:6432`; `DIRECT_DATABASE_URL` keeps the deep-jobs LISTEN
+> connection on `postgres:5432` — NOTIFY subscriptions need a pinned backend
+> and silently die under transaction pooling. Rollback = point DATABASE_URL
+> back at `postgres:5432` and redeploy; the app has no other coupling to the
+> pooler. AUTH_TYPE=plain is confined to the compose-internal network (no
+> published ports). (2026-07-16)
 
 Decision documented, nothing installed. Current math:
 
