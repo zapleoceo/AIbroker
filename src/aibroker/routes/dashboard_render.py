@@ -129,6 +129,18 @@ _RATE_LIMIT_DISPLAY_SIGNS: tuple[str, ...] = (
     "rate limit", "ratelimit", "too many requests", "429",
     "resource_exhausted", "resource has been exhausted",
 )
+
+# Shared (en, ru) label vocabulary — one home for the strings both the raw-text
+# key-status column (_friendly_reason) and the error-kind log cell
+# (_friendly_call_error) speak, so the two never drift.
+_LBL_RATE = ("rate limited", "лимит запросов")
+_LBL_TIMEOUT = ("timeout", "таймаут")
+_LBL_CAP = ("budget cap", "лимит бюджета")
+_LBL_AUTH = ("auth failed", "ошибка авторизации")
+_LBL_EMPTY = ("empty response", "пустой ответ")
+_LBL_BADJSON = ("bad JSON", "плохой JSON")
+_LBL_CONN = ("connection error", "ошибка соединения")
+
 _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
     *((s, "top up balance", "пополнить баланс") for s in _TOP_UP_SIGNS),
     ("monthly quota", "monthly quota", "месячная квота"),
@@ -136,12 +148,17 @@ _FRIENDLY_REASONS: tuple[tuple[str, str, str], ...] = (
     # not a dead key (2026-07-12).
     ("daily free allocation", "daily free quota — resets 00:00 UTC",
      "дневная free-квота — сброс в 00:00 UTC"),
-    *((s, "rate limited", "лимит запросов") for s in _RATE_LIMIT_DISPLAY_SIGNS),
+    *((s, *_LBL_RATE) for s in _RATE_LIMIT_DISPLAY_SIGNS),
     ("quota", "quota exceeded", "квота исчерпана"),
     ("timeout", "provider timeout", "таймаут провайдера"),
     ("response_format type is unavailable", "provider feature outage",
      "сбой фичи у провайдера"),
 )
+
+# Transient (recoverable) vs dead (needs intervention) → the log cell's colour:
+# warn (yellow) for rate/timeout/cap/empty/json/connection, bad (red) for auth.
+_ERR_TRANSIENT = "warn"
+_ERR_DEAD = "bad"
 
 
 # Timestamp fields per format hint — mirrored in the dashboard JS (F map). The
@@ -200,6 +217,51 @@ def _friendly_reason(raw: str) -> tuple[str, str] | None:
         if sign in low:
             return en, ru
     return None
+
+
+def _friendly_call_error(
+    http_status: int | None, error_kind: str | None
+) -> tuple[str, str, str] | None:
+    """(en, ru, css_class) for a usage_log error row's http/kind pair, else None
+    (caller shows the raw `{http_status} {error_kind}`). Shares the _LBL_*
+    vocabulary with _friendly_reason so the recent-calls table and the
+    key-status column read the same. Colours by meaning: transient=warn,
+    dead(auth)=bad.
+
+    error_kind is matched BEFORE http_status: a timeout and a cap block are
+    booked under 429/402 respectively, so a raw status read would mislabel a
+    '429 TimeoutError' as a plain rate limit."""
+    kind = (error_kind or "").lower()
+    if not kind and http_status is None:
+        return None
+    if "capblock" in kind or http_status == 402:
+        return (*_LBL_CAP, _ERR_TRANSIENT)
+    if "timeout" in kind:
+        return (*_LBL_TIMEOUT, _ERR_TRANSIENT)
+    if http_status == 401 or "auth" in kind:
+        return (*_LBL_AUTH, _ERR_DEAD)
+    if http_status == 429:
+        return (*_LBL_RATE, _ERR_TRANSIENT)
+    if kind == "emptybody":
+        return (*_LBL_EMPTY, _ERR_TRANSIENT)
+    if kind == "invalidjson":
+        return (*_LBL_BADJSON, _ERR_TRANSIENT)
+    if "connection" in kind:
+        return (*_LBL_CONN, _ERR_TRANSIENT)
+    return None
+
+
+def _err_cell(http_status: int | None, error_kind: str | None) -> str:
+    """Recent-calls table cell for the http/err pair — a humanized, coloured
+    label with the raw `{http_status} {error_kind}` kept in the title tooltip."""
+    raw = f"{http_status or ''} {error_kind or ''}".strip()
+    friendly = _friendly_call_error(http_status, error_kind)
+    if friendly is None:
+        return f'<td style="color:#888;font-size:11px">{esc(raw)}</td>'
+    en, ru, cls = friendly
+    return (f'<td class="{cls}" style="font-size:11px" title="{esc(raw)}">'
+            f'<span data-i18n data-en="{esc(en)}" data-ru="{esc(ru)}">{esc(en)}</span>'
+            f'</td>')
 
 
 def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
@@ -899,8 +961,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'<td class="num" data-sort="{r.latency_ms or 0}">'
         f'{r.latency_ms or "—"}</td>'
         f'<td class="status-{esc(r.status)}">{esc(r.status)}</td>'
-        f'<td style="color:#888;font-size:11px">{r.http_status or ""} '
-        f'{esc(r.error_kind or "")}</td></tr>'
+        f'{_err_cell(r.http_status, r.error_kind)}</tr>'
         for r in d["recent"]
     ) or '<tr><td colspan="10" style="color:#5a6171">no calls yet</td></tr>'
 

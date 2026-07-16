@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum, auto
@@ -41,6 +42,7 @@ from aibroker.providers.provider_errors import (
 from aibroker.routing import (
     CostGuardError,
     chain_for,
+    circuit,
     deprioritize_for_json,
     pick_and_reserve,
     release_cost,
@@ -107,6 +109,19 @@ _MAX_ATTEMPTS_ABS = 100
 _CALL_TIMEOUT_S = 60.0
 _DEEP_CALL_TIMEOUT_S = 19 * 60.0
 
+# Overall wall-clock budget for a NON-deep run_chat walk (chat:deep is exempt —
+# nemotron legitimately runs ~19min as an async job). Checked BEFORE starting
+# each new attempt, NEVER mid-call (an aborted call = wasted tokens — policy).
+# Kept comfortably under job_queue's 25-min _STALE_RUNNING_S reclaim window so a
+# slow storm walk finishes and writes its result before a second worker could
+# reclaim the row and re-execute it (double-execution/double-spend). 2026-07-16.
+_CHAT_WALL_DEADLINE_S = 18 * 60.0
+
+
+def _now() -> float:
+    """Monotonic clock — indirected so the wall-clock gate is unit-testable."""
+    return time.monotonic()
+
 
 def _max_keys(provider: str) -> int:
     return _MAX_KEYS_BY_PROVIDER.get(provider, _MAX_KEYS_PER_PROVIDER)
@@ -132,6 +147,11 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
     # money" from "rate limited" apart, or when a cooldown actually ends.
     reason = str(exc)[:200]
+    timed_out = is_timeout(exc)
+    if timed_out:
+        # Feed the selection-side circuit-breaker so a bulk-timing-out provider
+        # is soft-skipped and this hung key isn't re-pinned by affinity.
+        circuit.note_timeout(key.provider, key.id)
     if kind == "rate_limit":
         # 2026-06-29: cooldown resolved by the provider's own signal —
         # retry-after hint > daily-quota (until UTC midnight) > adaptive
@@ -145,7 +165,7 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
         async with get_session() as s:
             try:
                 until = await cooldown_until(key.id, key.provider, str(exc),
-                                             session=s)
+                                             session=s, is_timeout=timed_out)
             except Exception:
                 # A failed statement aborts the tx on Postgres — roll back so
                 # the fallback UPDATE below can still land in this session.
@@ -160,15 +180,24 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
 async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
-    billed_cost: float = 0.0,
 ) -> None:
     """Book a failed attempt in usage_log. Shared by run_chat/run_embed/
     run_transcribe — the shape is identical; only the capability differs.
 
-    `billed_cost` is normally 0 (a rejected call costs nothing), but a TIMEOUT
-    the provider still processed IS billed upstream — the caller passes the
-    reserved estimate so the per-key daily_cost_cap actually sees that spend and
-    stops the key, instead of the cap staying blind to it (fix 2026-07-12).
+    A failed attempt always books cost_usd=0. Two incidents pull opposite ways
+    and this is the reconciliation:
+      - 2026-07-12 ($122 gap): a paid gemini TIMEOUT was billed upstream while
+        we recorded $0 — real spend UNDERcounted. That fix charged the reserved
+        estimate on a timeout so the per-key cost cap could see it.
+      - 2026-07-16 (storm, $0.50/day cap): with a tiny cap, a handful of
+        ANSWERLESS timeouts booked at the estimate exhausted the whole day's
+        ADMISSION budget on ZERO answers — starving the answers the owner
+        actually reserves that budget for.
+    For ADMISSION-cap purposes an answerless call must not consume budget
+    reserved for ANSWERS: the reservation is fully released (release_cost, in
+    _run_attempt) and the row is booked at $0. Real upstream timeout spend is
+    reconciled against the provider invoice, out-of-band — not via the admission
+    counter that gates whether the NEXT answer is allowed to run.
 
     http_status is derived from the error class, NOT left NULL: a rate_limit
     books 429 specifically because adaptive_cooldown counts recent
@@ -181,7 +210,7 @@ async def _record_error(
     await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=model, capability=capability,
-        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=billed_cost,
+        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
         latency_ms=None, status="error", error_kind=type(exc).__name__,
         http_status=http_status,
     )
@@ -238,18 +267,30 @@ class ChatOutcome:
     cache_write_tokens: int = 0
 
 
+class _BudgetExhausted:
+    """Sentinel run_chat returns when a PROJECT/GLOBAL daily cap is spent — a
+    distinct outcome from None (no provider had free capacity). Lets the caller
+    give the job an honest 'budget cap' error and stop retrying (more retries
+    can't create budget) instead of the misleading 'no provider available'."""
+    __slots__ = ()
+
+
+BUDGET_EXHAUSTED = _BudgetExhausted()
+
+
 class _Flow(Enum):
     """Verdict of one key attempt — how run_chat's chain walk proceeds."""
     NEXT_KEY = auto()
     NEXT_KEY_EMPTY = auto()  # empty JSON body — retry same provider, bounded by run_chat
     NEXT_PROVIDER = auto()
+    BUDGET_EXHAUSTED = auto()  # project/global cap spent — abort the whole walk
     SUCCESS = auto()
 
 
 async def _handle_call_error(
     *, exc: Exception, key: ApiKeyRow, project: ProjectRow, provider: str,
     use_model: str, capability: str, workflow: str | None,
-    est_tokens: int, estimated_cost: float,
+    est_tokens: int,
 ) -> _Flow:
     """Classify a failed call_llm, penalize/book it, return the walk verdict."""
     # Model gone/unprovisioned (404) — it's a MODEL problem, not a
@@ -274,14 +315,14 @@ async def _handle_call_error(
         log.info("learned: %s rejects ~%d tok prompts",
                  provider, est_tokens)
         return _Flow.NEXT_PROVIDER  # bigger keys won't help
-    # A timeout means the provider held the request long enough to
-    # generate (and bill) a response we never got — charge the
-    # reserved estimate so the daily_cost_cap sees that spend. A
-    # pre-processing reject (429/auth/503) cost nothing → 0.
+    # Every failed attempt books $0 (see _record_error) — a timeout's real
+    # upstream spend is reconciled off the provider invoice, NOT charged to the
+    # admission cap the owner reserves for answers (fix 2026-07-16). The
+    # reservation is fully released in _run_attempt, so an answerless timeout
+    # leaves daily_cost_used_usd untouched.
     await _record_error(
         key=key, project=project, provider=provider,
         model=use_model, capability=capability, workflow=workflow, exc=exc,
-        billed_cost=estimated_cost if is_timeout(exc) else 0.0,
     )
     log.warning("provider %s key %s failed (%s): %s",
                 provider, key.label, kind, exc)
@@ -342,7 +383,24 @@ async def _run_attempt(
     except CostGuardError as e:
         await audit(actor=f"project:{project.name}", action="cap_block",
                     target=f"provider={provider}", metadata={"reason": str(e)})
-        return _Flow.NEXT_PROVIDER, None  # project/global cap — more keys won't help
+        # Book the block in usage_log exactly like every other failed attempt
+        # (status=error, error_kind=CapBlock, http 402, $0) — the audit_log alone
+        # used to record it, so ~8800 cap-blocked picks in 2h vanished from the
+        # usage view and jobs died invisibly as "no provider available" (prod
+        # 2026-07-16). 402 Payment Required is the honest, greppable signal.
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model, capability=capability,
+            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+            latency_ms=None, status="error", error_kind="CapBlock",
+            http_status=402,
+        )
+        # A project/global cap blocks EVERY paid provider identically, so walking
+        # to the next paid key is futile spend — abort the whole walk. A per-key
+        # cap is local (other keys/providers may still have room) → next provider.
+        if e.kind in ("project", "global"):
+            return _Flow.BUDGET_EXHAUSTED, None
+        return _Flow.NEXT_PROVIDER, None
     plain = decrypt(key.token_encrypted)
     try:
         text, meta = await call_llm(
@@ -354,13 +412,14 @@ async def _run_attempt(
         )
         meta["cost_usd"] = _billed_cost(key, meta)
     except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-        # Attempt is over (however it ends) — release the reservation.
-        # _record_error (in _handle_call_error) books the real cost (0 — no response).
+        # Attempt is over (however it ends) — fully release the reservation so
+        # an answerless call (incl. a paid timeout) consumes NO admission budget;
+        # _record_error books the row at $0.
         await release_cost(api_key=key, estimated_cost=estimated_cost)
         return await _handle_call_error(
             exc=e, key=key, project=project, provider=provider,
             use_model=use_model, capability=capability, workflow=workflow,
-            est_tokens=est_tokens, estimated_cost=estimated_cost,
+            est_tokens=est_tokens,
         ), None
 
     # Call resolved (successfully) — release the reservation; record_usage
@@ -434,7 +493,7 @@ async def run_chat(
     response_format: dict[str, Any] | None,
     workflow: str | None,
     paid_only: bool = False,
-) -> ChatOutcome | None:
+) -> ChatOutcome | _BudgetExhausted | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
     Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
@@ -444,6 +503,10 @@ async def run_chat(
     `paid_only=True` demands a paid-tier key on every pick (the job queue's
     final-retry escalation): the same chain walk, but free keys are invisible,
     so the request lands on the paid tail or honestly returns None.
+
+    Returns `BUDGET_EXHAUSTED` (not None) when a project/global daily cap is
+    spent — the caller can then fail the job honestly instead of masking it as
+    "no provider available" and burning retries that can't create budget.
     """
     scope = scope_for(capability)
 
@@ -475,6 +538,10 @@ async def run_chat(
     attempt_cap = _attempt_budget(chain)
     call_timeout = _call_timeout(capability)
     require_tier = "paid" if paid_only else None
+    # chat:deep runs a single legitimately-long call; every other capability gets
+    # an overall wall-clock deadline so a storm walk can't outlast the job's
+    # stale-reclaim window and get re-executed by another worker.
+    wall_deadline = None if capability == "chat:deep" else _now() + _CHAT_WALL_DEADLINE_S
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
@@ -482,6 +549,12 @@ async def run_chat(
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)
+                return None
+            if wall_deadline is not None and _now() >= wall_deadline:
+                log.warning("chat:%s hit the %ds wall-clock deadline mid-walk — "
+                            "stop starting attempts so the job finishes before "
+                            "stale-reclaim (no double-execution)",
+                            capability, int(_CHAT_WALL_DEADLINE_S))
                 return None
             key = await pick_and_reserve(provider, scope=scope,
                                           require_tier=require_tier,
@@ -501,6 +574,10 @@ async def run_chat(
             )
             if flow is _Flow.SUCCESS:
                 return outcome
+            if flow is _Flow.BUDGET_EXHAUSTED:
+                log.warning("chat:%s aborted — project/global daily cap reached",
+                            capability)
+                return BUDGET_EXHAUSTED
             if flow is _Flow.NEXT_KEY_EMPTY:
                 if empty_retries < _MAX_EMPTY_RETRIES:
                     # Retry the SAME provider's next key ONCE — that rescues a

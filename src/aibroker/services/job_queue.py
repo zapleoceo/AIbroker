@@ -36,12 +36,18 @@ from sqlalchemy import text
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import JOBS_CHANNEL, _finish
-from aibroker.services.llm_service import run_chat
+from aibroker.services.llm_service import BUDGET_EXHAUSTED, run_chat
+from aibroker.telemetry.notifier import alert
 
 log = logging.getLogger(__name__)
 
-_MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "8"))
+# Slots are almost entirely I/O waits (a provider call blocks ~1-60s), so the
+# ceiling gates throughput, not CPU. 8 floored storm throughput at 8×60s while
+# the queue backed up (2026-07-16); 24 gives real headroom. Env-tunable for a
+# node that needs to dial it back.
+_MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "24"))
 _POLL_INTERVAL_S = float(os.environ.get("JOB_POLL_INTERVAL_S", "1.0"))
 # With the LISTEN/NOTIFY wake-up (Postgres) the timed poll is only a fallback
 # for a missed NOTIFY, so it can be lazier than the old 1s hot poll.
@@ -146,8 +152,11 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # Final attempt before give-up walks the paid tail only: free-pool storms
     # outlast the 8-retry window, so the last shot must not waste itself on a
     # cooling free pool (2026-07-16: 148 jobs/h died "no provider available"
-    # while the paid deepseek tail was healthy the whole time).
-    paid_only = row.retry_count >= _MAX_RETRIES - 1
+    # while the paid deepseek tail was healthy the whole time). Only when the
+    # capability's chain actually reaches a paid provider with a wired model —
+    # else (e.g. chat:deep is nvidia-only) demanding a paid key is a guaranteed
+    # no-op, so the final retry stays a normal walk instead.
+    paid_only = row.retry_count >= _MAX_RETRIES - 1 and has_paid_tail(row.capability)
     if paid_only:
         log.info("final retry — paid tail only, job %d", row.id)
     try:
@@ -161,6 +170,17 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}")
+        return
+    if outcome is BUDGET_EXHAUSTED:
+        # A project/global daily cap is spent — more retries can't create budget,
+        # so give up immediately with an honest message (not "no provider
+        # available"). Alert the owner once per day so a silently-capped project
+        # is visible, not just invisibly stalled until 00:00 UTC.
+        await _finish(row.id, status="error",
+                       error_message="daily budget cap reached — retry after 00:00 UTC")
+        await alert(f"budget:{row.project_id}",
+                    f"project <b>{project.name}</b> hit its daily budget cap — "
+                    "jobs paused until 00:00 UTC", throttle_min=24 * 60)
         return
     if outcome is None:
         # No provider available right now — retry as capacity frees up.

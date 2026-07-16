@@ -10,6 +10,7 @@ from aibroker.routing.chains import (
     JSON_UNRELIABLE_PROVIDERS,
     chain_for,
     deprioritize_for_json,
+    has_paid_tail,
     is_known_capability,
     scope_for,
 )
@@ -24,6 +25,15 @@ def test_chain_first_provider_is_known(capability):
     chain = chain_for(capability)
     assert chain, f"{capability} chain is empty"
     assert chain[0] in KNOWN_FREE | KNOWN_PAID
+
+
+def test_has_paid_tail_gates_the_final_retry_escalation():
+    """The final-retry paid_only escalation is only meaningful where the chain
+    reaches a paid provider with a wired model. chat:deep is nvidia-only (free),
+    so demanding a paid key there is a guaranteed no-op."""
+    assert has_paid_tail("chat:fast") is True     # deepseek/anthropic/openai tail
+    assert has_paid_tail("chat:edit") is True      # deepseek + anthropic wired
+    assert has_paid_tail("chat:deep") is False      # nvidia-only free lane
 
 
 @pytest.mark.parametrize(

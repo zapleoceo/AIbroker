@@ -65,6 +65,34 @@ async def test_wait_stop_or_wake_times_out_as_poll_fallback():
     await asyncio.wait_for(_wait_stop_or_wake(stop, wake, timeout=0.01), timeout=1.0)
 
 
+async def test_execute_budget_exhausted_finishes_without_burning_retries():
+    """A project/global cap block (run_chat → BUDGET_EXHAUSTED) fails the job
+    honestly and immediately: an accurate error_message, NO retry burn (more
+    retries can't create budget), and one throttled owner alert."""
+    from aibroker.services.llm_service import BUDGET_EXHAUSTED
+
+    pid = 990202
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="cap-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:chat"]))
+
+    async def fake_run_chat(**kw):
+        return BUDGET_EXHAUSTED
+
+    with patch.object(job_queue, "run_chat", fake_run_chat), \
+         patch.object(job_queue, "_finish", AsyncMock()) as finish, \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue, \
+         patch.object(job_queue, "alert", AsyncMock()) as alert_mock:
+        await job_queue._execute(_unclaimed_row(pid, retry_count=0))
+    requeue.assert_not_called()            # no retry burn on a spent budget
+    finish.assert_awaited_once()
+    assert finish.await_args.kwargs["status"] == "error"
+    assert "budget cap" in finish.await_args.kwargs["error_message"]
+    alert_mock.assert_awaited_once()
+    assert alert_mock.await_args.args[0] == f"budget:{pid}"
+    assert alert_mock.await_args.kwargs["throttle_min"] == 24 * 60
+
+
 @pytest.mark.skipif(not ON_SQLITE, reason="asserts the SQLite degradation path")
 async def test_dispatcher_loop_sqlite_no_listener_and_clean_stop():
     """On SQLite the LISTEN task must never start (dialect guard) and the loop
@@ -171,6 +199,32 @@ async def test_execute_final_attempt_escalates_to_paid_only():
         await job_queue._execute(_unclaimed_row(pid, retry_count=0))
     assert seen == [True, False]
     assert requeue.await_count == 2  # outcome None still requeues/fails honestly
+
+
+async def test_execute_no_paid_escalation_when_chain_has_no_paid_tail():
+    """A capability whose chain never reaches a paid provider (chat:deep is
+    nvidia-only) must NOT escalate to paid_only on the final retry — that would
+    be a guaranteed no-op. The last shot stays a normal free-lane walk."""
+    pid = 990303
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="deep-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:deep"]))
+    seen: list[bool] = []
+
+    async def fake_run_chat(**kw):
+        seen.append(kw["paid_only"])
+
+    row = DeepJobRow(
+        id=1, project_id=pid, capability="chat:deep", status="running",
+        retry_count=job_queue._MAX_RETRIES - 1,
+        request={"messages": [{"role": "user", "content": "hi"}], "model": None,
+                 "max_tokens": 64, "temperature": 0.7, "response_format": None,
+                 "workflow": "t"},
+    )
+    with patch.object(job_queue, "run_chat", fake_run_chat), \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()):
+        await job_queue._execute(row)
+    assert seen == [False]      # final retry, but no paid tail → normal walk
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")

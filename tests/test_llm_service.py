@@ -77,11 +77,12 @@ def test_classify_timeout_is_rate_limit():
     assert classify_provider_error(TimeoutError(), "zai") == "rate_limit"
 
 
-def test_is_timeout_flags_billable_holds_only():
-    """A timeout means the provider generated (and BILLED) a response we never
-    received, so it must charge the cost cap; a pre-processing reject cost
-    nothing (fix 2026-07-12: Google billed $122 on gemini while the broker saw
-    $2, the gap being timeouts booked at $0 that never tripped the $1/day cap)."""
+def test_is_timeout_classifies_backstop_and_provider_timeouts():
+    """is_timeout distinguishes a held-then-timed-out call (our wait_for backstop
+    or the provider's own timeout) from a pre-processing reject. Used to steepen
+    the cooldown for a hanging key (a 60s-wasted timeout escalates faster than a
+    0s-wasted 429); no longer drives billing (answerless timeouts book $0 as of
+    2026-07-16)."""
     from aibroker.providers.provider_errors import is_timeout
 
     class _LiteLLMTimeout(Exception):
@@ -440,6 +441,96 @@ async def test_run_chat_caps_gemini_retries(monkeypatch):
     assert picks.count("gemini") == 3     # capped, not 5
 
 
+# ─── cap-block honesty (visible CapBlock row + BUDGET_EXHAUSTED abort) ────────
+
+
+def _cap_block_env(monkeypatch, kind: str, chain: list[str]):
+    """Wire run_chat so every paid pick's reserve_cost raises a `kind` cap block.
+    Returns (picks, recorded) collected during the walk."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.routing import CostGuardError
+
+    picks: list[str] = []
+    recorded: list[dict] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return SimpleNamespace(id=1, label="k", tier="paid", provider=provider,
+                                token_encrypted="x", account_id=None)
+
+    async def fake_reserve(**kw):
+        raise CostGuardError(kind, 0.5, 0.5, 0.001)
+
+    async def fake_record(**kw):
+        recorded.append(kw)
+        return 1
+
+    async def fake_audit(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "audit", fake_audit)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.001)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: list(chain))
+    return svc, picks, recorded
+
+
+async def test_cap_block_books_visible_capblock_row(monkeypatch):
+    """A cap-blocked pick writes a usage_log row (status=error, CapBlock, 402,
+    $0) so the block is visible in the usage view — not audit_log only (prod
+    2026-07-16: ~8800 cap-blocked picks/2h vanished, jobs died invisibly)."""
+    from types import SimpleNamespace
+
+    svc, _picks, recorded = _cap_block_env(monkeypatch, "project", ["deepseek"])
+    await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert recorded[0]["error_kind"] == "CapBlock"
+    assert recorded[0]["http_status"] == 402
+    assert recorded[0]["cost_usd"] == 0.0
+    assert recorded[0]["status"] == "error"
+
+
+async def test_project_cap_aborts_walk_with_budget_exhausted(monkeypatch):
+    """A project/global cap blocks every paid provider identically — run_chat
+    must abort the whole walk (not step to the next paid provider) and signal
+    BUDGET_EXHAUSTED so the caller fails the job honestly."""
+    from types import SimpleNamespace
+
+    svc, picks, _rec = _cap_block_env(
+        monkeypatch, "project", ["deepseek", "anthropic", "openai"])
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is svc.BUDGET_EXHAUSTED
+    assert picks == ["deepseek"]           # aborted — anthropic/openai untried
+
+
+async def test_per_key_cap_advances_to_next_provider(monkeypatch):
+    """A per-key cap is LOCAL — other providers may still have room, so the walk
+    continues to the next provider (returns None only after all are tried)."""
+    from types import SimpleNamespace
+
+    svc, picks, _rec = _cap_block_env(
+        monkeypatch, "api_key", ["deepseek", "anthropic"])
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None                     # no capacity anywhere, but honest None
+    assert picks == ["deepseek", "anthropic"]  # advanced past the per-key block
+
+
 # ─── InvalidJSON breaks to next PROVIDER, not next key ───────────────────────
 
 
@@ -570,6 +661,72 @@ async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
     # gemini + mistral (reliable) walked before cerebras (unreliable, to back)
     assert picks.index("gemini") < picks.index("cerebras")
     assert picks.index("mistral") < picks.index("cerebras")
+
+
+# ─── wall-clock gate (no double-execution) ───────────────────────────────────
+
+
+async def test_run_chat_wall_deadline_stops_starting_attempts(monkeypatch):
+    """A non-deep walk that outlasts _CHAT_WALL_DEADLINE_S stops starting NEW
+    attempts and returns None, so the job finishes before job_queue's 25-min
+    stale-reclaim window could re-execute it. The gate is checked between
+    attempts only — it never aborts an in-flight call."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    clock = {"t": 1000.0}
+
+    def fake_now() -> float:
+        return clock["t"]
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        clock["t"] += 10 * 60      # each attempt burns 10 wall-clock minutes
+        # no key returned → run_chat walks to the next provider
+
+    monkeypatch.setattr(svc, "_now", fake_now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["a", "b", "c", "d"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None
+    # deadline = 1000 + 1080 = 2080. pick a@1000→t1600, b@1600→t2200,
+    # then 2200 >= 2080 → stop before c/d.
+    assert picks == ["a", "b"]
+
+
+async def test_run_chat_deep_has_no_wall_deadline(monkeypatch):
+    """chat:deep is exempt — a legitimately long (~19min) single call must not
+    be gated. The deadline branch is skipped even when the clock is far ahead."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+
+    def fake_now() -> float:
+        return 10 ** 9        # way past any deadline
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)      # no key returned → walk continues
+
+    monkeypatch.setattr(svc, "_now", fake_now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["nvidia"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:deep",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None
+    assert picks == ["nvidia"]   # attempted despite the clock — no gate
 
 
 # ─── translate exact-match cache ─────────────────────────────────────────────
@@ -1371,48 +1528,61 @@ def test_classify_cloudflare_neurons_quota_is_rate_limit_not_auth():
     assert classify_provider_error(exc, "groq") == "error"  # scoped, not global
 
 
-# ─── timeout attempts must charge the reserved estimate ──────────────────────
+# ─── answerless timeouts must NOT consume the admission budget ───────────────
 
 
-async def test_timeout_attempt_books_reserved_estimate(monkeypatch):
-    """A timeout means the provider generated (and billed) a response we never
-    received — _handle_call_error must book the reserved worst-case estimate
-    into usage_log so the per-key daily cost cap sees the spend (the 2026-07-12
-    gemini gap: $122 billed upstream vs $2 recorded). A pre-processing reject
-    stays free."""
+async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
+    """REVERSAL (2026-07-16): a paid timeout used to book the reserved estimate
+    so the per-key cost cap saw upstream spend (the 2026-07-12 $122 gemini gap).
+    But with a $0.50/day cap, a few ANSWERLESS timeouts booked at the estimate
+    burned the whole day's ADMISSION budget on ZERO answers. Now a failed
+    attempt always books $0 — the reservation is released and real timeout spend
+    is reconciled off the provider invoice, not the admission counter."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
 
-    captured: dict = {}
+    booked: dict = {}
+    released: dict = {}
 
-    async def fake_record_error(**kw):
-        captured.update(kw)
+    async def fake_record_usage(**kw):
+        booked.update(kw)
+        return 1
+
+    async def fake_reserve(**kw):
+        return None
+
+    async def fake_release(**kw):
+        released.update(kw)
+
+    async def fake_call_llm(**kw):
+        raise TimeoutError()
 
     async def fake_penalize(k, e):
         return "rate_limit"
 
-    monkeypatch.setattr(svc, "_record_error", fake_record_error)
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "release_cost", fake_release)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0123)
 
-    key = SimpleNamespace(id=1, provider="gemini", label="g")
-    project = SimpleNamespace(id=2)
-    flow = await svc._handle_call_error(
-        exc=TimeoutError(), key=key, project=project, provider="gemini",
+    key = SimpleNamespace(id=1, provider="gemini", label="g", tier="paid",
+                          token_encrypted="x", account_id=None)
+    project = SimpleNamespace(id=2, name="stepan")
+    flow, outcome = await svc._run_attempt(
+        key=key, project=project, provider="gemini",
         use_model="gemini/gemini-2.5-flash", capability="chat:fast",
-        workflow=None, est_tokens=1000, estimated_cost=0.0123,
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None,
+        workflow=None, est_tokens=1000, call_timeout=60.0,
     )
     assert flow is svc._Flow.NEXT_KEY
-    assert captured["billed_cost"] == pytest.approx(0.0123)
-
-    captured.clear()
-    await svc._handle_call_error(
-        exc=RuntimeError("429 rate limit"), key=key, project=project,
-        provider="gemini", use_model="gemini/gemini-2.5-flash",
-        capability="chat:fast", workflow=None, est_tokens=1000,
-        estimated_cost=0.0123,
-    )
-    assert captured["billed_cost"] == 0.0   # a reject costs nothing
+    assert outcome is None
+    assert booked["cost_usd"] == 0.0                       # $0 to the admission cap
+    assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
 
 
 async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
@@ -1517,6 +1687,21 @@ async def test_penalize_rate_limit_opens_exactly_one_session(monkeypatch):
     assert row.cooldown_until is not None
     assert row.error_count == 1
     assert row.last_error == "429 Too Many Requests"
+
+
+async def test_penalize_timeout_feeds_circuit_breaker():
+    """A timeout penalty records the key in the selection-side circuit-breaker,
+    so the selector can soft-skip a bulk-timing-out provider and won't re-pin
+    cache-affinity to the hung key (2026-07-16 storm)."""
+    import aibroker.services.llm_service as svc
+    from aibroker.routing import circuit
+
+    circuit.reset()
+    key = await _seed_key()
+    kind = await svc._penalize(key, TimeoutError())
+    assert kind == "rate_limit"
+    assert key.id in circuit.recent_timeout_key_ids()
+    circuit.reset()
 
 
 async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypatch):

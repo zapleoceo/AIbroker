@@ -68,6 +68,16 @@ def test_backoff_caps_at_max():
     assert cooldown_seconds("anything", 50) == MAX_COOLDOWN_S
 
 
+def test_timeout_bump_escalates_one_strike_faster():
+    """A hung key wasted ~60s (vs 0s for a 429), so timeout_bump escalates one
+    strike faster — it drops out in ~2 strikes, not ~5 (2026-07-16 storm)."""
+    assert cooldown_seconds("gemini", 0) == 60                      # 429 baseline
+    assert cooldown_seconds("gemini", 0, timeout_bump=True) == 120  # like strike 1
+    assert cooldown_seconds("gemini", 1, timeout_bump=True) == 240  # like strike 2
+    # Still bounded by the cap.
+    assert cooldown_seconds("gemini", 20, timeout_bump=True) == MAX_COOLDOWN_S
+
+
 def test_gemini_recovers_in_one_minute_first_try():
     """Regression: Gemini's RPM window is 60s — base must match.
 

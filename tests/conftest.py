@@ -23,6 +23,7 @@ os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
 # notifier (paid-tail check) in the Postgres tests that don't patch it.
 os.environ.setdefault("ALERT_STATE_DIR", tempfile.mkdtemp(prefix="aib-alert-state-"))
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -32,6 +33,17 @@ from aibroker.db.engine import Base
 
 _DB_URL = os.environ["DATABASE_URL"]
 _IS_PG = "postgres" in _DB_URL or "asyncpg" in _DB_URL
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit():
+    """The timeout circuit-breaker is per-process module state — clear it around
+    every test so a timeout noted in one test can't soft-skip a provider in the
+    next (would flake the Postgres selector picks)."""
+    from aibroker.routing import circuit
+    circuit.reset()
+    yield
+    circuit.reset()
 
 
 @pytest_asyncio.fixture(autouse=True)
