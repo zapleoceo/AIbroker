@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
@@ -285,18 +286,28 @@ async def pick_and_reserve(
     )
 
 
-async def mark_cooldown(api_key_id: int, until: datetime, reason: str | None = None) -> None:
+async def mark_cooldown(
+    api_key_id: int,
+    until: datetime,
+    reason: str | None = None,
+    *,
+    session: AsyncSession | None = None,
+) -> None:
     # cooldown_until is a naive UTC TIMESTAMP; asyncpg rejects tz-aware values
     # ("can't subtract offset-naive and offset-aware"). Callers pass UTC-aware
     # datetimes — normalise to naive UTC here so prod (asyncpg) doesn't blow up.
     if until.tzinfo is not None:
         until = until.astimezone(UTC).replace(tzinfo=None)
+    stmt = text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1, "
+                "last_error = :reason WHERE id = :id")
+    params = {"u": until, "id": api_key_id, "reason": (reason or "")[:200] or None}
+    # `session` lets _penalize land the whole penalty (adaptive COUNT + this
+    # UPDATE) in one session/transaction instead of one session per statement.
+    if session is not None:
+        await session.execute(stmt, params)
+        return
     async with get_session() as s:
-        await s.execute(
-            text("UPDATE api_keys SET cooldown_until = :u, error_count = error_count + 1, "
-                 "last_error = :reason WHERE id = :id"),
-            {"u": until, "id": api_key_id, "reason": (reason or "")[:200] or None},
-        )
+        await s.execute(stmt, params)
 
 
 async def mark_dead(api_key_id: int, reason: str | None = None) -> None:

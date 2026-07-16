@@ -14,6 +14,7 @@ from enum import Enum, auto
 from typing import Any
 
 from aibroker.crypto import decrypt
+from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
 from aibroker.providers.context_limits import (
@@ -136,12 +137,20 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
         # backoff. Stops the retry storm where a daily-exhausted key
         # (cerebras "tokens per day limit exceeded") got a 60 s cooldown,
         # recovered, got hammered, re-failed — looping until midnight.
-        try:
-            from aibroker.routing.cooldown import cooldown_until
-            until = await cooldown_until(key.id, key.provider, str(exc))
-        except Exception:
-            until = datetime.now(UTC) + _COOLDOWN
-        await mark_cooldown(key.id, until, reason)
+        # 2026-07-16: one session for the whole penalty — the adaptive COUNT
+        # and the cooldown UPDATE used to each open their own session, pure
+        # pool churn on a path that fires on every failed attempt.
+        from aibroker.routing.cooldown import cooldown_until
+        async with get_session() as s:
+            try:
+                until = await cooldown_until(key.id, key.provider, str(exc),
+                                             session=s)
+            except Exception:
+                # A failed statement aborts the tx on Postgres — roll back so
+                # the fallback UPDATE below can still land in this session.
+                await s.rollback()
+                until = datetime.now(UTC) + _COOLDOWN
+            await mark_cooldown(key.id, until, reason, session=s)
     elif kind == "auth":
         await mark_dead(key.id, reason)
     return kind

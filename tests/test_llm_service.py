@@ -1315,3 +1315,87 @@ def test_classify_cloudflare_neurons_quota_is_rate_limit_not_auth():
     )
     assert classify_provider_error(exc, "cloudflare") == "rate_limit"
     assert classify_provider_error(exc, "groq") == "error"  # scoped, not global
+
+
+# ─── _penalize — single-session penalty path (2026-07-16) ────────────────────
+
+
+async def _seed_key(provider: str = "gemini"):
+    from aibroker.crypto import encrypt
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    async with get_session() as s:
+        key = ApiKeyRow(provider=provider, label="pen", tier="free",
+                        scopes=["llm:chat"], token_encrypted=encrypt("x"),
+                        is_active=True, is_alive=True,
+                        daily_limit=0, daily_used=0,
+                        daily_cost_used_usd=0.0, monthly_cost_used_usd=0.0,
+                        total_cost_usd=0.0, error_count=0, notes="")
+        s.add(key)
+        await s.flush()
+        return key
+
+
+async def test_penalize_rate_limit_opens_exactly_one_session(monkeypatch):
+    """The whole penalty (adaptive 429 COUNT + cooldown UPDATE) lands in ONE
+    session — it used to be one per statement, pure pool churn on a path that
+    fires on every failed provider attempt."""
+    from contextlib import asynccontextmanager
+
+    import aibroker.db.engine as engine_mod
+    import aibroker.routing.cooldown as cooldown_mod
+    import aibroker.routing.selector as selector_mod
+    import aibroker.services.llm_service as svc
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    key = await _seed_key()
+    opened = {"n": 0}
+    real = engine_mod.get_session
+
+    @asynccontextmanager
+    async def counting():
+        opened["n"] += 1
+        async with real() as s:
+            yield s
+
+    monkeypatch.setattr(svc, "get_session", counting)
+    monkeypatch.setattr(cooldown_mod, "get_session", counting)
+    monkeypatch.setattr(selector_mod, "get_session", counting)
+
+    kind = await svc._penalize(key, RuntimeError("429 Too Many Requests"))
+
+    assert kind == "rate_limit"
+    assert opened["n"] == 1
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, key.id)
+    assert row.cooldown_until is not None
+    assert row.error_count == 1
+    assert row.last_error == "429 Too Many Requests"
+
+
+async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypatch):
+    """cooldown_until blowing up must not lose the penalty: the session is
+    rolled back and the flat 5-min fallback UPDATE still lands in it."""
+    from datetime import UTC, datetime
+
+    import aibroker.routing.cooldown as cooldown_mod
+    import aibroker.services.llm_service as svc
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    key = await _seed_key()
+
+    async def boom(*a, **kw):
+        raise RuntimeError("resolver down")
+
+    monkeypatch.setattr(cooldown_mod, "cooldown_until", boom)
+    kind = await svc._penalize(key, RuntimeError("429 Too Many Requests"))
+
+    assert kind == "rate_limit"
+    async with get_session() as s:
+        row = await s.get(ApiKeyRow, key.id)
+    assert row.cooldown_until is not None
+    parked_s = (row.cooldown_until - datetime.now(UTC).replace(tzinfo=None)).total_seconds()
+    assert 200 < parked_s <= 330  # the flat _COOLDOWN (5 min), not the adaptive path

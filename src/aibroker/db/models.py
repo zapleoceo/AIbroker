@@ -22,6 +22,11 @@ from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 
 # JSONB on Postgres, plain JSON on SQLite (for tests). Same Python API.
 JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
+
+# BIGINT PK on Postgres, INTEGER on SQLite (for tests): SQLite only
+# autoincrements an exact `INTEGER PRIMARY KEY` (rowid alias) — a BIGINT PK
+# there fails NOT NULL on any insert without a hand-picked explicit id.
+PkBigInt = BigInteger().with_variant(Integer(), "sqlite")
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aibroker.db.engine import Base
@@ -50,7 +55,7 @@ class ApiKeyRow(Base):
     __tablename__ = "api_keys"
     __table_args__ = (UniqueConstraint("provider", "label", name="uq_api_keys_provider_label"),)
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     tier: Mapped[str] = mapped_column(String(10), default="free", nullable=False)
@@ -121,7 +126,7 @@ class LeaseRow(Base):
 class UsageLogRow(Base):
     __tablename__ = "usage_log"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
     api_key_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("api_keys.id", ondelete="SET NULL")
     )
