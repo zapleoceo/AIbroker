@@ -364,36 +364,48 @@ async def record_usage(
     through the outcome dataclasses and returned to the caller in the API
     response (`request_id`) so both sides can find the same call in their own
     logs / this dashboard's project detail table."""
+    params = {
+        "k": api_key_id, "p": project_id, "l": lease_id, "pr": provider,
+        "m": model, "c": capability, "w": workflow,
+        "ti": tokens_in, "to": tokens_out,
+        "cr": cache_read_tokens, "cw": cache_write_tokens,
+        "co": cost_usd, "lm": latency_ms,
+        "s": status, "e": error_kind, "h": http_status,
+    }
+    insert_sql = (
+        "INSERT INTO usage_log "
+        "(api_key_id, project_id, lease_id, provider, model, capability, workflow, "
+        " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
+        " cost_usd, latency_ms, status, error_kind, http_status) "
+        "VALUES (:k, :p, :l, :pr, :m, :c, :w, :ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
+        "RETURNING id"
+    )
+    recover_sql = _recover_set_sql(status, error_kind)
+    update_sql = (
+        "UPDATE api_keys AS k "
+        f"SET daily_used = {FRESH_DAILY_USED_SQL} + 1, "
+        f"    daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :co, "
+        "    daily_reset_at = CURRENT_DATE, "
+        "    monthly_cost_used_usd = monthly_cost_used_usd + :co, "
+        f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
+        "WHERE k.id = :k"
+    )
     async with get_session() as s:
-        usage_id = (await s.execute(
-            text(
-                "INSERT INTO usage_log "
-                "(api_key_id, project_id, lease_id, provider, model, capability, workflow, "
-                " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
-                " cost_usd, latency_ms, status, error_kind, http_status) "
-                "VALUES (:k, :p, :l, :pr, :m, :c, :w, :ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
-                "RETURNING id"
-            ),
-            {
-                "k": api_key_id, "p": project_id, "l": lease_id, "pr": provider,
-                "m": model, "c": capability, "w": workflow,
-                "ti": tokens_in, "to": tokens_out,
-                "cr": cache_read_tokens, "cw": cache_write_tokens,
-                "co": cost_usd, "lm": latency_ms,
-                "s": status, "e": error_kind, "h": http_status,
-            },
-        )).scalar_one()
-        recover_sql = _recover_set_sql(status, error_kind)  # pragma: no cover
-        await s.execute(
-            text(
-                "UPDATE api_keys AS k "
-                f"SET daily_used = {FRESH_DAILY_USED_SQL} + 1, "
-                f"    daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c, "
-                "    daily_reset_at = CURRENT_DATE, "
-                "    monthly_cost_used_usd = monthly_cost_used_usd + :c, "
-                f"    total_cost_usd = total_cost_usd + :c{recover_sql} "
-                "WHERE k.id = :id"
-            ),
-            {"c": cost_usd, "id": api_key_id},
-        )
+        if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
+            # One round-trip: data-modifying CTE folds the INSERT and the
+            # counter UPDATE into a single statement (2026-07-16). record_usage
+            # runs once per attempt at 60-100k picks/day — the second statement
+            # was half this hot path's DB chatter.
+            usage_id = (await s.execute(
+                text(f"WITH ins AS ({insert_sql}), "
+                     f"upd AS ({update_sql} RETURNING 1) "
+                     "SELECT id FROM ins"),
+                params,
+            )).scalar_one()
+        else:
+            # SQLite (test gate) allows only SELECT in a WITH clause — a
+            # data-modifying CTE is a syntax error there. Same statements,
+            # same session/transaction, just two round-trips.
+            usage_id = (await s.execute(text(insert_sql), params)).scalar_one()
+            await s.execute(text(update_sql), params)
     return int(usage_id)

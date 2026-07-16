@@ -119,6 +119,34 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
+## Connection scaling (2026-07-16)
+
+Decision documented, nothing installed. Current math:
+
+- `db/engine.py`: `pool_size=10` + `max_overflow=20` = **30 connections max
+  per process**; the `api` container runs **2 uvicorn workers** → 60 max from
+  the API alone, plus the `monitor` container's own engine (another 30 worst
+  case) — vs Postgres's default `max_connections = 100`.
+- In practice the pools sit far below their ceilings (sessions are
+  short-lived; the 2026-07-16 session-diet work cut per-attempt session churn
+  further), so today a pooler would add a hop and a component for no measured
+  win.
+
+**Threshold — add PgBouncer (transaction pooling) when a second broker node
+appears or the worker count doubles.** Either step puts the theoretical max
+(≥120 from API workers alone) past what default Postgres can take, and
+per-process SQLAlchemy pools stop being a global cap at all once processes
+multiply across nodes.
+
+How it slots in when the time comes (sketch, not applied): add a
+`pgbouncer` service to `docker-compose.yml` (e.g. `edoburu/pgbouncer`,
+`pool_mode=transaction`, `default_pool_size≈20`) between the app and
+`postgres`, point `DATABASE_URL` at it, and drop the app-side pool to
+`pool_size≈5, max_overflow≈5` per worker. Caveats to check then: no
+session-level state across transactions (no advisory locks / LISTEN on
+pooled connections — the deep-jobs NOTIFY listener needs a DIRECT
+connection to Postgres, bypassing the pooler), and `pool_pre_ping` stays on.
+
 ## Manual deploy fallback
 
 ```
