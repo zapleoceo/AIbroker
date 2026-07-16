@@ -498,10 +498,58 @@ async def test_cap_block_books_visible_capblock_row(monkeypatch):
     assert recorded[0]["status"] == "error"
 
 
-async def test_project_cap_aborts_walk_with_budget_exhausted(monkeypatch):
-    """A project/global cap blocks every paid provider identically — run_chat
-    must abort the whole walk (not step to the next paid provider) and signal
-    BUDGET_EXHAUSTED so the caller fails the job honestly."""
+async def test_project_cap_downgrades_walk_to_free_not_abort(monkeypatch):
+    """Non-paid_only: a project cap blocks only PAID keys ($0 free keys are
+    exempt in cost_guard), so run_chat must NOT abort — it downgrades the rest
+    of the walk to free-only and tries providers past the paid tail (which
+    deprioritize_for_json sinks BELOW it on JSON requests). Returns retryable
+    None, not BUDGET_EXHAUSTED. Regression 2026-07-17: the abort starved 14 idle
+    cerebras keys once Stepan's $0.50 paid cap filled."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.routing import CostGuardError
+
+    picks: list[tuple[str, str | None]] = []
+
+    async def fake_pick(provider, *, scope=None, require_tier=None, **kw):
+        picks.append((provider, require_tier))
+        if provider == "deepseek" and require_tier != "free":
+            return SimpleNamespace(id=1, label="k", tier="paid", provider=provider,
+                                    token_encrypted="x", account_id=None)
+        return None  # free tail momentarily empty → walk ends retryable
+
+    async def fake_reserve(**kw):
+        raise CostGuardError("project", 0.5, 0.5, 0.001)
+
+    async def fake_record(**kw):
+        return 1
+
+    async def fake_audit(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "audit", fake_audit)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.001)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "cerebras"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+    )
+    assert out is None                        # retryable — NOT BUDGET_EXHAUSTED
+    assert ("deepseek", None) in picks        # paid tail tried, cap-blocked
+    assert ("cerebras", "free") in picks      # walk downgraded + continued
+
+
+async def test_paid_only_project_cap_returns_budget_exhausted(monkeypatch):
+    """paid_only (the job queue's final-retry escalation) has NO free fallback,
+    so a project cap there returns BUDGET_EXHAUSTED — the job fails honestly
+    instead of retrying budget it can't create."""
     from types import SimpleNamespace
 
     svc, picks, _rec = _cap_block_env(
@@ -510,6 +558,7 @@ async def test_project_cap_aborts_walk_with_budget_exhausted(monkeypatch):
         project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
         messages=[{"role": "user", "content": "hi"}], model=None,
         max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+        paid_only=True,
     )
     assert out is svc.BUDGET_EXHAUSTED
     assert picks == ["deepseek"]           # aborted — anthropic/openai untried

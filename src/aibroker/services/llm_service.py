@@ -575,9 +575,26 @@ async def run_chat(
             if flow is _Flow.SUCCESS:
                 return outcome
             if flow is _Flow.BUDGET_EXHAUSTED:
-                log.warning("chat:%s aborted — project/global daily cap reached",
-                            capability)
-                return BUDGET_EXHAUSTED
+                if paid_only:
+                    log.warning("chat:%s — paid tail budget-capped, no free "
+                                "fallback (final retry)", capability)
+                    return BUDGET_EXHAUSTED
+                # A project/global COST cap blocks only PAID keys — $0 free keys
+                # are exempt in cost_guard, so a cap-block must NOT abort the
+                # walk: healthy free providers later in the chain still serve for
+                # free. deprioritize_for_json sinks cerebras/cohere/openrouter
+                # BELOW the paid tail on JSON requests, so aborting here starved
+                # the whole free tail once Stepan's $0.50 paid cap filled — jobs
+                # died "budget cap reached" beside 14 idle cerebras keys
+                # (2026-07-17). Downgrade to free-only for the rest of the walk:
+                # the identically-capped paid providers now yield no key (pick
+                # returns None, no re-booked CapBlock) and the sunk free
+                # providers get their turn.
+                if require_tier != "free":
+                    require_tier = "free"
+                    log.info("chat:%s paid budget-capped — walking free-only tail",
+                             capability)
+                break
             if flow is _Flow.NEXT_KEY_EMPTY:
                 if empty_retries < _MAX_EMPTY_RETRIES:
                     # Retry the SAME provider's next key ONCE — that rescues a

@@ -1231,13 +1231,27 @@ never by exempting anything from the caps or raising them.
 **Cap-block is visible + honest.** `_run_attempt`'s `except CostGuardError`
 now books a `usage_log` row (`status=error`, `error_kind=CapBlock`,
 `http_status=402`, `cost_usd=0`) exactly like any other attempt, alongside the
-existing audit call. A project/global cap blocks every paid provider
-identically, so walking to the next paid key is futile: `run_chat` aborts the
-whole walk (new `_Flow.BUDGET_EXHAUSTED`) and returns the `BUDGET_EXHAUSTED`
-sentinel; a per-key cap stays `NEXT_PROVIDER`. `job_queue._execute` finalizes a
-budget-exhausted job with `daily budget cap reached — retry after 00:00 UTC`,
-burns **no** further retries (more retries can't create budget), and fires a
-24h-throttled owner alert keyed `budget:{project_id}`.
+existing audit call. A project/global cap blocks every PAID provider
+identically (`_run_attempt` returns `_Flow.BUDGET_EXHAUSTED`); a per-key cap
+stays `NEXT_PROVIDER`.
+
+**A cap-block downgrades the walk to free-only — it does NOT abort it**
+(fix 2026-07-17). A project/global cap is a *cost* cap, and a free-tier
+attempt bills **$0** (`_billed_cost`) so `cost_guard` exempts it — therefore a
+cap-block must never stop a free attempt. But `deprioritize_for_json` sinks
+`JSON_UNRELIABLE_PROVIDERS` (cerebras/cohere/openrouter) BELOW the paid tail on
+JSON requests, so on `BUDGET_EXHAUSTED` `run_chat` sets `require_tier="free"`
+for the rest of the walk instead of returning: the identically-capped paid
+providers now yield no key (pick returns `None`, no re-booked CapBlock) and the
+sunk free providers get their turn. If the free tail is momentarily empty the
+walk ends in a **retryable `None`** (free capacity recovers on cooldown/quota
+reset), not a hard fail. The original whole-walk abort starved 14 idle cerebras
+keys the moment Stepan's `$0.50` paid cap filled — jobs died `budget cap
+reached` beside a healthy free pool. The honest hard-fail (`BUDGET_EXHAUSTED` →
+`daily budget cap reached — retry after 00:00 UTC`, **no** further retries,
+24h-throttled `budget:{project_id}` alert) is reserved for the `paid_only`
+final retry, which by definition has no free fallback. `job_queue._execute`
+still finalizes that path unchanged.
 
 **A timeout is not billed to the admission cap.** A paid TIMEOUT used to book
 the reserved estimate so the per-key cost cap saw the upstream spend (the
