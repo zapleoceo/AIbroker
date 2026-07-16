@@ -87,6 +87,25 @@ What it does:
 Rerun whenever you want a fresh snapshot — old `legacy:%` rows are
 wiped and re-imported, live broker rows are never touched.
 
+## Schema migrations
+
+Applied via `psql` directly against the running container — no Alembic in
+production. Every file in `infra/sql/migrations/` is idempotent
+(`IF NOT EXISTS`), so re-running is safe:
+
+```
+ssh hetzner-root
+docker exec -i aibroker-postgres psql -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/010_deep_jobs_payload_hash.sql
+```
+
+Apply a migration BEFORE merging the code that depends on it (the deploy
+pipeline ships code only). `infra/sql/init.sql` mirrors every migration for
+fresh-DB bootstrap. Migration 010 (2026-07-16) adds `deep_jobs.payload_hash`
+plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
+degrades to plain inserts (with a logged warning) if it lands first, but
+dedup stays off until the migration is applied.
+
 ## Manual deploy fallback
 
 ```

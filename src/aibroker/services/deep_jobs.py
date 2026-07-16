@@ -20,11 +20,14 @@ give-up after retries) are owned by the dispatcher — `get_job` is a pure read.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
@@ -35,6 +38,63 @@ log = logging.getLogger(__name__)
 # NOTIFY channel shared with the dispatcher's LISTEN connection (job_queue.py).
 # Lives here (not job_queue) because job_queue already imports from this module.
 JOBS_CHANNEL = "aib_jobs"
+
+# In-flight dedup window. Measured on prod (2026-07-16): one client resubmitted
+# the SAME vision payload up to 33x (480 jobs/24h vs 156 distinct payloads);
+# with the dispatcher's own up-to-8 retries that's ~260 provider attempts for
+# one image. 30 min is wide enough to swallow that whole resubmit storm, narrow
+# enough that a genuinely repeated question tomorrow gets a fresh answer. Only
+# pending/running jobs dedup — a done/error job never does: after a failure the
+# client may legitimately want a retry.
+_DEDUP_WINDOW_S = 30 * 60
+
+# Flips False the first time the dedup lookup hits a missing payload_hash
+# column (code deployed before migration 010 was applied) — degrade to plain
+# duplicate-tolerant inserts instead of 500ing every submit. Warn once.
+_dedup_available = True
+
+
+def payload_hash(project_id: int, capability: str, request: dict[str, Any]) -> str:
+    """md5 over project + capability + canonical (sorted, compact) request JSON."""
+    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(f"{project_id}:{capability}:{canonical}".encode()).hexdigest()
+
+
+async def _find_inflight_duplicate(
+    project_id: int, capability: str, phash: str
+) -> int | None:
+    """id of an identical pending/running job inside the dedup window, or None.
+
+    Best-effort, not a uniqueness constraint: two truly simultaneous identical
+    submits can still both insert — fine, the target is the serial resubmit
+    storm, not a race window of milliseconds."""
+    global _dedup_available
+    if not _dedup_available:
+        return None
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=_DEDUP_WINDOW_S)
+    try:
+        async with get_session() as s:
+            return (await s.execute(
+                select(DeepJobRow.id)
+                .where(
+                    DeepJobRow.project_id == project_id,
+                    DeepJobRow.capability == capability,
+                    DeepJobRow.payload_hash == phash,
+                    DeepJobRow.status.in_(("pending", "running")),
+                    DeepJobRow.created_at > cutoff,
+                )
+                .order_by(DeepJobRow.created_at.desc())
+                .limit(1)
+            )).scalars().first()
+    except (ProgrammingError, OperationalError) as e:
+        # Missing column = migration 010 not applied yet. The deploy must not
+        # 500 over that — disable dedup until the operator runs the migration.
+        _dedup_available = False
+        log.warning(
+            "job dedup disabled — payload_hash lookup failed (%s); "
+            "apply infra/sql/migrations/010_deep_jobs_payload_hash.sql", e,
+        )
+        return None
 
 
 async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Postgres-only (test_submit_job_fires_pg_notify)
@@ -72,9 +132,21 @@ async def submit_job(  # pragma: no cover
         "max_tokens": max_tokens, "temperature": temperature,
         "response_format": response_format, "workflow": workflow,
     }
+    phash = payload_hash(project.id, capability, request)
+    existing = await _find_inflight_duplicate(project.id, capability, phash)
+    if existing is not None:
+        # Identical request already in flight — hand back its id (the client's
+        # own resubmit storm now polls ONE job) and don't wake the dispatcher.
+        log.info("dedup: project=%s %s resubmitted in-flight job %s — returning it",
+                 project.id, capability, existing)
+        return existing
     async with get_session() as s:
         row = DeepJobRow(project_id=project.id, capability=capability,
                           status="pending", request=request)
+        if _dedup_available:
+            # Left UNSET (not None) when degraded, so SQLAlchemy omits the
+            # column from the INSERT — it may not exist in the DB yet.
+            row.payload_hash = phash
         s.add(row)
         await s.flush()
         job_id = row.id
