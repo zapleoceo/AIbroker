@@ -1317,6 +1317,44 @@ def test_friendly_reason_humanizes_rate_limit_dumps():
     assert _friendly_reason("monthly quota") == ("monthly quota", "месячная квота")
 
 
+# ─── recent-calls log cell humanization (http/kind → friendly label) ─────────
+
+
+def test_friendly_call_error_humanizes_by_kind_and_status():
+    """A timeout/cap booked under 429/402 must read as itself, not a plain rate
+    limit — error_kind is matched before the raw status."""
+    from aibroker.routes.dashboard_render import _friendly_call_error as f
+    assert f(429, "TimeoutError") == ("timeout", "таймаут", "warn")
+    assert f(429, "APIConnectionError") == ("rate limited", "лимит запросов", "warn")
+    assert f(402, "CapBlock") == ("budget cap", "лимит бюджета", "warn")
+    assert f(401, "AuthenticationError") == ("auth failed", "ошибка авторизации", "bad")
+    assert f(200, "EmptyBody") == ("empty response", "пустой ответ", "warn")
+    assert f(200, "InvalidJSON") == ("bad JSON", "плохой JSON", "warn")
+    assert f(None, "APIConnectionError") == ("connection error", "ошибка соединения", "warn")
+
+
+def test_friendly_call_error_none_for_ok_and_unknown():
+    from aibroker.routes.dashboard_render import _friendly_call_error as f
+    assert f(200, None) is None            # a successful row carries no error label
+    assert f(None, None) is None
+    assert f(200, "SomethingBrandNew") is None
+
+
+def test_err_cell_shows_humanized_label_and_keeps_raw_tooltip():
+    """The cell shows the friendly label + colour; the raw `{status} {kind}`
+    survives in the title tooltip so nothing is lost for debugging."""
+    from aibroker.routes.dashboard_render import _err_cell
+    cell = _err_cell(429, "TimeoutError")
+    assert 'title="429 TimeoutError"' in cell     # raw preserved
+    assert 'data-en="timeout"' in cell
+    assert 'data-ru="таймаут"' in cell
+    assert 'class="warn"' in cell                 # transient → yellow
+    assert 'class="bad"' in _err_cell(401, "AuthenticationError")  # auth → red
+    ok = _err_cell(200, None)                      # ok row falls back to raw
+    assert "data-i18n" not in ok
+    assert "200" in ok
+
+
 def test_out_of_credit_key_shows_no_credits_not_dead():
     """REGRESSION (2026-07-10): a paid key that's is_alive=False only because its
     BALANCE ran out ('prepayment credits are depleted') is valid and auto-recovers
