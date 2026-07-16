@@ -244,7 +244,10 @@ jobs:
           if [ -n "$NET_ADDED" ]; then
             echo "Added public names: $NET_ADDED"
             for name in $NET_ADDED; do
-              if ! grep -rqF -- "$name" docs/ 2>/dev/null; then
+              # Word-boundary match: plain -F substring-matched, so a renamed
+              # symbol whose old name is a PREFIX of the new one (note_affinity ->
+              # note_affinity_shared) false-positived both checks (2026-07-16).
+              if ! grep -rqE -- "(^|[^A-Za-z0-9_])${name}([^A-Za-z0-9_]|$)" docs/ 2>/dev/null; then
                 echo "::error::Added public symbol '$name' not mentioned anywhere in docs/"
                 fail=1
               fi
@@ -253,7 +256,7 @@ jobs:
           if [ -n "$NET_REMOVED" ]; then
             echo "Removed public names: $NET_REMOVED"
             for name in $NET_REMOVED; do
-              if grep -rqF -- "$name" docs/ 2>/dev/null; then
+              if grep -rqE -- "(^|[^A-Za-z0-9_])${name}([^A-Za-z0-9_]|$)" docs/ 2>/dev/null; then
                 echo "::error::Removed symbol '$name' still referenced in docs/ (orphan)"
                 fail=1
               fi
