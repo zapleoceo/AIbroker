@@ -212,6 +212,50 @@ async def test_tick_paid_tail_kill_then_revive():
                 if c.args[0].startswith("paid_tail:")]
 
 
+async def test_tick_skip_verdict_does_not_revive_dead_key():
+    """REGRESSION (2026-07-16): a provider with no configured probe returned
+    'alive', so the monitor force-revived its dead keys every sweep
+    (is_alive=True, last_error wiped) — a dead/revoked cloudflare key flapped
+    pick→fail→dead→revive forever. The 'skip' verdict must leave the key's
+    state exactly as real traffic left it. Explicit id → SQLite-safe insert;
+    probe_all is REAL here (unknown provider short-circuits to skip, no HTTP)."""
+    async with get_session() as s:
+        await s.execute(insert(ApiKeyRow).values(
+            id=90050, provider="mysteryprov", label="skip1",
+            token_encrypted=encrypt("t"), tier="free",
+            is_active=True, is_alive=False, error_count=4,
+            last_error="auth failed", scopes=["llm:chat"],
+        ))
+    with patch("aibroker.monitor.alert", AsyncMock()), \
+         patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
+        await tick()
+    async with get_session() as s:
+        row = (await s.execute(
+            select(ApiKeyRow).where(ApiKeyRow.id == 90050)
+        )).scalar_one()
+    assert row.is_alive is False               # NOT resurrected
+    assert row.last_error == "auth failed"     # NOT wiped
+    assert row.error_count == 4
+    assert not [c for c in fake_recover.await_args_list
+                if c.args[0].startswith("key:")]
+
+
+async def test_tick_threads_account_id_to_probe_all():
+    """The cloudflare probe needs the key's account_id for its account-scoped
+    URL — tick must pass it through probe_all's key tuples."""
+    async with get_session() as s:
+        await s.execute(insert(ApiKeyRow).values(
+            id=90051, provider="cloudflare", label="cf1",
+            token_encrypted=encrypt("cf-token"), tier="free",
+            is_active=True, is_alive=False,   # dead → probed every sweep
+            account_id="acct-42", scopes=["llm:chat"],
+        ))
+    with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})) as pa:
+        await tick()
+    entries = {(kid, prov, acc) for kid, prov, _plain, acc in pa.await_args.args[0]}
+    assert (90051, "cloudflare", "acct-42") in entries
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")
 async def test_tick_marks_alive_to_alive_clears_error_count():
     async with get_session() as s:
@@ -365,7 +409,7 @@ async def test_tick_marks_undecryptable_key_dead_and_alerts():
 async def _probed_ids(sweep: int) -> set[int]:
     with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})) as pa:
         await tick(sweep)
-    return {kid for kid, _, _ in pa.await_args.args[0]}
+    return {kid for kid, *_ in pa.await_args.args[0]}
 
 
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL needs Postgres")

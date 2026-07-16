@@ -66,11 +66,37 @@ async def test_probe_neterr_on_exception():
     assert "ConnectionError" in hint
 
 
-async def test_probe_unknown_provider_returns_alive():
-    """If we never configured a probe for a provider, skip with 'alive'."""
+async def test_probe_unknown_provider_returns_skip_not_alive():
+    """REGRESSION (2026-07-16): an unprobeable provider used to read 'alive',
+    so the monitor force-revived its dead keys every sweep (cloudflare flapped
+    pick→fail→dead→revive forever). Neutral 'skip' = leave state unchanged."""
     verdict, http, hint = await probe("nonexistent-provider", "fake-key")
-    assert verdict == "alive"
+    assert verdict == "skip"
+    assert http == 0
     assert "no probe" in hint
+
+
+async def test_probe_cloudflare_without_account_id_returns_skip():
+    """A cloudflare key with no account_id can't be called at all — the probe
+    must skip (leave state), not fabricate a verdict. No HTTP is attempted."""
+    verdict, http, hint = await probe("cloudflare", "fake-key", None)
+    assert verdict == "skip"
+    assert http == 0
+    assert "account_id" in hint
+
+
+def test_cloudflare_probe_uses_account_scoped_api_base():
+    """The cloudflare probe URL must embed the key's account_id (Workers AI has
+    no account header — the ID rides in the path, same as the adapter's
+    api_base) and probe the same gpt-oss-120b the chat lanes use."""
+    from aibroker.providers.health_probes import _PROBES
+    method, url, headers, body = _PROBES["cloudflare"]("SECRET", "acct-123")
+    assert method == "POST"
+    assert "api.cloudflare.com" in url
+    assert "/accounts/acct-123/" in url
+    assert body["model"] == "@cf/openai/gpt-oss-120b"
+    assert body["max_tokens"] == 1
+    assert headers["Authorization"] == "Bearer SECRET"
 
 
 def test_probe_models_are_live_not_dead_or_paid():
@@ -83,8 +109,9 @@ def test_probe_models_are_live_not_dead_or_paid():
     _, _, _, nvidia_body = _PROBES["nvidia"]("k")
     assert "kimi" not in nvidia_body["model"]
     assert "nemotron" in nvidia_body["model"]
-    # openai + cloudflare gaps: openai now has a probe (dead keys detectable).
+    # openai + cloudflare both have probes now (dead keys detectable).
     assert "openai" in _PROBES
+    assert "cloudflare" in _PROBES
 
 
 def test_gemini_probe_key_in_header_not_url():

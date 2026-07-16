@@ -1,5 +1,19 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (cloudflare health probe + neutral "skip" verdict)**: cloudflare
+> had no `_PROBES` entry, and `probe_with_headers` defaulted an unprobed
+> provider to `("alive", 0, "no probe configured")` — so the monitor
+> force-revived dead cloudflare keys on EVERY sweep (`is_alive=True`,
+> `last_error` wiped) and a dead/revoked key flapped pick→fail→dead→revive
+> forever. Two fixes: (1) a real cloudflare probe (chat completion on
+> `@cf/openai/gpt-oss-120b`, `max_tokens=1`) — it needs the key's
+> account-scoped URL, so `probe`/`probe_all` now thread each key row's
+> `account_id` through (monitor passes it; a cloudflare key without one is
+> unprobeable); (2) an unprobeable key now returns the neutral verdict
+> **`skip`**, which the monitor treats as "leave state unchanged" instead of
+> force-alive — a dead key of an unprobed provider stays dead until real
+> traffic or an operator proves otherwise.
+
 > **2026-07-16 (openrouter chat model delisted)**: `openai/gpt-oss-120b:free`
 > now 404s on OpenRouter (48 NotFoundErrors/75min; same fate as
 > llama-3.2-vision) — its whole chat presence was dead, shortening every chat
