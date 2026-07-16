@@ -154,12 +154,17 @@ def test_paid_key_usable_cost_cap_follows_fresh_semantics():
 
 
 async def test_check_paid_tail_alerts_when_no_paid_key():
-    """Empty key table → every paid-tail capability alerts, none recovers."""
+    """Empty key table → every paid-tail capability alerts, none recovers.
+    The alert must carry the once-a-DAY reminder throttle (owner's choice,
+    2026-07-12) — dropping the kwarg would silently revert to the notifier's
+    default throttle and spam during a long outage."""
     with patch("aibroker.monitor.alert", AsyncMock()) as fake_alert, \
          patch("aibroker.monitor.recover", AsyncMock()) as fake_recover:
         await _check_paid_tail()
     alerted = {c.args[0] for c in fake_alert.await_args_list}
     assert alerted == {f"paid_tail:{cap}" for cap in _PAID_TAIL_CAPS}
+    for c in fake_alert.await_args_list:
+        assert c.kwargs["throttle_min"] == 24 * 60
     fake_recover.assert_not_awaited()
 
 

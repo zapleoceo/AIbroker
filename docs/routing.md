@@ -139,7 +139,8 @@
 > pure `random()` rotation fragmented a project's stable prompt prefix across
 > every key in the pool, so most calls re-paid for a prefix some other key had
 > already cached (deepseek measured 56% hit rate; a warm single key can do much
-> better). On success, `note_affinity(project_id, provider, key_id)` pins the
+> better). On success, `note_affinity_shared(project_id, provider, key_id)`
+> (the in-process `_note_affinity` + the cross-worker store) pins the
 > (project, provider) pair to that key for `_AFFINITY_TTL_S` (30 min ≈ the
 > provider cache windows); the next pick (`project_id` kwarg, passed by
 > `run_chat`/`run_embed`/`run_transcribe`) prefers the pinned key as a
@@ -488,17 +489,20 @@ returns the scope the **project** must hold and the **key** must carry.
 > `api_base + encoded_model` with no separator; omit it and every call 404s
 > with "No route for that URI".
 >
-> **Known gap:** the health monitor's `probe_all()` only carries
-> `(api_key_id, provider, plain_token)` per key — no account_id — so
-> cloudflare keys are NOT probed by the background monitor yet. Liveness is
-> only inferred from real traffic (`_penalize` on a failed call), same as
-> before any provider had a dedicated probe.
+> **Known gap (RESOLVED 2026-07-16):** the health monitor's `probe_all()`
+> used to carry only `(api_key_id, provider, plain_token)` per key — no
+> account_id — so cloudflare keys were not probed by the background monitor.
+> `probe_all` now takes `(api_key_id, provider, plain_token, account_id)` and
+> a dedicated cloudflare probe exists; see the 2026-07-16 "cloudflare health
+> probe" note at the top of this file.
 >
 > **zai (Z.ai/Zhipu) added (2026-07-05).** Confirmed live, but only
 > `glm-4.5-flash` — the bigger `glm-4.5`/`glm-4.5-air` both 429'd with
 > "Insufficient balance or no resource package" on this account, so
 > `chat:smart`/`chat:code` stay off this provider; only `chat:fast` and
-> `prefilter` use it, tail position. LiteLLM DOES have a real (zero) price
+> `prefilter` use it, tail position (2026-07-16: `prefilter` dropped and JSON
+> requests now exclude zai — see the JSON_INCAPABLE note at the top; zai
+> remains a plain-text `chat:fast` tail). LiteLLM DOES have a real (zero) price
 > for `glm-4.5-flash` — `cost_usd` isn't blind here like nvidia/cloudflare.
 > No rate-limit headers exposed and no documented per-account daily cap
 > found, so `quotas.py` carries no invented axis (same reasoning as
