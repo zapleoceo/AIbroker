@@ -77,11 +77,12 @@ def test_classify_timeout_is_rate_limit():
     assert classify_provider_error(TimeoutError(), "zai") == "rate_limit"
 
 
-def test_is_timeout_flags_billable_holds_only():
-    """A timeout means the provider generated (and BILLED) a response we never
-    received, so it must charge the cost cap; a pre-processing reject cost
-    nothing (fix 2026-07-12: Google billed $122 on gemini while the broker saw
-    $2, the gap being timeouts booked at $0 that never tripped the $1/day cap)."""
+def test_is_timeout_classifies_backstop_and_provider_timeouts():
+    """is_timeout distinguishes a held-then-timed-out call (our wait_for backstop
+    or the provider's own timeout) from a pre-processing reject. Used to steepen
+    the cooldown for a hanging key (a 60s-wasted timeout escalates faster than a
+    0s-wasted 429); no longer drives billing (answerless timeouts book $0 as of
+    2026-07-16)."""
     from aibroker.providers.provider_errors import is_timeout
 
     class _LiteLLMTimeout(Exception):
@@ -1461,48 +1462,61 @@ def test_classify_cloudflare_neurons_quota_is_rate_limit_not_auth():
     assert classify_provider_error(exc, "groq") == "error"  # scoped, not global
 
 
-# ─── timeout attempts must charge the reserved estimate ──────────────────────
+# ─── answerless timeouts must NOT consume the admission budget ───────────────
 
 
-async def test_timeout_attempt_books_reserved_estimate(monkeypatch):
-    """A timeout means the provider generated (and billed) a response we never
-    received — _handle_call_error must book the reserved worst-case estimate
-    into usage_log so the per-key daily cost cap sees the spend (the 2026-07-12
-    gemini gap: $122 billed upstream vs $2 recorded). A pre-processing reject
-    stays free."""
+async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
+    """REVERSAL (2026-07-16): a paid timeout used to book the reserved estimate
+    so the per-key cost cap saw upstream spend (the 2026-07-12 $122 gemini gap).
+    But with a $0.50/day cap, a few ANSWERLESS timeouts booked at the estimate
+    burned the whole day's ADMISSION budget on ZERO answers. Now a failed
+    attempt always books $0 — the reservation is released and real timeout spend
+    is reconciled off the provider invoice, not the admission counter."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
 
-    captured: dict = {}
+    booked: dict = {}
+    released: dict = {}
 
-    async def fake_record_error(**kw):
-        captured.update(kw)
+    async def fake_record_usage(**kw):
+        booked.update(kw)
+        return 1
+
+    async def fake_reserve(**kw):
+        return None
+
+    async def fake_release(**kw):
+        released.update(kw)
+
+    async def fake_call_llm(**kw):
+        raise TimeoutError()
 
     async def fake_penalize(k, e):
         return "rate_limit"
 
-    monkeypatch.setattr(svc, "_record_error", fake_record_error)
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "release_cost", fake_release)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0123)
 
-    key = SimpleNamespace(id=1, provider="gemini", label="g")
-    project = SimpleNamespace(id=2)
-    flow = await svc._handle_call_error(
-        exc=TimeoutError(), key=key, project=project, provider="gemini",
+    key = SimpleNamespace(id=1, provider="gemini", label="g", tier="paid",
+                          token_encrypted="x", account_id=None)
+    project = SimpleNamespace(id=2, name="stepan")
+    flow, outcome = await svc._run_attempt(
+        key=key, project=project, provider="gemini",
         use_model="gemini/gemini-2.5-flash", capability="chat:fast",
-        workflow=None, est_tokens=1000, estimated_cost=0.0123,
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None,
+        workflow=None, est_tokens=1000, call_timeout=60.0,
     )
     assert flow is svc._Flow.NEXT_KEY
-    assert captured["billed_cost"] == pytest.approx(0.0123)
-
-    captured.clear()
-    await svc._handle_call_error(
-        exc=RuntimeError("429 rate limit"), key=key, project=project,
-        provider="gemini", use_model="gemini/gemini-2.5-flash",
-        capability="chat:fast", workflow=None, est_tokens=1000,
-        estimated_cost=0.0123,
-    )
-    assert captured["billed_cost"] == 0.0   # a reject costs nothing
+    assert outcome is None
+    assert booked["cost_usd"] == 0.0                       # $0 to the admission cap
+    assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
 
 
 async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):

@@ -36,7 +36,6 @@ from aibroker.providers.observations import learned_ceilings, record_too_large
 from aibroker.providers.provider_errors import (
     classify_provider_error,
     is_model_unavailable,
-    is_timeout,
 )
 from aibroker.routing import (
     CostGuardError,
@@ -160,15 +159,24 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
 async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
-    billed_cost: float = 0.0,
 ) -> None:
     """Book a failed attempt in usage_log. Shared by run_chat/run_embed/
     run_transcribe — the shape is identical; only the capability differs.
 
-    `billed_cost` is normally 0 (a rejected call costs nothing), but a TIMEOUT
-    the provider still processed IS billed upstream — the caller passes the
-    reserved estimate so the per-key daily_cost_cap actually sees that spend and
-    stops the key, instead of the cap staying blind to it (fix 2026-07-12).
+    A failed attempt always books cost_usd=0. Two incidents pull opposite ways
+    and this is the reconciliation:
+      - 2026-07-12 ($122 gap): a paid gemini TIMEOUT was billed upstream while
+        we recorded $0 — real spend UNDERcounted. That fix charged the reserved
+        estimate on a timeout so the per-key cost cap could see it.
+      - 2026-07-16 (storm, $0.50/day cap): with a tiny cap, a handful of
+        ANSWERLESS timeouts booked at the estimate exhausted the whole day's
+        ADMISSION budget on ZERO answers — starving the answers the owner
+        actually reserves that budget for.
+    For ADMISSION-cap purposes an answerless call must not consume budget
+    reserved for ANSWERS: the reservation is fully released (release_cost, in
+    _run_attempt) and the row is booked at $0. Real upstream timeout spend is
+    reconciled against the provider invoice, out-of-band — not via the admission
+    counter that gates whether the NEXT answer is allowed to run.
 
     http_status is derived from the error class, NOT left NULL: a rate_limit
     books 429 specifically because adaptive_cooldown counts recent
@@ -181,7 +189,7 @@ async def _record_error(
     await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=model, capability=capability,
-        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=billed_cost,
+        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
         latency_ms=None, status="error", error_kind=type(exc).__name__,
         http_status=http_status,
     )
@@ -261,7 +269,7 @@ class _Flow(Enum):
 async def _handle_call_error(
     *, exc: Exception, key: ApiKeyRow, project: ProjectRow, provider: str,
     use_model: str, capability: str, workflow: str | None,
-    est_tokens: int, estimated_cost: float,
+    est_tokens: int,
 ) -> _Flow:
     """Classify a failed call_llm, penalize/book it, return the walk verdict."""
     # Model gone/unprovisioned (404) — it's a MODEL problem, not a
@@ -286,14 +294,14 @@ async def _handle_call_error(
         log.info("learned: %s rejects ~%d tok prompts",
                  provider, est_tokens)
         return _Flow.NEXT_PROVIDER  # bigger keys won't help
-    # A timeout means the provider held the request long enough to
-    # generate (and bill) a response we never got — charge the
-    # reserved estimate so the daily_cost_cap sees that spend. A
-    # pre-processing reject (429/auth/503) cost nothing → 0.
+    # Every failed attempt books $0 (see _record_error) — a timeout's real
+    # upstream spend is reconciled off the provider invoice, NOT charged to the
+    # admission cap the owner reserves for answers (fix 2026-07-16). The
+    # reservation is fully released in _run_attempt, so an answerless timeout
+    # leaves daily_cost_used_usd untouched.
     await _record_error(
         key=key, project=project, provider=provider,
         model=use_model, capability=capability, workflow=workflow, exc=exc,
-        billed_cost=estimated_cost if is_timeout(exc) else 0.0,
     )
     log.warning("provider %s key %s failed (%s): %s",
                 provider, key.label, kind, exc)
@@ -383,13 +391,14 @@ async def _run_attempt(
         )
         meta["cost_usd"] = _billed_cost(key, meta)
     except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-        # Attempt is over (however it ends) — release the reservation.
-        # _record_error (in _handle_call_error) books the real cost (0 — no response).
+        # Attempt is over (however it ends) — fully release the reservation so
+        # an answerless call (incl. a paid timeout) consumes NO admission budget;
+        # _record_error books the row at $0.
         await release_cost(api_key=key, estimated_cost=estimated_cost)
         return await _handle_call_error(
             exc=e, key=key, project=project, provider=provider,
             use_model=use_model, capability=capability, workflow=workflow,
-            est_tokens=est_tokens, estimated_cost=estimated_cost,
+            est_tokens=est_tokens,
         ), None
 
     # Call resolved (successfully) — release the reservation; record_usage
