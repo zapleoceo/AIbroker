@@ -433,12 +433,17 @@ async def run_chat(
     temperature: float,
     response_format: dict[str, Any] | None,
     workflow: str | None,
+    paid_only: bool = False,
 ) -> ChatOutcome | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
     Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
     out a fresh LRU key each time and `_penalize` cools failed ones) before falling
     through — so one rate-limited free key doesn't sink the whole request.
+
+    `paid_only=True` demands a paid-tier key on every pick (the job queue's
+    final-retry escalation): the same chain walk, but free keys are invisible,
+    so the request lands on the paid tail or honestly returns None.
     """
     scope = scope_for(capability)
 
@@ -469,6 +474,7 @@ async def run_chat(
     # falls through to it fast). Bounded by the absolute runaway backstop.
     attempt_cap = _attempt_budget(chain)
     call_timeout = _call_timeout(capability)
+    require_tier = "paid" if paid_only else None
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
@@ -478,6 +484,7 @@ async def run_chat(
                             capability, attempt_cap)
                 return None
             key = await pick_and_reserve(provider, scope=scope,
+                                          require_tier=require_tier,
                                           project_id=project.id)
             if key is None:
                 break  # no (more) available key for this provider → next provider

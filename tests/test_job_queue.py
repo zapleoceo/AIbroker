@@ -133,6 +133,46 @@ async def _enqueue(project_id: int, capability: str = "chat:fast") -> int:
         return row.id
 
 
+# ─── final-retry paid escalation (SQLite-runnable: drives _execute directly) ─
+
+
+def _unclaimed_row(pid: int, retry_count: int) -> DeepJobRow:
+    """In-memory row (never persisted — SQLite can't autoincrement the
+    BigInteger PK); _execute only reads its attributes, and run_chat /
+    _requeue_or_fail are mocked so no job UPDATE is ever attempted."""
+    return DeepJobRow(
+        id=1, project_id=pid, capability="chat:fast", status="running",
+        retry_count=retry_count,
+        request={"messages": [{"role": "user", "content": "hi"}], "model": None,
+                 "max_tokens": 64, "temperature": 0.7, "response_format": None,
+                 "workflow": "t"},
+    )
+
+
+async def test_execute_final_attempt_escalates_to_paid_only():
+    """The LAST retry before give-up must call run_chat with paid_only=True —
+    the guaranteed-answer mechanism (2026-07-16: 148 jobs/h died 'no provider
+    available' in a free-pool storm while the paid deepseek tail was healthy).
+    A non-final row stays paid_only=False."""
+    pid = 990101  # explicit id — SQLite can't autoincrement the BigInteger PK
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="paid-only-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:chat"]))
+    seen: list[bool] = []
+
+    async def fake_run_chat(**kw):
+        # Returns None: no paid capacity either → normal requeue/give-up path.
+        seen.append(kw["paid_only"])
+
+    with patch.object(job_queue, "run_chat", fake_run_chat), \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue:
+        await job_queue._execute(
+            _unclaimed_row(pid, retry_count=job_queue._MAX_RETRIES - 1))
+        await job_queue._execute(_unclaimed_row(pid, retry_count=0))
+    assert seen == [True, False]
+    assert requeue.await_count == 2  # outcome None still requeues/fails honestly
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")
 async def test_drain_once_runs_pending_job_to_done():
     pid = await _make_project(["llm:chat"])

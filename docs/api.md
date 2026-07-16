@@ -161,7 +161,10 @@ long jobs). A job belongs to exactly one project — polling someone else's
 a job whose worker died mid-run sits in `running` past the stale window and is
 re-queued by the next tick (so a deploy delays answers, never drops them), and
 a job with no capacity is re-queued with backoff until it succeeds or gives up
-after the retry cap. `chat:deep` is **async-only** (nemotron runs minutes);
+after the retry cap. The job's **final retry escalates to paid-tier keys only**
+(`paid_only`, 2026-07-16) — the last attempt may be billed even when free
+capacity would eventually recover, so a job never dies while a paid key has
+budget. `chat:deep` is **async-only** (nemotron runs minutes);
 `POST /v1/chat` returns `410 Gone` for every capability. `POST /v1/deep` +
 `GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
 endpoints.

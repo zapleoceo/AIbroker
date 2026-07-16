@@ -134,20 +134,29 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str) -> None: 
 
 async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     """Run one claimed job to a terminal state (done) or re-queue/fail it.
-    Reached only from a real claimed row → Postgres-only; covered by
-    test_job_queue.py's drain_once tests (skipif ON_SQLITE)."""
+    Reached only from a real claimed row → Postgres-only via drain_once tests
+    (skipif ON_SQLITE); the paid-only escalation branch is also driven directly
+    on SQLite (test_execute_final_attempt_escalates_to_paid_only)."""
     req = row.request
     async with get_session() as s:
         project = await s.get(ProjectRow, row.project_id)
     if project is None:
         await _finish(row.id, status="error", error_message="project no longer exists")
         return
+    # Final attempt before give-up walks the paid tail only: free-pool storms
+    # outlast the 8-retry window, so the last shot must not waste itself on a
+    # cooling free pool (2026-07-16: 148 jobs/h died "no provider available"
+    # while the paid deepseek tail was healthy the whole time).
+    paid_only = row.retry_count >= _MAX_RETRIES - 1
+    if paid_only:
+        log.info("final retry — paid tail only, job %d", row.id)
     try:
         outcome = await run_chat(
             project=project, capability=row.capability,
             messages=req["messages"], model=req.get("model"),
             max_tokens=req["max_tokens"], temperature=req["temperature"],
             response_format=req.get("response_format"), workflow=req.get("workflow"),
+            paid_only=paid_only,
         )
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)

@@ -1185,6 +1185,32 @@ chosen key's **label** (surfaced to clients for their cost/usage chip).
 > drift problem; the durable one is the per-(provider, model) handler with
 > its own liveness/cooldown/quota/timeout — see `docs/roadmap.md` §3.1.
 
+## Final-retry paid escalation (2026-07-16)
+
+**A job must not die while ANY paid key has budget.** Measured 2026-07-16:
+during a 2-hour cerebras degradation storm, **148 jobs/hour** died `no
+provider available (gave up after 8 retries)` while the paid deepseek tail
+was mostly healthy — every one of their 8 attempts happened to land in
+windows where the free keys were cooling AND the walk never reached a
+pickable key. Free-pool storms simply outlast the 8-retry window.
+
+The fix is a two-line contract between the dispatcher and the chain walk:
+
+- `run_chat(..., paid_only=True)` (keyword-only, default `False`): the same
+  chain walk — JSON reorder, size filter, attempt budget, booking, cache —
+  but every `pick_and_reserve` demands `require_tier="paid"`, so free keys
+  are invisible for this one request. Not a separate loop: `paid_only` only
+  changes what tier the selector is allowed to hand out.
+- `job_queue._execute`: when `row.retry_count >= _MAX_RETRIES - 1` (the final
+  attempt before give-up), the job runs with `paid_only=True` and logs
+  `final retry — paid tail only, job N`. Every earlier attempt stays
+  tier-agnostic (free-first via chain order, as before).
+
+Edge case stays honest: if the paid-only pick finds nothing (all paid keys
+capped or dead), `run_chat` returns `None` and the job errors exactly as it
+did before — the escalation guarantees the paid tail is *offered* the last
+shot, not that an answer materializes without budget.
+
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
 `run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**
