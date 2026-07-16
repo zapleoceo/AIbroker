@@ -875,6 +875,60 @@ async def test_run_chat_reaches_paid_tail_when_free_providers_saturated(monkeypa
     assert tried == ["paid_tail/model"]
 
 
+# ─── final-retry paid escalation (paid_only) ─────────────────────────────────
+
+
+async def test_run_chat_paid_only_threads_require_tier_paid(monkeypatch):
+    """paid_only=True must demand a paid-tier key on EVERY pick_and_reserve —
+    the job queue's final retry escalates to the paid tail instead of dying on
+    a cooling free pool (2026-07-16: 148 jobs/h died 'no provider available'
+    during a cerebras storm while the paid deepseek tail was healthy)."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    tiers: list[str | None] = []
+
+    async def fake_pick(provider, scope, **kw):
+        # Returns None: no paid key either → chain walks on, honest None.
+        tiers.append(kw.get("require_tier"))
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "deepseek"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="x",
+        paid_only=True,
+    )
+    assert out is None                    # all paid capped/dead → job errors as before
+    assert tiers == ["paid", "paid"]      # every pick demanded the paid tier
+
+
+async def test_run_chat_default_pick_has_no_tier_requirement(monkeypatch):
+    """Without paid_only the walk must stay tier-agnostic (require_tier=None) —
+    free keys remain first-class on every non-final attempt."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    tiers: list[str | None] = []
+
+    async def fake_pick(provider, scope, **kw):
+        tiers.append(kw.get("require_tier"))
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "deepseek"])
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow="x",
+    )
+    assert tiers == [None, None]
+
+
 # ─── free-tier keys must never bill a real $ cost ───────────────────────────
 
 
