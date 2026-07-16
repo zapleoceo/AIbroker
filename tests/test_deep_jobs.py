@@ -116,14 +116,21 @@ async def test_find_inflight_duplicate_ignores_rows_outside_window():
 
 async def test_find_inflight_duplicate_degrades_when_column_missing():
     """Code deployed before migration 010: the lookup must not raise — it
-    disables dedup for the process and returns None (plain-insert fallback)."""
+    disables dedup for the process and returns None (plain-insert fallback).
+    The column is restored in `finally`: CI shares one database across the
+    whole session, so leaving it dropped poisons every later test."""
     async with get_session() as s:
         await s.execute(text("ALTER TABLE deep_jobs DROP COLUMN payload_hash"))
-    h = payload_hash(_P1, "vision", _REQ)
-    assert await _find_inflight_duplicate(_P1, "vision", h) is None
-    assert deep_jobs._dedup_available is False
-    # Second call short-circuits without touching the DB.
-    assert await _find_inflight_duplicate(_P1, "vision", h) is None
+    try:
+        h = payload_hash(_P1, "vision", _REQ)
+        assert await _find_inflight_duplicate(_P1, "vision", h) is None
+        assert deep_jobs._dedup_available is False
+        # Second call short-circuits without touching the DB.
+        assert await _find_inflight_duplicate(_P1, "vision", h) is None
+    finally:
+        async with get_session() as s:
+            await s.execute(
+                text("ALTER TABLE deep_jobs ADD COLUMN payload_hash VARCHAR(32)"))
 
 
 # ─── submit_job dedup — Postgres only (BIGSERIAL autoincrement insert) ───────
@@ -203,7 +210,12 @@ async def test_submit_degrades_to_plain_insert_when_column_missing():
     project = await _make_project()
     async with get_session() as s:
         await s.execute(text("ALTER TABLE deep_jobs DROP COLUMN payload_hash"))
-    first = await _submit(project)
-    second = await _submit(project)
-    assert first != second
-    assert deep_jobs._dedup_available is False
+    try:
+        first = await _submit(project)
+        second = await _submit(project)
+        assert first != second
+        assert deep_jobs._dedup_available is False
+    finally:
+        async with get_session() as s:
+            await s.execute(
+                text("ALTER TABLE deep_jobs ADD COLUMN payload_hash VARCHAR(32)"))

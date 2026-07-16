@@ -140,16 +140,26 @@ async def submit_job(  # pragma: no cover
         log.info("dedup: project=%s %s resubmitted in-flight job %s — returning it",
                  project.id, capability, existing)
         return existing
-    async with get_session() as s:
-        row = DeepJobRow(project_id=project.id, capability=capability,
-                          status="pending", request=request)
-        if _dedup_available:
-            # Left UNSET (not None) when degraded, so SQLAlchemy omits the
-            # column from the INSERT — it may not exist in the DB yet.
-            row.payload_hash = phash
-        s.add(row)
-        await s.flush()
-        job_id = row.id
+    if _dedup_available:
+        async with get_session() as s:
+            row = DeepJobRow(project_id=project.id, capability=capability,
+                              status="pending", request=request,
+                              payload_hash=phash)
+            s.add(row)
+            await s.flush()
+            job_id = row.id
+    else:
+        # Degraded (migration 010 not applied yet): raw INSERT naming ONLY the
+        # pre-010 columns. An ORM insert is unsafe here — SQLAlchemy's compiled
+        # cache may reuse a statement that references payload_hash from before
+        # the flag flipped (bit us in CI, 2026-07-16).
+        import json as _json
+        async with get_session() as s:
+            job_id = (await s.execute(text(
+                "INSERT INTO deep_jobs (project_id, capability, status, request) "
+                "VALUES (:p, :c, 'pending', :r) RETURNING id"
+            ), {"p": project.id, "c": capability,
+                "r": _json.dumps(request)})).scalar_one()
     # After the enqueue COMMITS: wake the dispatcher instantly via NOTIFY so an
     # interactive chat call doesn't eat up to a full poll interval of claim
     # latency. Best-effort — the dispatcher's timed poll is the guaranteed
