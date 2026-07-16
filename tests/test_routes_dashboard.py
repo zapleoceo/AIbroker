@@ -1020,10 +1020,9 @@ def test_range_pill_today_is_active_when_selected():
     """REGRESSION: clicking 'today' filtered correctly but never got an
     'active' class — and 'all time' rendered permanently blue regardless of
     state, so it visually looked stuck 'pressed' no matter what was selected."""
-    from datetime import date
-
     from aibroker.routes.dashboard_render import _render
-    today = date.today()
+    from aibroker.routes.dashboard_time import UTC_TZ, today_in
+    today = today_in(UTC_TZ)  # match _render's default-tz reference day
     body = _render(_fake_main_data(date_from=today, date_to=today)).body.decode()
     assert '>today</a>' in body
     assert 'class="active">today</a>' in body
@@ -1032,10 +1031,11 @@ def test_range_pill_today_is_active_when_selected():
 
 
 def test_range_pill_7d_is_active_when_selected():
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from aibroker.routes.dashboard_render import _render
-    today = date.today()
+    from aibroker.routes.dashboard_time import UTC_TZ, today_in
+    today = today_in(UTC_TZ)  # match _render's default-tz reference day
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=6), date_to=today
     )).body.decode()
@@ -1045,10 +1045,11 @@ def test_range_pill_7d_is_active_when_selected():
 
 
 def test_range_pill_30d_is_active_when_selected():
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from aibroker.routes.dashboard_render import _render
-    today = date.today()
+    from aibroker.routes.dashboard_time import UTC_TZ, today_in
+    today = today_in(UTC_TZ)  # match _render's default-tz reference day
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=29), date_to=today
     )).body.decode()
@@ -1060,10 +1061,11 @@ def test_range_pill_30d_is_active_when_selected():
 def test_range_pill_none_active_for_custom_range():
     """An arbitrary date range (not matching today/7d/30d) leaves every quick
     pill un-highlighted — no false 'active' on the wrong button."""
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from aibroker.routes.dashboard_render import _render
-    today = date.today()
+    from aibroker.routes.dashboard_time import UTC_TZ, today_in
+    today = today_in(UTC_TZ)  # match _render's default-tz reference day
     body = _render(_fake_main_data(
         date_from=today - timedelta(days=3), date_to=today - timedelta(days=1)
     )).body.decode()
