@@ -15,6 +15,7 @@ from sqlalchemy import text
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.db.resilience import retry_terminal_write
+from aibroker.routing import shared_state
 
 
 class SelectionError(Exception):
@@ -61,16 +62,33 @@ _saturated: dict[str, Any] = {"ids": frozenset(), "fetched_at": float("-inf")}
 # prompt prefix across every key, wasting hits (deepseek measured 56%, could
 # be much higher). Map (project_id, provider) → last successful key so repeat
 # traffic lands where the prefix is already warm. TTL ≈ provider cache
-# retention windows. In-process only: 2 uvicorn workers each keep their own
-# map — acceptable (no Redis dependency; worst case one extra cache warm per
-# worker).
-_AFFINITY_TTL_S = 30 * 60.0
+# retention windows. Since 2026-07-16 the map is shared across workers/nodes
+# via routing/shared_state (Redis, fail-open); this dict stays as the
+# fallback for single-node / Redis-down / SQLite-test runs. TTL constant
+# lives in shared_state so both layers expire in step.
+_AFFINITY_TTL_S = shared_state.AFFINITY_TTL_S
 _affinity: dict[tuple[int, str], tuple[int, float]] = {}
 
 
 def note_affinity(project_id: int, provider: str, api_key_id: int) -> None:
     """Pin the key that just successfully served (project, provider)."""
     _affinity[(project_id, provider)] = (api_key_id, time.monotonic())
+
+
+async def note_affinity_shared(project_id: int, provider: str, api_key_id: int) -> None:
+    """note_affinity + publish the pin to the cross-worker store (fail-open)."""
+    note_affinity(project_id, provider, api_key_id)
+    await shared_state.set_affinity(project_id, provider, api_key_id)
+
+
+async def _affinity_for_shared(project_id: int | None, provider: str) -> int | None:
+    """Cross-worker pin first; in-process dict as the fallback/miss path."""
+    if project_id is None:
+        return None
+    shared = await shared_state.get_affinity(project_id, provider)
+    if shared is not None:
+        return shared
+    return _affinity_for(project_id, provider)
 
 
 def _affinity_for(project_id: int | None, provider: str) -> int | None:
@@ -118,6 +136,13 @@ async def _saturated_key_ids() -> frozenset[int]:  # pragma: no cover — Postgr
     now = time.monotonic()
     if now - _saturated["fetched_at"] < _SATURATION_TTL_S:
         return _saturated["ids"]
+    # Local TTL expired — another worker may have computed the verdict within
+    # the same window: take it from the shared store before hitting the DB.
+    shared = await shared_state.get_saturated()
+    if shared is not None:
+        _saturated["ids"] = shared
+        _saturated["fetched_at"] = now
+        return shared
     # Saturation per axis = today's usage ≥ 95% of the effective cap, resolved
     # manual_* > discovered_* > PROVIDER_QUOTAS seed. Four axes: requests,
     # total tokens, input, output — the corp Gemini case (3M in / 80k out) is
@@ -155,6 +180,7 @@ async def _saturated_key_ids() -> frozenset[int]:  # pragma: no cover — Postgr
         ids = frozenset((await s.execute(stmt)).scalars().all())
     _saturated["ids"] = ids
     _saturated["fetched_at"] = now
+    await shared_state.set_saturated(ids, _SATURATION_TTL_S)
     return ids
 
 
@@ -193,7 +219,8 @@ async def pick_and_reserve(
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
     saturated = await _saturated_key_ids()  # pragma: no cover — Postgres-only glue, covered by tests/test_selector.py
-    params.update(_saturation_order_params(saturated, _affinity_for(project_id, provider)))  # pragma: no cover — same
+    affinity_id = await _affinity_for_shared(project_id, provider)  # pragma: no cover — same
+    params.update(_saturation_order_params(saturated, affinity_id))  # pragma: no cover — same
 
     where = " AND ".join(conds)
     # 2026-06-28 (random + soft saturation skip), 2026-07-12 (TTL cache + affinity):

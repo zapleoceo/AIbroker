@@ -13,6 +13,7 @@ dependencies = [
     "cryptography>=43",
     "httpx>=0.27",
     "litellm==1.92.0",
+    "redis>=5",
     "structlog>=24.4",
     "python-multipart>=0.0.9",
     "jinja2>=3.1",

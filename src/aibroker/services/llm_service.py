@@ -49,7 +49,7 @@ from aibroker.routing import (
 from aibroker.routing.selector import (
     mark_cooldown,
     mark_dead,
-    note_affinity,
+    note_affinity_shared,
     record_usage,
 )
 from aibroker.services import response_cache
@@ -381,7 +381,7 @@ async def _run_attempt(
                         max_tokens=max_tokens, temperature=temperature)
     # A success pins this (project, provider) to this key so the NEXT pick
     # lands where the provider-side prompt cache is already warm.
-    note_affinity(project.id, provider, key.id)
+    await note_affinity_shared(project.id, provider, key.id)
     return _Flow.SUCCESS, ChatOutcome(
         text=text, provider=provider, model=meta["model"],
         tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
@@ -584,7 +584,7 @@ async def run_embed(
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             status="ok", error_kind=None, http_status=200,
         )
-        note_affinity(project.id, provider, key.id)
+        await note_affinity_shared(project.id, provider, key.id)
         return EmbedOutcome(
             embeddings=vectors, provider=provider, model=use_model,
             tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
@@ -655,7 +655,7 @@ async def run_transcribe(
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             status="ok", error_kind=None, http_status=200,
         )
-        note_affinity(project.id, provider, key.id)
+        await note_affinity_shared(project.id, provider, key.id)
         return TranscribeOutcome(
             text=text, provider=provider, model=use_model,
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],

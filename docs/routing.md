@@ -1,5 +1,11 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (selector state shared via Redis)**: the cache-affinity map and
+> saturation verdict below are now cross-worker/cross-node through
+> `routing/shared_state.py` (fail-open — no `REDIS_URL` / Redis down = the old
+> in-process dicts); see **Shared selector state** in
+> [architecture.md](architecture.md).
+
 > **2026-07-12 (prompt-cache: mark every leading system message)**:
 > `apply_prompt_cache` used to put a `cache_control` breakpoint on only the
 > FIRST system message. Stepan sends its static prefix as one or more leading
