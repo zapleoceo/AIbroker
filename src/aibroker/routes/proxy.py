@@ -55,8 +55,13 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     model: str | None = Field(None, description="override provider's default model")
-    max_tokens: int = 1024
-    temperature: float = 0.7
+    # Bounded (2026-07-16): an oversized max_tokens inflates the cost-guard's
+    # worst-case reservation estimate (est_tokens × max_tokens pricing) and
+    # silently knocks every capped paid key out of the chain — the paid tail
+    # vanishes and the request 503s with keys sitting idle. 16384 covers every
+    # real caller; temperature beyond [0, 2] is rejected by providers anyway.
+    max_tokens: int = Field(1024, ge=1, le=16384)
+    temperature: float = Field(0.7, ge=0.0, le=2.0)
     response_format: dict[str, Any] | None = None
     workflow: str | None = None
 
@@ -188,8 +193,10 @@ async def transcribe_endpoint(
 class DeepRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     model: str | None = Field(None, description="override provider's default model")
-    max_tokens: int = 4096
-    temperature: float = 0.7
+    # Same cost-guard-reservation rationale as ChatRequest (2026-07-16); the
+    # deep lane legitimately generates long answers, so its ceiling is higher.
+    max_tokens: int = Field(4096, ge=1, le=32768)
+    temperature: float = Field(0.7, ge=0.0, le=2.0)
     workflow: str | None = None
 
 

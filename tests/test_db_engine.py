@@ -32,9 +32,10 @@ async def test_get_session_without_init_raises():
 
 async def test_get_session_rollback_on_exception():
     """Exception inside the with-block triggers rollback."""
-    from sqlalchemy import text
     # Re-init via the conftest fixture — close + recreate from scratch.
+    from sqlalchemy import text
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
     from aibroker.db.engine import Base
     e = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with e.begin() as conn:
@@ -57,3 +58,21 @@ async def test_get_session_rollback_on_exception():
     await e.dispose()
     engine_mod._engine = None
     engine_mod._sessionmaker = None
+
+
+def test_compose_pins_pgbouncer_max_prepared_statements():
+    """asyncpg's implicit prepared statements survive PgBouncer's TRANSACTION
+    pooling ONLY because compose sets MAX_PREPARED_STATEMENTS (pgbouncer >=
+    1.21 tracks named prepared statements across pooled connections; verified
+    live on 1.25). If this env var disappears, prod starts throwing
+    'prepared statement ... does not exist' — and the WRONG fix (asyncpg
+    statement_cache_size=0) costs a re-parse on every hot-path query. See the
+    comment in aibroker/db/engine.py init_engine."""
+    from pathlib import Path
+
+    compose = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+    text = compose.read_text(encoding="utf-8")
+    assert "MAX_PREPARED_STATEMENTS" in text, (
+        "docker-compose.yml no longer sets MAX_PREPARED_STATEMENTS on "
+        "pgbouncer — asyncpg + transaction pooling is unsafe without it"
+    )

@@ -618,6 +618,40 @@ async def test_jobs_poll_404_for_unknown_job():
     assert r.status_code == 404
 
 
+async def test_jobs_submit_rejects_oversized_max_tokens():
+    """An unbounded max_tokens inflated the cost-guard's worst-case reservation
+    and silently knocked every capped paid key out of the chain (2026-07-16) —
+    the request must be rejected at the schema, not starve the paid tail."""
+    plain, _ = await _make_project(["llm:chat"])
+    r = client.post(
+        "/v1/jobs?capability=chat:fast",
+        headers={"X-Project-Key": plain},
+        json={"messages": _MSGS, "max_tokens": 1_000_000},
+    )
+    assert r.status_code == 422
+
+
+async def test_jobs_submit_rejects_out_of_range_temperature():
+    plain, _ = await _make_project(["llm:chat"])
+    r = client.post(
+        "/v1/jobs?capability=chat:fast",
+        headers={"X-Project-Key": plain},
+        json={"messages": _MSGS, "temperature": 5},
+    )
+    assert r.status_code == 422
+
+
+async def test_deep_submit_rejects_oversized_max_tokens():
+    """DeepRequest has its own (higher) ceiling — but still a ceiling."""
+    plain, _ = await _make_project(["llm:deep"])
+    r = client.post(
+        "/v1/deep",
+        headers={"X-Project-Key": plain},
+        json={"messages": _MSGS, "max_tokens": 1_000_000},
+    )
+    assert r.status_code == 422
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="BIGSERIAL autoincrement needs Postgres")
 async def test_jobs_submit_creates_job_for_chat_fast_and_runs():
     """Generic async path on Postgres: submit chat:fast (with response_format)

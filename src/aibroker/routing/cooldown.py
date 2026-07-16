@@ -18,6 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 
+# Quota-DURATION marker tables live in providers/provider_errors.py (one home
+# for ALL provider-message signs, 2026-07-16); the is_*_quota_error verdicts
+# built on them stay here, next to the cooldown math that consumes them.
+from aibroker.providers.provider_errors import (
+    _DAILY_QUOTA_MARKERS,
+    _HOURLY_QUOTA_MARKERS,
+    _MONTHLY_QUOTA_MARKERS,
+    _PROVIDER_MONTHLY_SIGNS,
+)
+
 # Base cooldown in seconds, picked from each provider's published rate-limit
 # reset interval. Conservative for paid (we don't want to spam paid keys).
 COOLDOWN_BASE_S: dict[str, int] = {
@@ -70,22 +80,6 @@ def _boundary_jitter() -> timedelta:
     return timedelta(seconds=random.uniform(0, _BOUNDARY_JITTER_S))
 
 
-# A key that hit its DAILY quota won't recover until the provider's day rolls
-# over (UTC midnight for the ones we use). Parking it 60 s just causes a retry
-# storm — it 429s again immediately. Markers below mean "daily exhaustion".
-_DAILY_QUOTA_MARKERS = (
-    "per day",
-    "per-day",
-    "tokens per day",
-    "daily limit",
-    "requests per day",
-    "tpd",
-    "rpd",
-    # cloudflare Workers AI: "daily free allocation of 10,000 neurons" —
-    # resets at 00:00 UTC like every other daily quota here (2026-07-12).
-    "daily free allocation",
-)
-
 # Providers tell us exactly how long to wait via a retry hint — honour it
 # instead of guessing. Covers Gemini "Please retry in 24.5s", OpenAI-style
 # "retry after 30", Google "retryDelay: 24s".
@@ -118,18 +112,6 @@ def is_daily_quota_error(msg: str) -> bool:
     return any(marker in m for marker in _DAILY_QUOTA_MARKERS)
 
 
-# A per-HOUR request cap (cerebras free: "Requests per hour limit exceeded").
-# Distinct from per-minute (recovers in ~60s → adaptive) and per-day (waits to
-# UTC midnight). Parking 60s just re-hits the wall and climbs the adaptive
-# backoff one 429 at a time; park to the top of the next hour on the first hit.
-_HOURLY_QUOTA_MARKERS = (
-    "per hour",
-    "per-hour",
-    "requests per hour",
-    "hourly limit",
-)
-
-
 def is_hourly_quota_error(msg: str) -> bool:
     """True if the error is a per-HOUR request cap (not per-minute or per-day)."""
     m = msg.lower()
@@ -149,39 +131,11 @@ def next_hour_boundary(now: datetime | None = None) -> datetime:
     return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
 
 
-# A per-MONTH call cap (cohere trial: "You are using a Trial key, which is
-# limited to 1000 API calls / month"). This is NOT a rate-limit that clears in
-# minutes/hours/a day — the account's monthly allowance is gone until the
-# provider's billing cycle rolls over. Confirmed live (2026-07-03): all 7
-# cohere keys are exhausted trial keys; the adaptive 60s-doubling backoff was
-# the only thing applying (worse: classify_provider_error didn't even
-# recognise "trial key"/"1000 API calls" as rate-limiting at all, so
-# _penalize did NOTHING — no cooldown, no mark_dead — and the exhausted key
-# was retried on every single pick with zero backoff, 1447 wasted attempts in
-# 17h). Anything shorter than "next month" just re-hits the same wall.
-_MONTHLY_QUOTA_MARKERS = (
-    "trial key",
-    "api calls / month",
-    "calls / month",
-    "monthly limit",
-)
-
-
 def is_monthly_quota_error(msg: str) -> bool:
     """True if the error is a per-MONTH account/plan cap (e.g. a trial key's
     call allowance), not a per-minute/hour/day rate limit."""
     m = msg.lower()
     return any(marker in m for marker in _MONTHLY_QUOTA_MARKERS)
-
-
-# Provider-scoped monthly signatures: strings that mean "monthly quota" for one
-# provider but nothing generic. mistral's bare 401 "Unauthorized" is its
-# monthly Vibe-plan exhaustion on our accounts (see llm_service
-# _PROVIDER_RATE_LIMIT_SIGNS["mistral"]) — indistinguishable from a revoked key
-# in the API text, so scoped to mistral only.
-_PROVIDER_MONTHLY_SIGNS: dict[str, tuple[str, ...]] = {
-    "mistral": ("unauthorized",),
-}
 
 
 def _is_provider_monthly(provider: str, msg: str) -> bool:

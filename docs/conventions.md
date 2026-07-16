@@ -12,10 +12,18 @@ src/aibroker/
   db/
     engine.py          Async engine + sessionmaker + Base
     models.py          ORM models
+    resilience.py      retry_terminal_write — retry transient failures on money-already-spent writes
   routing/
     chains.py          Capability → provider order
     selector.py        LRU + atomic pick_and_reserve
     cost_guard.py      Three-tier cap check
+    cooldown.py        Adaptive backoff from the provider's own signal
+    shared_state.py    Redis-shared affinity + saturation (fail-open)
+  services/
+    llm_service.py     run_chat/run_embed/run_transcribe orchestration
+    job_queue.py       dispatcher_loop — claims + drains pending jobs
+    deep_jobs.py       submit/poll + payload-hash dedup
+    response_cache.py  exact-match LRU+TTL for translate/prefilter
   providers/
     litellm_adapter.py LLM SDK wrapper
     provider_errors.py Error classification (sign tables + verdicts)
@@ -108,7 +116,7 @@ split.
 - One test file per source module: `test_<module>.py`.
 - Fixtures in `tests/conftest.py`.
 - In-memory SQLite for unit tests; mark DB-dependent tests with `@pytest.mark.asyncio`.
-- Aim for >70% line coverage on `src/aibroker/` (current gate 23%, stair-step up).
+- Aim for >70% line coverage on `src/aibroker/` (current gate 70%, stair-step — never drops).
 - Integration tests for routes use FastAPI `TestClient`.
 
 ## Pre-commit hooks

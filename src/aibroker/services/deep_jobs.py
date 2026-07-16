@@ -91,8 +91,9 @@ async def _find_inflight_duplicate(
         # 500 over that — disable dedup until the operator runs the migration.
         _dedup_available = False
         log.warning(
-            "job dedup disabled — payload_hash lookup failed (%s); "
-            "apply infra/sql/migrations/010_deep_jobs_payload_hash.sql", e,
+            "job dedup disabled — payload_hash lookup failed (%s); apply "
+            "infra/sql/migrations/010_deep_jobs_payload_hash.sql and RESTART "
+            "(dedup stays off until process restart)", e,
         )
         return None
 
@@ -105,10 +106,13 @@ async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Pos
 
 
 # BIGSERIAL id needs a real autoincrementing PK — SQLite doesn't do that for
-# BigInteger, so submit_deep_job's insert-then-flush (and everything it
-# schedules downstream) is exercised only by the Postgres-only integration
-# test test_deep_submit_creates_job_and_runs_in_background, not the SQLite
-# coverage run — hence `# pragma: no cover` on this and the next two defs.
+# BigInteger, so submit_job's insert-then-flush (and everything it schedules
+# downstream) is exercised only by the Postgres-only tests: the submit/dedup
+# tests in tests/test_deep_jobs.py (test_submit_same_payload_twice_returns_
+# same_id_single_row and friends) plus the end-to-end
+# test_deep_submit_enqueues_and_dispatcher_drains_to_done in
+# tests/test_routes_proxy.py — not the SQLite coverage run, hence
+# `# pragma: no cover` on this and the next two defs.
 async def submit_job(  # pragma: no cover
     *,
     project: ProjectRow,

@@ -28,6 +28,21 @@ log = logging.getLogger(__name__)
 # it — safe broker-wide default.
 litellm.drop_params = True
 
+# voyage-4 (our default embedder since 2026-07-07) has no entry in LiteLLM's
+# pricing map, so estimate_llm_cost warned "no LiteLLM pricing for
+# voyage/voyage-4 — cost recorded as 0" on embed traffic (pure log spam) and
+# would have billed a PAID voyage key $0 forever, blinding its daily cost cap.
+# Register the list price ($0.06/M input, embeddings have no output cost) so
+# the cost path prices it like any other model (2026-07-16).
+litellm.register_model({
+    "voyage/voyage-4": {
+        "input_cost_per_token": 0.00000006,
+        "output_cost_per_token": 0.0,
+        "litellm_provider": "voyage",
+        "mode": "embedding",
+    }
+})
+
 # Map: provider name → default model per capability. Used when the caller
 # doesn't pin a model. Every (provider, capability) that appears in a routing
 # chain MUST have an entry here — otherwise the provider is silently skipped.

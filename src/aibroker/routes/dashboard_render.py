@@ -356,17 +356,30 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
         # up (the monitor's probe revives it). Show "нет средств" (warn), not the
         # alarming "мёртв" (bad), so the operator knows to top up, not replace.
         no_credits = not k.is_alive and not in_cd and _is_top_up(k.last_error)
+        # A hard-capped key (day cost cap or day request limit spent) is alive
+        # and not cooling, but pick_and_reserve skips it until midnight UTC —
+        # showing it as "alive" hid why traffic fell to the next provider
+        # (2026-07-16). Freshness mirrors FRESH_DAILY_*_SQL: a daily_reset_at
+        # from a previous day means the counter is stale and reads 0 → NOT capped.
+        day_capped = bool(
+            k.is_alive and not in_cd and k.daily_reset_at == now.date() and (
+                (k.daily_cost_cap_usd is not None
+                 and float(k.daily_cost_used_usd or 0) >= float(k.daily_cost_cap_usd))
+                or ((k.daily_limit or 0) > 0 and (k.daily_used or 0) >= k.daily_limit)
+            )
+        )
         status_label = (
-            "alive" if (k.is_alive and not in_cd)
+            "capped" if day_capped
+            else "alive" if (k.is_alive and not in_cd)
             else "cooldown" if in_cd
             else "no_credits" if no_credits
             else "dead"
         )
-        status_class = {"alive": "ok", "cooldown": "warn",
+        status_class = {"alive": "ok", "capped": "warn", "cooldown": "warn",
                         "no_credits": "warn", "dead": "bad"}[status_label]
-        status_en = {"alive": "alive", "cooldown": "cooldown",
+        status_en = {"alive": "alive", "capped": "day cap", "cooldown": "cooldown",
                      "no_credits": "no credits", "dead": "dead"}[status_label]
-        status_ru = {"alive": "жив", "cooldown": "пауза",
+        status_ru = {"alive": "жив", "capped": "лимит дня", "cooldown": "пауза",
                      "no_credits": "нет средств", "dead": "мёртв"}[status_label]
         # Reason + (for cooldown) when it ends — 2026-07-05: status used to be
         # just "мёртв"/"пауза" with no way to tell "no money" from "rate

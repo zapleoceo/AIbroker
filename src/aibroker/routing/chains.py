@@ -98,11 +98,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # (no other free provider offers this context length) — a miss here falls
     # straight to a 503, by design.
     "chat:deep": ["nvidia"],
+    # 2026-07-16: zai removed — prefilter requests are ALWAYS JSON and zai has
+    # zero response_format support (see JSON_INCAPABLE_PROVIDERS), so every
+    # zai prefilter attempt was a guaranteed billed-but-unusable InvalidJSON.
     "prefilter": [
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
-        "sambanova", "zai",
+        "sambanova",
         "cloudflare",
     ],
     # Trivial utility task (message translation): does NOT need premium/reasoning
@@ -215,26 +218,37 @@ def scope_for(capability: Capability) -> str:
 # is our free workhorse (≈0 on chat), so it's not demoted. Kept in the chain as
 # a last resort (a maybe-malformed retry still beats a 503) but pushed behind
 # the JSON-reliable providers whenever the caller asks for JSON.
+JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
+    {"cerebras", "cohere", "openrouter"}
+)
+
+# Providers with ZERO response_format support — not "often malformed" but
+# structurally incapable of a JSON instruction, so a JSON request to them is a
+# 100%-guaranteed billed-but-unusable body. These are EXCLUDED from the
+# effective chain on JSON requests (unlike JSON_UNRELIABLE_PROVIDERS, which
+# are merely deprioritized — a maybe-malformed retry still beats a 503; a
+# certainly-malformed one never does).
 #
-# 2026-07-05: zai added — confirmed via
+# 2026-07-05: zai — confirmed via
 # `litellm.get_supported_openai_params(model="glm-4.5-flash",
 # custom_llm_provider="zai")`: no `response_format` in the supported list at
 # all. litellm.drop_params=True (broker-wide) SILENTLY strips it on every
-# call, so the model never even receives an instruction to emit JSON — a
-# 100%-guaranteed InvalidJSON on any JSON-format request, not just "a
-# meaningful rate". Confirmed live (request #871336): 200 OK, unparseable
-# body, correctly fell through to the next provider per the JSON quality
-# gate — but no reason to try it first on JSON requests again.
-JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
-    {"cerebras", "cohere", "openrouter", "zai"}
-)
+# call, so the model never even receives an instruction to emit JSON.
+# Confirmed live (request #871336): 200 OK, unparseable body.
+# 2026-07-16: deprioritizing wasn't enough — measured 44 InvalidJSON/45min
+# from zai as JSON traffic overflowed to the chain tail, each one a wasted
+# billed call. Promoted from deprioritize to exclude.
+JSON_INCAPABLE_PROVIDERS: frozenset[str] = frozenset({"zai"})
 
 
 def deprioritize_for_json(chain: list[str]) -> list[str]:
-    """Stable-partition `chain`: JSON-reliable providers first (original order),
-    then the JSON_UNRELIABLE_PROVIDERS (original order). Never drops one, so a
-    JSON request still reaches every provider — just tries the reliable ones
-    first, cutting InvalidJSON waste at the source instead of after the fact."""
-    reliable = [p for p in chain if p not in JSON_UNRELIABLE_PROVIDERS]
-    unreliable = [p for p in chain if p in JSON_UNRELIABLE_PROVIDERS]
+    """Shape `chain` for a JSON request: drop the JSON_INCAPABLE_PROVIDERS
+    (they can never return usable JSON), then stable-partition the rest —
+    JSON-reliable providers first (original order), JSON_UNRELIABLE_PROVIDERS
+    after (original order). Cuts InvalidJSON waste at the source instead of
+    after the wasted call. Plain-text requests never come through here, so
+    incapable providers still serve those."""
+    capable = [p for p in chain if p not in JSON_INCAPABLE_PROVIDERS]
+    reliable = [p for p in capable if p not in JSON_UNRELIABLE_PROVIDERS]
+    unreliable = [p for p in capable if p in JSON_UNRELIABLE_PROVIDERS]
     return reliable + unreliable

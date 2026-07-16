@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -31,6 +31,16 @@ async def init_engine() -> None:
     if _engine is not None:
         return
     s = get_settings()
+    # asyncpg prepares statements implicitly; prod DATABASE_URL points at
+    # PgBouncer in TRANSACTION pooling mode, which historically broke prepared
+    # statements ("prepared statement ... does not exist"). It works here ONLY
+    # because docker-compose pins pgbouncer with MAX_PREPARED_STATEMENTS=500
+    # (supported since pgbouncer 1.21; verified live on 1.25 — it tracks named
+    # prepared statements across pooled connections). Do NOT "fix" asyncpg
+    # prepared-statement errors by adding
+    # connect_args={"statement_cache_size": 0} — that trades a config problem
+    # for a per-query re-parse on the hottest path; restore the compose env
+    # instead. Guarded by tests/test_db_engine.py's compose assertion.
     _engine = create_async_engine(
         s.DATABASE_URL,
         echo=False,

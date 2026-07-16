@@ -177,6 +177,14 @@ def test_estimate_cost_unknown_model_returns_zero():
     assert cost == 0.0
 
 
+def test_estimate_cost_voyage_4_is_registered():
+    """voyage-4 is absent from LiteLLM's pricing map — before the
+    register_model at import, every embed cost estimate warned 'no LiteLLM
+    pricing' (log spam) and priced a PAID voyage key at $0, blinding its
+    daily cost cap (2026-07-16). $0.06/M input is the voyage-4 list price."""
+    assert estimate_llm_cost("voyage/voyage-4", 1_000_000, 0) == pytest.approx(0.06)
+
+
 # ─── call_llm — mocked LiteLLM ────────────────────────────────────────────
 
 

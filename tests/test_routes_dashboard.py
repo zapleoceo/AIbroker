@@ -1354,6 +1354,63 @@ def test_main_render_cooldown_key_shows_until_time():
     assert f"until {until.strftime('%H:%M')} UTC" in body
 
 
+def test_day_capped_key_shows_capped_not_alive():
+    """A key whose day cost cap is spent is alive+not-cooling, but
+    pick_and_reserve skips it until midnight UTC — it must render as
+    'day cap' (warn), not a misleading 'alive' (2026-07-16)."""
+    from datetime import UTC, datetime
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard_render import _render
+    k = ApiKeyRow(
+        id=31, provider="deepseek", label="capped", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True,
+        daily_cost_cap_usd=1.0, daily_cost_used_usd=1.02,
+        daily_reset_at=datetime.now(UTC).date(),
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-en="day cap"' in body
+    assert 'data-ru="лимит дня"' in body
+    assert "data-sort='capped'" in body
+
+
+def test_day_capped_by_request_limit_shows_capped():
+    from datetime import UTC, datetime
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard_render import _render
+    k = ApiKeyRow(
+        id=32, provider="gemini", label="reqcap", tier="free",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True,
+        daily_limit=100, daily_used=100,
+        daily_reset_at=datetime.now(UTC).date(),
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-en="day cap"' in body
+
+
+def test_day_capped_stale_counter_reads_alive():
+    """FRESH_DAILY_*_SQL semantics: a daily_reset_at from a previous day means
+    the counter belongs to yesterday and reads 0 — the key is usable again, so
+    it must render 'alive', not a phantom 'day cap'."""
+    from datetime import UTC, datetime, timedelta
+
+    from aibroker.db.models import ApiKeyRow
+    from aibroker.routes.dashboard_render import _render
+    k = ApiKeyRow(
+        id=33, provider="deepseek", label="stale", tier="paid",
+        scopes=["llm:chat"], token_encrypted="x",
+        is_active=True, is_alive=True,
+        daily_cost_cap_usd=1.0, daily_cost_used_usd=5.0,
+        daily_reset_at=datetime.now(UTC).date() - timedelta(days=1),
+    )
+    body = _render(_fake_main_data(keys=[k])).body.decode()
+    assert 'data-en="day cap"' not in body
+    assert "data-sort='alive'" in body
+
+
 def test_main_render_alive_key_has_no_status_detail():
     """A healthy key shows no stray reason/time — detail only appears for
     dead/cooldown keys with a last_error set."""

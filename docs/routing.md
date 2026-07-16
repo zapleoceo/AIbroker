@@ -1,5 +1,55 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (dashboard: hard-capped keys show "day cap", not "alive")**: a
+> key whose per-key day cost cap (`daily_cost_used_usd ≥ daily_cost_cap_usd`)
+> or day request limit (`daily_used ≥ daily_limit > 0`) is spent rendered as
+> "alive" even though `pick_and_reserve` skips it until midnight UTC — the
+> operator couldn't see why traffic fell through to the next provider. New
+> status between alive and cooldown: **"day cap" / «лимит дня»** (warn class).
+> Freshness mirrors `FRESH_DAILY_*_SQL`: a `daily_reset_at` from a previous
+> day means the counter is stale and reads 0 → the key renders alive again.
+
+> **2026-07-16 (request bounds: max_tokens / temperature)**: `ChatRequest` and
+> `DeepRequest` accepted any `max_tokens`/`temperature`. An oversized
+> `max_tokens` inflates the cost guard's worst-case reservation
+> (`estimate_llm_cost(model, est_tokens, max_tokens)`), which silently knocks
+> every capped paid key out of the chain — the paid tail vanishes and the
+> request 503s with usable keys idle (found 2026-07-16). Now bounded at the
+> schema: chat `max_tokens` 1–16384, deep 1–32768, `temperature` 0.0–2.0 —
+> out-of-range submits get a 422 instead of starving the tail.
+
+> **2026-07-16 (zai excluded from JSON chains)**: zai has ZERO
+> `response_format` support (drop_params strips it silently), so every
+> JSON-shaped request to it is a 100%-guaranteed billed-but-unusable body —
+> deprioritizing (2026-07-05) wasn't enough: measured 44 InvalidJSON/45min as
+> JSON traffic overflowed to the chain tail. New
+> `JSON_INCAPABLE_PROVIDERS = {"zai"}`: `deprioritize_for_json` now DROPS
+> these from the effective chain on JSON requests (JSON_UNRELIABLE_PROVIDERS
+> keep the demote-only behaviour), and zai is removed from `prefilter`
+> (always-JSON). Plain-text chat still reaches zai unchanged.
+
+> **2026-07-16 (voyage-4 price registered with LiteLLM)**: LiteLLM's pricing
+> map has no `voyage/voyage-4` entry, so every embed cost estimate logged
+> "no LiteLLM pricing … cost recorded as 0" (spam) and a PAID voyage key
+> would bill $0 forever — its daily cost cap blind. `litellm_adapter` now
+> calls `litellm.register_model` at import with the list price ($0.06/M
+> input, $0 output, mode=embedding). Free-tier voyage keys still bill $0 via
+> the `tier` check in `_billed_cost`.
+
+> **2026-07-16 (cloudflare health probe + neutral "skip" verdict)**: cloudflare
+> had no `_PROBES` entry, and `probe_with_headers` defaulted an unprobed
+> provider to `("alive", 0, "no probe configured")` — so the monitor
+> force-revived dead cloudflare keys on EVERY sweep (`is_alive=True`,
+> `last_error` wiped) and a dead/revoked key flapped pick→fail→dead→revive
+> forever. Two fixes: (1) a real cloudflare probe (chat completion on
+> `@cf/openai/gpt-oss-120b`, `max_tokens=1`) — it needs the key's
+> account-scoped URL, so `probe`/`probe_all` now thread each key row's
+> `account_id` through (monitor passes it; a cloudflare key without one is
+> unprobeable); (2) an unprobeable key now returns the neutral verdict
+> **`skip`**, which the monitor treats as "leave state unchanged" instead of
+> force-alive — a dead key of an unprobed provider stays dead until real
+> traffic or an operator proves otherwise.
+
 > **2026-07-16 (openrouter chat model delisted)**: `openai/gpt-oss-120b:free`
 > now 404s on OpenRouter (48 NotFoundErrors/75min; same fate as
 > llama-3.2-vision) — its whole chat presence was dead, shortening every chat
@@ -89,7 +139,8 @@
 > pure `random()` rotation fragmented a project's stable prompt prefix across
 > every key in the pool, so most calls re-paid for a prefix some other key had
 > already cached (deepseek measured 56% hit rate; a warm single key can do much
-> better). On success, `note_affinity(project_id, provider, key_id)` pins the
+> better). On success, `note_affinity_shared(project_id, provider, key_id)`
+> (the in-process `_note_affinity` + the cross-worker store) pins the
 > (project, provider) pair to that key for `_AFFINITY_TTL_S` (30 min ≈ the
 > provider cache windows); the next pick (`project_id` kwarg, passed by
 > `run_chat`/`run_embed`/`run_transcribe`) prefers the pinned key as a
@@ -438,17 +489,20 @@ returns the scope the **project** must hold and the **key** must carry.
 > `api_base + encoded_model` with no separator; omit it and every call 404s
 > with "No route for that URI".
 >
-> **Known gap:** the health monitor's `probe_all()` only carries
-> `(api_key_id, provider, plain_token)` per key — no account_id — so
-> cloudflare keys are NOT probed by the background monitor yet. Liveness is
-> only inferred from real traffic (`_penalize` on a failed call), same as
-> before any provider had a dedicated probe.
+> **Known gap (RESOLVED 2026-07-16):** the health monitor's `probe_all()`
+> used to carry only `(api_key_id, provider, plain_token)` per key — no
+> account_id — so cloudflare keys were not probed by the background monitor.
+> `probe_all` now takes `(api_key_id, provider, plain_token, account_id)` and
+> a dedicated cloudflare probe exists; see the 2026-07-16 "cloudflare health
+> probe" note at the top of this file.
 >
 > **zai (Z.ai/Zhipu) added (2026-07-05).** Confirmed live, but only
 > `glm-4.5-flash` — the bigger `glm-4.5`/`glm-4.5-air` both 429'd with
 > "Insufficient balance or no resource package" on this account, so
 > `chat:smart`/`chat:code` stay off this provider; only `chat:fast` and
-> `prefilter` use it, tail position. LiteLLM DOES have a real (zero) price
+> `prefilter` use it, tail position (2026-07-16: `prefilter` dropped and JSON
+> requests now exclude zai — see the JSON_INCAPABLE note at the top; zai
+> remains a plain-text `chat:fast` tail). LiteLLM DOES have a real (zero) price
 > for `glm-4.5-flash` — `cost_usd` isn't blind here like nvidia/cloudflare.
 > No rate-limit headers exposed and no documented per-account daily cap
 > found, so `quotas.py` carries no invented axis (same reasoning as

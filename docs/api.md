@@ -70,9 +70,28 @@ latency for no benefit.
 
 `translate` routes to small fast non-reasoning models first
 (mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,
-don't answer" task under a tight client timeout. Identical translate requests
-are served from an in-process exact-match cache (24h TTL) — repeated phrases
-skip the LLM entirely (`provider="cache"` in the response).
+don't answer" task under a tight client timeout. Identical `translate` and
+`prefilter` requests are served from an in-process exact-match response
+cache (`services/response_cache.py`) — repeated inputs skip the LLM
+entirely (`provider="cache"` in the response). TTL is per-capability:
+24h for `translate` (a phrase's translation is stable), 10 min for
+`prefilter` (kept short so a prompt/threshold change rolls through
+quickly). Chat capabilities are never cached.
+
+### Request bounds (2026-07-16)
+
+`max_tokens` and `temperature` are validated at submit — out-of-range
+values return `422`:
+
+- chat (`ChatRequest`, every `/v1/jobs` capability): `max_tokens`
+  1..16384 (default 1024), `temperature` 0..2 (default 0.7).
+- deep (`DeepRequest`, the `/v1/deep` alias): `max_tokens` 1..32768
+  (default 4096) — the deep lane legitimately generates long answers.
+
+Rationale: an oversized `max_tokens` inflates the cost-guard's worst-case
+reservation estimate and silently knocks every capped paid key out of the
+chain — the paid tail vanishes and the request 503s with keys sitting
+idle.
 
 **For structured/JSON output, send a full `json_schema`, not a bare
 `json_object`.** With `response_format={"type":"json_schema","json_schema":
@@ -126,6 +145,16 @@ GET /v1/jobs/123
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
 
+**In-flight dedup (2026-07-16, migration 010).** An identical
+`POST /v1/jobs` payload (same project, capability, and canonical request
+body) submitted within **30 minutes** while the prior job is still
+`pending` or `running` returns the SAME `job_id` — the client's resubmit
+storm collapses onto one job it just keeps polling. A `done`/`error` job
+never dedups: after a failure a resubmit legitimately means "retry".
+Best-effort, not a uniqueness constraint (two truly simultaneous identical
+submits can still both insert). Client contract: resubmitting is harmless —
+you'll get back the in-flight `job_id`; just poll it.
+
 `poll_after_s` is the broker's suggested wait before the next poll (widens for
 long jobs). A job belongs to exactly one project — polling someone else's
 `job_id` is a `404`. Poll is a pure read; the dispatcher owns the lifecycle —
@@ -141,7 +170,7 @@ endpoints.
 
 The broker retries **up to 5 keys of the same provider** on failure
 (2026-07-02) before returning `502`. It does **not** fall back to a different
-provider — `voyage-3` and `cohere embed-english-v3` are different vector
+provider — `voyage-4` and `cohere embed-english-v3` are different vector
 spaces, and silently switching mid-batch would poison a vector index with
 incomparable embeddings. `provider` is your explicit choice; the broker only
 rotates keys within it. If you need a specific fallback provider, call
@@ -157,7 +186,7 @@ Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
 
 ### `request_id` — correlating a call across both sides
 
-A completed chat `JobResponse`, `EmbedResponse`/`TranscribeResponse`, and `/v1/usage`'s reply
+A completed chat `JobResponse` and `EmbedResponse`/`TranscribeResponse`
 all carry `request_id` — the `usage_log.id` for that exact call. Log it on
 your side (Stepan/Vera); if a call misbehaves, quote it back to us and we can
 look the row up directly (`/dashboard/projects/{id}` — the "Recent 50 calls"

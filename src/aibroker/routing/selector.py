@@ -51,10 +51,13 @@ _INF = "999999999999"
 
 # The 4-axis saturation verdict needs an aggregate over today's usage_log
 # slice (30-60k rows). Computing it inline on EVERY pick (~60-100k picks/day)
-# made the hot path O(day-rows × picks); a verdict up to 15s stale is harmless
-# — a key crosses 95% of a DAILY quota once a day, not once a second. Same
-# in-process pattern as cost_guard._global_cache: per uvicorn worker, no Redis
-# dependency, worst case each worker recomputes once per TTL.
+# made the hot path O(day-rows × picks); staleness is harmless — a key crosses
+# 95% of a DAILY quota once a day, not once a second. With the shared layer the
+# staleness compounds up to ~2×TTL (~30s): a worker whose local TTL just
+# expired can adopt a shared verdict another worker computed almost a full TTL
+# ago, then keep it for its own TTL. Same in-process pattern as
+# cost_guard._global_cache: per uvicorn worker, no Redis dependency, worst
+# case each worker recomputes once per TTL.
 _SATURATION_TTL_S = 15.0
 _saturated: dict[str, Any] = {"ids": frozenset(), "fetched_at": float("-inf")}
 
@@ -71,14 +74,16 @@ _AFFINITY_TTL_S = shared_state.AFFINITY_TTL_S
 _affinity: dict[tuple[int, str], tuple[int, float]] = {}
 
 
-def note_affinity(project_id: int, provider: str, api_key_id: int) -> None:
-    """Pin the key that just successfully served (project, provider)."""
+def _note_affinity(project_id: int, provider: str, api_key_id: int) -> None:
+    """Pin the key that just successfully served (project, provider).
+    Internal — services go through note_affinity_shared so the pin also
+    reaches the cross-worker store."""
     _affinity[(project_id, provider)] = (api_key_id, time.monotonic())
 
 
 async def note_affinity_shared(project_id: int, provider: str, api_key_id: int) -> None:
-    """note_affinity + publish the pin to the cross-worker store (fail-open)."""
-    note_affinity(project_id, provider, api_key_id)
+    """_note_affinity + publish the pin to the cross-worker store (fail-open)."""
+    _note_affinity(project_id, provider, api_key_id)
     await shared_state.set_affinity(project_id, provider, api_key_id)
 
 

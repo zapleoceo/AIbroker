@@ -90,9 +90,10 @@ _MAX_ATTEMPTS_ABS = 100
 # Per-provider-call timeout (seconds). A safety net against a hung upstream —
 # normal calls finish in ~1-8s; this only cuts a genuine hang so the chain can
 # fail over instead of blocking until the client's read timeout. chat:deep is
-# the exception: nemotron legitimately runs minutes (it's an async job, polled
-# by deep_jobs with a 20-min stale marker), so it gets a long ceiling that
-# still fires before the job is marked stale.
+# the exception: nemotron legitimately runs minutes (it's an async job;
+# job_queue._requeue_stale_running reclaims rows stuck `running` past its
+# 25-min stale window), so it gets a long ceiling that still fires before the
+# job is treated as stale.
 #
 # 2026-07-07: raised 45s -> 60s (explicit ask, applies to every key/provider).
 # Trade-off worth knowing: Stepan2's own client read timeout for chat:fast is

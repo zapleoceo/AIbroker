@@ -13,7 +13,8 @@
 | Слой | Файл | Ответственность | Оценка |
 |---|---|---|---|
 | HTTP | `routes/proxy.py` (305) | validate → delegate → shape | ✅ тонкий, чистый |
-| Оркестрация | `services/llm_service.py` (620) | walk chain, rotate keys, classify, record | ⚠️ 3 почти-дубля |
+| Оркестрация | `services/llm_service.py` (620) | walk chain, rotate keys, record | ⚠️ 3 почти-дубля |
+| Классификация ошибок | `providers/provider_errors.py` | sign-таблицы + classify_provider_error (вынесено из llm_service 2026-07-12) | ✅ |
 | Маршрут | `routing/chains.py` (204) | capability → порядок провайдеров | ✅ single source |
 | Выбор ключа | `routing/selector.py` (278) | атомарный LRU/random pick, reserve | ✅ гонки закрыты |
 | Cooldown | `routing/cooldown.py` (215) | адаптивный backoff по сигналу провайдера | ✅ |
@@ -259,6 +260,37 @@ ModelHandler(provider, model):
 Фазы 1 и 2 оставлены как осознанное решение (churn/over-abstraction против
 рабочей системы), а не как незакрытый долг. Переоценить — при появлении
 конкретного отказа (§6).
+
+## 5ter. Done since — 2026-07-16 (scale-волна 07-12..07-16)
+
+Что сделано ПОСЛЕ статуса 5bis и уже живёт на проде:
+
+- **In-flight job dedup** (миграция 010): `deep_jobs.payload_hash` +
+  `ix_deep_jobs_dedup`; идентичный resubmit в 30-мин окне при живом
+  pending/running-job возвращает ТОТ ЖЕ `job_id` (замер: один клиент слал
+  один и тот же vision-payload до 33×). Контракт клиента — в
+  [api.md](api.md).
+- **Redis shared state** (`routing/shared_state.py`, контейнер
+  `aibroker-redis`): cache-affinity (project,provider)→key и
+  saturation-вердикты шарятся между воркерами/нодами; fail-open к
+  in-process dict'ам.
+- **NOTIFY-диспетчер**: submit будит `dispatcher_loop` через
+  `pg_notify('aib_jobs')` по выделенному asyncpg LISTEN-соединению —
+  убран пол латентности claim'а; timed-poll остался фолбэком.
+- **PgBouncer** (`aibroker-pgbouncer`, transaction pooling, :6432):
+  весь трафик api/monitor через пулер; `DIRECT_DATABASE_URL` — обход
+  для LISTEN. См. «Connection scaling» в [deploy-ops.md](deploy-ops.md).
+- **Адаптивный монитор** (07-12) + cloudflare-probe и вердикт `skip`
+  (07-16): dead/cooldown — каждый sweep, alive — раз в час, микро-RPD —
+  никогда; unprobeable-ключ больше не воскрешается принудительно.
+  См. «Health probes» в [providers.md](providers.md).
+- **`providers/provider_errors.py`**: классификация ошибок (sign-таблицы,
+  `classify_provider_error`, `is_model_unavailable`, `is_timeout`)
+  вынесена из `llm_service` в свой модуль (частично закрывает §2.2 по
+  форме — таксономия §4 остаётся целевой).
+- Плюс: bounded request params (max_tokens/temperature → 422),
+  openrouter chat → `google/gemma-4-31b-it:free` (gpt-oss:free делистнут),
+  voyage-4 в прайсинге, zai исключён из JSON-lanes.
 
 ## 6. Будущий технический долг (зафиксировано)
 

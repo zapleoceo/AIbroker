@@ -903,9 +903,9 @@ def test_billed_cost_voyage_free_tier_is_zero_on_voyage4():
     unconditionally, because voyage-3 had a ZERO free-token allocation. We
     moved the default embedding model to voyage-4 (200M free tokens/month,
     genuinely $0 under our run-rate), so a voyage free-tier key is now $0 like
-    any other free key — the carve-out is gone. (Belt-and-suspenders: LiteLLM
-    also has no price for voyage-4, so meta['cost_usd'] is already 0; this
-    guards the tier logic even if a price is added upstream later.)"""
+    any other free key — the carve-out is gone. (voyage-4 now HAS a price —
+    litellm_adapter registers $0.06/M at import, 2026-07-16 — so this tier
+    check is exactly what keeps a free voyage key at $0.)"""
     from types import SimpleNamespace
 
     from aibroker.services.llm_service import _billed_cost
@@ -1315,6 +1315,96 @@ def test_classify_cloudflare_neurons_quota_is_rate_limit_not_auth():
     )
     assert classify_provider_error(exc, "cloudflare") == "rate_limit"
     assert classify_provider_error(exc, "groq") == "error"  # scoped, not global
+
+
+# ─── timeout attempts must charge the reserved estimate ──────────────────────
+
+
+async def test_timeout_attempt_books_reserved_estimate(monkeypatch):
+    """A timeout means the provider generated (and billed) a response we never
+    received — _handle_call_error must book the reserved worst-case estimate
+    into usage_log so the per-key daily cost cap sees the spend (the 2026-07-12
+    gemini gap: $122 billed upstream vs $2 recorded). A pre-processing reject
+    stays free."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    captured: dict = {}
+
+    async def fake_record_error(**kw):
+        captured.update(kw)
+
+    async def fake_penalize(k, e):
+        return "rate_limit"
+
+    monkeypatch.setattr(svc, "_record_error", fake_record_error)
+    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+
+    key = SimpleNamespace(id=1, provider="gemini", label="g")
+    project = SimpleNamespace(id=2)
+    flow = await svc._handle_call_error(
+        exc=TimeoutError(), key=key, project=project, provider="gemini",
+        use_model="gemini/gemini-2.5-flash", capability="chat:fast",
+        workflow=None, est_tokens=1000, estimated_cost=0.0123,
+    )
+    assert flow is svc._Flow.NEXT_KEY
+    assert captured["billed_cost"] == pytest.approx(0.0123)
+
+    captured.clear()
+    await svc._handle_call_error(
+        exc=RuntimeError("429 rate limit"), key=key, project=project,
+        provider="gemini", use_model="gemini/gemini-2.5-flash",
+        capability="chat:fast", workflow=None, est_tokens=1000,
+        estimated_cost=0.0123,
+    )
+    assert captured["billed_cost"] == 0.0   # a reject costs nothing
+
+
+async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
+    """A provider that returns empty bodies DETERMINISTICALLY (deepseek
+    json_object on a 30k prompt) must burn at most _MAX_EMPTY_RETRIES + 1 keys
+    before the chain breaks to the next provider — not every key it has."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        return SimpleNamespace(id=len(picks), label=f"k{len(picks)}", tier="paid",
+                                provider=provider, token_encrypted="x")
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        body = "   " if kw["model"].startswith("deepseek") else '{"ok": true}'
+        return body, {"model": kw["model"], "tokens_in": 100, "tokens_out": 0,
+                      "cost_usd": 0.0, "latency_ms": 50,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7,
+        response_format={"type": "json_object"}, workflow=None,
+    )
+    assert picks.count("deepseek") == svc._MAX_EMPTY_RETRIES + 1  # capped, not 5
+    assert out.provider == "gemini"
+    assert out.text == '{"ok": true}'
 
 
 # ─── _penalize — single-session penalty path (2026-07-16) ────────────────────

@@ -155,7 +155,7 @@ async def tick(sweep: int = 0) -> None:
             decrypt_failed.add(r.id)  # pragma: no cover — see test_tick_marks_undecryptable_key_dead_and_alerts
             continue  # pragma: no cover — Postgres-only tick
         if _should_probe(r, sweep):  # pragma: no cover — cadence logic unit-tested via _should_probe
-            plain_keys.append((r.id, r.provider, plain))
+            plain_keys.append((r.id, r.provider, plain, r.account_id))
 
     results = await probe_all(plain_keys)
 
@@ -184,6 +184,13 @@ async def tick(sweep: int = 0) -> None:
             verdict, http_code, hint = res
             was_alive = r.is_alive
 
+            if verdict == "skip":
+                # Unprobeable (no probe configured / cloudflare key without an
+                # account_id): leave the key's state exactly as real traffic
+                # left it. The old default mapped this to "alive", which
+                # force-revived a dead/revoked key every sweep — an eternal
+                # pick→fail→dead→revive flap (2026-07-16).
+                continue
             if verdict == "alive":
                 alive_count += 1
                 await s.execute(

@@ -1,9 +1,12 @@
 """Provider-error classification — one home for the sign tables and verdicts.
 
-Single source of truth: chat, embed, transcribe and the monitor probe must all
-classify a provider exception the same way. The sign tables below are calibrated
-against LIVE incidents (dates in the comments) and version-specific litellm
-behaviour — treat every entry as load-bearing documentation.
+Single source of truth: chat, embed and transcribe must all classify a
+provider exception the same way (the monitor probe classifies via HTTP status
+separately — see providers/health_probes.py). The sign tables below are
+calibrated against LIVE incidents (dates in the comments) and
+version-specific litellm behaviour — treat every entry as load-bearing
+documentation. This includes the quota-DURATION marker tables at the bottom,
+consumed by routing/cooldown.py.
 """
 from __future__ import annotations
 
@@ -174,3 +177,62 @@ def is_timeout(exc: Exception) -> bool:
     paid gemini key while the broker recorded $2, the gap being ~1.2k/day gemini
     timeouts booked at $0). So a timeout must charge the cap, not be free."""
     return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
+# ─── Quota-DURATION markers (how long to park a rate-limited key) ────────────
+# Consumed by routing/cooldown.py's is_*_quota_error / _is_provider_monthly.
+# They live HERE (moved from cooldown.py, 2026-07-16) so every
+# provider-message sign table has one home and the two files can't drift.
+
+# A key that hit its DAILY quota won't recover until the provider's day rolls
+# over (UTC midnight for the ones we use). Parking it 60 s just causes a retry
+# storm — it 429s again immediately. Markers below mean "daily exhaustion".
+_DAILY_QUOTA_MARKERS = (
+    "per day",
+    "per-day",
+    "tokens per day",
+    "daily limit",
+    "requests per day",
+    "tpd",
+    "rpd",
+    # cloudflare Workers AI: "daily free allocation of 10,000 neurons" —
+    # resets at 00:00 UTC like every other daily quota here (2026-07-12).
+    "daily free allocation",
+)
+
+# A per-HOUR request cap (cerebras free: "Requests per hour limit exceeded").
+# Distinct from per-minute (recovers in ~60s → adaptive) and per-day (waits to
+# UTC midnight). Parking 60s just re-hits the wall and climbs the adaptive
+# backoff one 429 at a time; park to the top of the next hour on the first hit.
+_HOURLY_QUOTA_MARKERS = (
+    "per hour",
+    "per-hour",
+    "requests per hour",
+    "hourly limit",
+)
+
+# A per-MONTH call cap (cohere trial: "You are using a Trial key, which is
+# limited to 1000 API calls / month"). This is NOT a rate-limit that clears in
+# minutes/hours/a day — the account's monthly allowance is gone until the
+# provider's billing cycle rolls over. Confirmed live (2026-07-03): all 7
+# cohere keys are exhausted trial keys; the adaptive 60s-doubling backoff was
+# the only thing applying (worse: classify_provider_error didn't even
+# recognise "trial key"/"1000 API calls" as rate-limiting at all, so
+# _penalize did NOTHING — no cooldown, no mark_dead — and the exhausted key
+# was retried on every single pick with zero backoff, 1447 wasted attempts in
+# 17h). Anything shorter than "next month" just re-hits the same wall.
+_MONTHLY_QUOTA_MARKERS = (
+    "trial key",
+    "api calls / month",
+    "calls / month",
+    "monthly limit",
+)
+
+# Provider-scoped monthly signatures: strings that mean "monthly quota" for one
+# provider but nothing generic. mistral's bare 401 "Unauthorized" is its
+# monthly Vibe-plan exhaustion on our accounts (see
+# _PROVIDER_RATE_LIMIT_SIGNS["mistral"] above) — indistinguishable from a
+# revoked key in the API text, so scoped to mistral only.
+_PROVIDER_MONTHLY_SIGNS: dict[str, tuple[str, ...]] = {
+    "mistral": ("unauthorized",),
+}

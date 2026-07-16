@@ -6,6 +6,7 @@ import pytest
 from aibroker.routing.chains import (
     CAPABILITY_CHAINS,
     CAPABILITY_SCOPE,
+    JSON_INCAPABLE_PROVIDERS,
     JSON_UNRELIABLE_PROVIDERS,
     chain_for,
     deprioritize_for_json,
@@ -208,9 +209,10 @@ def test_deprioritize_for_json_pushes_unreliable_to_back():
     assert out == ["groq", "gemini", "mistral", "deepseek", "cerebras", "cohere"]
 
 
-def test_deprioritize_for_json_never_drops_a_provider():
-    """Even an all-unreliable chain must keep every provider — a maybe-malformed
-    retry still beats a 503."""
+def test_deprioritize_for_json_never_drops_an_unreliable_provider():
+    """An all-UNRELIABLE chain keeps every provider — a maybe-malformed retry
+    still beats a 503. (Only JSON_INCAPABLE_PROVIDERS are dropped: their JSON
+    is certainly-malformed, so keeping them never helps.)"""
     chain = ["cerebras", "cohere", "openrouter"]
     out = deprioritize_for_json(chain)
     assert set(out) == set(chain)
@@ -230,14 +232,30 @@ def test_deprioritize_for_json_noop_when_all_reliable():
     assert deprioritize_for_json(chain) == chain
 
 
-def test_deprioritize_for_json_demotes_zai():
+def test_deprioritize_for_json_excludes_zai_entirely():
     """2026-07-05: zai/glm-4.5-flash doesn't support response_format at all
     (confirmed via litellm.get_supported_openai_params) — drop_params=True
-    silently strips it, so the model never gets told to emit JSON. Confirmed
-    live (request #871336): 200 OK, unparseable body. Must be demoted behind
-    JSON-reliable providers on any JSON-format request."""
-    assert "zai" in JSON_UNRELIABLE_PROVIDERS
-    assert deprioritize_for_json(["zai", "gemini"]) == ["gemini", "zai"]
+    silently strips it, so the model never gets told to emit JSON: a
+    100%-guaranteed InvalidJSON. 2026-07-16: deprioritizing wasn't enough
+    (measured 44 InvalidJSON/45min as JSON traffic overflowed to the tail) —
+    zai is now EXCLUDED from JSON chains, not just demoted."""
+    assert "zai" in JSON_INCAPABLE_PROVIDERS
+    assert "zai" not in JSON_UNRELIABLE_PROVIDERS
+    assert deprioritize_for_json(["zai", "gemini"]) == ["gemini"]
+
+
+def test_json_request_drops_zai_but_plain_text_keeps_it():
+    """zai still serves plain-text chat:fast (it's a fine free model there);
+    only the JSON-shaped effective chain loses it."""
+    raw = chain_for("chat:fast")
+    assert "zai" in raw
+    assert "zai" not in deprioritize_for_json(raw)
+
+
+def test_prefilter_chain_excludes_zai():
+    """prefilter requests are always JSON — zai in that chain was a guaranteed
+    billed-but-unusable call (2026-07-16)."""
+    assert "zai" not in chain_for("prefilter")
 
 
 def test_usable_scopes_anthropic_excludes_audio_and_vision():

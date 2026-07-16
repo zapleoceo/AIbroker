@@ -16,7 +16,8 @@ CI fails otherwise. Opt-out: `docs-not-needed` in the commit message
 | [deploy-ops.md](./deploy-ops.md) | Restricted SSH key flow, GH Actions secrets, manual deploy fallback |
 | [security.md](./security.md) | Threat model, encryption at rest, audit log, key leak response |
 | [conventions.md](./conventions.md) | Code style, file layout, naming, test patterns |
-| [domain-model.md](./domain-model.md) | Postgres schema with rationale (projects, api_keys, leases, usage_log, audit_log) |
+| [domain-model.md](./domain-model.md) | Postgres schema with rationale (projects, api_keys, leases, usage_log, audit_log, deep_jobs, provider_observations) |
+| [roadmap.md](./roadmap.md) | Restructuring plan, tech-debt register, phase status + done-log |
 
 ## How to write a doc change
 

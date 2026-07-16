@@ -70,12 +70,23 @@ computed and discarded:
 |---|---|---|---|---|---|
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | — | — |
 | **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — |
-| **gemini** | gemini-2.5-flash | gemini-2.5-flash | — | gemini-2.5-flash | — |
+| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | — |
 | **deepseek** | deepseek-chat | deepseek-chat | deepseek-chat | — | — |
-| **openrouter** | openai/gpt-oss-120b:free | openai/gpt-oss-120b:free | — | — | — |
+| **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | claude-sonnet-5 | claude-sonnet-5 | — |
-| **openai** | gpt-5-mini | gpt-5 | — | — | — |
-| **voyage** | — | — | — | — | voyage-3 |
+| **openai** | gpt-5-mini | gpt-5 | gpt-5 | gpt-5-mini | — |
+| **mistral** | mistral-small-latest | mistral-large-latest | codestral-latest | — | — |
+| **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | command-r7b-12-2024 | — | embed-english-v3.0 |
+| **sambanova** | Meta-Llama-3.3-70B-Instruct | Meta-Llama-3.3-70B-Instruct | Meta-Llama-3.3-70B-Instruct | — | — |
+| **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
+| **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — |
+| **zai** | glm-4.5-flash | — | — | — | — |
+| **voyage** | — | — | — | — | voyage-4 |
+
+2026-07-16: openrouter's `openai/gpt-oss-120b:free` was DELISTED (404 on
+every call) — all its chat lanes + vision moved to
+`google/gemma-4-31b-it:free` (instruct non-reasoning, JSON-safe at low
+`max_tokens`, 262k ctx, verified live on our keys).
 
 ## Adding a new provider
 
@@ -90,14 +101,37 @@ computed and discarded:
 
 ## Health probes
 
-Run every 10 min by the monitor container. Verdicts:
+The monitor container sweeps every `MONITOR_INTERVAL_S` (600s), but the
+cadence per key is **adaptive** (`monitor._should_probe`, 2026-07-12) —
+probing every key every sweep was ~10.8k real completions/day on liveness
+alone:
+
+- **dead or in-cooldown keys** — probed every sweep (their state is the
+  one in question; auto-revive depends on it);
+- **alive keys** — only every 6th sweep (`_ALIVE_PROBE_EVERY_N`,
+  ≈ once/hour);
+- **alive keys of micro-quota providers** (effective req/day quota —
+  manual > discovered > `PROVIDER_QUOTAS` seed — under
+  `_MIN_RPD_FOR_LIVE_PROBE=200`) — **never live-probed**: sambanova's
+  20 req/day meant probes alone exceeded a key's daily quota, and gemini
+  free lost ~10% of budget to probing. Their dead/cooldown keys are still
+  probed — reviving is worth one call.
+
+Verdicts:
 
 | Verdict | Trigger | Action |
 |---|---|---|
 | `alive` | 2xx | `is_alive=true`, `error_count=0`, clear Telegram alert |
-| `cooldown` | 429 | `cooldown_until = now + 5min` |
+| `cooldown` | 429 | `cooldown_until = now + 5min` (also `is_alive=true` — a 429 proves the credential works) |
 | `dead` | 401/403, "insufficient balance", "payment required" | `is_alive=false`, alert TG |
 | `neterr` | TCP/TLS failure | no-op, retried next tick |
+| `skip` | unprobeable key (no probe configured, or a cloudflare key missing its `account_id`) | no-op — key state left exactly as real traffic set it |
+
+The `skip` verdict is 2026-07-16: the old default mapped "unprobeable" to
+`alive`, which force-revived a dead/revoked key every sweep — an eternal
+pick→fail→dead→revive flap. A **cloudflare probe** was added the same day
+(account-scoped `api_base` — the account ID rides in the URL path, so a
+key without `account_id` can't be probed at all and gets `skip`).
 
 When `is_alive` flips true → false, the monitor sends a Telegram alert via
 `@aibzapleo_bot`. When it flips back → false → true, a recovery message
