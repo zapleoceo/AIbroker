@@ -1623,6 +1623,21 @@ async def test_penalize_rate_limit_opens_exactly_one_session(monkeypatch):
     assert row.last_error == "429 Too Many Requests"
 
 
+async def test_penalize_timeout_feeds_circuit_breaker():
+    """A timeout penalty records the key in the selection-side circuit-breaker,
+    so the selector can soft-skip a bulk-timing-out provider and won't re-pin
+    cache-affinity to the hung key (2026-07-16 storm)."""
+    import aibroker.services.llm_service as svc
+    from aibroker.routing import circuit
+
+    circuit.reset()
+    key = await _seed_key()
+    kind = await svc._penalize(key, TimeoutError())
+    assert kind == "rate_limit"
+    assert key.id in circuit.recent_timeout_key_ids()
+    circuit.reset()
+
+
 async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypatch):
     """cooldown_until blowing up must not lose the penalty: the session is
     rolled back and the flat 5-min fallback UPDATE still lands in it."""

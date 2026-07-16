@@ -36,10 +36,12 @@ from aibroker.providers.observations import learned_ceilings, record_too_large
 from aibroker.providers.provider_errors import (
     classify_provider_error,
     is_model_unavailable,
+    is_timeout,
 )
 from aibroker.routing import (
     CostGuardError,
     chain_for,
+    circuit,
     deprioritize_for_json,
     pick_and_reserve,
     release_cost,
@@ -131,6 +133,11 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
     # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
     # money" from "rate limited" apart, or when a cooldown actually ends.
     reason = str(exc)[:200]
+    timed_out = is_timeout(exc)
+    if timed_out:
+        # Feed the selection-side circuit-breaker so a bulk-timing-out provider
+        # is soft-skipped and this hung key isn't re-pinned by affinity.
+        circuit.note_timeout(key.provider, key.id)
     if kind == "rate_limit":
         # 2026-06-29: cooldown resolved by the provider's own signal —
         # retry-after hint > daily-quota (until UTC midnight) > adaptive
@@ -144,7 +151,7 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
         async with get_session() as s:
             try:
                 until = await cooldown_until(key.id, key.provider, str(exc),
-                                             session=s)
+                                             session=s, is_timeout=timed_out)
             except Exception:
                 # A failed statement aborts the tx on Postgres — roll back so
                 # the fallback UPDATE below can still land in this session.

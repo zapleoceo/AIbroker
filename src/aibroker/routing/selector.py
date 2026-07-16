@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.db.resilience import retry_terminal_write
-from aibroker.routing import shared_state
+from aibroker.routing import circuit, shared_state
+
+# Free provider soft-skipped when this many of its keys are in timeout-cooldown
+# — the whole pool is degraded, so fail the chain over cheaply rather than send
+# another ~60s answerless call (2026-07-16 free-pool timeout storm).
+_TIMEOUT_STORM_MIN_KEYS = 2
 
 
 class SelectionError(Exception):
@@ -128,12 +133,14 @@ def _quota_values_sql() -> str:
 
 
 def _saturation_order_params(
-    saturated: frozenset[int], affinity_id: int | None
+    saturated: frozenset[int], affinity_id: int | None,
+    timed_out: frozenset[int] = frozenset(),
 ) -> dict[str, object]:
-    """Bind params for the pick ORDER BY. saturated_ids is never empty —
-    asyncpg needs a concrete bigint[] — and -1 matches no real key id."""
+    """Bind params for the pick ORDER BY. saturated_ids/timed_out_ids are never
+    empty — asyncpg needs a concrete bigint[] — and -1 matches no real key id."""
     return {
         "saturated_ids": list(saturated) or [-1],
+        "timed_out_ids": list(timed_out) or [-1],
         "aff": affinity_id if affinity_id is not None else -1,
     }
 
@@ -211,6 +218,14 @@ async def pick_and_reserve(
     The returned row already has last_used_at advanced — so concurrent picks
     in another replica will see a different LRU order.
     """
+    # Circuit-breaker: a free provider whose pool is timing out in bulk is
+    # soft-skipped with NO call sent, so the chain fails over cheaply instead of
+    # burning another ~60s answerless call. Never applied to a paid-tier pick —
+    # the guaranteed-answer escalation must not be starved by a transient storm.
+    if require_tier is None and provider in circuit.providers_in_timeout_storm(
+            _TIMEOUT_STORM_MIN_KEYS):
+        return None
+
     conds = [
         "k.provider = :provider",
         "k.is_active = TRUE",
@@ -225,8 +240,13 @@ async def pick_and_reserve(
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
     saturated = await _saturated_key_ids()  # pragma: no cover — Postgres-only glue, covered by tests/test_selector.py
+    timed_out = circuit.recent_timeout_key_ids()  # pragma: no cover — same
     affinity_id = await _affinity_for_shared(project_id, provider)  # pragma: no cover — same
-    params.update(_saturation_order_params(saturated, affinity_id))  # pragma: no cover — same
+    # Don't let cache-affinity pin to a key that just hung — a warm prompt cache
+    # isn't worth re-hitting a degraded key (2026-07-16 storm).
+    if affinity_id is not None and affinity_id in timed_out:  # pragma: no cover — same
+        affinity_id = None
+    params.update(_saturation_order_params(saturated, affinity_id, timed_out))  # pragma: no cover — same
 
     where = " AND ".join(conds)
     # 2026-06-28 (random + soft saturation skip), 2026-07-12 (TTL cache + affinity):
@@ -234,10 +254,14 @@ async def pick_and_reserve(
     #   2. saturated   — keys ≥95% on any daily quota axis (verdict from the
     #      TTL-cached _saturated_key_ids, no per-pick usage_log aggregate) are
     #      pushed to the back. Still soft: picked if every peer is also full.
-    #   3. affinity    — the key that last successfully served this (project,
+    #   3. timed_out   — keys that hung within the last ~2min sink below their
+    #      healthy siblings, so a fresh key of the same provider is preferred
+    #      over re-hitting one that just wasted a ~60s answerless call. Soft
+    #      (peer of saturation): picked if every sibling also just hung.
+    #   4. affinity    — the key that last successfully served this (project,
     #      provider) wins ties, keeping its provider-side prompt cache warm.
     #      Never overrides reserve/saturation/WHERE filters — tie-break only.
-    #   4. random()    — rotation within the bucket. No LRU, no daily_used
+    #   5. random()    — rotation within the bucket. No LRU, no daily_used
     #      sort — those caused one key per workload to monopolise its slot
     #      while others sat idle.
     stmt = text(
@@ -249,6 +273,7 @@ async def pick_and_reserve(
             ORDER BY
                 k.is_reserve,
                 COALESCE(k.id = ANY(CAST(:saturated_ids AS bigint[])), FALSE),
+                COALESCE(k.id = ANY(CAST(:timed_out_ids AS bigint[])), FALSE),
                 (k.id = :aff) DESC,
                 random()
             LIMIT 1

@@ -62,11 +62,18 @@ _ADAPTIVE_JITTER_FRAC = 0.25      # adaptive waits stretched by 0-25%
 _BOUNDARY_JITTER_S = 90           # day/hour resets spread 0-90s past the boundary
 
 
-def cooldown_seconds(provider: str, recent_cooldowns: int) -> int:
-    """How long to park a key, given how many times it's tripped in the window."""
+def cooldown_seconds(provider: str, recent_cooldowns: int, *,
+                     timeout_bump: bool = False) -> int:
+    """How long to park a key, given how many times it's tripped in the window.
+
+    `timeout_bump` escalates one strike faster: a TimeoutError wasted ~60s of
+    wall-clock (vs 0s for a 429), so a hanging key should drop out of rotation
+    in ~2 strikes, not ~5 (2026-07-16 storm — hung keys kept getting re-picked
+    on a short adaptive wait and re-hung, flooring throughput)."""
     base = COOLDOWN_BASE_S.get(provider, DEFAULT_COOLDOWN_S)
     # 0 prior cooldowns → base; 1 → base*2; 2 → base*4; cap at MAX_COOLDOWN_S.
-    return min(base * (2 ** max(0, recent_cooldowns)), MAX_COOLDOWN_S)
+    steps = recent_cooldowns + (1 if timeout_bump else 0)
+    return min(base * (2 ** max(0, steps)), MAX_COOLDOWN_S)
 
 
 def _adaptive_jitter(secs: int) -> float:
@@ -158,6 +165,7 @@ async def cooldown_until(
     error_msg: str,
     *,
     session: AsyncSession | None = None,
+    is_timeout: bool = False,
 ) -> datetime:
     """Resolve the cooldown end for a rate-limited call, most-authoritative first:
       1. provider's own retry-after hint  → wait exactly that
@@ -169,6 +177,9 @@ async def cooldown_until(
     `session` (optional) lets the caller run the adaptive COUNT inside its own
     transaction — _penalize merges the whole penalty into ONE session instead
     of one per statement (this path fires on every failed attempt).
+
+    `is_timeout` steepens the adaptive backoff (a hung key wasted ~60s and must
+    drop out faster than a 0s-wasted 429 — 2026-07-16 storm).
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
@@ -183,7 +194,8 @@ async def cooldown_until(
         # up to MAX_COOLDOWN_S so it drops out of rotation; a one-off blip (low
         # recent count → tiny adaptive) still just waits the provider's hint.
         retry_until = datetime.now(UTC) + timedelta(seconds=retry)
-        adaptive = await adaptive_cooldown(api_key_id, provider, session=session)
+        adaptive = await adaptive_cooldown(api_key_id, provider, session=session,
+                                           timeout_bump=is_timeout)
         return max(retry_until, adaptive)
     if is_monthly_quota_error(error_msg) or _is_provider_monthly(provider, error_msg):
         return next_utc_month_start() + _boundary_jitter()
@@ -191,7 +203,8 @@ async def cooldown_until(
         return next_utc_midnight() + _boundary_jitter()
     if is_hourly_quota_error(error_msg):
         return next_hour_boundary() + _boundary_jitter()
-    return await adaptive_cooldown(api_key_id, provider, session=session)
+    return await adaptive_cooldown(api_key_id, provider, session=session,
+                                   timeout_bump=is_timeout)
 
 
 async def _recent_429_count(s: AsyncSession, api_key_id: int, since: datetime) -> int:
@@ -210,11 +223,13 @@ async def adaptive_cooldown(
     provider: str,
     *,
     session: AsyncSession | None = None,
+    timeout_bump: bool = False,
 ) -> datetime:
     """Park a key for an adaptive duration. Returns the UTC `until` timestamp.
 
     Counts how many times this key was cool-down-marked in the last
     BACKOFF_WINDOW_S; the more recent cool-downs, the longer the next one.
+    `timeout_bump` escalates one strike faster for a hung key.
     """
     # Threshold computed in Python (not Postgres `now() - INTERVAL`) so the query
     # is portable to the SQLite test DB — cooldown_until now reaches this on the
@@ -225,5 +240,5 @@ async def adaptive_cooldown(
     else:
         async with get_session() as s:
             recent = await _recent_429_count(s, api_key_id, since)
-    secs = _adaptive_jitter(cooldown_seconds(provider, recent))
+    secs = _adaptive_jitter(cooldown_seconds(provider, recent, timeout_bump=timeout_bump))
     return datetime.now(UTC) + timedelta(seconds=secs)

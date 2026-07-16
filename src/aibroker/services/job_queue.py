@@ -42,7 +42,11 @@ from aibroker.telemetry.notifier import alert
 
 log = logging.getLogger(__name__)
 
-_MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "8"))
+# Slots are almost entirely I/O waits (a provider call blocks ~1-60s), so the
+# ceiling gates throughput, not CPU. 8 floored storm throughput at 8×60s while
+# the queue backed up (2026-07-16); 24 gives real headroom. Env-tunable for a
+# node that needs to dial it back.
+_MAX_CONCURRENCY = int(os.environ.get("JOB_MAX_CONCURRENCY", "24"))
 _POLL_INTERVAL_S = float(os.environ.get("JOB_POLL_INTERVAL_S", "1.0"))
 # With the LISTEN/NOTIFY wake-up (Postgres) the timed poll is only a fallback
 # for a missed NOTIFY, so it can be lazier than the old 1s hot poll.
