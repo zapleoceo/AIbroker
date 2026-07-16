@@ -15,16 +15,19 @@
 
 ## Audit log
 
-Every admin op and every key checkout writes a row to `audit_log`:
+Every admin op writes a row to `audit_log`:
 
 ```
 actor       — 'admin' | 'project:<name>' | 'tg:<user_id>' | 'dashboard'
-action      — 'project.create' | 'key.create' | 'key.disable' | 'vend' | 'login.success' | ...
+action      — 'project.create' | 'key.create' | 'key.disable' | 'cap_block' | 'login.success' | ...
 target      — what was acted on (e.g. 'cerebras/eatmeat', 'id=12')
 metadata    — JSONB, arbitrary
 ip          — best-effort client IP
 created_at  — server time
 ```
+
+(The `vend` action disappeared with vending mode, removed 2026-07-12 —
+old `vend` rows remain in the table as history.)
 
 `audit_log` is append-only. There is no UPDATE or DELETE in code.
 
@@ -37,7 +40,10 @@ If a provider API key leaks (e.g. accidentally pasted in chat, committed to a pu
 2. Rotate the key with the provider (vendor console).
 3. Click **delete** in the dashboard. Audit log records the deletion.
 4. Create a fresh key with the new token via the **Add API key** form.
-5. Health monitor will probe the new key within 10 min and mark it alive.
+5. The key-create flow probes the new key immediately (quota discovery);
+   the background monitor re-confirms on its adaptive cadence
+   (dead/cooldown keys every 600s sweep, alive keys ≈ hourly — see
+   [providers.md](providers.md#health-probes)).
 
 ## Project key leak response
 
@@ -46,7 +52,9 @@ If `X-Project-Key` leaks:
 1. `POST /admin/projects` to create a replacement project with the same scopes.
 2. Update the client app's `BROKER_PROJECT_KEY` env, redeploy.
 3. The old project's `is_active` set to `false` (no API endpoint yet — use psql).
-4. Audit log will show all `vend` ops by the leaked project — review for suspicious activity.
+4. Review `usage_log` rows for the leaked project (`project_id` +
+   `created_at`) for suspicious activity — every proxied call is logged
+   there.
 
 ## What's NOT covered
 

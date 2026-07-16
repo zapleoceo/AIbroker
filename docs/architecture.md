@@ -13,12 +13,17 @@
 │   POST /v1/embed?provider=...    → LiteLLM SDK       │
 │                                                      │
 │   GET  /v1/health, /admin/*, /dashboard, /login      │
-└──────────┬───────────────────────────────────────────┘
-           │ async pool
-           ▼
+└───┬──────────────────────┬───────────────────────────┘
+    │ async pool           │ selector hot state
+    ▼                      ▼
+┌── aibroker-pgbouncer ──┐  ┌── aibroker-redis ────────┐
+│ transaction pooling,   │  │ cache-affinity +         │
+│ :6432                  │  │ saturation verdicts,     │
+└──────────┬─────────────┘  │ fail-open (64MB LRU)     │
+           ▼                └──────────────────────────┘
 ┌─── aibroker-postgres ─────────────────────┐
 │ projects, api_keys, leases, usage_log,    │
-│ audit_log                                 │
+│ audit_log, deep_jobs, provider_observations│
 └───────────────────────────────────────────┘
            ▲
            │
@@ -29,6 +34,16 @@
 │ state flip via @aibzapleo_bot.           │
 └───────────────────────────────────────────┘
 ```
+
+**Connection pooling (2026-07-16).** All routine DB traffic from `api` and
+`monitor` goes through the `aibroker-pgbouncer` container (transaction
+pooling on port 6432 — `DATABASE_URL` points at it), so ~15 real Postgres
+backends serve every app-side connection. The one exception is
+`DIRECT_DATABASE_URL` (`postgres:5432`): the deep-jobs dispatcher's
+asyncpg LISTEN connection needs a pinned backend — NOTIFY subscriptions
+silently die under transaction pooling. Sizing, rollback, and the
+prepared-statement caveat live in **Connection scaling** in
+[deploy-ops.md](deploy-ops.md).
 
 **Adaptive probe cadence (2026-07-12).** Probing EVERY key every sweep was
 self-harm: 144 sweeps/day × ~75 keys ≈ 10.8k real `max_tokens=1` completions

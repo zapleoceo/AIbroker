@@ -132,31 +132,37 @@ If the container is down the app fails open to its old in-process behaviour
 > pooler. AUTH_TYPE=plain is confined to the compose-internal network (no
 > published ports). (2026-07-16)
 
-Decision documented, nothing installed. Current math:
+**How it runs today.** The `pgbouncer` service in `docker-compose.yml` sits
+between the app containers and `postgres`:
 
-- `db/engine.py`: `pool_size=10` + `max_overflow=20` = **30 connections max
-  per process**; the `api` container runs **2 uvicorn workers** → 60 max from
-  the API alone, plus the `monitor` container's own engine (another 30 worst
-  case) — vs Postgres's default `max_connections = 100`.
-- In practice the pools sit far below their ceilings (sessions are
-  short-lived; the 2026-07-16 session-diet work cut per-attempt session churn
-  further), so today a pooler would add a hop and a component for no measured
-  win.
+- `POOL_MODE=transaction` — a server backend is held only for the duration
+  of a transaction, so `DEFAULT_POOL_SIZE=15` real Postgres connections
+  serve up to `MAX_CLIENT_CONN=200` client ones, `LISTEN_PORT=6432`.
+- `MAX_PREPARED_STATEMENTS=500` (pgbouncer ≥ 1.21) lets asyncpg's
+  protocol-level prepared statements survive transaction pooling — without
+  it every SQLAlchemy statement re-prepares or errors under the pooler.
+- `api` and `monitor` both get
+  `DATABASE_URL=…@pgbouncer:6432/aibroker` (all pooled traffic) and
+  `DIRECT_DATABASE_URL=…@postgres:5432/aibroker` — the one bypass, used
+  only by the deep-jobs dispatcher's asyncpg LISTEN connection
+  (`services/job_queue.py`): NOTIFY subscriptions need a pinned backend
+  and would silently die under transaction pooling.
+- **Rollback**: flip `DATABASE_URL` back to `postgres:5432` and redeploy.
+  Nothing else in the app knows the pooler exists.
 
-**Threshold — add PgBouncer (transaction pooling) when a second broker node
-appears or the worker count doubles.** Either step puts the theoretical max
-(≥120 from API workers alone) past what default Postgres can take, and
-per-process SQLAlchemy pools stop being a global cap at all once processes
-multiply across nodes.
-
-How it slots in when the time comes (sketch, not applied): add a
-`pgbouncer` service to `docker-compose.yml` (e.g. `edoburu/pgbouncer`,
-`pool_mode=transaction`, `default_pool_size≈20`) between the app and
-`postgres`, point `DATABASE_URL` at it, and drop the app-side pool to
-`pool_size≈5, max_overflow≈5` per worker. Caveats to check then: no
-session-level state across transactions (no advisory locks / LISTEN on
-pooled connections — the deep-jobs NOTIFY listener needs a DIRECT
-connection to Postgres, bypassing the pooler), and `pool_pre_ping` stays on.
+**Why (threshold history, kept as background).** `db/engine.py` runs
+`pool_size=10 + max_overflow=20` = 30 connections max per process; 2
+uvicorn workers in `api` → 60 max from the API alone, plus the `monitor`
+container's engine (another 30 worst case) — uncomfortably close to
+Postgres's default `max_connections = 100` when those were direct backend
+connections. The documented threshold was "add PgBouncer when a second
+broker node appears or the worker count doubles"; the 2026-07-16 scale
+work (Redis shared state, NOTIFY dispatcher — the prep for a second node)
+crossed that line, so the pooler went in with it. The app-side SQLAlchemy
+pool is unchanged — its 30 per-process connections now terminate at
+pgbouncer, which multiplexes them onto ~15 real backends. Session-level
+caveats that shaped the layout: no advisory locks or LISTEN on pooled
+connections (hence `DIRECT_DATABASE_URL`), `pool_pre_ping` stays on.
 
 ## Manual deploy fallback
 

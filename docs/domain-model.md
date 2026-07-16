@@ -35,11 +35,19 @@ The actual provider credentials.
 | `is_active` / `is_alive` | `is_active` = ops toggle; `is_alive` = monitor-set |
 | `daily_used` / `daily_limit` | Request counter; `daily_limit=0` = no limit |
 | `daily_cost_used_usd` / `daily_cost_cap_usd` | Cap is NULL for free keys |
+| `monthly_cost_used_usd` / `monthly_cost_cap_usd` | Monthly analogue of the daily pair; cap NULL = no monthly cap |
+| `total_cost_usd` | Lifetime spend counter, never reset |
 | `daily_reset_at` | Date the two `daily_*` counters above were last touched. Read/write always goes through `FRESH_DAILY_USED_SQL`/`FRESH_DAILY_COST_SQL` (`selector.py`), which treats a non-today value as 0 — self-healing, no cron reset job. See **Cost guard** in [routing.md](routing.md). |
+| `is_reserve` | Reserved-lane flag: picked LAST within its (provider, scope) group. A key scoped only to `llm:edit` with `is_reserve=true` is the Coach safety net — used only when all shared edit keys are exhausted, invisible to bot `llm:chat` traffic |
 | `cooldown_until` | Set on 429 |
 | `error_count` | Cleared on success ping by monitor |
+| `last_error` | Human-readable reason for the CURRENT dead/cooldown state (short provider message or probe hint — "no funds", "rate limit"), not a full error log. Cleared back to NULL the moment the key is confirmed alive again |
 | `last_used_at` | Drives LRU |
 | `last_alive_check_at` | Drives monitor cadence |
+| `discovered_req_limit` / `discovered_tok_limit` / `limits_discovered_at` | Discovered free-tier limits, parsed from response rate-limit headers at first probe (key-create flows). NULL ⇒ fall back to `PROVIDER_QUOTAS` defaults in `providers/quotas.py` |
+| `manual_req_limit` / `manual_tok_limit` / `manual_tok_in_limit` / `manual_tok_out_limit` | Manual per-key quota override — highest priority (manual > discovered > default). Set when the operator knows the real cap (e.g. a corporate Gemini key: 3M in / 80k out). NULL on an axis ⇒ defer down the chain |
+| `account_id` | Non-secret per-provider config that rides along with the key. Only cloudflare needs it so far (account ID is embedded in its API URL, not a header litellm can take separately) — NULL for every other provider |
+| `notes` | Free-form operator notes, default `''` |
 
 ### `leases`
 
@@ -79,6 +87,7 @@ Append-only billing + analytics.
 | `latency_ms` | End-to-end |
 | `status` | `ok` / `rate_limit` / `auth_fail` / `error` |
 | `error_kind` | Exception class name |
+| `http_status` | Provider HTTP status code when known, NULL otherwise |
 
 Indexes on `(project_id, created_at)`, `(api_key_id, created_at)`,
 `(provider, created_at)`, and a plain `(created_at)` (migration 005) cover the
@@ -93,14 +102,57 @@ Append-only admin trail.
 | Column | Notes |
 |---|---|
 | `actor` | `admin` / `project:<name>` / `tg:<user_id>` / `dashboard` |
-| `action` | `project.create`, `key.create`, `vend`, `login.success`, ... |
+| `action` | `project.create`, `key.create`, `cap_block`, `login.success`, ... (`vend` rows are historical — vending removed 2026-07-12) |
 | `target` | Free-form identifier |
 | `metadata` | JSONB |
 | `ip` | best-effort, from `X-Forwarded-For` or `client.host` |
 
 Never mutated, never deleted. Manually prune older than 1 year if it ever matters.
 
+### `deep_jobs`
+
+Async job queue — one row per `POST /v1/jobs` submit (built for `chat:deep`,
+now generic over every chat capability; the table name stays for
+continuity). Submit only enqueues (`pending`); a per-worker dispatcher
+(`services/job_queue.py`) claims and runs rows. See **Async jobs** in
+[architecture.md](architecture.md).
+
+| Column | Notes |
+|---|---|
+| `id` | BIGSERIAL PK — the `job_id` clients poll |
+| `project_id` | FK, CASCADE — a job belongs to exactly one project |
+| `capability` | Which async-job capability this runs (default `chat:deep`) |
+| `status` | `pending` / `running` / `done` / `error` |
+| `request` | Full request payload, JSONB |
+| `payload_hash` | md5 of `project:capability:canonical request JSON` (migration 010). Lets submit return an EXISTING in-flight job for an identical resubmit inside a 30-min window instead of enqueueing a duplicate — only `pending`/`running` jobs dedup; `done`/`error` never do (the client may legitimately retry after a failure). Nullable — rows predating the migration have none |
+| `result_text` / `result_meta` | Set on `done` |
+| `error_message` | Set on `error` |
+| `retry_count` | Queue state (migration 009): bumped each requeue, errors past `JOB_MAX_RETRIES` |
+| `run_after` | Earliest eligible time (exponential backoff); NULL = eligible now |
+| `started_at` | When a dispatcher claimed the row (→ `running`); a row stuck past the stale window is re-queued by the next tick |
+| `created_at` / `completed_at` | Lifecycle timestamps |
+
+Indexes: `(project_id, created_at)` for polling,
+`(status, run_after, created_at)` for the dispatcher's claim scan, and
+`(project_id, capability, payload_hash, created_at DESC)` for the dedup
+lookup (migration 010).
+
+### `provider_observations`
+
+Self-learned, provider-level facts from real responses — hardcoded
+constants are only seeds, overridden once reality is observed.
+
+| Column | Notes |
+|---|---|
+| `provider` | PK |
+| `learned_max_request_tokens` | Observed request-size ceiling |
+| `learned_at` | When last updated |
+| `sample_count` | How many observations back the learned value |
+
 ## Migrations
 
-`infra/sql/init.sql` runs once on Postgres first boot. After that, use
-Alembic (`migrations/` — currently empty placeholder).
+Hand-applied idempotent `psql` files in `infra/sql/migrations/` — there is
+no Alembic. `infra/sql/init.sql` runs once on Postgres first boot and
+mirrors every migration for fresh-DB bootstrap. Apply a migration BEFORE
+merging the code that depends on it — see **Schema migrations** in
+[deploy-ops.md](deploy-ops.md).
