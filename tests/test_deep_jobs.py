@@ -57,11 +57,28 @@ def test_payload_hash_is_md5_hex():
 # ─── _find_inflight_duplicate — runs on SQLite via explicit-id inserts ───────
 
 
+# Explicit high ids: SQLite can't autoincrement the BigInteger PK, and on
+# Postgres deep_jobs.project_id carries a REAL FK — hardcoded project_id=1
+# violated it in CI (2026-07-16). Insert the parent project explicitly too,
+# far above anything the sequence will hand out.
+_P1, _P2 = 990001, 990002
+
+
+async def _ensure_project(pid: int) -> None:
+    async with get_session() as s:
+        if await s.get(ProjectRow, pid) is None:
+            s.add(ProjectRow(id=pid, name=f"dedup-fixture-{pid}",
+                             project_key_hash=f"h{pid}",
+                             project_key_prefix="pk_x",
+                             allowed_scopes=["llm:chat"]))
+
+
 async def _insert_job(
     job_id: int, *, status: str = "pending", phash: str | None = None,
-    project_id: int = 1, capability: str = "vision",
+    project_id: int = _P1, capability: str = "vision",
     created_at: datetime | None = None,
 ) -> None:
+    await _ensure_project(project_id)
     async with get_session() as s:
         row = DeepJobRow(id=job_id, project_id=project_id, capability=capability,
                          status=status, request=_REQ, payload_hash=phash)
@@ -71,30 +88,30 @@ async def _insert_job(
 
 
 async def test_find_inflight_duplicate_matches_pending_and_running():
-    h = payload_hash(1, "vision", _REQ)
+    h = payload_hash(_P1, "vision", _REQ)
     await _insert_job(11, status="pending", phash=h)
-    assert await _find_inflight_duplicate(1, "vision", h) == 11
+    assert await _find_inflight_duplicate(_P1, "vision", h) == 11
     await _insert_job(12, status="running", phash=h)
     # Newest in-flight row wins (created_at DESC) — either is a valid dedup
     # target; assert it found one of them.
-    assert await _find_inflight_duplicate(1, "vision", h) in (11, 12)
+    assert await _find_inflight_duplicate(_P1, "vision", h) in (11, 12)
 
 
 async def test_find_inflight_duplicate_ignores_done_error_and_other_scope():
-    h = payload_hash(1, "vision", _REQ)
+    h = payload_hash(_P1, "vision", _REQ)
     await _insert_job(21, status="done", phash=h)
     await _insert_job(22, status="error", phash=h)
-    await _insert_job(23, status="pending", phash=h, project_id=2)
+    await _insert_job(23, status="pending", phash=h, project_id=_P2)
     await _insert_job(24, status="pending", phash=h, capability="chat:fast")
-    assert await _find_inflight_duplicate(1, "vision", h) is None
+    assert await _find_inflight_duplicate(_P1, "vision", h) is None
 
 
 async def test_find_inflight_duplicate_ignores_rows_outside_window():
-    h = payload_hash(1, "vision", _REQ)
+    h = payload_hash(_P1, "vision", _REQ)
     old = (datetime.now(UTC).replace(tzinfo=None)
            - timedelta(seconds=deep_jobs._DEDUP_WINDOW_S + 60))
     await _insert_job(31, status="pending", phash=h, created_at=old)
-    assert await _find_inflight_duplicate(1, "vision", h) is None
+    assert await _find_inflight_duplicate(_P1, "vision", h) is None
 
 
 async def test_find_inflight_duplicate_degrades_when_column_missing():
@@ -102,11 +119,11 @@ async def test_find_inflight_duplicate_degrades_when_column_missing():
     disables dedup for the process and returns None (plain-insert fallback)."""
     async with get_session() as s:
         await s.execute(text("ALTER TABLE deep_jobs DROP COLUMN payload_hash"))
-    h = payload_hash(1, "vision", _REQ)
-    assert await _find_inflight_duplicate(1, "vision", h) is None
+    h = payload_hash(_P1, "vision", _REQ)
+    assert await _find_inflight_duplicate(_P1, "vision", h) is None
     assert deep_jobs._dedup_available is False
     # Second call short-circuits without touching the DB.
-    assert await _find_inflight_duplicate(1, "vision", h) is None
+    assert await _find_inflight_duplicate(_P1, "vision", h) is None
 
 
 # ─── submit_job dedup — Postgres only (BIGSERIAL autoincrement insert) ───────
