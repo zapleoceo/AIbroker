@@ -903,9 +903,9 @@ def test_billed_cost_voyage_free_tier_is_zero_on_voyage4():
     unconditionally, because voyage-3 had a ZERO free-token allocation. We
     moved the default embedding model to voyage-4 (200M free tokens/month,
     genuinely $0 under our run-rate), so a voyage free-tier key is now $0 like
-    any other free key — the carve-out is gone. (Belt-and-suspenders: LiteLLM
-    also has no price for voyage-4, so meta['cost_usd'] is already 0; this
-    guards the tier logic even if a price is added upstream later.)"""
+    any other free key — the carve-out is gone. (voyage-4 now HAS a price —
+    litellm_adapter registers $0.06/M at import, 2026-07-16 — so this tier
+    check is exactly what keeps a free voyage key at $0.)"""
     from types import SimpleNamespace
 
     from aibroker.services.llm_service import _billed_cost

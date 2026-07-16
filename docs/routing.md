@@ -1,5 +1,32 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (request bounds: max_tokens / temperature)**: `ChatRequest` and
+> `DeepRequest` accepted any `max_tokens`/`temperature`. An oversized
+> `max_tokens` inflates the cost guard's worst-case reservation
+> (`estimate_llm_cost(model, est_tokens, max_tokens)`), which silently knocks
+> every capped paid key out of the chain — the paid tail vanishes and the
+> request 503s with usable keys idle (found 2026-07-16). Now bounded at the
+> schema: chat `max_tokens` 1–16384, deep 1–32768, `temperature` 0.0–2.0 —
+> out-of-range submits get a 422 instead of starving the tail.
+
+> **2026-07-16 (zai excluded from JSON chains)**: zai has ZERO
+> `response_format` support (drop_params strips it silently), so every
+> JSON-shaped request to it is a 100%-guaranteed billed-but-unusable body —
+> deprioritizing (2026-07-05) wasn't enough: measured 44 InvalidJSON/45min as
+> JSON traffic overflowed to the chain tail. New
+> `JSON_INCAPABLE_PROVIDERS = {"zai"}`: `deprioritize_for_json` now DROPS
+> these from the effective chain on JSON requests (JSON_UNRELIABLE_PROVIDERS
+> keep the demote-only behaviour), and zai is removed from `prefilter`
+> (always-JSON). Plain-text chat still reaches zai unchanged.
+
+> **2026-07-16 (voyage-4 price registered with LiteLLM)**: LiteLLM's pricing
+> map has no `voyage/voyage-4` entry, so every embed cost estimate logged
+> "no LiteLLM pricing … cost recorded as 0" (spam) and a PAID voyage key
+> would bill $0 forever — its daily cost cap blind. `litellm_adapter` now
+> calls `litellm.register_model` at import with the list price ($0.06/M
+> input, $0 output, mode=embedding). Free-tier voyage keys still bill $0 via
+> the `tier` check in `_billed_cost`.
+
 > **2026-07-16 (cloudflare health probe + neutral "skip" verdict)**: cloudflare
 > had no `_PROBES` entry, and `probe_with_headers` defaulted an unprobed
 > provider to `("alive", 0, "no probe configured")` — so the monitor
