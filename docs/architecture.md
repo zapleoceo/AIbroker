@@ -446,10 +446,51 @@ The toggle is pure client-side — no server round-trip. Adding a new
 label means writing `data-i18n data-en="..." data-ru="..."` next to
 the source string; no template engine, no .po files.
 
+## Shared selector state (Redis) (2026-07-16)
+
+Two pieces of selector hot state used to live in per-worker dicts: the
+(project, provider) → key **cache-affinity** map (`_affinity`, 30-min TTL —
+the thing that keeps deepseek/gemini prompt caches warm; measured
+$2.30 → $0.50/day on deepseek) and the **saturation verdict**
+(`_saturated`, 15-s TTL — the ≥95%-of-daily-quota key set). Two uvicorn
+workers each learned them separately; a second node would split-brain them
+entirely.
+
+Both now go through `routing/shared_state.py` — a leaf module holding a
+lazy singleton `redis.asyncio` client (env `REDIS_URL`; empty/unset =
+disabled). API:
+
+- `get_affinity(project_id, provider)` / `set_affinity(project_id,
+  provider, key_id)` — key `aib:aff:{project_id}:{provider}`, SETEX with
+  the shared `AFFINITY_TTL_S` (the selector's fallback dict imports the
+  same constant, so both layers expire in step).
+- `get_saturated()` / `set_saturated(ids, ttl)` — key `aib:sat`, a JSON
+  int list, SETEX with the saturation TTL. `get_saturated()` returning
+  `None` means cache miss → the selector recomputes from the DB and
+  publishes the fresh verdict.
+
+The selector consults the shared store FIRST: `pick_and_reserve` resolves
+affinity via an async wrapper (`_affinity_for_shared`) and success paths in
+`llm_service` publish pins via `note_affinity_shared`; `_saturated_key_ids`
+checks Redis between its local TTL cache and the Postgres aggregate. The
+old in-process dicts are kept — they double as the single-node fallback AND
+the SQLite/test path.
+
+**Fail-open semantics.** Every Redis call is wrapped: on ANY exception the
+module logs one warning per process, disables itself for 60 s
+(monotonic-clock window), and callers silently fall back to the in-process
+dicts. Socket connect/read timeouts are 0.5 s so the pick hot path can
+never stall on a sick Redis. A Redis outage therefore costs only the
+cross-worker sharing — request serving, tests, and single-node deployments
+(no `REDIS_URL` at all) behave exactly as before.
+
 ## Scaling story
 
-- API is stateless — all state in Postgres. Add replicas behind a load
-  balancer; concurrent picks are safe because of `SKIP LOCKED`.
+- API is stateless — all durable state in Postgres. Add replicas behind a
+  load balancer; concurrent picks are safe because of `SKIP LOCKED`.
+- Selector hot state (affinity + saturation) is shared across workers and
+  nodes via Redis (`shared_state`, above) — fail-open, so losing Redis
+  degrades to per-worker behaviour, never to downtime.
 - Monitor is a single instance loop. If we need multiple, gate ticks with
   Postgres advisory locks.
 - Postgres is the bottleneck. Vertical scaling fine until >1k qps; then

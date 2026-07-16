@@ -106,6 +106,19 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+## Redis container (2026-07-16)
+
+`docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —
+shared selector state (cache-affinity + saturation verdicts) across the two
+uvicorn workers / future nodes. **No ops action needed**: the next
+`docker compose up -d` creates it, and `REDIS_URL` is wired into `api` and
+`monitor` by compose itself (nothing to add to `.env`).
+
+Cache semantics on purpose: `--save ""` (no persistence, nothing to back
+up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
+If the container is down the app fails open to its old in-process behaviour
+— worst case a slightly colder provider prompt-cache, never an outage.
+
 ## Manual deploy fallback
 
 ```

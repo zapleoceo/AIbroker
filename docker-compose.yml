@@ -21,6 +21,16 @@ services:
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
+  # Cross-worker selector state (affinity + saturation verdicts) — pure cache
+  # semantics: LRU-evicted, never persisted, and the app fails open to its
+  # in-process dicts if this container is down. No published ports on purpose.
+  redis:
+    image: redis:7-alpine
+    container_name: aibroker-redis
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
   api:
     build:
       context: .
@@ -29,8 +39,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET:?TOKEN_SECRET must be set}
       ADMIN_KEY: ${ADMIN_KEY:?ADMIN_KEY must be set}
       INTERNAL_SECRET: ${INTERNAL_SECRET:?INTERNAL_SECRET must be set}
@@ -56,8 +69,11 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET}
       ADMIN_KEY: ${ADMIN_KEY}            # not used by monitor, but Settings requires it
       INTERNAL_SECRET: ${INTERNAL_SECRET}

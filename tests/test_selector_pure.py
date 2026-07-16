@@ -58,6 +58,32 @@ def test_affinity_expires_after_ttl(monkeypatch):
     assert (7, "gemini") not in selector._affinity  # expired entries are dropped
 
 
+# ─── shared (Redis-backed) wrappers — in-process fallback path ────────────────
+
+
+async def test_shared_wrappers_fall_back_in_process(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "")  # shared store disabled
+    selector._affinity.clear()
+    await selector.note_affinity_shared(1, "deepseek", 42)
+    assert await selector._affinity_for_shared(1, "deepseek") == 42
+    assert await selector._affinity_for_shared(None, "deepseek") is None
+    assert await selector._affinity_for_shared(2, "deepseek") is None
+
+
+async def test_shared_affinity_wins_over_in_process(monkeypatch):
+    selector._affinity.clear()
+    note_affinity(1, "deepseek", 42)
+
+    async def fake_get(project_id: int, provider: str) -> int | None:
+        return 99 if (project_id, provider) == (1, "deepseek") else None
+
+    monkeypatch.setattr(selector.shared_state, "get_affinity", fake_get)
+    assert await selector._affinity_for_shared(1, "deepseek") == 99
+    # Shared miss (other project) still falls through to the local dict.
+    note_affinity(2, "deepseek", 7)
+    assert await selector._affinity_for_shared(2, "deepseek") == 7
+
+
 # ─── saturation-cache helpers ────────────────────────────────────────────────
 
 
