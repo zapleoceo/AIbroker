@@ -36,6 +36,7 @@ from sqlalchemy import text
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import JOBS_CHANNEL, _finish
 from aibroker.services.llm_service import BUDGET_EXHAUSTED, run_chat
 from aibroker.telemetry.notifier import alert
@@ -151,8 +152,11 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # Final attempt before give-up walks the paid tail only: free-pool storms
     # outlast the 8-retry window, so the last shot must not waste itself on a
     # cooling free pool (2026-07-16: 148 jobs/h died "no provider available"
-    # while the paid deepseek tail was healthy the whole time).
-    paid_only = row.retry_count >= _MAX_RETRIES - 1
+    # while the paid deepseek tail was healthy the whole time). Only when the
+    # capability's chain actually reaches a paid provider with a wired model —
+    # else (e.g. chat:deep is nvidia-only) demanding a paid key is a guaranteed
+    # no-op, so the final retry stays a normal walk instead.
+    paid_only = row.retry_count >= _MAX_RETRIES - 1 and has_paid_tail(row.capability)
     if paid_only:
         log.info("final retry — paid tail only, job %d", row.id)
     try:

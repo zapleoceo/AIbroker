@@ -201,6 +201,32 @@ async def test_execute_final_attempt_escalates_to_paid_only():
     assert requeue.await_count == 2  # outcome None still requeues/fails honestly
 
 
+async def test_execute_no_paid_escalation_when_chain_has_no_paid_tail():
+    """A capability whose chain never reaches a paid provider (chat:deep is
+    nvidia-only) must NOT escalate to paid_only on the final retry — that would
+    be a guaranteed no-op. The last shot stays a normal free-lane walk."""
+    pid = 990303
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="deep-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:deep"]))
+    seen: list[bool] = []
+
+    async def fake_run_chat(**kw):
+        seen.append(kw["paid_only"])
+
+    row = DeepJobRow(
+        id=1, project_id=pid, capability="chat:deep", status="running",
+        retry_count=job_queue._MAX_RETRIES - 1,
+        request={"messages": [{"role": "user", "content": "hi"}], "model": None,
+                 "max_tokens": 64, "temperature": 0.7, "response_format": None,
+                 "workflow": "t"},
+    )
+    with patch.object(job_queue, "run_chat", fake_run_chat), \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()):
+        await job_queue._execute(row)
+    assert seen == [False]      # final retry, but no paid tail → normal walk
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")
 async def test_drain_once_runs_pending_job_to_done():
     pid = await _make_project(["llm:chat"])

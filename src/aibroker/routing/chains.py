@@ -192,6 +192,25 @@ def usable_scopes_for_provider(provider: str) -> frozenset[str]:
     )
 
 
+# Providers billed per-token (a paid-tier key). The job queue's final-retry
+# paid_only escalation is only meaningful for a capability whose chain reaches
+# one of these with a wired model — otherwise (e.g. chat:deep is nvidia-only)
+# demanding a paid key is a guaranteed no-op.
+PAID_PROVIDERS: frozenset[str] = frozenset({"deepseek", "anthropic", "openai"})
+
+
+def has_paid_tail(capability: Capability) -> bool:
+    """True if `capability`'s chain reaches a paid provider with a wired model —
+    the only case where the job queue's final-retry paid_only escalation can do
+    anything. Imported lazily (leaf table module must not drag litellm in at
+    import time)."""
+    from aibroker.providers.litellm_adapter import model_for
+    return any(
+        p in PAID_PROVIDERS and model_for(p, capability)
+        for p in CAPABILITY_CHAINS.get(capability, [])
+    )
+
+
 def is_known_capability(capability: str) -> bool:
     return capability in CAPABILITY_CHAINS
 
