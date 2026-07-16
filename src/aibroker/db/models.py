@@ -191,6 +191,10 @@ class DeepJobRow(Base):
     capability: Mapped[str] = mapped_column(String(30), default="chat:deep", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending|running|done|error
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # md5 of project+capability+canonical request (migration 010): lets submit
+    # return an EXISTING in-flight job for an identical resubmit instead of
+    # enqueueing a duplicate. Nullable — rows predating the migration have none.
+    payload_hash: Mapped[str | None] = mapped_column(String(32))
     result_text: Mapped[str | None] = mapped_column(Text)
     result_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error_message: Mapped[str | None] = mapped_column(Text)

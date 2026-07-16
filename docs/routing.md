@@ -335,6 +335,25 @@ returns the scope the **project** must hold and the **key** must carry.
 > reconnecting, notify error) can only delay a job, never stall it. On SQLite
 > (tests) no listener starts and the loop degrades to the old 1s poll.
 >
+> **In-flight dedup — identical resubmits return the existing job_id
+> (2026-07-16).** Measured on prod: one client (Stepan, project 4) resubmitted
+> the SAME vision payload up to **33×** (480 jobs/24h vs 156 distinct
+> payloads); each job also retries up to 8× in the dispatcher — up to ~260
+> provider attempts for one image. Fixed broker-side so clients need NO
+> changes: `submit_job` computes `payload_hash` (md5 of
+> `project_id:capability:` + canonical sorted-key JSON of the request, stored
+> in `deep_jobs.payload_hash`, migration 010) and, if an identical job is
+> already **in flight** (`pending`/`running`, created within the last 30 min),
+> returns that job's id instead of inserting — and does NOT re-fire
+> `pg_notify`. The window is wide enough to swallow the client's whole
+> resubmit storm, narrow enough that a genuinely repeated question tomorrow
+> gets a fresh answer. Done/error jobs never dedup — a retry after failure
+> stays legitimate. Return shape is unchanged (an int job id), so the client
+> just polls the one shared job. Graceful degrade: if the code lands before
+> migration 010, the dedup SELECT fails once, logs a warning, disables itself
+> for the process, and submits fall back to plain (duplicate-tolerant)
+> inserts — no 500s.
+>
 > **cloudflare tried in `vision`, then pulled the SAME DAY (2026-07-04).**
 > Confirmed live (real token + account ID, 200 OK) against a garbage-bytes
 > probe — but that only proved auth+connectivity. A follow-up test with a
