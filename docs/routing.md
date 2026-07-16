@@ -1,5 +1,14 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (dashboard: hard-capped keys show "day cap", not "alive")**: a
+> key whose per-key day cost cap (`daily_cost_used_usd ≥ daily_cost_cap_usd`)
+> or day request limit (`daily_used ≥ daily_limit > 0`) is spent rendered as
+> "alive" even though `pick_and_reserve` skips it until midnight UTC — the
+> operator couldn't see why traffic fell through to the next provider. New
+> status between alive and cooldown: **"day cap" / «лимит дня»** (warn class).
+> Freshness mirrors `FRESH_DAILY_*_SQL`: a `daily_reset_at` from a previous
+> day means the counter is stale and reads 0 → the key renders alive again.
+
 > **2026-07-16 (request bounds: max_tokens / temperature)**: `ChatRequest` and
 > `DeepRequest` accepted any `max_tokens`/`temperature`. An oversized
 > `max_tokens` inflates the cost guard's worst-case reservation
