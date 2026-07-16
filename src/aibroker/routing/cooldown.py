@@ -14,6 +14,7 @@ import re
 from datetime import UTC, datetime, time, timedelta
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 
@@ -197,13 +198,23 @@ def next_utc_month_start(now: datetime | None = None) -> datetime:
     return datetime(now.year, now.month + 1, 1, tzinfo=UTC)
 
 
-async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> datetime:
+async def cooldown_until(
+    api_key_id: int,
+    provider: str,
+    error_msg: str,
+    *,
+    session: AsyncSession | None = None,
+) -> datetime:
     """Resolve the cooldown end for a rate-limited call, most-authoritative first:
       1. provider's own retry-after hint  → wait exactly that
       2. monthly account/plan cap (no hint) → wait until next UTC calendar month
       3. daily-quota exhaustion (no hint)  → wait until UTC midnight
       4. hourly request cap (no hint)      → wait to the top of the next hour
       5. otherwise                         → adaptive per-provider backoff
+
+    `session` (optional) lets the caller run the adaptive COUNT inside its own
+    transaction — _penalize merges the whole penalty into ONE session instead
+    of one per statement (this path fires on every failed attempt).
     """
     retry = parse_retry_after(error_msg)
     if retry is not None:
@@ -218,7 +229,7 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
         # up to MAX_COOLDOWN_S so it drops out of rotation; a one-off blip (low
         # recent count → tiny adaptive) still just waits the provider's hint.
         retry_until = datetime.now(UTC) + timedelta(seconds=retry)
-        adaptive = await adaptive_cooldown(api_key_id, provider)
+        adaptive = await adaptive_cooldown(api_key_id, provider, session=session)
         return max(retry_until, adaptive)
     if is_monthly_quota_error(error_msg) or _is_provider_monthly(provider, error_msg):
         return next_utc_month_start() + _boundary_jitter()
@@ -226,10 +237,26 @@ async def cooldown_until(api_key_id: int, provider: str, error_msg: str) -> date
         return next_utc_midnight() + _boundary_jitter()
     if is_hourly_quota_error(error_msg):
         return next_hour_boundary() + _boundary_jitter()
-    return await adaptive_cooldown(api_key_id, provider)
+    return await adaptive_cooldown(api_key_id, provider, session=session)
 
 
-async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:
+async def _recent_429_count(s: AsyncSession, api_key_id: int, since: datetime) -> int:
+    return int((await s.execute(
+        text(
+            "SELECT COUNT(*) FROM usage_log "
+            "WHERE api_key_id = :id AND http_status = 429 "
+            "  AND created_at > :since"
+        ),
+        {"id": api_key_id, "since": since},
+    )).scalar() or 0)
+
+
+async def adaptive_cooldown(
+    api_key_id: int,
+    provider: str,
+    *,
+    session: AsyncSession | None = None,
+) -> datetime:
     """Park a key for an adaptive duration. Returns the UTC `until` timestamp.
 
     Counts how many times this key was cool-down-marked in the last
@@ -239,14 +266,10 @@ async def adaptive_cooldown(api_key_id: int, provider: str) -> datetime:
     # is portable to the SQLite test DB — cooldown_until now reaches this on the
     # retry-after path too, which the SQLite deploy gate exercises.
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=BACKOFF_WINDOW_S)
-    async with get_session() as s:
-        recent = int((await s.execute(
-            text(
-                "SELECT COUNT(*) FROM usage_log "
-                "WHERE api_key_id = :id AND http_status = 429 "
-                "  AND created_at > :since"
-            ),
-            {"id": api_key_id, "since": since},
-        )).scalar() or 0)
+    if session is not None:
+        recent = await _recent_429_count(session, api_key_id, since)
+    else:
+        async with get_session() as s:
+            recent = await _recent_429_count(s, api_key_id, since)
     secs = _adaptive_jitter(cooldown_seconds(provider, recent))
     return datetime.now(UTC) + timedelta(seconds=secs)

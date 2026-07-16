@@ -1,5 +1,39 @@
 # Routing, scopes & cost guard
 
+> **2026-07-16 (record_usage in one round-trip on Postgres)**: `record_usage`
+> ran an `INSERT INTO usage_log … RETURNING id` and then a separate
+> `UPDATE api_keys` counter bump — same session/transaction, but two
+> round-trips on a statement that runs once per attempt (~60-100k/day). On
+> Postgres both now fold into a single data-modifying CTE
+> (`WITH ins AS (INSERT … RETURNING id), upd AS (UPDATE … RETURNING 1)
+> SELECT id FROM ins`). The `_recover_set_sql` success-reset and the
+> `FRESH_DAILY_*` lazy-reset semantics are byte-identical (the SET clause is
+> the same string), and `@retry_terminal_write` still wraps the whole call.
+> SQLite (the test gate) allows only SELECT inside `WITH`, so a dialect branch
+> keeps the old two-statement path there — covered by
+> `tests/test_record_usage_portable.py`, which runs on BOTH dialects (the
+> Postgres job exercises the CTE, the SQLite gate the fallback). Success:
+> 2 sessions/3 statements → 2/2; failure (with the single-session penalty
+> below): 4 sessions/5 statements → 3/4.
+
+> **2026-07-16 (single-session penalty path)**: `_penalize`'s rate-limit branch
+> used to open one DB session for the adaptive-backoff COUNT
+> (`cooldown.adaptive_cooldown`) and ANOTHER for the cooldown UPDATE
+> (`selector.mark_cooldown`) — 2 sessions per penalty on a path that fires on
+> every failed provider attempt (60-100k picks/day makes failed attempts the
+> dominant DB load after the saturation aggregate fix). Now `_penalize` opens
+> ONE `get_session()` and threads it down via a new optional
+> `session: AsyncSession | None = None` kwarg on `cooldown_until` /
+> `adaptive_cooldown` / `mark_cooldown` (default `None` keeps every existing
+> caller and test unchanged — they still self-open). Cooldown math and error
+> classification untouched. If the cooldown resolve fails, the session is
+> rolled back (a failed statement aborts the Postgres tx) and the flat 5-min
+> fallback UPDATE still lands in the same session. A failed attempt drops from
+> 4 sessions/5 statements to 3/4 (pick + penalty + error row); `mark_dead`
+> (auth path) was already a single statement/session and `record_usage` retries
+> independently under `@retry_terminal_write` (re-running it inside a shared
+> aborted tx would be wrong), so neither was merged in.
+
 > **2026-07-16 (selector state shared via Redis)**: the cache-affinity map and
 > saturation verdict below are now cross-worker/cross-node through
 > `routing/shared_state.py` (fail-open — no `REDIS_URL` / Redis down = the old
