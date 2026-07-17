@@ -62,7 +62,7 @@ class _AnthropicAdapter(ProviderAdapter):
 
 
 class _DeepseekAdapter(ProviderAdapter):
-    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
         # "This response_format type is unavailable now") but accepts
         # json_object — confirmed live 2026-07-07. Downgrade so the provider
@@ -71,6 +71,18 @@ class _DeepseekAdapter(ProviderAdapter):
         rf = kwargs.get("response_format")
         if rf and rf.get("type") == "json_schema":
             kwargs["response_format"] = {"type": "json_object"}
+        # v4 models default to THINKING mode; hidden reasoning_content eats the
+        # max_tokens budget so short JSON replies truncate to empty (the 2026-
+        # 07-10 "v4-flash regression" was this default, not the model — and
+        # reasoning_effort="disable" is NOT the deepseek knob). The broker never
+        # wants deepseek to deep-reason (that's the chat:deep lane), so disable
+        # it via the documented body param. Confirmed live 2026-07-17: with
+        # thinking disabled v4-flash returns valid JSON at max_tokens=120,
+        # reasoning_content empty. Scoped to v4-*: deepseek-reasoner IS the
+        # thinking mode, and legacy names pre-date the param.
+        if model.split("/", 1)[-1].startswith("deepseek-v4"):
+            kwargs.setdefault("extra_body", {}).setdefault(
+                "thinking", {"type": "disabled"})
 
 
 class _CerebrasAdapter(ProviderAdapter):

@@ -81,22 +81,23 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "translate": "gemini/gemini-2.5-flash",
                "vision": "gemini/gemini-2.5-flash",
                "transcription": "gemini/gemini-2.5-flash"},
-    # 2026-07-10: REVERTED to deepseek-chat after a live-data regression.
-    # Briefly moved to deepseek-v4-flash (cheaper), but v4-flash is a REASONING
-    # model — its hidden reasoning_content eats the max_tokens budget, so on our
-    # short-max_tokens JSON replies the actual content is truncated/empty →
-    # InvalidJSON (measured ~49% on chat:fast, 12% on chat:smart) + slower →
-    # Timeout. reasoning_effort="disable" does NOT stop v4-flash thinking
-    # (verified). deepseek-chat is NON-reasoning and returns clean JSON at any
-    # max_tokens (verified: valid JSON at mt=120 vs v4-flash empty). It still
-    # works today though DeepSeek's /models only lists v4-* and flags chat for
-    # deprecation ~2026-07-24 — MUST pick a non-reasoning JSON-reliable paid
-    # fallback (or a max_tokens floor for v4-flash) before then. deepseek-coder
-    # is gone → chat:code also uses deepseek-chat.
-    "deepseek": {"chat:fast": "deepseek/deepseek-chat",
-                 "chat:smart": "deepseek/deepseek-chat",
-                 "chat:edit": "deepseek/deepseek-chat",
-                 "chat:code": "deepseek/deepseek-chat"},
+    # 2026-07-17: moved to deepseek-v4-flash AHEAD of deepseek-chat's
+    # deprecation (2026-07-24 15:59 UTC; DeepSeek: "deepseek-chat corresponds
+    # to the non-thinking mode of deepseek-v4-flash"). The 2026-07-10 "v4-flash
+    # regression" (truncated/empty JSON, ~49% InvalidJSON on chat:fast) was NOT
+    # the model — v4 defaults to THINKING mode and reasoning_content ate the
+    # max_tokens budget; reasoning_effort="disable" was the wrong knob. The
+    # right one is body param thinking={"type":"disabled"} — _DeepseekAdapter
+    # sets it for every v4-* call. Confirmed live 2026-07-17: valid JSON at
+    # max_tokens=120 on a 17k-token system prompt, reasoning empty, prompt
+    # cache hitting 17280/17286. Cheaper too: $0.14/M in (cache-hit $0.0028)
+    # vs chat's $0.28/M. Prod track record: 482 Stepan calls, avg 10.4k-token
+    # prompts, zero EmptyBody (vs 1590 on deepseek-chat over the same week).
+    # deepseek-coder is gone → chat:code also uses v4-flash.
+    "deepseek": {"chat:fast": "deepseek/deepseek-v4-flash",
+                 "chat:smart": "deepseek/deepseek-v4-flash",
+                 "chat:edit": "deepseek/deepseek-v4-flash",
+                 "chat:code": "deepseek/deepseek-v4-flash"},
     # 2026-07-16: openai/gpt-oss-120b:free DELISTED by OpenRouter (404
     # NotFoundError, 48 errs/75min — same fate as llama-3.2-vision earlier).
     # All chat lanes moved to google/gemma-4-31b-it:free: verified live on our

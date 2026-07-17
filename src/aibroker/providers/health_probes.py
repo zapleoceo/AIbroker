@@ -200,14 +200,16 @@ _PROBES = {
                               {"model": "google/gemma-4-31b-it:free",  # gpt-oss:free delisted 2026-07-16
                                "messages": [{"role": "user", "content": "."}],
                                "max_tokens": 1}),
-    # deepseek-chat (matches DEFAULT_MODEL — reverted from v4-flash, which is a
-    # reasoning model that broke our JSON replies; see litellm_adapter). Watch
-    # the ~2026-07-24 deprecation — swap the probe with the model.
+    # deepseek-v4-flash (matches DEFAULT_MODEL; deepseek-chat is deprecated
+    # 2026-07-24). thinking disabled to mirror production calls — the v4
+    # default is thinking mode, which at max_tokens=1 burns the whole budget
+    # on hidden reasoning (see _DeepseekAdapter).
     "deepseek": lambda k, _acc=None: ("POST", "https://api.deepseek.com/chat/completions",
                             _bearer(k),
-                            {"model": "deepseek-chat",
+                            {"model": "deepseek-v4-flash",
                              "messages": [{"role": "user", "content": "."}],
-                             "max_tokens": 1}),
+                             "max_tokens": 1,
+                             "thinking": {"type": "disabled"}}),
     "anthropic": lambda k, _acc=None: ("POST", "https://api.anthropic.com/v1/messages",
                              {"x-api-key": k, "anthropic-version": "2023-06-01",
                               "content-type": "application/json"},
