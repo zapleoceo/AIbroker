@@ -28,6 +28,36 @@ def test_deepseek_leaves_json_object_and_no_format_alone():
     assert "response_format" not in _prepared("deepseek")
 
 
+def test_deepseek_v4_disables_thinking():
+    """2026-07-17: v4 models default to THINKING mode — hidden reasoning ate
+    the max_tokens budget and truncated short JSON replies to empty (the
+    07-10 'v4-flash regression' was this default, not the model). The adapter
+    sets the documented body param on every v4-* call."""
+    kwargs: dict = {}
+    adapter_for("deepseek").prepare("deepseek/deepseek-v4-flash", kwargs)
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    kwargs = {}
+    adapter_for("deepseek").prepare("deepseek/deepseek-v4-pro", kwargs)
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_non_v4_models_get_no_thinking_param():
+    """deepseek-reasoner IS the thinking mode and legacy names pre-date the
+    param — sending it there risks a 400."""
+    for model in ("deepseek/deepseek-chat", "deepseek/deepseek-reasoner"):
+        kwargs: dict = {}
+        adapter_for("deepseek").prepare(model, kwargs)
+        assert "extra_body" not in kwargs, model
+
+
+def test_deepseek_v4_thinking_respects_caller_extra_body():
+    """setdefault semantics: a caller-set thinking value wins, and unrelated
+    extra_body keys survive."""
+    kwargs: dict = {"extra_body": {"thinking": {"type": "enabled"}, "x": 1}}
+    adapter_for("deepseek").prepare("deepseek/deepseek-v4-flash", kwargs)
+    assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}, "x": 1}
+
+
 def test_cerebras_downgrades_json_schema_to_json_object():
     """REGRESSION (2026-07-11): cerebras 400s on json_schema whose array fields
     carry keywords it doesn't implement ('Invalid fields for schema with types

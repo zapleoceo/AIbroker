@@ -271,15 +271,18 @@
 > verified 30k→empty 4/4 vs 16k→OK 4/4), so retrying every key just burns the
 > provider. After the cap it's a normal miss → next provider. Root trigger is the
 > caller's oversized system prompt, not the broker.
-> - **deepseek stays on `deepseek-chat`** (chat:fast/smart/edit/code). A brief
->   move to the cheaper `deepseek-v4-flash` was REVERTED same day: v4-flash is a
->   REASONING model whose hidden reasoning eats the max_tokens budget, so our
->   short-max_tokens JSON replies got truncated → InvalidJSON (~49% on chat:fast,
->   12% on chat:smart) + Timeouts; `reasoning_effort=disable` doesn't stop it.
->   deepseek-chat is non-reasoning and returns clean JSON at any max_tokens
->   (verified mt=120: chat valid, v4-flash empty). Caveat: DeepSeek's /models
->   lists only v4-* and flags chat for ~07-24 deprecation — needs a non-reasoning
->   JSON-reliable replacement before then (NOT a blind swap to a reasoning model).
+> - **deepseek moved to `deepseek-v4-flash`** (chat:fast/smart/edit/code,
+>   2026-07-17) ahead of `deepseek-chat`'s deprecation (2026-07-24 15:59 UTC).
+>   The 07-10 revert-story is now understood: v4 defaults to THINKING mode and
+>   its hidden reasoning_content ate the max_tokens budget (truncated JSON,
+>   ~49% InvalidJSON on chat:fast); `reasoning_effort=disable` was the wrong
+>   knob. The right one is the body param `thinking={"type":"disabled"}` —
+>   `_DeepseekAdapter` sets it on every v4-* call (confirmed live: valid JSON
+>   at mt=120 on a 17k-token system prompt, reasoning empty). DeepSeek's own
+>   mapping: "deepseek-chat corresponds to the non-thinking mode of
+>   deepseek-v4-flash". Cheaper ($0.14/M in, cache-hit $0.0028 vs chat's
+>   $0.28/M) and the prod week showed 482 Stepan calls (avg 10.4k-tok prompts)
+>   with ZERO EmptyBody vs 1590 on deepseek-chat.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
@@ -325,9 +328,9 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
 | `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare → deepseek → openai | `llm:chat` | Strict free-first (2026-07-05) — paid is always last. cloudflare = gpt-oss-120b. nvidia REMOVED (kimi-k2.6 → 404), anthropic REMOVED (out of credit), github REMOVED (exhausted, 0 success) — all 2026-07-10. |
-| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → cloudflare → openai → deepseek | `llm:chat` | Strict free-first; deepseek-chat last (non-reasoning, JSON-reliable). gemini = 2.5-flash (2026-07-10). cloudflare added for free burst; nvidia/anthropic/github removed 2026-07-10. |
+| `chat:smart` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → cloudflare → openai → deepseek | `llm:chat` | Strict free-first; deepseek-v4-flash last (thinking disabled by adapter, JSON-reliable). gemini = 2.5-flash (2026-07-10). cloudflare added for free burst; nvidia/anthropic/github removed 2026-07-10. |
 | `chat:code` | cerebras → groq → openrouter → gemini → mistral → sambanova → cloudflare → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry. anthropic/github removed 2026-07-10. |
-| `chat:edit` | **gemini → deepseek** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-chat. anthropic dropped 2026-07-10 (out of credit). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
+| `chat:edit` | **gemini → deepseek** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-v4-flash (thinking disabled). anthropic dropped 2026-07-10 (out of credit). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only** — `POST /v1/chat` returns **410 Gone** (all capabilities); use `POST /v1/jobs?capability=chat:deep` (or `/v1/deep`) + `GET /v1/jobs/{id}`. |
 | `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras = gemma-4-31b (fast non-reasoning, 2026-07-10). github removed. |
 | `translate` | cerebras → mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |

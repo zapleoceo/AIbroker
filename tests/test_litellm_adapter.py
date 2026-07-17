@@ -137,16 +137,16 @@ def test_default_model_has_voyage_embedding():
     assert "embedding" in DEFAULT_MODEL["voyage"]
 
 
-def test_deepseek_stays_on_nonreasoning_chat_not_v4_flash():
-    """REGRESSION (2026-07-10): deepseek-v4-flash is a REASONING model — its
-    hidden reasoning eats the max_tokens budget, truncating our short JSON
-    replies (measured ~49% InvalidJSON on chat:fast) + Timeouts. deepseek-chat
-    is non-reasoning and returns clean JSON at any max_tokens, so every deepseek
-    slot stays on it. (Watch the ~07-24 deprecation — needs a non-reasoning
-    JSON-reliable replacement, NOT a blind swap to a reasoning model.)"""
+def test_deepseek_is_on_v4_flash_everywhere():
+    """2026-07-17: deepseek-chat is deprecated 2026-07-24 — every deepseek slot
+    moves to v4-flash. Safe ONLY because _DeepseekAdapter disables thinking on
+    v4-* (the 07-10 regression was the thinking DEFAULT eating max_tokens, not
+    the model; confirmed live: valid JSON at max_tokens=120 with the knob).
+    This test + test_deepseek_v4_disables_thinking guard both halves — moving
+    the model without the knob resurrects the ~49% InvalidJSON storm."""
     for cap, model in DEFAULT_MODEL["deepseek"].items():
-        assert model == "deepseek/deepseek-chat", cap
-        assert "v4-flash" not in model and "v4-pro" not in model
+        assert model == "deepseek/deepseek-v4-flash", cap
+    assert "deepseek-chat" not in str(DEFAULT_MODEL["deepseek"])
 
 
 def test_gemini_smart_is_flash_not_starved_pro():
