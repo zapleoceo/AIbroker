@@ -61,6 +61,15 @@ class _AnthropicAdapter(ProviderAdapter):
             }
 
 
+# Non-thinking deepseek (== deepseek-chat) goes deterministically EMPTY on
+# json_object once the prompt nears ~30k chars (verified 30k→empty 4/4,
+# 16k→OK 4/4). Threshold sits under the verified failure point with margin —
+# Stepan's failing followups were ~25k system + dialog. The mt floor keeps
+# thinking from starving the content budget on short-reply calls.
+_DEEPSEEK_JSON_EMPTY_CHARS = 24_000
+_DEEPSEEK_THINKING_MT_FLOOR = 1_000
+
+
 class _DeepseekAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
@@ -74,15 +83,35 @@ class _DeepseekAdapter(ProviderAdapter):
         # v4 models default to THINKING mode; hidden reasoning_content eats the
         # max_tokens budget so short JSON replies truncate to empty (the 2026-
         # 07-10 "v4-flash regression" was this default, not the model — and
-        # reasoning_effort="disable" is NOT the deepseek knob). The broker never
-        # wants deepseek to deep-reason (that's the chat:deep lane), so disable
-        # it via the documented body param. Confirmed live 2026-07-17: with
-        # thinking disabled v4-flash returns valid JSON at max_tokens=120,
-        # reasoning_content empty. Scoped to v4-*: deepseek-reasoner IS the
-        # thinking mode, and legacy names pre-date the param.
+        # reasoning_effort="disable" is NOT the deepseek knob). So disable it
+        # via the documented body param (confirmed live 2026-07-17: valid JSON
+        # at max_tokens=120, reasoning_content empty)…
+        #
+        # …EXCEPT for a JSON request with a HUGE prompt and a roomy max_tokens.
+        # Non-thinking mode IS deepseek-chat (DeepSeek's own mapping), and
+        # deepseek-chat deterministically returns an EMPTY json_object body on
+        # ~30k-char prompts (verified 30k→empty 4/4 vs 16k→OK 4/4; resurfaced
+        # 2026-07-17 within minutes of disabling thinking: 8 EmptyBody on
+        # Stepan followups, input billed for nothing). Thinking mode is the one
+        # that demonstrably WORKS there — 482 prod calls, avg 10.4k-token
+        # prompts, zero EmptyBody — because the reasoning pass gets the model
+        # to actually emit the JSON. It needs max_tokens headroom (reasoning
+        # spends from the same budget), hence the mt floor: below it thinking
+        # would starve the content itself (the 07-10 mt=120 failure).
+        # Scoped to v4-*: deepseek-reasoner IS the thinking mode, and legacy
+        # names pre-date the param.
         if model.split("/", 1)[-1].startswith("deepseek-v4"):
-            kwargs.setdefault("extra_body", {}).setdefault(
-                "thinking", {"type": "disabled"})
+            rf_now = kwargs.get("response_format") or {}
+            prompt_chars = sum(
+                len(str(m.get("content") or "")) for m in kwargs.get("messages", []))
+            keep_thinking = (
+                str(rf_now.get("type", "")).startswith("json")
+                and prompt_chars >= _DEEPSEEK_JSON_EMPTY_CHARS
+                and kwargs.get("max_tokens", 0) >= _DEEPSEEK_THINKING_MT_FLOOR
+            )
+            if not keep_thinking:
+                kwargs.setdefault("extra_body", {}).setdefault(
+                    "thinking", {"type": "disabled"})
 
 
 class _CerebrasAdapter(ProviderAdapter):
