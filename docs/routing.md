@@ -277,12 +277,19 @@
 >   its hidden reasoning_content ate the max_tokens budget (truncated JSON,
 >   ~49% InvalidJSON on chat:fast); `reasoning_effort=disable` was the wrong
 >   knob. The right one is the body param `thinking={"type":"disabled"}` —
->   `_DeepseekAdapter` sets it on every v4-* call (confirmed live: valid JSON
->   at mt=120 on a 17k-token system prompt, reasoning empty). DeepSeek's own
->   mapping: "deepseek-chat corresponds to the non-thinking mode of
->   deepseek-v4-flash". Cheaper ($0.14/M in, cache-hit $0.0028 vs chat's
->   $0.28/M) and the prod week showed 482 Stepan calls (avg 10.4k-tok prompts)
->   with ZERO EmptyBody vs 1590 on deepseek-chat.
+>   `_DeepseekAdapter` sets it (confirmed live: valid JSON at mt=120 on a
+>   17k-token system prompt, reasoning empty). DeepSeek's own mapping:
+>   "deepseek-chat corresponds to the non-thinking mode of deepseek-v4-flash".
+>   Cheaper ($0.14/M in, cache-hit $0.0028 vs chat's $0.28/M).
+>   **Hybrid knob (same day):** because non-thinking v4 IS deepseek-chat, it
+>   inherits chat's deterministic EMPTY `json_object` body on ~30k-char
+>   prompts (resurfaced within minutes: 8 EmptyBody on Stepan followups,
+>   input billed for nothing). Thinking mode demonstrably works there (482
+>   prod calls, avg 10.4k-tok prompts, zero EmptyBody — the reasoning pass
+>   gets the JSON emitted). So the adapter disables thinking EXCEPT when
+>   json + prompt ≥ 24k chars + max_tokens ≥ 1000 (headroom for the
+>   reasoning spend; below the floor thinking starves the content itself —
+>   the 07-10 mt=120 failure).
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.

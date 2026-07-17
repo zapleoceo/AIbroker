@@ -41,6 +41,40 @@ def test_deepseek_v4_disables_thinking():
     assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
 
 
+def _v4_kwargs(*, sys_chars: int, rf_type: str | None, mt: int) -> dict:
+    kwargs: dict = {"messages": [{"role": "system", "content": "x" * sys_chars},
+                                 {"role": "user", "content": "hi"}],
+                    "max_tokens": mt}
+    if rf_type:
+        kwargs["response_format"] = {"type": rf_type}
+    adapter_for("deepseek").prepare("deepseek/deepseek-v4-flash", kwargs)
+    return kwargs
+
+
+def test_deepseek_v4_keeps_thinking_for_huge_json_prompts():
+    """REGRESSION (2026-07-17, minutes after the migration): non-thinking v4
+    == deepseek-chat, which returns a deterministically EMPTY json_object body
+    on ~30k-char prompts (8 EmptyBody on Stepan followups, input billed for
+    nothing). Thinking mode demonstrably works there (482 prod calls, 0 empty)
+    — so for json + huge prompt + roomy max_tokens the adapter must NOT
+    disable it."""
+    out = _v4_kwargs(sys_chars=25_000, rf_type="json_object", mt=2000)
+    assert "extra_body" not in out  # thinking left at its (enabled) default
+
+
+def test_deepseek_v4_disables_thinking_below_the_size_or_mt_gates():
+    # small prompt → disabled even for json
+    assert _v4_kwargs(sys_chars=5_000, rf_type="json_object", mt=2000)[
+        "extra_body"]["thinking"] == {"type": "disabled"}
+    # huge prompt but NO json → disabled (plain text has no empty-body bug)
+    assert _v4_kwargs(sys_chars=25_000, rf_type=None, mt=2000)[
+        "extra_body"]["thinking"] == {"type": "disabled"}
+    # huge json prompt but tiny max_tokens → thinking would starve the content
+    # itself (the 07-10 mt=120 failure) → disabled
+    assert _v4_kwargs(sys_chars=25_000, rf_type="json_object", mt=120)[
+        "extra_body"]["thinking"] == {"type": "disabled"}
+
+
 def test_deepseek_non_v4_models_get_no_thinking_param():
     """deepseek-reasoner IS the thinking mode and legacy names pre-date the
     param — sending it there risks a 400."""
