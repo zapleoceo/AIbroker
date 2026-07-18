@@ -748,20 +748,25 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
     return HTMLResponse(_dash_html(body=body, flash=flash), headers=_NO_STORE)
 
 
-def _cache_card(cache_read: int, cache_write: int) -> str:
-    """Prompt-cache KPI card — only anthropic calls ever populate these
-    (apply_prompt_cache), so most projects/ranges show neither; omit the card
-    entirely rather than show a permanent 0/0. Reuse ratio (reads per write)
-    is the honest cache-efficiency signal: one write feeds many cheap reads."""
+def _cache_card(cache_read: int, cache_write: int, tin: int = 0) -> str:
+    """Prompt-cache KPI card. anthropic populates read+write via explicit
+    cache_control marks; deepseek/cerebras/zai report server-side automatic
+    cache reads (prompt_tokens_details.cached_tokens, write stays 0). Omit the
+    card when nothing cached in range rather than show a permanent 0/0. The
+    headline is HIT-RATE (cached share of all input tokens) — the number that
+    says whether the caller's stable prefix is actually paying off; read/write
+    reuse stays as the sub-line for the anthropic case."""
     if not cache_read and not cache_write:
         return ""
-    reuse = f"{cache_read / cache_write:.1f}× reuse" if cache_write else "—"
+    hit = f"{100 * cache_read / tin:.0f}%" if tin else "—"
+    reuse = f"{cache_read / cache_write:.1f}× reuse" if cache_write else \
+        f"{cache_read:,} read"
     return f"""
       <div class="card">
-        <div class="card-label" data-i18n data-en="Prompt cache" data-ru="Кэш промпта">Prompt cache</div>
-        <div class="card-value" style="font-size:18px">{cache_read:,} / {cache_write:,}</div>
+        <div class="card-label" data-i18n data-en="Cache hit" data-ru="Кэш-хит">Cache hit</div>
+        <div class="card-value" style="font-size:18px">{hit}</div>
         <div class="card-sub" data-i18n
-             data-en="read / write · {reuse}" data-ru="чтения / записи · {reuse}">read / write · {reuse}</div>
+             data-en="{reuse} of {tin:,} in-tokens" data-ru="{reuse} из {tin:,} вх. токенов">{reuse} of {tin:,} in-tokens</div>
       </div>
     """
 
@@ -849,7 +854,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         <div class="card-value">{int(t.avg_lat or 0)} ms</div>
         <div class="card-sub">{ok_pct:.0f}% success</div>
       </div>
-      {_cache_card(t.cache_read, t.cache_write)}
+      {_cache_card(t.cache_read, t.cache_write, int(t.tin))}
     </div>
     """
 
@@ -917,9 +922,21 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         + '</div>'
     )
 
+    # Per-model cache hit-rate: cached share of the model's input tokens over
+    # the range. THE number for the deepseek-first smart lane — a drop here
+    # means the caller's prompt prefix stopped being byte-stable (cache broke)
+    # and every call is billed at full input rate again.
+    def _hit_cell(r) -> str:
+        tin = int(getattr(r, "tin", 0) or 0)
+        cache_r = int(getattr(r, "cache_r", 0) or 0)
+        if not tin or not cache_r:
+            return '<td class="num">—</td>'
+        return f'<td class="num">{100 * cache_r / tin:.0f}%</td>'
+
     model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
         lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
                   f'<td class="num">{r.n}</td>'
+                  f'{_hit_cell(r)}'
                   f'<td class="num">{_cost_span(float(r.spend))}</td></tr>')
 
     # Latency histogram: count of calls per latency bucket (same period), bars

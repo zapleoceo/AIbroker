@@ -286,7 +286,9 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
         ), bind_)).all()
         by_model = (await s.execute(text(
             "SELECT model, COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS spend, "
-            "       COALESCE(SUM(tokens_in+tokens_out),0) AS toks "
+            "       COALESCE(SUM(tokens_in+tokens_out),0) AS toks, "
+            "       COALESCE(SUM(tokens_in),0) AS tin, "
+            "       COALESCE(SUM(cache_read_tokens),0) AS cache_r "
             "FROM usage_log WHERE project_id=:pid AND model IS NOT NULL "
             "  AND created_at > now() - (:h * INTERVAL '1 hour') "
             "GROUP BY model ORDER BY n DESC LIMIT 12"

@@ -785,7 +785,7 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
     Brk = namedtuple("B", "provider n spend")
     BrkCap = namedtuple("BC", "cap n spend")
     BrkWf = namedtuple("BW", "wf n spend")
-    BrkModel = namedtuple("BM", "model n spend toks")
+    BrkModel = namedtuple("BM", "model n spend toks tin cache_r")
     Recent = namedtuple("R", "id created_at provider model capability tokens_in "
                               "tokens_out cost_usd latency_ms status http_status "
                               "error_kind")
@@ -799,7 +799,9 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
         "by_capability": [BrkCap("chat:fast", 3, 0.05), BrkCap("chat:edit", 1, 0.07)],
         "by_workflow": [BrkWf("triage", 3, 0.05), BrkWf("rel_extract", 1, 0.07)],
         "cap_spark": cap_spark or {}, "wf_spark": wf_spark or {},
-        "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800)],
+        "by_model": [BrkModel("cerebras/gpt-oss-120b", 2, 0.0, 800, 600, 0),
+                     BrkModel("deepseek/deepseek-v4-flash", 3, 0.001, 9000,
+                              8000, 6800)],
         "lat_hist": lat_hist if lat_hist is not None else [1, 2, 0, 1, 0, 0, 0, 0],
         "recent": [
             Recent(90000 + i, datetime(2026, 6, 26, 12, 0, i, tzinfo=UTC),
@@ -808,6 +810,31 @@ def _fake_proj_detail(*, hours: int = 24, recent_n: int = 3,
             for i in range(recent_n)
         ],
     }
+
+
+def test_model_card_shows_cache_hit_rate():
+    """Per-model cache hit column: cached share of that model's input tokens.
+    The health signal for the deepseek-first smart lane — a drop means the
+    caller's prefix stopped being byte-stable and full input price is back.
+    Models with no cached reads show a dash, not 0%."""
+    from aibroker.routes.dashboard_render import _render_project_detail
+    body = _render_project_detail(_fake_proj_detail()).body.decode()
+    assert "85%" in body                       # 6800/8000 on v4-flash
+    assert '<td class="num">—</td>' in body    # cerebras: tin>0, cache 0 → dash
+
+
+def test_cache_kpi_headline_is_hit_rate():
+    """The cache KPI leads with hit-rate over ALL input tokens (works for the
+    auto-cache providers where write is always 0), read/write reuse demoted to
+    the sub-line. Card omitted entirely when nothing cached in range."""
+    from aibroker.routes.dashboard_render import _render_project_detail
+    body = _render_project_detail(
+        _fake_proj_detail(cache_read=617, cache_write=0)).body.decode()
+    assert "50%" in body                       # 617 of tin=1234
+    assert "617" in body
+    # nothing cached → no card
+    body0 = _render_project_detail(_fake_proj_detail()).body.decode()
+    assert "Cache hit" not in body0
 
 
 def test_render_project_detail_smoke():
@@ -931,9 +958,10 @@ def test_cache_card_empty_when_no_activity():
 
 def test_cache_card_shows_read_write_and_reuse_ratio():
     from aibroker.routes.dashboard_render import _cache_card
-    html = _cache_card(9000, 1000)
-    assert "9,000" in html and "1,000" in html
-    assert "9.0" in html          # reuse ratio: 9000/1000 reads-per-write
+    html = _cache_card(9000, 1000, tin=18000)
+    assert "50%" in html          # headline: hit-rate 9000/18000
+    assert "9.0" in html          # reuse ratio 9000/1000 stays in the sub-line
+    assert "18,000" in html
 
 
 def test_cache_card_handles_read_without_write():
@@ -949,16 +977,16 @@ def test_render_project_detail_shows_cache_card_when_active():
     from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail(cache_read=9000, cache_write=1000)
     body = _render_project_detail(d).body.decode()
-    assert "Prompt cache" in body
-    assert "9,000 / 1,000" in body
+    assert "Cache hit" in body
+    assert "9.0" in body           # reuse sub-line
 
 
 def test_render_project_detail_hides_cache_card_when_inactive():
-    """Most projects never touch anthropic's cache — no permanent 0/0 card."""
+    """Projects with nothing cached in range get no permanent 0/0 card."""
     from aibroker.routes.dashboard_render import _render_project_detail
     d = _fake_proj_detail()  # cache_read=cache_write=0 by default
     body = _render_project_detail(d).body.decode()
-    assert "Prompt cache" not in body
+    assert "Cache hit" not in body
 
 
 # ─── Main dashboard render (unit, no DB) ───────────────────────────────────
