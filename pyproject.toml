@@ -43,6 +43,11 @@ packages = ["src/aibroker"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
+# asr_local (services/asr-local) is a separate deployable package (its own
+# pyproject.toml, own Docker image) — not pip-installed alongside aibroker.
+# tests/test_asr_local.py mocks the model, so it only needs fastapi/uvicorn
+# (already aibroker deps) plus this path to import the package.
+pythonpath = ["services/asr-local/src"]
 
 [tool.ruff]
 line-length = 100

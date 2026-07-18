@@ -119,17 +119,30 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
-## Cross-project network — local ASR (2026-07-18)
+## Local ASR (2026-07-18, moved in-repo same day)
 
-`api` (only — not postgres/pgbouncer/redis/monitor) joins vera3's
-`vera3_default` network (declared `external: true` in `docker-compose.yml`)
-so it can reach `vera3-asr-local` by container name. `ASR_LOCAL_URL` defaults
-to `http://vera3-asr-local:8000`; unreachable/unset degrades safely to
+`services/asr-local/` — self-hosted `faster-whisper` (small, int8, 1 CPU
+thread, 1.5GB cap) — is its own `docker-compose.yml` service
+(`aibroker-asr-local`), built and run alongside `api` on this repo's own
+compose network. `api` reaches it at `ASR_LOCAL_URL` (default
+`http://aibroker-asr-local:8000`); unreachable/unset degrades safely to
 groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
-This is the only cross-project network membership in the stack — vera3's
-compose file must keep exposing that network name for this to keep working;
-if vera3 ever renames its network, `ASR_LOCAL_URL` env override is the
-escape hatch without touching compose.
+
+This briefly lived in vera3's own compose stack instead, reached over a
+cross-project network join (`api` joining `vera3_default` as an external
+network) — reverted same day: a vera3-side refactor deleted that service
+entirely (its own voice pipeline moved to calling this broker uniformly,
+which made its local copy look redundant), not realizing the broker's
+`local` provider was only ever a thin proxy to that exact container, not a
+model of its own. Deleting the one real model host silently took the
+broker-wide feature down with it. Owning the service directly means the
+one thing the broker's own routing depends on can't become collateral
+damage in an unrelated project's cleanup again — no other project's compose
+file needs to keep a network name stable for this to keep working.
+
+Same 2-cores-shared-with-Stepan2/Vera constraint applies regardless of which
+compose file the container lives in — nothing about resource math changed by
+moving it, only the ownership boundary.
 
 ## Connection scaling
 

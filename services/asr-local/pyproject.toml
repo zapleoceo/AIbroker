@@ -1,0 +1,13 @@
+[project]
+name = "asr-local"
+version = "0.1.0"
+description = "Local faster-whisper transcription service — backs AIbroker's 'local' transcription provider"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
+  "faster-whisper>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

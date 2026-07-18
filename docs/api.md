@@ -197,18 +197,27 @@ below) → `groq` whisper-large-v3-turbo (free) → `gemini` (chat-based audio,
 separate quota) → `openai` whisper-1. Returns
 `{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
 
-#### `local` — self-hosted faster-whisper (2026-07-18)
+#### `local` — self-hosted faster-whisper (2026-07-18, moved in-repo)
 
 Chain-first, always tried before any external provider — free, private, no
-external rate limit. Backed by vera3's `asr-local` service (same host,
-`faster-whisper small`, int8, CPU; see
-[muai/vera3/docs/asr-local.md](https://github.com/zapleoceo/muai/blob/master/vera3/docs/asr-local.md)),
-reached over plain HTTP via `_transcribe_via_local_asr` /
-`_post_local_asr` in `providers/litellm_adapter.py` — not through LiteLLM,
-since it isn't an LLM SDK-compatible endpoint. Always requests
-`language=auto`: asr-local's own default is `ru` (vera3's own voice-note
-use case), but broker callers are multi-tenant (e.g. Stepan2's mostly-Bahasa
-leads) and must not be force-decoded through Russian.
+external rate limit. Backed by this repo's own `services/asr-local`
+(`faster-whisper small`, int8, CPU) — its own `docker-compose.yml` service
+(`aibroker-asr-local`), on the same compose network as `api`, no
+cross-project dependency. (2026-07-18 history: this originally lived in
+vera3's own compose stack, reached over a cross-project network join —
+a same-day vera3 refactor deleted that service entirely, since from vera3's
+side "voice/audio now goes through the broker" made its own copy look
+redundant. It wasn't: the broker's `local` provider was only ever a proxy to
+that same container, not its own model — deleting the one real model host
+took the feature down broker-wide too. Moved in-repo so the service the
+broker's routing depends on can't be an casualty of an unrelated project's
+cleanup again.)
+
+Reached over plain HTTP via `_transcribe_via_local_asr` / `_post_local_asr`
+in `providers/litellm_adapter.py` — not through LiteLLM, since it isn't an
+LLM SDK-compatible endpoint. Always requests `language=auto`: broker callers
+are multi-tenant (e.g. Stepan2's mostly-Bahasa leads), so a single fixed
+default language would be wrong for most of them.
 
 Configured via `ASR_LOCAL_URL` (empty = disabled, every request falls
 straight through to groq/gemini/openai) and `ASR_LOCAL_TIMEOUT_S` (default
