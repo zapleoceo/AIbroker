@@ -722,6 +722,46 @@ class TranscribeFailed(Exception):
     """All transcription providers in the chain failed — route maps to 502."""
 
 
+_LOCAL_ASR_CORRECTION_MAX_TOKENS = 800
+_LOCAL_ASR_CORRECTION_PROMPT = (
+    "The text below is a raw speech-to-text transcript from a small local ASR "
+    "model and may contain misheard words, missing punctuation, or garbled "
+    "fragments. Fix ONLY obvious transcription errors. Do not translate, "
+    "summarize, add commentary, or change the meaning. Keep the original "
+    "language. Reply with the corrected transcript ONLY.\n\n"
+    "Transcript:\n{text}"
+)
+
+
+async def _correct_local_transcript(
+    *, project: ProjectRow, text: str, workflow: str | None,
+) -> str:
+    """local ASR trades accuracy for a tiny CPU footprint (small model,
+    int8, 1 thread — see litellm_adapter._transcribe_via_local_asr) to fit
+    the shared host. Clean its output with one cheap chat:fast pass before
+    handing it back. Best-effort: any failure (no provider, budget cap,
+    exception) falls back to the raw transcript — a proofreading step must
+    never cost the caller a working answer."""
+    if not text.strip():
+        return text
+    tag = f"{workflow}+asr-correct" if workflow else "asr-correct"
+    try:
+        outcome = await run_chat(
+            project=project, capability="chat:fast",
+            messages=[{"role": "user",
+                       "content": _LOCAL_ASR_CORRECTION_PROMPT.format(text=text)}],
+            model=None, max_tokens=_LOCAL_ASR_CORRECTION_MAX_TOKENS,
+            temperature=0.0, response_format=None, workflow=tag,
+        )
+    except Exception as e:  # noqa: BLE001 — proofreading must never sink a working transcript
+        log.warning("local ASR correction pass failed: %s — returning raw transcript", e)
+        return text
+    if not isinstance(outcome, ChatOutcome):
+        return text
+    corrected = outcome.text.strip()
+    return corrected or text
+
+
 async def run_transcribe(
     *,
     project: ProjectRow,
@@ -759,6 +799,10 @@ async def run_transcribe(
                 model=use_model, capability="transcription", workflow=workflow, exc=e,
             )
             continue
+        if provider == "local":
+            text = await _correct_local_transcript(
+                project=project, text=text, workflow=workflow,
+            )
         request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model, capability="transcription",

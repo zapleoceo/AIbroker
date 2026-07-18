@@ -219,6 +219,20 @@ slow-past-timeout local service raises `TimeoutError`, which
 degrades to the external chain instead of being retried every call with no
 backoff.
 
+**Correction pass (2026-07-18).** `small`/int8 trades accuracy for the tiny
+CPU footprint the shared host can afford, so every successful `local`
+transcript is proofread by one `chat:fast` call
+(`services/llm_service._correct_local_transcript`) before it's returned —
+fixes misheard words/punctuation, never translates or changes meaning.
+Best-effort: if the correction call has no available provider, hits the
+project/global budget cap, or raises, the raw local transcript is returned
+unchanged rather than losing a working answer. Tagged
+`workflow=<caller's workflow>+asr-correct` (or bare `asr-correct` when the
+caller sent none) in `usage_log`, so it's visible as its own line in the
+dashboard's per-project workflow breakdown, not folded into the caller's own
+tag. Only applied to the `local` provider — groq/gemini/openai's transcripts
+already come from full-size hosted models.
+
 ### `request_id` — correlating a call across both sides
 
 A completed chat `JobResponse` and `EmbedResponse`/`TranscribeResponse`

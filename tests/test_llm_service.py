@@ -1178,6 +1178,107 @@ def test_billed_cost_voyage_free_tier_is_zero_on_voyage4():
     assert _billed_cost(paid_voyage_key, meta) == 0.51
 
 
+# ─── _correct_local_transcript — local ASR proofreading pass ────────────────
+
+
+def _fake_project():
+    from aibroker.db.models import ProjectRow
+    return ProjectRow(id=1, name="x", project_key_hash="x", project_key_prefix="x",
+                       allowed_scopes=["llm:audio"], is_active=True, notes="")
+
+
+async def test_correct_local_transcript_returns_corrected_text():
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import ChatOutcome, _correct_local_transcript
+
+    outcome = ChatOutcome(
+        text="Привет, это голосовое сообщение.", provider="gemini", model="gemini-2.5-flash",
+        tokens_in=10, tokens_out=8, cost_usd=0.0, latency_ms=200,
+        key_label="k", request_id=5,
+    )
+    with patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=outcome)):
+        result = await _correct_local_transcript(
+            project=_fake_project(), text="привет ето галасовое сообщение", workflow="media",
+        )
+    assert result == "Привет, это голосовое сообщение."
+
+
+async def test_correct_local_transcript_falls_back_when_no_provider():
+    """No chat:fast capacity right now — the raw (uncorrected) transcript is
+    still a working answer; don't turn that into a failure."""
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import _correct_local_transcript
+
+    with patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=None)):
+        result = await _correct_local_transcript(
+            project=_fake_project(), text="raw transcript", workflow=None,
+        )
+    assert result == "raw transcript"
+
+
+async def test_correct_local_transcript_falls_back_on_budget_exhausted():
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import BUDGET_EXHAUSTED, _correct_local_transcript
+
+    with patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=BUDGET_EXHAUSTED)):
+        result = await _correct_local_transcript(
+            project=_fake_project(), text="raw transcript", workflow=None,
+        )
+    assert result == "raw transcript"
+
+
+async def test_correct_local_transcript_falls_back_on_exception():
+    """A proofreading failure must never sink an already-working transcript."""
+    from unittest.mock import patch
+
+    from aibroker.services.llm_service import _correct_local_transcript
+
+    async def boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    with patch("aibroker.services.llm_service.run_chat", side_effect=boom):
+        result = await _correct_local_transcript(
+            project=_fake_project(), text="raw transcript", workflow=None,
+        )
+    assert result == "raw transcript"
+
+
+async def test_correct_local_transcript_skips_empty_text():
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import _correct_local_transcript
+
+    mock_run_chat = AsyncMock()
+    with patch("aibroker.services.llm_service.run_chat", mock_run_chat):
+        result = await _correct_local_transcript(project=_fake_project(), text="   ", workflow=None)
+    assert result == "   "
+    mock_run_chat.assert_not_called()
+
+
+async def test_correct_local_transcript_tags_workflow_and_uses_chat_fast():
+    """Correction calls are tagged distinctly so the dashboard's per-project
+    workflow breakdown doesn't fold them into the caller's own workflow."""
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import ChatOutcome, _correct_local_transcript
+
+    outcome = ChatOutcome(text="ok", provider="gemini", model="m", tokens_in=1, tokens_out=1,
+                           cost_usd=0.0, latency_ms=1, key_label="k", request_id=1)
+    mock_run_chat = AsyncMock(return_value=outcome)
+    with patch("aibroker.services.llm_service.run_chat", mock_run_chat):
+        await _correct_local_transcript(project=_fake_project(), text="raw", workflow="media")
+    assert mock_run_chat.call_args.kwargs["workflow"] == "media+asr-correct"
+    assert mock_run_chat.call_args.kwargs["capability"] == "chat:fast"
+
+    mock_run_chat.reset_mock()
+    with patch("aibroker.services.llm_service.run_chat", mock_run_chat):
+        await _correct_local_transcript(project=_fake_project(), text="raw", workflow=None)
+    assert mock_run_chat.call_args.kwargs["workflow"] == "asr-correct"
+
+
 async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):
     """End-to-end through run_chat: a free-tier key's real LiteLLM-priced cost
     must be zeroed before it reaches record_usage / the returned outcome."""

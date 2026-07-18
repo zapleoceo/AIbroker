@@ -388,6 +388,7 @@ async def test_transcribe_happy_path():
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.transcribe",
                 AsyncMock(return_value=("привет это голосовое", fake_meta))), \
+         patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=None)), \
          patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
         r = client.post(
             "/v1/transcribe?workflow=media",
@@ -399,6 +400,34 @@ async def test_transcribe_happy_path():
     assert data["text"] == "привет это голосовое"
     assert data["provider"] == "local"   # first in transcription chain (self-hosted ASR)
     assert data["request_id"] == 101
+
+
+async def test_transcribe_local_applies_correction_pass():
+    """The `local` provider's raw ASR text is proofread by chat:fast before it
+    reaches the caller — the corrected text, not the raw transcript, must be
+    what /v1/transcribe returns."""
+    from aibroker.services.llm_service import ChatOutcome
+
+    plain, _ = await _make_project(["llm:audio"])
+    fake_meta = {"model": "local/whisper", "cost_usd": 0.0, "latency_ms": 120}
+    corrected = ChatOutcome(
+        text="Привет, это голосовое сообщение.", provider="gemini", model="gemini-2.5-flash",
+        tokens_in=20, tokens_out=10, cost_usd=0.0, latency_ms=300,
+        key_label="k", request_id=202,
+    )
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+                AsyncMock(return_value=_fake_key())), \
+         patch("aibroker.services.llm_service.transcribe",
+                AsyncMock(return_value=("привет ето галасовое сообщение", fake_meta))), \
+         patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=corrected)), \
+         patch("aibroker.services.llm_service.record_usage", AsyncMock(return_value=101)):
+        r = client.post(
+            "/v1/transcribe",
+            headers={"X-Project-Key": plain},
+            files={"file": ("v.ogg", b"fakeaudiobytes", "audio/ogg")},
+        )
+    assert r.status_code == 200
+    assert r.json()["text"] == "Привет, это голосовое сообщение."
 
 
 async def test_transcribe_502_when_all_providers_fail():
