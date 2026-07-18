@@ -119,6 +119,18 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
+## Cross-project network — local ASR (2026-07-18)
+
+`api` (only — not postgres/pgbouncer/redis/monitor) joins vera3's
+`vera3_default` network (declared `external: true` in `docker-compose.yml`)
+so it can reach `vera3-asr-local` by container name. `ASR_LOCAL_URL` defaults
+to `http://vera3-asr-local:8000`; unreachable/unset degrades safely to
+groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
+This is the only cross-project network membership in the stack — vera3's
+compose file must keep exposing that network name for this to keep working;
+if vera3 ever renames its network, `ASR_LOCAL_URL` env override is the
+escape hatch without touching compose.
+
 ## Connection scaling
 
 > **Status 2026-07-16: PgBouncer is INSTALLED** (`aibroker-pgbouncer`,

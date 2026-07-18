@@ -84,8 +84,18 @@ services:
       GLOBAL_DAILY_CAP_USD: ${GLOBAL_DAILY_CAP_USD:-20.0}
       PUBLIC_HOST: ${PUBLIC_HOST:-aib.zapleo.com}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # vera3's self-hosted faster-whisper — joins vera3_default below to
+      # reach it by container name. Empty/unreachable degrades safely to
+      # groq/gemini/openai (see providers/litellm_adapter.py).
+      ASR_LOCAL_URL: ${ASR_LOCAL_URL:-http://vera3-asr-local:8000}
     ports:
       - "127.0.0.1:8004:8000"
+    # Second network membership ONLY on api (not postgres/pgbouncer/redis/
+    # monitor) — the transcription call is the one thing that needs to reach
+    # across projects; everything else stays on the private aibroker network.
+    networks:
+      - default
+      - vera3
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -121,6 +131,15 @@ services:
       disable: true
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
+networks:
+  # vera3's compose-managed network — external because it's owned by a
+  # different project's docker-compose.yml (see docs/deploy-ops.md "Local
+  # ASR"). "default" (aibroker_default) is untouched: every other service
+  # keeps its implicit membership, only api opts into this second one.
+  vera3:
+    name: vera3_default
+    external: true
 
 volumes:
   aibroker_pgdata:
