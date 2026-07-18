@@ -82,7 +82,7 @@ Append-only billing + analytics.
 | `capability` | `chat:fast`, `chat:smart`, ... |
 | `workflow` | Optional caller-provided tag (e.g. `triage`, `search`) |
 | `tokens_in` / `tokens_out` | From provider response |
-| `cache_read_tokens` / `cache_write_tokens` | Prompt-cache subset of `tokens_in` (migration 006). Anthropic only today — see `providers/litellm_adapter.py:apply_prompt_cache`. 0 for every other call. |
+| `cache_read_tokens` / `cache_write_tokens` | Prompt-cache subset of `tokens_in` (migration 006). Anthropic populates both via explicit `cache_control` marks (`providers/litellm_adapter.py:apply_prompt_cache`); deepseek/cerebras/zai report automatic server-side cache reads (`prompt_tokens_details.cached_tokens` — write stays 0). Surfaced on the project-detail dashboard as the "Cache hit" KPI and a per-model hit-rate column (the health signal for the deepseek-first `chat:smart` lane). |
 | `cost_usd` | LiteLLM-computed; cache-aware (a cache read prices at ~0.1x, a cache write at its real premium rate) |
 | `latency_ms` | End-to-end |
 | `status` | `ok` / `rate_limit` / `auth_fail` / `error` |
