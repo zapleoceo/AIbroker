@@ -1,15 +1,15 @@
 """Local faster-whisper ASR — backs AIbroker's 'local' transcription provider.
 
-One model instance (large-v3-turbo, int8, CPU) loads at startup and lives for
-the process lifetime. Requests are serialized with a lock: the host has 2
+One model instance (small, int8, CPU) loads at startup and lives for the
+process lifetime. Requests are serialized with a lock: the host has 2
 cores shared with production Stepan2/Vera, so parallel decodes would only
 thrash the CPU without finishing faster.
 
-2026-07-18: upgraded from `small` — volume is low (~10 req/day, no backfill),
-so the model's fixed RAM cost (not per-request) is the only thing worth
-guarding, and 1 thread was already the throughput ceiling either way. turbo's
-large-v3 encoder meaningfully improves multilingual accuracy (Bahasa is the
-common case here) for a beam_size=5 decode that a low-volume queue can afford.
+2026-07-18: tried bumping to large-v3-turbo, then medium — both OOM-killed
+loading directly on this host (swap already 100% full, no headroom for the
+transient peak during download+int8 quantization). Stayed on `small`;
+`beam_size=5` (below, up from greedy) is the accuracy lever that doesn't cost
+extra RAM instead. See docs/deploy-ops.md "Local ASR" for the numbers.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 log = logging.getLogger("asr-local")
 
-MODEL_SIZE = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3-turbo")
+MODEL_SIZE = os.environ.get("WHISPER_MODEL", "small")
 CPU_THREADS = int(os.environ.get("WHISPER_CPU_THREADS", "1"))
 # "auto": this service is multi-tenant (any broker project's voice traffic,
 # e.g. Stepan2's mostly-Bahasa leads) — AIbroker's own caller always passes

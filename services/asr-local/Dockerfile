@@ -5,9 +5,13 @@ COPY pyproject.toml ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir -e .
 # Model is baked into the image: startup doesn't depend on network, restart is fast.
-# large-v3-turbo (2026-07-18, up from small): same encoder as large-v3 (the
-# part that drives multilingual accuracy — Stepan2's leads are mostly Bahasa),
-# decoder pruned 32->4 layers by OpenAI for speed. int8 keeps it under the
-# 1.5GB container cap (docker-compose.yml) on this 2-core/3.7GB shared host.
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('Systran/faster-whisper-large-v3-turbo', device='cpu', compute_type='int8')"
+# STAYS on small (2026-07-18): tried bumping to large-v3-turbo and medium —
+# both OOM-killed (exit 137) loading directly on this host, even in an
+# unconstrained throwaway container, well before the app's own 1.5GB
+# mem_limit came into play. Swap was already 100% full at test time (no
+# headroom for the transient peak during download+int8 quantization, which
+# runs meaningfully higher than the final resident size). See
+# docs/deploy-ops.md "Local ASR" for the numbers. Revisit if this host gets
+# more RAM or a dedicated one is stood up for asr-local.
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
 CMD ["uvicorn", "asr_local.app:app", "--host", "0.0.0.0", "--port", "8000"]
