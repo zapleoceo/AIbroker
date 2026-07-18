@@ -1,9 +1,15 @@
 """Local faster-whisper ASR — backs AIbroker's 'local' transcription provider.
 
-One model instance (small, int8, CPU) loads at startup and lives for the
-process lifetime. Requests are serialized with a lock: the host has 2
+One model instance (large-v3-turbo, int8, CPU) loads at startup and lives for
+the process lifetime. Requests are serialized with a lock: the host has 2
 cores shared with production Stepan2/Vera, so parallel decodes would only
 thrash the CPU without finishing faster.
+
+2026-07-18: upgraded from `small` — volume is low (~10 req/day, no backfill),
+so the model's fixed RAM cost (not per-request) is the only thing worth
+guarding, and 1 thread was already the throughput ceiling either way. turbo's
+large-v3 encoder meaningfully improves multilingual accuracy (Bahasa is the
+common case here) for a beam_size=5 decode that a low-volume queue can afford.
 """
 from __future__ import annotations
 
@@ -20,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 log = logging.getLogger("asr-local")
 
-MODEL_SIZE = os.environ.get("WHISPER_MODEL", "small")
+MODEL_SIZE = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3-turbo")
 CPU_THREADS = int(os.environ.get("WHISPER_CPU_THREADS", "1"))
 # "auto": this service is multi-tenant (any broker project's voice traffic,
 # e.g. Stepan2's mostly-Bahasa leads) — AIbroker's own caller always passes
@@ -73,8 +79,11 @@ def _run_transcribe(audio: bytes, language: str | None) -> dict[str, Any]:
     with tempfile.NamedTemporaryFile(suffix=".audio") as f:
         f.write(audio)
         f.flush()
+        # beam_size=5 (up from 1/greedy, 2026-07-18): low volume means the
+        # slower search is affordable, and it noticeably helps accuracy on
+        # non-English audio — the case the correction pass can't always save.
         segments, info = get_model().transcribe(
-            f.name, language=language, beam_size=1, vad_filter=True)
+            f.name, language=language, beam_size=5, vad_filter=True)
         text = " ".join(s.text.strip() for s in segments).strip()
     return {"text": text, "duration_s": round(info.duration, 1),
             "language": info.language}

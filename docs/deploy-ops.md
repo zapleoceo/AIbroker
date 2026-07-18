@@ -119,14 +119,22 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
-## Local ASR (2026-07-18, moved in-repo same day)
+## Local ASR (2026-07-18, moved in-repo same day; model bumped same day)
 
-`services/asr-local/` — self-hosted `faster-whisper` (small, int8, 1 CPU
-thread, 1.5GB cap) — is its own `docker-compose.yml` service
-(`aibroker-asr-local`), built and run alongside `api` on this repo's own
-compose network. `api` reaches it at `ASR_LOCAL_URL` (default
+`services/asr-local/` — self-hosted `faster-whisper` (`large-v3-turbo`, int8,
+1 CPU thread, `beam_size=5`, 1.5GB cap) — is its own `docker-compose.yml`
+service (`aibroker-asr-local`), built and run alongside `api` on this repo's
+own compose network. `api` reaches it at `ASR_LOCAL_URL` (default
 `http://aibroker-asr-local:8000`); unreachable/unset degrades safely to
 groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
+
+Started life as `small` (int8) — bumped to `large-v3-turbo` the same day once
+volume proved low (~10 req/day, no backfill): the model's RAM footprint is a
+fixed cost regardless of traffic, and 1 CPU thread was already the throughput
+ceiling either way, so there was no reason not to spend the accuracy budget.
+Still fits the 1.5GB `mem_limit` at int8. Roll back with `WHISPER_MODEL=small`
+if the host ever gets memory-tight (`free -h` / swap usage worth checking
+after any further bump — this host runs Stepan2/Vera3 on the same 3.7GB).
 
 This briefly lived in vera3's own compose stack instead, reached over a
 cross-project network join (`api` joining `vera3_default` as an external
