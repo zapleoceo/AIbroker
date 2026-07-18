@@ -119,22 +119,40 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
-## Local ASR (2026-07-18, moved in-repo same day; model bumped same day)
+## Local ASR (2026-07-18, moved in-repo same day; model-bump attempted same day, reverted)
 
-`services/asr-local/` — self-hosted `faster-whisper` (`large-v3-turbo`, int8,
-1 CPU thread, `beam_size=5`, 1.5GB cap) — is its own `docker-compose.yml`
-service (`aibroker-asr-local`), built and run alongside `api` on this repo's
-own compose network. `api` reaches it at `ASR_LOCAL_URL` (default
+`services/asr-local/` — self-hosted `faster-whisper` (`small`, int8, 1 CPU
+thread, `beam_size=5`, 1.5GB cap) — is its own `docker-compose.yml` service
+(`aibroker-asr-local`), built and run alongside `api` on this repo's own
+compose network. `api` reaches it at `ASR_LOCAL_URL` (default
 `http://aibroker-asr-local:8000`); unreachable/unset degrades safely to
 groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
 
-Started life as `small` (int8) — bumped to `large-v3-turbo` the same day once
-volume proved low (~10 req/day, no backfill): the model's RAM footprint is a
-fixed cost regardless of traffic, and 1 CPU thread was already the throughput
-ceiling either way, so there was no reason not to spend the accuracy budget.
-Still fits the 1.5GB `mem_limit` at int8. Roll back with `WHISPER_MODEL=small`
-if the host ever gets memory-tight (`free -h` / swap usage worth checking
-after any further bump — this host runs Stepan2/Vera3 on the same 3.7GB).
+**Model size ceiling on this host (2026-07-18).** Tried bumping `small` ->
+`large-v3-turbo` (bigger encoder, better multilingual accuracy — worth it
+since volume is low, ~10 req/day, no backfill, so the model's RAM footprint
+is the only real cost, not throughput). First attempt used a
+non-existent repo id (`Systran/faster-whisper-large-v3-turbo` 401s — Systran
+never published that conversion; the real public one is
+`deepdml/faster-whisper-large-v3-turbo-ct2`) and failed CI's docker build
+fast (~45s) before ever reaching the server. Fixed the repo id, then tested
+loading it **directly on the server** in an isolated, unconstrained
+container (not the real deploy) before trying again — **OOM-killed (exit
+137)**. Tried `medium` as a fallback the same way — also OOM-killed. Swap was
+100% full both times (`free -h`), so there was no headroom for the transient
+peak during download+int8 quantization (meaningfully above the model's final
+resident size). Reverted all three files (Dockerfile, docker-compose.yml,
+app.py default) back to `small`; kept `beam_size=5` (up from greedy) as the
+accuracy lever that costs CPU/latency, not RAM. The failed GitHub Actions
+deploy (`docker compose build` failing) never reached `up -d`, so production
+was unaffected throughout both attempts.
+
+Revisit if this host gets more RAM, or a dedicated host is stood up for
+asr-local — `WHISPER_MODEL` env var is the only thing that needs to change.
+Before trying again: check `free -h` for swap headroom, and load-test the
+candidate model directly on the server in a throwaway container first
+(`docker run --rm -v ...:/test.py python:3.12-slim ...`) rather than finding
+out via a failed deploy.
 
 This briefly lived in vera3's own compose stack instead, reached over a
 cross-project network join (`api` joining `vera3_default` as an external

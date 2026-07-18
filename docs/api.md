@@ -201,7 +201,7 @@ separate quota) → `openai` whisper-1. Returns
 
 Chain-first, always tried before any external provider — free, private, no
 external rate limit. Backed by this repo's own `services/asr-local`
-(`faster-whisper large-v3-turbo`, int8, CPU, `beam_size=5`) — its own
+(`faster-whisper small`, int8, CPU, `beam_size=5`) — its own
 `docker-compose.yml` service (`aibroker-asr-local`), on the same compose
 network as `api`, no cross-project dependency. (2026-07-18 history: this originally lived in
 vera3's own compose stack, reached over a cross-project network join —
@@ -228,22 +228,29 @@ slow-past-timeout local service raises `TimeoutError`, which
 degrades to the external chain instead of being retried every call with no
 backoff.
 
-**Model (2026-07-18: `small` -> `large-v3-turbo`).** Real volume is low
-(~10 req/day, no backfill), so the model's fixed RAM cost — not decode
-throughput — was the only real constraint; 1 CPU thread stays the ceiling
-either way. turbo keeps large-v3's encoder (the part that drives multilingual
-accuracy — Stepan2's leads are mostly Bahasa) with its decoder pruned
-32->4 layers, and fits comfortably under the container's 1.5GB `mem_limit` at
-int8. `beam_size` bumped 1->5 alongside it — slower per call, which a
-low-volume queue can afford, meaningfully better accuracy than greedy
-decoding. Roll back to `small` via the `WHISPER_MODEL` env var if the host
-ever gets memory-tight.
+**Model (2026-07-18: tried `large-v3-turbo`, then `medium` — stayed on
+`small`).** Real volume is low (~10 req/day, no backfill), so the model's
+fixed RAM cost — not decode throughput — looked like the only real
+constraint, and 1 CPU thread stays the throughput ceiling either way. In
+practice both bigger sizes **OOM-killed (exit 137) loading directly on this
+host**, tested in an unconstrained throwaway container — swap was already
+100% full at test time, so there was no headroom left for the transient peak
+during model download+int8 quantization, which runs meaningfully above the
+final resident size. Production itself was never affected (the failed
+`docker compose build` step never reached `up -d`, so `aibroker-asr-local`
+stayed on its previous working image throughout). Stayed on `small`.
+`beam_size` bumped 1->5 instead — slower per call (affordable at this
+volume), meaningfully better accuracy than greedy decoding, and costs no
+extra RAM. Revisit the model size if this host gets more RAM or a dedicated
+host is stood up for asr-local; `WHISPER_MODEL` env var is the only thing
+that needs to change.
 
-**Correction pass (2026-07-18).** Even with the larger model, every
-successful `local` transcript is still proofread by one `chat:fast` call
+**Correction pass (2026-07-18).** Every successful `local` transcript is
+still proofread by one `chat:fast` call
 (`services/llm_service._correct_local_transcript`) before it's returned —
-fixes misheard words/punctuation, never translates or changes meaning. Cheap
-insurance on top of the model upgrade, not a substitute for it. Best-effort:
+fixes misheard words/punctuation, never translates or changes meaning.
+Matters more with `small` than a bigger model would need, but stays on
+regardless — cheap insurance either way. Best-effort:
 if the correction call has no available provider, hits the project/global
 budget cap, or raises, the raw local transcript is returned unchanged rather
 than losing a working answer. Tagged `workflow=<caller's workflow>+asr-correct`
