@@ -12,8 +12,10 @@ import time
 from datetime import datetime
 from typing import Any
 
+import httpx
 import litellm
 
+from aibroker.config import get_settings
 from aibroker.providers.adapters import adapter_for
 from aibroker.providers.peak_pricing import peak_multiplier
 
@@ -65,6 +67,13 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
              "structured": f"groq/openai/{_OSS}",
              "translate": f"groq/openai/{_OSS}",
              "transcription": "groq/whisper-large-v3-turbo"},
+    # 2026-07-18: self-hosted faster-whisper (vera3's asr-local service, same
+    # host) — free, private, no external rate limit. "model" is a routing
+    # label only (_transcribe_via_local_asr ignores it and calls asr-local's
+    # HTTP API directly, not LiteLLM). Chain-first in transcription (see
+    # routing/chains.py); groq/openai stay as fallback when ASR_LOCAL_URL is
+    # unset or the service is unreachable.
+    "local": {"transcription": "local/whisper"},
     # 2026-07-10: chat:smart gemini-2.5-pro → gemini-2.5-flash. On the free tier
     # 2.5-pro is capped at ~50-100 req/day @ 5 RPM per key, so under Stepan's
     # smart volume it 429'd ~100% (4096 errors / 0 ok in 3 days) — pure wasted
@@ -502,13 +511,58 @@ async def _transcribe_via_chat(
     return (resp.choices[0].message.content or "").strip(), meta
 
 
+async def _post_local_asr(url: str, audio: bytes, timeout: float) -> httpx.Response:  # pragma: no cover — thin network I/O, exercised via _transcribe_via_local_asr's mocked tests
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(url, content=audio)
+
+
+async def _transcribe_via_local_asr(*, audio: bytes) -> tuple[str, dict[str, Any]]:
+    """Self-hosted faster-whisper (vera3's asr-local service, same host) —
+    free, private, no external rate limit. `language=auto`: asr-local's own
+    default is 'ru' (vera3's own voice notes), but broker callers (e.g.
+    Stepan2's mostly-Bahasa leads) must not be force-decoded through that —
+    auto-detect is the only sane default for a multi-tenant caller."""
+    settings = get_settings()
+    base = settings.ASR_LOCAL_URL
+    if not base:
+        raise RuntimeError("ASR_LOCAL_URL not configured")
+    t0 = time.time()
+    try:
+        resp = await _post_local_asr(
+            f"{base}/transcribe?language=auto", audio, settings.ASR_LOCAL_TIMEOUT_S,
+        )
+    except httpx.HTTPError as e:
+        # Connection refused / read timeout — the service is down or still
+        # mid-transcribe on its single serialized worker. Reclassified as
+        # TimeoutError (not left as a generic HTTPError) so
+        # classify_provider_error cools the key: a plain 'error' gets NO
+        # cooldown at all, so every subsequent request would re-hit a dead
+        # endpoint with zero backoff until it recovers on its own.
+        raise TimeoutError(f"asr-local unreachable: {e}") from e
+    latency_ms = int((time.time() - t0) * 1000)
+    if resp.status_code >= 500:
+        raise TimeoutError(f"asr-local {resp.status_code}: {resp.text[:200]}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"asr-local {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    meta = {
+        "model": "local/whisper", "tokens_in": 0, "tokens_out": 0,
+        "cost_usd": 0.0, "latency_ms": latency_ms,
+    }
+    return (data.get("text") or "").strip(), meta
+
+
 async def transcribe(
     *, model: str, audio: bytes, filename: str, api_key: str,
 ) -> tuple[str, dict[str, Any]]:
-    """Audio → text. Whisper providers (groq/openai) via LiteLLM atranscription;
-    chat providers (gemini) via acompletion with the audio inlined. Returns
-    (text, meta). `filename` carries the extension so the format is inferred."""
-    if model.split("/", 1)[0] in _CHAT_TRANSCRIBE_PROVIDERS:
+    """Audio → text. "local" (self-hosted faster-whisper) via raw HTTP; Whisper
+    providers (groq/openai) via LiteLLM atranscription; chat providers
+    (gemini) via acompletion with the audio inlined. Returns (text, meta).
+    `filename` carries the extension so the format is inferred."""
+    provider = model.split("/", 1)[0]
+    if provider == "local":
+        return await _transcribe_via_local_asr(audio=audio)
+    if provider in _CHAT_TRANSCRIBE_PROVIDERS:
         return await _transcribe_via_chat(
             model=model, audio=audio, filename=filename, api_key=api_key,
         )

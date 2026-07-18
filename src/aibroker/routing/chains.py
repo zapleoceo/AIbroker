@@ -52,7 +52,21 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # the very tail, reached only after deepseek.
         "deepseek", "anthropic", "openai",
     ],
+    # 2026-07-17: deepseek MOVED TO THE HEAD of chat:smart — the one deliberate
+    # exception to strict free-first, owner-approved (cap raised $0.50→$1 for
+    # it). chat:smart is Stepan's money lane (sales replies): quality beats
+    # price there, and routing every reply to ONE strong model (v4-flash)
+    # instead of whichever free key happens to be uncooled gives (a) stable
+    # answer quality, (b) a warm per-account prompt cache on every call —
+    # cache-hit input is $0.0028/M (50×), measured 80-99% hit on repeat reply
+    # prompts — so a reply costs ~$0.0003-0.0005, ~$0.4/day at current volume,
+    # and (c) independence from the free-pool storms that killed reply latency.
+    # Free providers stay as the fallback tail (deepseek flake/EmptyBody on
+    # ~50k-char prompts walks over to them; budget-downgrade walks there when
+    # the $1 cap is spent). Also pre-positions the lane for 2026-08-17 when
+    # cerebras' free tier dies (was ~70% of Stepan's tokens).
     "chat:smart": [
+        "deepseek",
         "cerebras", "groq", "gemini",
         "mistral", "cohere",
         "openrouter",
@@ -65,7 +79,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # DEFAULT_MODEL), tried before the paid tail. anthropic re-added (balance
         # topped up) as the quality paid fallback.
         "cloudflare",
-        "anthropic", "openai", "deepseek",
+        "anthropic", "openai",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
@@ -149,8 +163,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # entries stay (same "known but not chained" treatment as github before
     # its own prod key test — see docs/routing.md).
     "vision": ["gemini", "openrouter", "openai"],
+    # 2026-07-18: "local" (self-hosted faster-whisper, vera3's asr-local
+    # service on the same host) goes FIRST — free, private, no external rate
+    # limit, so a transcription request never has to wait on groq's daily
+    # Whisper quota or a saturated gemini pool. Falls through to groq/gemini/
+    # openai when ASR_LOCAL_URL is unset or the service is unreachable (see
+    # litellm_adapter._transcribe_via_local_asr).
     # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
-    "transcription": ["groq", "gemini", "openai"],
+    "transcription": ["local", "groq", "gemini", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.
     "embedding": ["voyage", "cohere"],
 }

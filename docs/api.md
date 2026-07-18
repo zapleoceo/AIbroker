@@ -192,9 +192,32 @@ mix vectors from two providers in one index.
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
-`?workflow=` query tag. Chain: `groq` whisper-large-v3-turbo (free) →
-`openai` whisper-1. Returns
+`?workflow=` query tag. Chain: `local` (self-hosted faster-whisper, see
+below) → `groq` whisper-large-v3-turbo (free) → `gemini` (chat-based audio,
+separate quota) → `openai` whisper-1. Returns
 `{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
+
+#### `local` — self-hosted faster-whisper (2026-07-18)
+
+Chain-first, always tried before any external provider — free, private, no
+external rate limit. Backed by vera3's `asr-local` service (same host,
+`faster-whisper small`, int8, CPU; see
+[muai/vera3/docs/asr-local.md](https://github.com/zapleoceo/muai/blob/master/vera3/docs/asr-local.md)),
+reached over plain HTTP via `_transcribe_via_local_asr` /
+`_post_local_asr` in `providers/litellm_adapter.py` — not through LiteLLM,
+since it isn't an LLM SDK-compatible endpoint. Always requests
+`language=auto`: asr-local's own default is `ru` (vera3's own voice-note
+use case), but broker callers are multi-tenant (e.g. Stepan2's mostly-Bahasa
+leads) and must not be force-decoded through Russian.
+
+Configured via `ASR_LOCAL_URL` (empty = disabled, every request falls
+straight through to groq/gemini/openai) and `ASR_LOCAL_TIMEOUT_S` (default
+90s — asr-local serializes every call behind a single lock on 1 CPU thread,
+so a request can queue behind another one already in flight). A downed or
+slow-past-timeout local service raises `TimeoutError`, which
+`classify_provider_error` cools down like any other rate limit — so it
+degrades to the external chain instead of being retried every call with no
+backoff.
 
 ### `request_id` — correlating a call across both sides
 

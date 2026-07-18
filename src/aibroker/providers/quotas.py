@@ -90,6 +90,11 @@ PROVIDER_QUOTAS: dict[str, Quota] = {
     # rate-limit headers exposed at all, and no documented per-account daily
     # cap found — no invented axis (same reasoning as mistral above).
     "zai": Quota(doc="https://docs.z.ai/guides/overview/quick-start"),
+    # Self-hosted faster-whisper (vera3's asr-local, same host) — no external
+    # rate limit at all, so no axis is honest here. The real constraint is
+    # local: a single asyncio.Lock serializes every call on 1 CPU thread (see
+    # vera3/docs/asr-local.md) — throughput, not a quota.
+    "local": Quota(doc="https://github.com/zapleoceo/muai/blob/master/vera3/docs/asr-local.md"),
 }
 
 

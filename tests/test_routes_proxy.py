@@ -381,7 +381,7 @@ async def test_transcribe_503_when_no_key():
 
 async def test_transcribe_happy_path():
     plain, _ = await _make_project(["llm:audio"])
-    fake_meta = {"model": "groq/whisper-large-v3-turbo",
+    fake_meta = {"model": "local/whisper",
                  "cost_usd": 0.0, "latency_ms": 120}
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
@@ -397,7 +397,7 @@ async def test_transcribe_happy_path():
     assert r.status_code == 200
     data = r.json()
     assert data["text"] == "привет это голосовое"
-    assert data["provider"] == "groq"   # first in transcription chain
+    assert data["provider"] == "local"   # first in transcription chain (self-hosted ASR)
     assert data["request_id"] == 101
 
 

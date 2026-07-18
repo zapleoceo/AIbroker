@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
 
+    # Self-hosted transcription (vera3's asr-local faster-whisper service) —
+    # empty = the "local" provider is unreachable and every transcription
+    # request falls straight through to groq/openai (see routing/chains.py).
+    ASR_LOCAL_URL: str = ""
+    ASR_LOCAL_TIMEOUT_S: float = 90.0
+
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
 

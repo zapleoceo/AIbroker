@@ -4,8 +4,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
+from aibroker.config import get_settings
 from aibroker.providers.litellm_adapter import (
     DEFAULT_MODEL,
     call_llm,
@@ -526,3 +528,80 @@ async def test_transcribe_passes_filename_as_buffer_name():
         await transcribe(model="groq/whisper-large-v3-turbo",
                          audio=b"data", filename="voice.ogg", api_key="k")
     assert captured["name"] == "voice.ogg"
+
+
+# ─── transcribe — local ASR (self-hosted faster-whisper, vera3's asr-local) ─
+
+
+def test_model_for_local_transcription():
+    assert model_for("local", "transcription") == "local/whisper"
+
+
+async def test_transcribe_local_asr_success(monkeypatch):
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
+    fake_resp = SimpleNamespace(
+        status_code=200,
+        json=lambda: {"text": "  привет  ", "duration_s": 2.1, "language": "ru"},
+    )
+    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+                AsyncMock(return_value=fake_resp)):
+        text, meta = await transcribe(
+            model="local/whisper", audio=b"oggbytes", filename="v.ogg", api_key="unused",
+        )
+    assert text == "привет"   # stripped
+    assert meta["cost_usd"] == 0.0
+    assert meta["model"] == "local/whisper"
+
+
+async def test_transcribe_local_asr_requests_language_auto(monkeypatch):
+    """asr-local's own default is 'ru' (vera3's use case) — the broker must
+    override it so non-Russian callers (Stepan2's mostly-Bahasa leads) aren't
+    force-decoded through Russian."""
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
+    captured = {}
+
+    async def fake_post(url, audio, timeout):
+        captured["url"] = url
+        return SimpleNamespace(status_code=200, json=lambda: {"text": "ok"})
+
+    with patch("aibroker.providers.litellm_adapter._post_local_asr", side_effect=fake_post):
+        await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
+    assert "language=auto" in captured["url"]
+
+
+async def test_transcribe_local_asr_no_url_configured(monkeypatch):
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "")
+    with pytest.raises(RuntimeError, match="ASR_LOCAL_URL"):
+        await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
+
+
+async def test_transcribe_local_asr_connection_error_becomes_timeout(monkeypatch):
+    """A downed/unreachable asr-local must classify as a retryable TimeoutError
+    (cools the key) — classify_provider_error gives a generic error NO
+    cooldown at all, which would hammer a dead endpoint every call."""
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
+    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+                AsyncMock(side_effect=httpx.ConnectError("refused"))), \
+         pytest.raises(TimeoutError):
+        await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
+
+
+async def test_transcribe_local_asr_5xx_becomes_timeout(monkeypatch):
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
+    fake_resp = SimpleNamespace(status_code=500, text="model still loading")
+    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+                AsyncMock(return_value=fake_resp)), \
+         pytest.raises(TimeoutError):
+        await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
+
+
+async def test_transcribe_local_asr_4xx_stays_plain_error(monkeypatch):
+    """A bad request (e.g. audio too large) is a per-request problem, not a
+    'the service is down, back off' one — must not cool the key like a 5xx."""
+    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
+    fake_resp = SimpleNamespace(status_code=413, text="audio > 25MB")
+    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+                AsyncMock(return_value=fake_resp)), \
+         pytest.raises(RuntimeError) as exc_info:
+        await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
+    assert not isinstance(exc_info.value, TimeoutError)

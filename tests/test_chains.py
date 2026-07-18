@@ -17,7 +17,7 @@ from aibroker.routing.chains import (
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
-              "nvidia", "mistral", "cohere", "voyage", "zai"}
+              "nvidia", "mistral", "cohere", "voyage", "zai", "local"}
 
 
 @pytest.mark.parametrize("capability", list(CAPABILITY_CHAINS.keys()))
@@ -37,7 +37,7 @@ def test_has_paid_tail_gates_the_final_retry_escalation():
 
 
 @pytest.mark.parametrize(
-    "capability", ["prefilter", "structured", "chat:fast", "chat:smart", "chat:code"]
+    "capability", ["prefilter", "structured", "chat:fast", "chat:code"]
 )
 def test_strict_free_first(capability):
     """Strictly-free-first capabilities — no paid before any free.
@@ -47,7 +47,10 @@ def test_strict_free_first(capability):
     backfill speed", meaning a paid call fired the moment the first ~5 free
     providers were saturated even though more free providers were still
     untried further down the chain. Explicit choice: slow-but-free beats
-    fast-but-paid."""
+    fast-but-paid.
+
+    2026-07-17: chat:smart LEFT this list — see
+    test_chat_smart_is_deepseek_first_by_owner_choice."""
     chain = chain_for(capability)
     paid_idx = [i for i, p in enumerate(chain) if p in KNOWN_PAID]
     free_idx = [i for i, p in enumerate(chain) if p in KNOWN_FREE]
@@ -57,9 +60,26 @@ def test_strict_free_first(capability):
         )
 
 
-@pytest.mark.parametrize("capability", ["chat:fast", "chat:smart", "chat:code"])
+def test_chat_smart_is_deepseek_first_by_owner_choice():
+    """2026-07-17, owner-approved (cap raised $0.50→$1 for it): chat:smart is
+    Stepan's money lane — quality beats price. deepseek v4-flash leads so every
+    sales reply comes from ONE strong model with a warm per-account prompt
+    cache (cache-hit input $0.0028/M ≈ $0.0004/reply) instead of whichever
+    free key happens to be uncooled. The free pool stays as the fallback tail
+    (deepseek flake and the $1 cap budget-downgrade both walk over to it).
+    Also pre-positions the lane for cerebras' free-tier death 2026-08-17."""
+    chain = chain_for("chat:smart")
+    assert chain[0] == "deepseek"
+    # the free fallback tail must survive right behind it
+    assert {"groq", "gemini", "mistral"} <= set(chain[1:])
+    # and the emergency paid quality tail stays at the very end
+    assert chain[-2:] == ["anthropic", "openai"]
+
+
+@pytest.mark.parametrize("capability", ["chat:fast", "chat:code"])
 def test_chat_first_3_are_free(capability):
-    """Documented invariant: chat:* chains always START with at least 3 free providers."""
+    """Documented invariant: chat:fast/code chains always START with at least 3
+    free providers (chat:smart is deepseek-first by owner choice, see above)."""
     chain = chain_for(capability)
     for provider in chain[:3]:
         assert provider in KNOWN_FREE, (
@@ -120,8 +140,17 @@ def test_transcription_has_gemini_fallback():
     has no key), so when groq's free daily cap parked every key (~9h), voice had
     zero capacity. gemini (chat-based audio, separate quota) is now a fallback."""
     chain = chain_for("transcription")
-    assert chain[0] == "groq"          # free Whisper stays primary
+    assert "groq" in chain
     assert "gemini" in chain
+
+
+def test_transcription_local_asr_first():
+    """2026-07-18: self-hosted faster-whisper (vera3's asr-local) goes first —
+    free, private, no external rate limit. groq/gemini/openai stay as fallback
+    for when ASR_LOCAL_URL is unset or the service is unreachable."""
+    chain = chain_for("transcription")
+    assert chain[0] == "local"
+    assert chain.index("local") < chain.index("groq")
 
 
 def test_structured_excludes_cerebras():
