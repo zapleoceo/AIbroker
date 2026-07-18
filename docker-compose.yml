@@ -65,13 +65,17 @@ services:
   # routing depends on. Same resource ceiling that ran healthy under vera3's
   # compose for real prod traffic (2026-07-18): the host has 2 cores shared
   # with Stepan2/Vera, 1 thread avoids thrashing more than it helps.
+  # 2026-07-18: model bumped small -> large-v3-turbo. Volume is low (~10
+  # req/day, no backfill) so the fixed per-model RAM cost is the only real
+  # constraint, not throughput; 1.5GB cap unchanged, turbo (int8) fits with
+  # margin. Roll back with WHISPER_MODEL=small if the host gets tight.
   asr-local:
     build:
       context: ./services/asr-local
       dockerfile: Dockerfile
     container_name: aibroker-asr-local
     environment:
-      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_MODEL: ${WHISPER_MODEL:-Systran/faster-whisper-large-v3-turbo}
       WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-1}
     cpus: 1.0
     mem_limit: 1500m

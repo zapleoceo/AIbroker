@@ -59,11 +59,16 @@ class Settings(BaseSettings):
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
 
-    # Self-hosted transcription (vera3's asr-local faster-whisper service) —
-    # empty = the "local" provider is unreachable and every transcription
-    # request falls straight through to groq/openai (see routing/chains.py).
+    # Self-hosted transcription (this repo's own services/asr-local) — empty
+    # = the "local" provider is unreachable and every transcription request
+    # falls straight through to groq/openai (see routing/chains.py).
     ASR_LOCAL_URL: str = ""
-    ASR_LOCAL_TIMEOUT_S: float = 90.0
+    # 2026-07-18: 90s -> 180s. large-v3-turbo + beam_size=5 (up from small +
+    # beam_size=1) is slower per request on the same 1 CPU thread; low volume
+    # (~10 req/day, no backfill) means the wait is affordable, and a real
+    # timeout beats a false-negative cooldown on a local, private, free
+    # provider that's just still working.
+    ASR_LOCAL_TIMEOUT_S: float = 180.0
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"

@@ -201,9 +201,9 @@ separate quota) → `openai` whisper-1. Returns
 
 Chain-first, always tried before any external provider — free, private, no
 external rate limit. Backed by this repo's own `services/asr-local`
-(`faster-whisper small`, int8, CPU) — its own `docker-compose.yml` service
-(`aibroker-asr-local`), on the same compose network as `api`, no
-cross-project dependency. (2026-07-18 history: this originally lived in
+(`faster-whisper large-v3-turbo`, int8, CPU, `beam_size=5`) — its own
+`docker-compose.yml` service (`aibroker-asr-local`), on the same compose
+network as `api`, no cross-project dependency. (2026-07-18 history: this originally lived in
 vera3's own compose stack, reached over a cross-project network join —
 a same-day vera3 refactor deleted that service entirely, since from vera3's
 side "voice/audio now goes through the broker" made its own copy look
@@ -221,26 +221,36 @@ default language would be wrong for most of them.
 
 Configured via `ASR_LOCAL_URL` (empty = disabled, every request falls
 straight through to groq/gemini/openai) and `ASR_LOCAL_TIMEOUT_S` (default
-90s — asr-local serializes every call behind a single lock on 1 CPU thread,
+180s — asr-local serializes every call behind a single lock on 1 CPU thread,
 so a request can queue behind another one already in flight). A downed or
 slow-past-timeout local service raises `TimeoutError`, which
 `classify_provider_error` cools down like any other rate limit — so it
 degrades to the external chain instead of being retried every call with no
 backoff.
 
-**Correction pass (2026-07-18).** `small`/int8 trades accuracy for the tiny
-CPU footprint the shared host can afford, so every successful `local`
-transcript is proofread by one `chat:fast` call
+**Model (2026-07-18: `small` -> `large-v3-turbo`).** Real volume is low
+(~10 req/day, no backfill), so the model's fixed RAM cost — not decode
+throughput — was the only real constraint; 1 CPU thread stays the ceiling
+either way. turbo keeps large-v3's encoder (the part that drives multilingual
+accuracy — Stepan2's leads are mostly Bahasa) with its decoder pruned
+32->4 layers, and fits comfortably under the container's 1.5GB `mem_limit` at
+int8. `beam_size` bumped 1->5 alongside it — slower per call, which a
+low-volume queue can afford, meaningfully better accuracy than greedy
+decoding. Roll back to `small` via the `WHISPER_MODEL` env var if the host
+ever gets memory-tight.
+
+**Correction pass (2026-07-18).** Even with the larger model, every
+successful `local` transcript is still proofread by one `chat:fast` call
 (`services/llm_service._correct_local_transcript`) before it's returned —
-fixes misheard words/punctuation, never translates or changes meaning.
-Best-effort: if the correction call has no available provider, hits the
-project/global budget cap, or raises, the raw local transcript is returned
-unchanged rather than losing a working answer. Tagged
-`workflow=<caller's workflow>+asr-correct` (or bare `asr-correct` when the
-caller sent none) in `usage_log`, so it's visible as its own line in the
-dashboard's per-project workflow breakdown, not folded into the caller's own
-tag. Only applied to the `local` provider — groq/gemini/openai's transcripts
-already come from full-size hosted models.
+fixes misheard words/punctuation, never translates or changes meaning. Cheap
+insurance on top of the model upgrade, not a substitute for it. Best-effort:
+if the correction call has no available provider, hits the project/global
+budget cap, or raises, the raw local transcript is returned unchanged rather
+than losing a working answer. Tagged `workflow=<caller's workflow>+asr-correct`
+(or bare `asr-correct` when the caller sent none) in `usage_log`, so it's
+visible as its own line in the dashboard's per-project workflow breakdown,
+not folded into the caller's own tag. Only applied to the `local` provider —
+groq/gemini/openai's transcripts already come from full-size hosted models.
 
 ### `request_id` — correlating a call across both sides
 
