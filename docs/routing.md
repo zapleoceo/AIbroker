@@ -791,6 +791,19 @@ passing. Per-project/global checks are unchanged (live/cached SUM) — a
 smaller, accepted residual race remains there, a secondary backstop behind the
 now-atomic, tighter per-key cap.
 
+**Known limitation — embed/transcribe are per-key-cap-only.** `reserve_cost`
+(with its project + global tiers) is called only from `run_chat`. `run_embed`
+and `run_transcribe` gate spend solely through `pick_and_reserve`'s per-key
+`daily_cost_cap_usd` predicate — so a project or global daily cap is NOT
+enforced on the embedding/transcription lanes, and the per-key check on them is
+a (non-atomic) read filter, not the atomic reserve. This is safe while every
+embed key is free voyage-4 ($0) and Whisper is booked at $0; it becomes a real
+gap the moment a PAID embed key (the documented voyage-exhaustion → `tier=paid`
+path) or paid chat-transcription runs at volume. A paid key on these lanes must
+therefore be relied on only for its own per-key cap, never for project/global
+capping, until `reserve_cost` is threaded through them (needs an embed/audio
+cost estimator, which doesn't exist yet). 2026-07-19 review.
+
 **Daily counters that never reset (2026-07-03, found while fixing the above).**
 `api_keys.daily_used`/`daily_cost_used_usd` were never actually reset day to
 day — nothing wrote `daily_reset_at` forward. Confirmed on prod: a key created

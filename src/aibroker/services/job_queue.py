@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -118,23 +119,34 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
     return [DeepJobRow(**dict(r)) for r in rows]
 
 
-async def _requeue_or_fail(job_id: int, retry_count: int, reason: str) -> None:  # pragma: no cover
+async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
+                            expect_started_at: datetime | None = None) -> None:  # pragma: no cover
     """A job attempt didn't produce a result (no capacity, or an error). Retry
     with backoff until `_MAX_RETRIES`, then give up and mark it error. Covered
     by test_job_queue.py's Postgres tests (test_drain_once_requeues_when_no_
-    provider / test_drain_once_errors_after_max_retries), skipif ON_SQLITE."""
+    provider / test_drain_once_errors_after_max_retries), skipif ON_SQLITE.
+
+    `expect_started_at` is the value this worker claimed the job with. Every
+    write is guarded on it (matching _finish's success-path guard) so a stale
+    worker whose job was already stale-reclaimed and re-claimed by another
+    worker can't clobber the live claim — reset its started_at, or fail a job
+    that's legitimately running elsewhere (2026-07-19 review: only the success
+    path was guarded, so the error/no-provider paths could double-execute)."""
     if retry_count + 1 > _MAX_RETRIES:
         await _finish(job_id, status="error",
-                       error_message=f"{reason} (gave up after {retry_count} retries)")
+                       error_message=f"{reason} (gave up after {retry_count} retries)",
+                       expect_started_at=expect_started_at)
         return
     async with get_session() as s:
         await s.execute(
             text(
                 "UPDATE deep_jobs SET status = 'pending', started_at = NULL, "
                 "  retry_count = :rc, run_after = now() + make_interval(secs => :backoff) "
-                "WHERE id = :id"
+                "WHERE id = :id "
+                "  AND (:expected::timestamp IS NULL OR started_at = :expected)"
             ),
-            {"id": job_id, "rc": retry_count + 1, "backoff": _backoff_s(retry_count + 1)},
+            {"id": job_id, "rc": retry_count + 1, "backoff": _backoff_s(retry_count + 1),
+             "expected": expect_started_at},
         )
 
 
@@ -147,7 +159,8 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     async with get_session() as s:
         project = await s.get(ProjectRow, row.project_id)
     if project is None:
-        await _finish(row.id, status="error", error_message="project no longer exists")
+        await _finish(row.id, status="error", error_message="project no longer exists",
+                       expect_started_at=row.started_at)
         return
     # Final attempt before give-up walks the paid tail only: free-pool storms
     # outlast the 8-retry window, so the last shot must not waste itself on a
@@ -169,7 +182,8 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         )
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
-        await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}")
+        await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
+                                expect_started_at=row.started_at)
         return
     if outcome is BUDGET_EXHAUSTED:
         # A project/global daily cap is spent — more retries can't create budget,
@@ -177,7 +191,8 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         # available"). Alert the owner once per day so a silently-capped project
         # is visible, not just invisibly stalled until 00:00 UTC.
         await _finish(row.id, status="error",
-                       error_message="daily budget cap reached — retry after 00:00 UTC")
+                       error_message="daily budget cap reached — retry after 00:00 UTC",
+                       expect_started_at=row.started_at)
         await alert(f"budget:{row.project_id}",
                     f"project <b>{project.name}</b> hit its daily budget cap — "
                     "jobs paused until 00:00 UTC", throttle_min=24 * 60)
@@ -185,7 +200,8 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if outcome is None:
         # No provider available right now — retry as capacity frees up.
         await _requeue_or_fail(row.id, row.retry_count,
-                                f"no provider available for {row.capability}")
+                                f"no provider available for {row.capability}",
+                                expect_started_at=row.started_at)
         return
     await _finish(
         row.id, status="done", result_text=outcome.text,
