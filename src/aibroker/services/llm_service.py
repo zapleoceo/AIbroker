@@ -723,6 +723,8 @@ class TranscribeFailed(Exception):
 
 
 _LOCAL_ASR_CORRECTION_MAX_TOKENS = 800
+_LOCAL_ASR_CORRECTION_TOKEN_CAP = 4000
+_LOCAL_ASR_CORRECTION_MIN_KEEP_RATIO = 0.6
 _LOCAL_ASR_CORRECTION_PROMPT = (
     "The text below is a raw speech-to-text transcript from a small local ASR "
     "model and may contain misheard words, missing punctuation, or garbled "
@@ -744,13 +746,23 @@ async def _correct_local_transcript(
     never cost the caller a working answer."""
     if not text.strip():
         return text
+    # Size the proofread budget to the transcript. A fixed 800-token cap
+    # TRUNCATED long voice notes: the correction hit max_tokens, lost the tail,
+    # and — being non-empty — was returned as the "corrected" text, dropping
+    # the ending. Scale to the input with headroom, capped so a pathological
+    # transcript can't run away.
+    budget = min(
+        _LOCAL_ASR_CORRECTION_TOKEN_CAP,
+        max(_LOCAL_ASR_CORRECTION_MAX_TOKENS,
+            int(estimate_prompt_tokens([{"role": "user", "content": text}]) * 1.4)),
+    )
     tag = f"{workflow}+asr-correct" if workflow else "asr-correct"
     try:
         outcome = await run_chat(
             project=project, capability="chat:fast",
             messages=[{"role": "user",
                        "content": _LOCAL_ASR_CORRECTION_PROMPT.format(text=text)}],
-            model=None, max_tokens=_LOCAL_ASR_CORRECTION_MAX_TOKENS,
+            model=None, max_tokens=budget,
             temperature=0.0, response_format=None, workflow=tag,
         )
     except Exception as e:  # noqa: BLE001 — proofreading must never sink a working transcript
@@ -759,6 +771,13 @@ async def _correct_local_transcript(
     if not isinstance(outcome, ChatOutcome):
         return text
     corrected = outcome.text.strip()
+    # Backstop the budget: if the proofread still came back far shorter than the
+    # raw (it was truncated, or the model over-trimmed), a COMPLETE raw
+    # transcript beats a cut-off "corrected" one — never lose the tail.
+    if corrected and len(corrected) < _LOCAL_ASR_CORRECTION_MIN_KEEP_RATIO * len(text):
+        log.warning("local ASR correction returned %d chars vs %d raw — likely "
+                    "truncated; keeping raw transcript", len(corrected), len(text))
+        return text
     return corrected or text
 
 
@@ -769,53 +788,77 @@ async def run_transcribe(
     filename: str,
     workflow: str | None,
 ) -> TranscribeOutcome | None:
-    """Audio → text, walking the 'transcription' chain (groq → openai).
+    """Audio → text, walking the 'transcription' chain (local → groq → gemini
+    → openai), rotating keys within each provider.
 
     None → no key anywhere (503); TranscribeFailed → every provider errored (502).
+    An empty transcript from `local` is treated as a failure and escalated (its
+    small model + VAD can clip a real message to ""), so a voice is never
+    silently dropped as a successful empty string.
     """
     scope = scope_for("transcription")
     last_exc: Exception | None = None
     any_key_seen = False
 
     for provider in chain_for("transcription"):
-        key = await pick_and_reserve(provider, scope=scope,
-                                      project_id=project.id)
-        if key is None:
-            continue
-        any_key_seen = True
-        use_model = model_for(provider, "transcription")
-        if not use_model:
-            continue
-        plain = decrypt(key.token_encrypted)
-        try:
-            text, meta = await transcribe(
-                model=use_model, audio=audio, filename=filename, api_key=plain,
+        # Rotate KEYS within the provider before moving on — one transient 429/
+        # timeout on the picked key must not skip the whole provider while
+        # healthy sibling keys sit idle (mirrors run_embed/run_chat).
+        for _ in range(_max_keys(provider)):
+            key = await pick_and_reserve(provider, scope=scope,
+                                          project_id=project.id)
+            if key is None:
+                break  # no (more) available key for this provider → next provider
+            any_key_seen = True
+            use_model = model_for(provider, "transcription")
+            if not use_model:
+                break
+            plain = decrypt(key.token_encrypted)
+            try:
+                text, meta = await transcribe(
+                    model=use_model, audio=audio, filename=filename, api_key=plain,
+                )
+                meta["cost_usd"] = _billed_cost(key, meta)
+            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+                last_exc = e
+                await _handle_attempt_failure(
+                    key=key, project=project, provider=provider,
+                    model=use_model, capability="transcription", workflow=workflow, exc=e,
+                )
+                continue  # next key of the same provider
+            # local's small model + aggressive VAD can clip a REAL message to an
+            # empty string. Returning that as a successful "" silently DROPS the
+            # voice (caller sees 200 with no text, never retries). An empty from
+            # local is untrusted → book it and escalate to a reliable cloud
+            # whisper; a cloud provider's empty is genuinely-silent audio (kept).
+            if provider == "local" and not text.strip():
+                await record_usage(
+                    api_key_id=key.id, project_id=project.id, lease_id=None,
+                    provider=provider, model=use_model, capability="transcription",
+                    workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+                    latency_ms=meta.get("latency_ms"), status="error",
+                    error_kind="EmptyBody", http_status=502,
+                )
+                log.warning("local ASR returned empty transcript — escalating "
+                            "to the next transcription provider")
+                break  # deterministic for this audio → next provider, not next local key
+            if provider == "local":
+                text = await _correct_local_transcript(
+                    project=project, text=text, workflow=workflow,
+                )
+            request_id = await record_usage(
+                api_key_id=key.id, project_id=project.id, lease_id=None,
+                provider=provider, model=use_model, capability="transcription",
+                workflow=workflow, tokens_in=0, tokens_out=0,
+                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+                status="ok", error_kind=None, http_status=200,
             )
-            meta["cost_usd"] = _billed_cost(key, meta)
-        except Exception as e:
-            last_exc = e
-            await _handle_attempt_failure(
-                key=key, project=project, provider=provider,
-                model=use_model, capability="transcription", workflow=workflow, exc=e,
+            await note_affinity_shared(project.id, provider, key.id)
+            return TranscribeOutcome(
+                text=text, provider=provider, model=use_model,
+                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+                key_label=key.label, request_id=request_id,
             )
-            continue
-        if provider == "local":
-            text = await _correct_local_transcript(
-                project=project, text=text, workflow=workflow,
-            )
-        request_id = await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability="transcription",
-            workflow=workflow, tokens_in=0, tokens_out=0,
-            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            status="ok", error_kind=None, http_status=200,
-        )
-        await note_affinity_shared(project.id, provider, key.id)
-        return TranscribeOutcome(
-            text=text, provider=provider, model=use_model,
-            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            key_label=key.label, request_id=request_id,
-        )
 
     if not any_key_seen:
         return None

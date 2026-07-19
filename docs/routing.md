@@ -352,7 +352,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `translate` | cerebras → mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |
 | `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
 | `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare tried and pulled same day 2026-07-04, see below. |
-| `transcription` | groq → openai | `llm:audio` | Whisper: groq whisper-large-v3-turbo (free) → openai whisper-1. `/v1/transcribe` route |
+| `transcription` | local → groq → gemini → openai | `llm:audio` | local = self-hosted faster-whisper `small` (free/private, chain-first, cleaned by a chat:fast correction pass); groq whisper-large-v3-turbo (free) → gemini chat-transcription → openai whisper-1. Keys rotate within each provider. An empty `local` transcript is escalated, not returned as a silent empty success (small-model/VAD clip). `/v1/transcribe` route. |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 
 `chain_for(cap)` raises `ValueError` on an unknown capability; the proxy rejects

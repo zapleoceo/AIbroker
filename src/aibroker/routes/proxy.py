@@ -159,7 +159,7 @@ async def transcribe_endpoint(
     workflow: str | None = Query(None),
     ctx: ProjectCtx = Depends(require_project),
 ) -> TranscribeResponse:
-    """Audio → text. Multipart upload `file`. Chain: groq whisper → openai."""
+    """Audio → text. Multipart upload `file`. Chain: local → groq → gemini → openai."""
     _require_capability_scope(ctx, scope_for("transcription"))
 
     audio = await file.read()
