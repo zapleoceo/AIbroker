@@ -143,7 +143,7 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
                 "UPDATE deep_jobs SET status = 'pending', started_at = NULL, "
                 "  retry_count = :rc, run_after = now() + make_interval(secs => :backoff) "
                 "WHERE id = :id "
-                "  AND (:expected::timestamp IS NULL OR started_at = :expected)"
+                "  AND (CAST(:expected AS timestamp) IS NULL OR started_at = :expected)"
             ),
             {"id": job_id, "rc": retry_count + 1, "backoff": _backoff_s(retry_count + 1),
              "expected": expect_started_at},
