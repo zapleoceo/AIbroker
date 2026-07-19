@@ -85,6 +85,15 @@ def _run_transcribe(audio: bytes, language: str | None) -> dict[str, Any]:
         segments, info = get_model().transcribe(
             f.name, language=language, beam_size=5, vad_filter=True)
         text = " ".join(s.text.strip() for s in segments).strip()
+        if not text:
+            # The VAD gate can clip a quiet / short / breathy REAL message to
+            # nothing. Before returning empty (which the broker then escalates
+            # to a paid cloud model), retry once WITHOUT the gate — recovers
+            # faint speech locally and for free. Only pays the extra decode on
+            # the rare empty-first-pass case.
+            segments, info = get_model().transcribe(
+                f.name, language=language, beam_size=5, vad_filter=False)
+            text = " ".join(s.text.strip() for s in segments).strip()
     return {"text": text, "duration_s": round(info.duration, 1),
             "language": info.language}
 

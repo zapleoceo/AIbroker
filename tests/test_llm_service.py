@@ -1258,6 +1258,100 @@ async def test_correct_local_transcript_skips_empty_text():
     mock_run_chat.assert_not_called()
 
 
+async def test_correct_local_transcript_keeps_raw_when_correction_truncated():
+    """A correction far shorter than the raw was truncated at max_tokens — a
+    COMPLETE raw transcript beats a cut-off one, so the tail of a long voice
+    note is never lost."""
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import ChatOutcome, _correct_local_transcript
+
+    raw = "это длинное голосовое сообщение " * 40   # long
+    truncated = ChatOutcome(
+        text="это длинное", provider="cerebras", model="m", tokens_in=1,
+        tokens_out=1, cost_usd=0.0, latency_ms=1, key_label="k", request_id=1)
+    with patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=truncated)):
+        result = await _correct_local_transcript(
+            project=_fake_project(), text=raw, workflow=None)
+    assert result == raw   # kept the full raw, not the truncated correction
+
+
+async def test_correct_local_transcript_scales_max_tokens_to_length():
+    """Fixed 800 truncated long notes — the proofread budget now scales with
+    the input (floor 800, capped)."""
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.services.llm_service import (
+        _LOCAL_ASR_CORRECTION_MAX_TOKENS,
+        _LOCAL_ASR_CORRECTION_TOKEN_CAP,
+        ChatOutcome,
+        _correct_local_transcript,
+    )
+
+    ok = ChatOutcome(text="fine corrected text", provider="c", model="m", tokens_in=1,
+                     tokens_out=1, cost_usd=0.0, latency_ms=1, key_label="k", request_id=1)
+    short = AsyncMock(return_value=ok)
+    with patch("aibroker.services.llm_service.run_chat", short):
+        await _correct_local_transcript(project=_fake_project(), text="short one", workflow=None)
+    assert short.call_args.kwargs["max_tokens"] == _LOCAL_ASR_CORRECTION_MAX_TOKENS
+
+    longm = AsyncMock(return_value=ok)
+    with patch("aibroker.services.llm_service.run_chat", longm):
+        await _correct_local_transcript(
+            project=_fake_project(), text="word " * 3000, workflow=None)
+    assert longm.call_args.kwargs["max_tokens"] > _LOCAL_ASR_CORRECTION_MAX_TOKENS
+    assert longm.call_args.kwargs["max_tokens"] <= _LOCAL_ASR_CORRECTION_TOKEN_CAP
+
+
+async def test_run_transcribe_empty_local_escalates_never_dropped(monkeypatch):
+    """The core 'never drop a voice' guarantee: an empty transcript from local
+    (small model / VAD clip) must NOT be returned as a silent successful "" —
+    it's booked as an error and the walk escalates to a reliable cloud whisper."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        if provider in ("local", "groq") and picks.count(provider) == 1:
+            return SimpleNamespace(id=1, label="k", tier="free",
+                                    token_encrypted="x", provider=provider)
+        return None
+
+    async def fake_transcribe(*, model, audio, filename, api_key):
+        if model.startswith("local"):
+            return "", {"latency_ms": 10}
+        return "привет мир", {"latency_ms": 20}
+
+    recorded: list[dict] = []
+
+    async def fake_record(**kw):
+        recorded.append(kw)
+        return 7
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "transcribe", fake_transcribe)
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr(svc, "note_affinity_shared", _noop)
+    monkeypatch.setattr(svc, "_handle_attempt_failure", _noop)
+    monkeypatch.setattr(svc, "decrypt", lambda _x: "plain")
+
+    out = await svc.run_transcribe(project=_fake_project(), audio=b"x",
+                                    filename="a.ogg", workflow="media")
+    assert out is not None
+    assert out.provider == "groq"          # escalated past the empty local
+    assert out.text == "привет мир"
+    # local's empty booked as an error (visible), groq's result as ok
+    assert any(r["provider"] == "local" and r["error_kind"] == "EmptyBody"
+               and r["status"] == "error" for r in recorded)
+    assert any(r["provider"] == "groq" and r["status"] == "ok" for r in recorded)
+
+
 async def test_correct_local_transcript_tags_workflow_and_uses_chat_fast():
     """Correction calls are tagged distinctly so the dashboard's per-project
     workflow breakdown doesn't fold them into the caller's own workflow."""

@@ -63,11 +63,13 @@ class Settings(BaseSettings):
     # = the "local" provider is unreachable and every transcription request
     # falls straight through to groq/openai (see routing/chains.py).
     ASR_LOCAL_URL: str = ""
-    # 2026-07-18: 90s -> 180s. large-v3-turbo + beam_size=5 (up from small +
-    # beam_size=1) is slower per request on the same 1 CPU thread; low volume
-    # (~10 req/day, no backfill) means the wait is affordable, and a real
-    # timeout beats a false-negative cooldown on a local, private, free
-    # provider that's just still working.
+    # 2026-07-18: 90s -> 180s. Model is `small` int8 on 1 CPU thread with
+    # beam_size=5 (large-v3-turbo/medium were both OOM-killed on this shared
+    # host — see services/asr-local/app.py); the slower beam search plus a
+    # possible no-VAD retry pass on an empty first decode means a single
+    # request can run long. Low volume (~10 req/day, no backfill) makes the
+    # wait affordable, and a real timeout beats a false-negative cooldown on a
+    # local, private, free provider that's just still working.
     ASR_LOCAL_TIMEOUT_S: float = 180.0
 
     # Host

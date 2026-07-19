@@ -45,6 +45,11 @@ COOLDOWN_BASE_S: dict[str, int] = {
     "nvidia":     300,   # one-time credits + invisible quota — most conservative
     "cloudflare": 120,   # invisible neuron budget, renews daily — moderate
     "zai":        60,    # no visible quota — moderate default
+    "local":      30,    # self-hosted single-worker whisper: a timeout means
+                         # the decode lock was busy, NOT a dead credential — re-
+                         # probe fast. (Was DEFAULT 300 → 600 on timeout_bump,
+                         # parking the free/private/quality path ~10 min per
+                         # slow decode and dumping all voice on the paid tail.)
 }
 DEFAULT_COOLDOWN_S = 300
 
