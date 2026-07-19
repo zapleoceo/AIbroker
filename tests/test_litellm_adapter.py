@@ -157,6 +157,18 @@ def test_gemini_smart_is_flash_not_starved_pro():
     assert model_for("gemini", "chat:smart") == "gemini/gemini-2.5-flash"
 
 
+def test_gemini_utility_lanes_use_flash_lite_quota_bucket():
+    """2026-07-18: Google's free quota is PER MODEL per key — flash-lite's
+    1000 RPD bucket (4× flash's 250) was unused while flash burned quota on
+    utility calls. A/B on our keys: translate byte-identical, prefilter JSON
+    identical. Quality-sensitive lanes (vision/smart/structured) MUST stay on
+    flash — the freed quota is theirs."""
+    for cap in ("prefilter", "translate"):
+        assert model_for("gemini", cap) == "gemini/gemini-2.5-flash-lite", cap
+    for cap in ("chat:smart", "structured", "vision", "chat:edit"):
+        assert model_for("gemini", cap) == "gemini/gemini-2.5-flash", cap
+
+
 def test_cohere_smart_is_cheap_r7b_not_flagship_command_a():
     """REGRESSION (2026-07-10): command-a-03-2025 (flagship) billed ~$2.4/day
     mostly on failed calls — smart/code fall back to the cheap r7b."""

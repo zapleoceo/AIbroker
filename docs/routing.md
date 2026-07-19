@@ -293,6 +293,15 @@
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
+> - **gemini `prefilter`/`translate` → `2.5-flash-lite` (2026-07-18)**: Google's
+>   free quota is PER MODEL per key, so flash-lite's 1000 RPD/key bucket (4×
+>   flash's 250) sat unused while flash burned its scarce quota on utility
+>   calls. Live A/B on our keys: translate byte-identical, prefilter JSON
+>   identical (faster), sales-JSON on par. vision/smart/structured stay on
+>   flash — the freed quota is theirs. Caveat: the 429 cooldown is per KEY, so
+>   once flash's quota 429s a key into cooldown its flash-lite bucket is
+>   unreachable too — the extra quota helps exactly while the key is not
+>   cooling.
 > - **cohere `chat:smart`/`chat:code` `command-a-03-2025` → `command-r7b-12-2024`**:
 >   flagship command-a billed ~$2.4/day mostly on FAILED calls; r7b is the cheap
 >   fallback tier.
