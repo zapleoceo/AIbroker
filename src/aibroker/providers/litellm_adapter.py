@@ -81,13 +81,22 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # ~250 req/day @ 10 RPM per key (~2000/day across our 8 keys, covering the
     # ~1200 smart calls/day) at near-pro quality — moving most smart traffic
     # back onto FREE gemini and off the paid tail.
+    # 2026-07-18: prefilter + translate → gemini-2.5-flash-lite. Google's free
+    # quota is PER MODEL per key: flash-lite's 1000 RPD/key bucket (4× flash's
+    # 250) sat unused while flash burned its quota on utility calls that don't
+    # need flash quality. Live A/B on our keys: translate output byte-identical,
+    # prefilter JSON identical (and faster), sales-JSON quality on par. The
+    # freed flash quota goes to vision/smart/structured, which have no free
+    # alternative of that quality. Caveat: our 429 cooldown is per KEY, so a
+    # flash-quota 429 still parks the whole key incl. its flash-lite bucket —
+    # flash-lite quota is reachable only while the key itself is not cooling.
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
                "chat:smart": "gemini/gemini-2.5-flash",
                "chat:code": "gemini/gemini-2.5-flash",
                "chat:edit": "gemini/gemini-2.5-flash",
-               "prefilter": "gemini/gemini-2.5-flash",
+               "prefilter": "gemini/gemini-2.5-flash-lite",
                "structured": "gemini/gemini-2.5-flash",
-               "translate": "gemini/gemini-2.5-flash",
+               "translate": "gemini/gemini-2.5-flash-lite",
                "vision": "gemini/gemini-2.5-flash",
                "transcription": "gemini/gemini-2.5-flash"},
     # 2026-07-17: moved to deepseek-v4-flash AHEAD of deepseek-chat's
