@@ -220,9 +220,13 @@ async def pick_and_reserve(
     """
     # Circuit-breaker: a free provider whose pool is timing out in bulk is
     # soft-skipped with NO call sent, so the chain fails over cheaply instead of
-    # burning another ~60s answerless call. Never applied to a paid-tier pick —
-    # the guaranteed-answer escalation must not be starved by a transient storm.
-    if require_tier is None and provider in circuit.providers_in_timeout_storm(
+    # burning another ~60s answerless call. Applies to any non-paid pick — both
+    # a normal free walk (require_tier None) AND the free-only tail after a paid
+    # budget downgrade (require_tier "free"): a timeout storm coinciding with a
+    # spent cap is exactly when we must NOT feed answerless calls to a storming
+    # free pool. Only the guaranteed-answer PAID escalation is exempt (it must
+    # not be starved by a transient storm). 2026-07-19 review.
+    if require_tier != "paid" and provider in circuit.providers_in_timeout_storm(
             _TIMEOUT_STORM_MIN_KEYS):
         return None
 

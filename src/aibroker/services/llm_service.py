@@ -109,13 +109,25 @@ _MAX_ATTEMPTS_ABS = 100
 _CALL_TIMEOUT_S = 60.0
 _DEEP_CALL_TIMEOUT_S = 19 * 60.0
 
-# Overall wall-clock budget for a NON-deep run_chat walk (chat:deep is exempt —
-# nemotron legitimately runs ~19min as an async job). Checked BEFORE starting
-# each new attempt, NEVER mid-call (an aborted call = wasted tokens — policy).
-# Kept comfortably under job_queue's 25-min _STALE_RUNNING_S reclaim window so a
-# slow storm walk finishes and writes its result before a second worker could
-# reclaim the row and re-execute it (double-execution/double-spend). 2026-07-16.
+# Overall wall-clock budget for a NON-deep run_chat walk. Checked BEFORE
+# starting each new attempt, NEVER mid-call (an aborted call = wasted tokens —
+# policy). Kept comfortably under job_queue's 25-min _STALE_RUNNING_S reclaim
+# window so a slow storm walk finishes and writes its result before a second
+# worker could reclaim the row and re-execute it (double-execution/double-
+# spend). 2026-07-16.
 _CHAT_WALL_DEADLINE_S = 18 * 60.0
+
+# chat:deep's single nemotron call legitimately runs up to _DEEP_CALL_TIMEOUT_S
+# (~19min), so it can't share the 18-min budget — but it was previously EXEMPT
+# from any deadline, and _attempt_budget lets it try up to 5 nvidia keys. Two
+# hung keys = ~38min > the 25-min stale window → the row got reclaimed and
+# double-executed (double nvidia spend). The invariant is
+# `_DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S < _STALE_RUNNING_S`: once we're
+# past this many seconds we stop STARTING new attempts, so the last in-flight
+# call (≤19min) still finishes before the 25-min reclaim. Fast key-rotation in
+# the first few minutes stays allowed; only stacking multiple 19-min timeouts
+# is prevented (2026-07-19 review). 5 + 19 = 24 < 25.
+_DEEP_WALL_DEADLINE_S = 5 * 60.0
 
 
 def _now() -> float:
@@ -538,10 +550,13 @@ async def run_chat(
     attempt_cap = _attempt_budget(chain)
     call_timeout = _call_timeout(capability)
     require_tier = "paid" if paid_only else None
-    # chat:deep runs a single legitimately-long call; every other capability gets
-    # an overall wall-clock deadline so a storm walk can't outlast the job's
-    # stale-reclaim window and get re-executed by another worker.
-    wall_deadline = None if capability == "chat:deep" else _now() + _CHAT_WALL_DEADLINE_S
+    # Every capability gets a wall-clock deadline so a storm walk can't outlast
+    # the job's stale-reclaim window and get re-executed by another worker.
+    # chat:deep gets a SHORTER start-deadline (its single call is ~19min, so it
+    # must stop starting attempts early enough that the last one still lands
+    # under the 25-min reclaim — see _DEEP_WALL_DEADLINE_S).
+    wall_deadline = _now() + (
+        _DEEP_WALL_DEADLINE_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below

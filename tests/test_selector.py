@@ -60,6 +60,32 @@ async def test_pick_none_when_no_keys():
     assert result is None
 
 
+async def test_storm_skip_applies_to_free_downgrade_but_not_paid():
+    """2026-07-19: the timeout-storm circuit skip must fire for the free-only
+    tail after a paid-budget downgrade (require_tier='free'), not only an
+    initial free walk (require_tier=None) — a storm coinciding with a spent cap
+    is exactly when answerless calls into a storming free pool must be avoided.
+    Only the guaranteed-answer PAID escalation is exempt."""
+    from aibroker.routing import circuit
+
+    circuit.reset()
+    fid = await _add_key("cerebras", "free-a")
+    # A timeout storm = >= _TIMEOUT_STORM_MIN_KEYS (2) distinct cerebras keys hung.
+    circuit.note_timeout("cerebras", fid)
+    circuit.note_timeout("cerebras", fid + 999999)
+    try:
+        # downgraded free pick → storm-skipped though a healthy key exists
+        assert await pick_and_reserve("cerebras", "llm:chat", require_tier="free") is None
+        # normal free pick → also skipped
+        assert await pick_and_reserve("cerebras", "llm:chat") is None
+        # PAID escalation → exempt: reaches the SQL and picks the paid key
+        pid = await _add_key("cerebras", "paid-a", tier="paid")
+        picked = await pick_and_reserve("cerebras", "llm:chat", require_tier="paid")
+        assert picked is not None and picked.id == pid
+    finally:
+        circuit.reset()
+
+
 async def test_pick_distributes_randomly_across_eligible_keys():
     """2026-06-28: LRU replaced by random() — over 100 picks both keys get
     real share of traffic instead of one monopolising. Reset last_used_at

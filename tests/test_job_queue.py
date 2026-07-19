@@ -360,6 +360,55 @@ async def test_finish_claim_guard_ignores_stale_worker():
         assert row.result_text == "LIVE"
 
 
+def test_deep_wall_deadline_stays_under_stale_reclaim():
+    """chat:deep must stop STARTING attempts early enough that its last ~19min
+    call still lands before the 25min stale-reclaim — otherwise a reclaimed row
+    is double-executed (double nvidia spend). Guards the coupled invariant
+    across llm_service + job_queue (2026-07-19 review)."""
+    from aibroker.services.job_queue import _STALE_RUNNING_S
+    from aibroker.services.llm_service import (
+        _DEEP_CALL_TIMEOUT_S,
+        _DEEP_WALL_DEADLINE_S,
+    )
+
+    assert _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S < _STALE_RUNNING_S
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="cross-session claim state needs Postgres")
+async def test_requeue_or_fail_claim_guard_ignores_stale_worker():
+    """2026-07-19: the error/no-provider requeue path is now claim-guarded like
+    _finish's success path. A stale worker whose job was re-claimed must NOT
+    reset the live claim (started_at→NULL) — that would let a third worker
+    double-execute. Only the matching claim token requeues."""
+    from datetime import datetime
+
+    from sqlalchemy import text
+
+    from aibroker.services.job_queue import _requeue_or_fail
+
+    pid = await _make_project(["llm:chat"])
+    jid = await _enqueue(pid)
+    live_started = datetime(2026, 6, 1, 12, 0, 0)
+    async with get_session() as s:
+        await s.execute(
+            text("UPDATE deep_jobs SET status='running', started_at=:t, retry_count=0 "
+                 "WHERE id=:id"),
+            {"t": live_started, "id": jid})
+    # Stale worker (older claim token) → guarded no-op.
+    await _requeue_or_fail(jid, 0, "boom",
+                           expect_started_at=datetime(2026, 6, 1, 11, 0, 0))
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "running"
+        assert row.started_at == live_started
+    # Live claim (matching token) → requeues.
+    await _requeue_or_fail(jid, 0, "boom", expect_started_at=live_started)
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "pending"
+        assert row.started_at is None
+
+
 @pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED — Postgres only")
 async def test_claim_batch_concurrent_workers_never_double_claim():
     """Two 'workers' claiming concurrently (the real 2-uvicorn-worker setup)
