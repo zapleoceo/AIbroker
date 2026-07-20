@@ -70,17 +70,22 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     #   REMOVED mistral (0 successful smart calls in 7d, keys in AuthError),
     #   cohere command-r7b (25 InvalidJSON / 4 ok = 86% garbage — 7B can't do the
     #   structured reply), openrouter gemma-4-31b (0 ok / 114 rate-limited, ever).
-    # KEPT (clean valid answers in prod): deepseek (quality anchor + sticky
-    # cache; note ~40% EmptyBody on huge prompts, walks over on empty), the
-    # gpt-oss-120b trio cerebras/groq/cloudflare (0-0.4% bad), gemini-2.5-flash
-    # (0 empty), sambanova llama-3.3-70b (0 bad when it has quota), and the paid
-    # anthropic/openai quality tail. nvidia stays out (2026-07-10: v4-pro 91s
-    # timeouts; nemotron only in chat:deep).
+    # 2026-07-21 (later): gpt-oss-120b (cerebras/groq/cloudflare) REMOVED from
+    # chat:smart entirely (owner call — its sales replies read weak, "тупит").
+    # A model check confirmed those providers have NOTHING smarter to swap in
+    # (cerebras=gpt-oss/gemma/glm only; groq=llama-70b/qwen-27b smaller;
+    # cloudflare llama-4 broken via litellm, nemotron-120b 35s). So smart now
+    # runs ONLY genuinely-smart models: deepseek (anchor + sticky cache) →
+    # gemini-2.5-flash (free) → sambanova DeepSeek-V3.2 (FREE deepseek-quality)
+    # → paid anthropic/openai tail. Tradeoff owner accepted: losing the free
+    # gpt-oss safety net means that once deepseek's $1 cap + gemini/sambanova
+    # free quota are spent, smart lands on the paid tail (higher cost) rather
+    # than a cheap-but-weak gpt-oss reply. gpt-oss stays PRIMARY on chat:fast.
+    # nvidia stays out (2026-07-10: v4-pro 91s timeouts; nemotron only chat:deep).
     "chat:smart": [
         "deepseek",
-        "cerebras", "groq", "gemini",
+        "gemini",
         "sambanova",
-        "cloudflare",
         "anthropic", "openai",
     ],
     "chat:code": [

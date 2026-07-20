@@ -70,11 +70,15 @@ def test_chat_smart_is_deepseek_first_by_owner_choice():
     Also pre-positions the lane for cerebras' free-tier death 2026-08-17."""
     chain = chain_for("chat:smart")
     assert chain[0] == "deepseek"
-    # the free fallback tail must survive right behind it
-    assert {"groq", "gemini"} <= set(chain[1:])
-    # 2026-07-21 quality prune: providers that gave BAD smart answers are gone —
-    # cohere (86% InvalidJSON), openrouter (0 ok ever), mistral (dead keys).
-    assert {"mistral", "cohere", "openrouter"}.isdisjoint(chain)
+    # the free smart-quality fallback (gemini + sambanova's free DeepSeek-V3.2)
+    # sits right behind the deepseek anchor
+    assert {"gemini", "sambanova"} <= set(chain[1:])
+    # 2026-07-21 quality prune: only providers that give GOOD smart answers.
+    # cohere (86% InvalidJSON), openrouter (0 ok ever), mistral (dead keys) gone;
+    # gpt-oss providers (cerebras/groq/cloudflare) removed too — owner found them
+    # weak on smart and no smarter model exists on them (still primary on fast).
+    assert {"mistral", "cohere", "openrouter",
+            "cerebras", "groq", "cloudflare"}.isdisjoint(chain)
     # and the emergency paid quality tail stays at the very end
     assert chain[-2:] == ["anthropic", "openai"]
 
