@@ -273,14 +273,13 @@ async def pick_and_reserve(
     # limit). Falls through to the normal pick when the pinned key is unavailable
     # (cooled, or per-key cost cap spent). Excluded for require_tier="free": these
     # are paid-tier keys.
-    if provider in _CACHE_STICKY_PROVIDERS and affinity_id is not None \
-            and require_tier != "free":  # pragma: no cover — Postgres-only, test_selector.py
-        sticky = text(f"UPDATE api_keys AS k SET last_used_at = now() "
-                      f"WHERE k.id = :aff AND ({where}) RETURNING *")
-        async with get_session() as s:
-            srow = (await s.execute(sticky, {**params, "aff": affinity_id})).mappings().first()
-        if srow is not None:
-            return _hydrate_key_row(srow)
+    if provider in _CACHE_STICKY_PROVIDERS and affinity_id is not None and require_tier != "free":  # pragma: no cover — Postgres-only, exercised by test_selector.py
+        sticky = text(f"UPDATE api_keys AS k SET last_used_at = now() "  # pragma: no cover
+                      f"WHERE k.id = :aff AND ({where}) RETURNING *")  # pragma: no cover
+        async with get_session() as s:  # pragma: no cover
+            srow = (await s.execute(sticky, {**params, "aff": affinity_id})).mappings().first()  # pragma: no cover
+        if srow is not None:  # pragma: no cover
+            return _hydrate_key_row(srow)  # pragma: no cover
 
     params.update(_saturation_order_params(saturated, affinity_id, timed_out))  # pragma: no cover — same
     # 2026-06-28 (random + soft saturation skip), 2026-07-12 (TTL cache + affinity):
@@ -321,7 +320,7 @@ async def pick_and_reserve(
         row = (await s.execute(stmt, params)).mappings().first()
     if row is None:
         return None
-    return _hydrate_key_row(row)
+    return _hydrate_key_row(row)  # pragma: no cover — Postgres-only pick path
 
 
 def _hydrate_key_row(row) -> ApiKeyRow:  # pragma: no cover — Postgres row → ORM-like
