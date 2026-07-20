@@ -19,5 +19,7 @@ def test_chain_for_unknown_raises():
 
 def test_chain_includes_free_before_paid_chat_fast():
     chain = chain_for("chat:fast")
-    # cerebras (free) must come before openai (paid)
-    assert chain.index("cerebras") < chain.index("openai")
+    # 2026-07-21: chat:fast is free-only — no paid providers at all (deepseek
+    # reserved for the smart money lane). cerebras leads the free pool.
+    assert "cerebras" in chain
+    assert not ({"deepseek", "anthropic", "openai"} & set(chain))

@@ -17,7 +17,7 @@ from aibroker.routing.chains import (
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
-              "nvidia", "mistral", "cohere", "voyage", "zai", "local"}
+              "nvidia", "mistral", "cohere", "voyage", "zai", "local", "cloudflare"}
 
 
 @pytest.mark.parametrize("capability", list(CAPABILITY_CHAINS.keys()))
@@ -31,8 +31,9 @@ def test_has_paid_tail_gates_the_final_retry_escalation():
     """The final-retry paid_only escalation is only meaningful where the chain
     reaches a paid provider with a wired model. chat:deep is nvidia-only (free),
     so demanding a paid key there is a guaranteed no-op."""
-    assert has_paid_tail("chat:fast") is True     # deepseek/anthropic/openai tail
-    assert has_paid_tail("chat:edit") is True      # deepseek + anthropic wired
+    assert has_paid_tail("chat:fast") is False     # 2026-07-21: free-only, no paid tail
+    assert has_paid_tail("chat:smart") is True      # deepseek anchor + paid tail
+    assert has_paid_tail("chat:edit") is True       # deepseek + anthropic wired
     assert has_paid_tail("chat:deep") is False      # nvidia-only free lane
 
 
@@ -94,22 +95,24 @@ def test_chat_first_3_are_free(capability):
         )
 
 
-@pytest.mark.parametrize("capability", ["chat:fast", "chat:smart"])
-def test_paid_tail_present_for_interactive_chat(capability):
-    """The guaranteed-answer tail: every interactive chat chain must keep at
-    least one provider whose keys are typically paid, so a fully-saturated free
-    pool still ends in an answer instead of a 503. deepseek is that anchor —
-    if it's ever removed from a chain, this test forces a conscious
-    replacement, not a silent free-only chain."""
-    assert "deepseek" in chain_for(capability)
+def test_chat_smart_keeps_paid_tail():
+    """The money lane keeps a paid guaranteed-answer tail (deepseek anchor) so a
+    fully-saturated free pool ends in an answer, not a 503. If deepseek is ever
+    removed from chat:smart, this forces a conscious replacement."""
+    assert "deepseek" in chain_for("chat:smart")
 
 
-def test_chat_fast_paid_at_the_very_tail():
-    """2026-07-05: paid providers sit at the LAST entries, after every free
-    provider. Paid tail = [deepseek, anthropic, openai] (anthropic re-added
-    2026-07-10 after its balance was topped up)."""
+def test_chat_fast_is_free_only():
+    """2026-07-21 (owner): chat:fast has NO paid tail — deepseek/anthropic/openai
+    removed so the scarce deepseek budget stays reserved for the smart money
+    lane. fast = triage/followups; a saturated free pool retries rather than
+    spending. (On fast the paid tail was only ever deepseek anyway — anthropic/
+    openai were never reached.)"""
     chain = chain_for("chat:fast")
-    assert chain[-3:] == ["deepseek", "anthropic", "openai"]
+    assert {"deepseek", "anthropic", "openai"}.isdisjoint(chain)
+    # every fast provider is free
+    for provider in chain:
+        assert provider in KNOWN_FREE, f"chat:fast must be free-only, got {provider}"
 
 
 def test_vision_only_vision_providers():
