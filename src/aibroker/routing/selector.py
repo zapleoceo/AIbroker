@@ -23,6 +23,16 @@ from aibroker.routing import circuit, shared_state
 # another ~60s answerless call (2026-07-16 free-pool timeout storm).
 _TIMEOUT_STORM_MIN_KEYS = 2
 
+# Providers whose prompt cache is PER-KEY (per-account) AND that carry a paid,
+# high-throughput API with no tight per-key RPM limit. For these, keeping ALL of
+# a project's traffic on ONE key (a warm cache-hit input is ~50x cheaper on
+# deepseek) beats the LRU spread the normal pick does — so the sticky fast path
+# pins to the affinity key directly instead of letting SKIP-LOCKED scatter a
+# burst across keys (each a cold cache). Free/RPM-limited providers (cerebras,
+# groq, …) are excluded: concentrating them would hit rate limits and their
+# cache gives no token discount anyway.
+_CACHE_STICKY_PROVIDERS = frozenset({"deepseek", "anthropic"})
+
 
 class SelectionError(Exception):
     """No usable api_key for the (provider, scope) request."""
@@ -250,9 +260,29 @@ async def pick_and_reserve(
     # isn't worth re-hitting a degraded key (2026-07-16 storm).
     if affinity_id is not None and affinity_id in timed_out:  # pragma: no cover — same
         affinity_id = None
-    params.update(_saturation_order_params(saturated, affinity_id, timed_out))  # pragma: no cover — same
 
     where = " AND ".join(conds)
+
+    # Cache-sticky fast path (2026-07-20): for deepseek/anthropic, pin ALL of the
+    # project's traffic to the affinity key so its PER-KEY prompt cache stays hot.
+    # The normal SKIP-LOCKED pick below scatters a concurrent burst across keys
+    # and lets the affinity pin flip to a cold one — measured deepseek smart
+    # cache hit ~50% (dragged by cold starts) vs ~80% on a continuously-warm key,
+    # and a warm deepseek input token is 50x cheaper. No LRU/SKIP LOCKED here:
+    # concurrent picks serialize on the one row and all get it (paid API, no RPM
+    # limit). Falls through to the normal pick when the pinned key is unavailable
+    # (cooled, or per-key cost cap spent). Excluded for require_tier="free": these
+    # are paid-tier keys.
+    if provider in _CACHE_STICKY_PROVIDERS and affinity_id is not None \
+            and require_tier != "free":  # pragma: no cover — Postgres-only, test_selector.py
+        sticky = text(f"UPDATE api_keys AS k SET last_used_at = now() "
+                      f"WHERE k.id = :aff AND ({where}) RETURNING *")
+        async with get_session() as s:
+            srow = (await s.execute(sticky, {**params, "aff": affinity_id})).mappings().first()
+        if srow is not None:
+            return _hydrate_key_row(srow)
+
+    params.update(_saturation_order_params(saturated, affinity_id, timed_out))  # pragma: no cover — same
     # 2026-06-28 (random + soft saturation skip), 2026-07-12 (TTL cache + affinity):
     #   1. is_reserve  — non-reserve first; Coach reserve last.
     #   2. saturated   — keys ≥95% on any daily quota axis (verdict from the
@@ -291,7 +321,10 @@ async def pick_and_reserve(
         row = (await s.execute(stmt, params)).mappings().first()
     if row is None:
         return None
-    # Hydrate into ORM-like object
+    return _hydrate_key_row(row)
+
+
+def _hydrate_key_row(row) -> ApiKeyRow:  # pragma: no cover — Postgres row → ORM-like
     return ApiKeyRow(
         id=row["id"],
         provider=row["provider"],

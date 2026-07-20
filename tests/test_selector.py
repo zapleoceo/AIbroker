@@ -86,6 +86,45 @@ async def test_storm_skip_applies_to_free_downgrade_but_not_paid():
         circuit.reset()
 
 
+def test_cache_sticky_providers_are_paid_percache_only():
+    """Sticky concentration is only for PAID per-account-cache providers with no
+    tight RPM limit. Free/RPM-limited providers must stay out (concentrating
+    them hits rate limits + their cache gives no token discount)."""
+    from aibroker.routing.selector import _CACHE_STICKY_PROVIDERS
+    assert "deepseek" in _CACHE_STICKY_PROVIDERS
+    assert "anthropic" in _CACHE_STICKY_PROVIDERS
+    assert len(_CACHE_STICKY_PROVIDERS) == 2
+    assert "cerebras" not in _CACHE_STICKY_PROVIDERS
+    assert "groq" not in _CACHE_STICKY_PROVIDERS
+
+
+async def test_sticky_pick_concentrates_deepseek_under_concurrent_burst():
+    """2026-07-20: deepseek's prompt cache is per-key. Under a concurrent burst
+    the normal SKIP-LOCKED pick scatters across keys (each a cold cache); the
+    sticky path pins the whole burst to the affinity key so its cache stays hot.
+    All 8 concurrent picks must land on the pin, not spread."""
+    import asyncio
+
+    b = await _add_key("deepseek", "b", tier="paid")
+    for lbl in ("c", "d", "e"):
+        await _add_key("deepseek", lbl, tier="paid")
+    _note_affinity(4, "deepseek", b)
+    picks = await asyncio.gather(*(
+        pick_and_reserve("deepseek", "llm:chat", project_id=4) for _ in range(8)))
+    assert all(p is not None and p.id == b for p in picks)
+
+
+async def test_sticky_pick_falls_through_when_pin_unavailable():
+    """A cooled/capped pin must not strand the project — the sticky path yields
+    nothing and the normal pick takes the healthy key."""
+    a = await _add_key("deepseek", "a", tier="paid")
+    b = await _add_key("deepseek", "b", tier="paid",
+                       cooldown_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5))
+    _note_affinity(4, "deepseek", b)   # pin is cooled → unavailable
+    picked = await pick_and_reserve("deepseek", "llm:chat", project_id=4)
+    assert picked is not None and picked.id == a
+
+
 async def test_pick_distributes_randomly_across_eligible_keys():
     """2026-06-28: LRU replaced by random() — over 100 picks both keys get
     real share of traffic instead of one monopolising. Reset last_used_at
