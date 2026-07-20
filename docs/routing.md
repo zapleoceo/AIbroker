@@ -148,6 +148,25 @@
 > push-back, or any WHERE filter (cooldown/dead/capped), so a broken pinned
 > key just falls back to random rotation. In-process map, per worker (2
 > workers = worst case one extra cache warm each; no Redis dependency).
+>
+> **2026-07-20 (cache-STICKY fast path for paid per-account-cache providers).**
+> The tie-break above concentrates SEQUENTIAL picks on the affinity key, but a
+> CONCURRENT burst (Stepan sends replies in cron batches) hits `FOR UPDATE SKIP
+> LOCKED`: only one call locks the pin key, the rest skip to other keys — each a
+> cold cache — and re-pin to whatever they served, so the pin flips. Measured on
+> deepseek chat:smart: a continuously-warm key caches 6-8k of the ~8.7k-token
+> prompt (~75-90%), but cold-start calls dragged the aggregate to ~50%. For
+> `_CACHE_STICKY_PROVIDERS` (deepseek, anthropic — PAID, per-account cache, no
+> tight per-key RPM limit) `pick_and_reserve` takes a fast path BEFORE the
+> SKIP-LOCKED query: `UPDATE … WHERE id = affinity_id AND <availability>` with
+> no LRU/lock-skip, so every concurrent pick serializes on the one row and all
+> get it — the cache stays hot. Falls through to the normal pick when the pin is
+> unavailable (cooled / per-key cap spent) or hung (already nulled by the
+> timed-out guard). Excluded for free/RPM-limited providers: concentrating them
+> would hit rate limits and their cache gives no per-token discount (cerebras
+> bills cache reads at full rate — it's just $0 because free). A warm deepseek
+> input token is 50× cheaper ($0.0028 vs $0.14/M), so this is pure paid-spend
+> reduction with no quality change.
 
 > **2026-07-10 (anthropic JSON via tool-use)**: Claude ignores OpenAI's
 > `response_format={"type":"json_object"}` (litellm drops the unsupported param),
