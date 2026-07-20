@@ -71,7 +71,10 @@ def test_chat_smart_is_deepseek_first_by_owner_choice():
     chain = chain_for("chat:smart")
     assert chain[0] == "deepseek"
     # the free fallback tail must survive right behind it
-    assert {"groq", "gemini", "mistral"} <= set(chain[1:])
+    assert {"groq", "gemini"} <= set(chain[1:])
+    # 2026-07-21 quality prune: providers that gave BAD smart answers are gone —
+    # cohere (86% InvalidJSON), openrouter (0 ok ever), mistral (dead keys).
+    assert {"mistral", "cohere", "openrouter"}.isdisjoint(chain)
     # and the emergency paid quality tail stays at the very end
     assert chain[-2:] == ["anthropic", "openai"]
 
