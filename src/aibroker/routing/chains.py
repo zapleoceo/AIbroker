@@ -42,15 +42,18 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
         # idle capacity (only vision was wired).
         "cloudflare",
-        # 2026-07-10: nvidia REMOVED from chat:fast. Its kimi-k2.6 model (wired
-        # 2026-07-05) went dead — every call now 404s "Function 'x': Not found
-        # for account" (confirmed live, ~30 errors/hr). The model vanished from
-        # our account's provisioning even though it's still in NVIDIA's catalog
-        # listing. nvidia STAYS in chat:deep (nemotron, confirmed still alive).
-        # 2026-07-10: anthropic re-added — balance topped up (was removed while
-        # out of credit "credit balance is too low"). Quality paid fallback at
-        # the very tail, reached only after deepseek.
-        "deepseek", "anthropic", "openai",
+        # 2026-07-10: nvidia REMOVED from chat:fast (kimi-k2.6 → 404 "Function
+        # not found for account"; stays in chat:deep with nemotron).
+        # 2026-07-21: chat:fast is now FREE-ONLY — the whole paid tail
+        # (deepseek/anthropic/openai) removed (owner: don't burn the scarce
+        # deepseek on the fast lane). fast = triage / simple followups, which
+        # tolerate a retry when the free pool is momentarily dry, unlike the
+        # smart money-lane. On chat:fast the paid tail was ONLY ever deepseek
+        # (anthropic/openai: 0 calls/7d — never reached); removing just deepseek
+        # would have shifted those ~2969 calls/wk to anthropic-haiku (~$1.27/M
+        # vs deepseek's $0.15/M, ~6x), so the entire paid tail is gone and every
+        # paid dollar is reserved for chat:smart. All 9 free providers saturated
+        # → fast returns None and the job retries.
     ],
     # 2026-07-17: deepseek MOVED TO THE HEAD of chat:smart — the one deliberate
     # exception to strict free-first, owner-approved (cap raised $0.50→$1 for

@@ -38,8 +38,9 @@ log = logging.getLogger(__name__)
 # Chat capabilities whose chains end in a paid "guaranteed-answer" tail (see
 # routing/chains.py + test_chains.py's paid-tail invariant). Losing every
 # usable paid key silently degrades them to free-only best-effort — worth an
-# operator alert, not just a 503 spike later.
-_PAID_TAIL_CAPS: tuple[str, ...] = ("chat:fast", "chat:smart")
+# operator alert, not just a 503 spike later. 2026-07-21: chat:fast dropped —
+# it's now free-only by design (no paid tail to guard).
+_PAID_TAIL_CAPS: tuple[str, ...] = ("chat:smart",)
 
 
 INTERVAL_S = int(os.environ.get("MONITOR_INTERVAL_S", "600"))

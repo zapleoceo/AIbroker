@@ -169,7 +169,7 @@ def _unclaimed_row(pid: int, retry_count: int) -> DeepJobRow:
     BigInteger PK); _execute only reads its attributes, and run_chat /
     _requeue_or_fail are mocked so no job UPDATE is ever attempted."""
     return DeepJobRow(
-        id=1, project_id=pid, capability="chat:fast", status="running",
+        id=1, project_id=pid, capability="chat:smart", status="running",
         retry_count=retry_count,
         request={"messages": [{"role": "user", "content": "hi"}], "model": None,
                  "max_tokens": 64, "temperature": 0.7, "response_format": None,
