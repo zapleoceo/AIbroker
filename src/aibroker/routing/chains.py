@@ -65,19 +65,21 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # ~50k-char prompts walks over to them; budget-downgrade walks there when
     # the $1 cap is spent). Also pre-positions the lane for 2026-08-17 when
     # cerebras' free tier dies (was ~70% of Stepan's tokens).
+    # 2026-07-21: pruned to ONLY providers that give GOOD smart answers (owner
+    # request). 7-day quality audit on Stepan's sales-reply JSON:
+    #   REMOVED mistral (0 successful smart calls in 7d, keys in AuthError),
+    #   cohere command-r7b (25 InvalidJSON / 4 ok = 86% garbage — 7B can't do the
+    #   structured reply), openrouter gemma-4-31b (0 ok / 114 rate-limited, ever).
+    # KEPT (clean valid answers in prod): deepseek (quality anchor + sticky
+    # cache; note ~40% EmptyBody on huge prompts, walks over on empty), the
+    # gpt-oss-120b trio cerebras/groq/cloudflare (0-0.4% bad), gemini-2.5-flash
+    # (0 empty), sambanova llama-3.3-70b (0 bad when it has quota), and the paid
+    # anthropic/openai quality tail. nvidia stays out (2026-07-10: v4-pro 91s
+    # timeouts; nemotron only in chat:deep).
     "chat:smart": [
         "deepseek",
         "cerebras", "groq", "gemini",
-        "mistral", "cohere",
-        "openrouter",
         "sambanova",
-        # 2026-07-10: nvidia REMOVED from chat:smart. Its deepseek-v4-pro model
-        # now times out on 100% of calls (~91s wall, confirmed live, past our
-        # 60s ceiling) — the free NVIDIA pool is oversubscribed. Pure wasted
-        # attempts + timeout waits. Stays in chat:deep (nemotron alive).
-        # 2026-07-10: cloudflare added — extra free gpt-oss-120b burst (see
-        # DEFAULT_MODEL), tried before the paid tail. anthropic re-added (balance
-        # topped up) as the quality paid fallback.
         "cloudflare",
         "anthropic", "openai",
     ],
