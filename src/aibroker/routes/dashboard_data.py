@@ -315,11 +315,12 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "GROUP BY b ORDER BY b"
         ), bind_)).all()
         recent = (await s.execute(text(
-            "SELECT id, created_at, provider, model, capability, "
-            "       tokens_in, tokens_out, cost_usd, latency_ms, status, "
-            "       http_status, error_kind "
-            "FROM usage_log WHERE project_id=:pid "
-            "ORDER BY created_at DESC LIMIT 50"
+            "SELECT u.id, u.created_at, u.provider, u.model, u.capability, "
+            "       u.tokens_in, u.tokens_out, u.cost_usd, u.latency_ms, u.status, "
+            "       u.http_status, u.error_kind, k.label AS key_label "
+            "FROM usage_log u LEFT JOIN api_keys k ON k.id = u.api_key_id "
+            "WHERE u.project_id=:pid "
+            "ORDER BY u.created_at DESC LIMIT 50"
         ), {"pid": project_id})).all()
         # Active key count by scope intersection (informational)
     # Each opens its own pooled connection and is independent of the block

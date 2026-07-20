@@ -1279,6 +1279,17 @@ def test_main_render_cooldown_key_shows_friendly_label_and_time():
     assert f"until {until.strftime('%H:%M')} UTC" in body
 
 
+def test_provider_with_key_appends_label_prefix():
+    """Recent-calls log shows which key served: provider + first 2 letters of
+    the key label in parens, e.g. 'sambanova (it)'. No key label → bare
+    provider. Label is HTML-escaped."""
+    from aibroker.routes.dashboard_render import _provider_with_key
+    out = _provider_with_key("sambanova", "itstep")
+    assert "sambanova" in out and "(it)" in out
+    assert _provider_with_key("deepseek", None) == "deepseek"
+    assert "&lt;" in _provider_with_key("x", "<b")
+
+
 def test_friendly_reason_unrecognized_falls_back_to_raw_text():
     from aibroker.routes.dashboard_render import _friendly_reason
     assert _friendly_reason("some brand new provider error nobody's seen") is None
