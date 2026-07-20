@@ -202,6 +202,18 @@ def _cost_span(cost: float) -> str:
     return f'<span class="{cls}">${cost:.4f}</span>'
 
 
+def _provider_with_key(provider: str, key_label: str | None) -> str:
+    """Provider name + the first two letters of the SERVING key's label in
+    parens, e.g. `sambanova (it)` — so the recent-calls log shows which
+    account/key actually handled the call (multiple keys per provider). The
+    label prefix is dimmed; absent (no key row) → just the provider."""
+    p = esc(provider)
+    if key_label:
+        return (f'{p} <span style="color:#888;font-size:11px">'
+                f'({esc(key_label[:2])})</span>')
+    return p
+
+
 def _is_top_up(raw: str | None) -> bool:
     """True if the error is a billing-exhaustion (out of money) — a valid key
     that recovers on top-up, not a dead credential."""
@@ -968,7 +980,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'<td data-sort="{r.created_at.isoformat()}" '
         f'style="color:#888;font-size:11px">'
         f'{_ts_span(r.created_at, "mdhms")}</td>'
-        f'<td>{esc(r.provider)}</td>'
+        f'<td>{_provider_with_key(r.provider, getattr(r, "key_label", None))}</td>'
         f'<td style="color:#888;font-size:11px">{esc((r.model or "—")[:32])}</td>'
         f'<td><span class="pill">{esc(r.capability or "—")}</span></td>'
         f'<td class="num" data-sort="{r.tokens_in + r.tokens_out}">'
