@@ -183,9 +183,17 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # req_per_day=20 (x-ratelimit-limit-requests-day header) — see quotas.py.
     # Too thin to be a primary workhorse; added at chain tail as extra free
     # breadth across however many keys accumulate.
+    # 2026-07-21: chat:smart/code → sambanova's FREE-tier DeepSeek-V3.2. SambaNova
+    # hosts DeepSeek-V3.1/V3.2 on its persistent free tier — same DeepSeek quality
+    # we pay ~$5.60/wk for direct, but $0 here. Confirmed live on a real Stepan
+    # sales prompt: valid JSON, natural Bahasa close ("Paham banget Kak…, DP 500rb
+    # dulu buat lock tempat…"), ~6-8s. So sambanova in the chat:smart chain is now
+    # a FREE deepseek-quality node (rate-limited free quota, walks over when dry).
+    # fast/prefilter stay on the faster Llama-3.3-70B (V3.2 is slower; fast lane
+    # doesn't need deepseek depth). MiniMax-M2.7 exists but is payment-gated for us.
     "sambanova": {"chat:fast": "sambanova/Meta-Llama-3.3-70B-Instruct",
-                  "chat:smart": "sambanova/Meta-Llama-3.3-70B-Instruct",
-                  "chat:code": "sambanova/Meta-Llama-3.3-70B-Instruct",
+                  "chat:smart": "sambanova/DeepSeek-V3.2",
+                  "chat:code": "sambanova/DeepSeek-V3.2",
                   "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
     # 2026-07-10: GitHub Models REMOVED entirely. Its free tier is tiny (~150
     # req/day on 1 key) and its reset window doesn't align with UTC midnight, so

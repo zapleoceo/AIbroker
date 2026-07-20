@@ -77,7 +77,7 @@ computed and discarded:
 | **openai** | gpt-5-mini | gpt-5 | gpt-5 | gpt-5-mini | — |
 | **mistral** | mistral-small-latest | mistral-large-latest | codestral-latest | — | — |
 | **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | command-r7b-12-2024 | — | embed-english-v3.0 |
-| **sambanova** | Meta-Llama-3.3-70B-Instruct | Meta-Llama-3.3-70B-Instruct | Meta-Llama-3.3-70B-Instruct | — | — |
+| **sambanova** | Meta-Llama-3.3-70B-Instruct | DeepSeek-V3.2 | DeepSeek-V3.2 | — | — |
 | **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
 | **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — |
 | **zai** | glm-4.5-flash | — | — | — | — |
