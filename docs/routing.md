@@ -309,20 +309,33 @@
 >   **v4-pro for big JSON (2026-07-21):** as Stepan's system prompt grew to
 >   ~50k chars the thinking net stopped holding — v4-flash + json_object now
 >   empties even WITH thinking (verified live 4/4 empty on a real 51k-char
->   reply prompt, both thinking modes). v4-pro handles the same prompt (0/3
->   empty, valid JSON, ~4.6s no-thinking) and still hits the per-key prompt
->   cache (cache-read $0.00363/M ≈ 1/120th of miss), so the static-catalog
->   prefix stays cheap. `run_chat` now upgrades ONLY big JSON deepseek calls to
->   v4-pro via `deepseek_model_for_json` (json + prompt ≥ 24k chars); flash
->   stays for everything else (3× cheaper, and it works below the threshold).
->   The upgrade is chosen in `run_chat` (not the adapter) so `use_model`
->   carries the pro model into cost estimation/booking — an adapter-side model
->   swap would bill pro as flash. Pro always runs no-thinking (4.6s vs 18.5s,
->   both valid). This guarantees valid JSON from deepseek itself instead of
->   emptying and leaking the answer to the free tail, at optimal price
->   (pro premium only on the big prompts that need it). The flash thinking net
->   remains as defence-in-depth for any path that reaches the adapter without
->   the run_chat upgrade.
+>   reply prompt, both thinking modes). `run_chat` now upgrades big JSON
+>   deepseek calls (json + prompt ≥ 24k chars) to v4-pro via
+>   `deepseek_model_for_json`; flash stays for everything else (3× cheaper,
+>   works below the threshold). Chosen in `run_chat` (not the adapter) so
+>   `use_model` carries the pro model into cost estimation/booking — an
+>   adapter-side model swap would bill pro as flash. Pro still hits the
+>   per-key prompt cache (cache-read $0.00363/M ≈ 1/120th of miss), so the
+>   static-catalog prefix stays cheap even at pro rates.
+>   **Correction, hours later (same day):** first shipped with pro forced to
+>   ALWAYS run no-thinking — based on a single N=3 test on one flat
+>   system+user prompt that happened to show 0/3 empty without thinking. Real
+>   prod traffic on a genuine multi-turn (19-message) reply prompt (job
+>   75792) told the opposite story at N=6: pro no-thinking emptied **6/6**
+>   (100% — WORSE than pre-upgrade flash, an active regression), pro **with**
+>   thinking emptied only 2/6, flash either way emptied 5/6. So pro gets NO
+>   special-cased no-thinking override — it shares the exact same
+>   thinking-keep condition as flash (json + prompt ≥ 24k chars + max_tokens ≥
+>   1000). On multi-turn dialogs the reasoning pass is apparently what makes
+>   DeepSeek actually emit the body at all, for either v4 variant; forcing it
+>   off just reproduces the empty-body bug on pro too. Even with thinking
+>   kept, ~33% empty is NOT zero — `_MAX_EMPTY_RETRIES=1` gives one same-
+>   provider retry (~11% chance both attempts empty), and if BOTH empty the
+>   walk falls to the free tail same as before this whole change existed; this
+>   upgrade narrows the failure window, it doesn't eliminate DeepSeek's
+>   empty-body bug outright. Lesson: a single small-N test on one prompt SHAPE
+>   doesn't generalize across prompt shapes (flat vs multi-turn) — this one
+>   needed real production traffic to catch.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
