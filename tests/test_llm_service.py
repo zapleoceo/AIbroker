@@ -386,6 +386,70 @@ async def _noop():
     return None
 
 
+# ─── deepseek big-JSON model upgrade in run_chat ─────────────────────────────
+
+
+async def _capture_deepseek_model(monkeypatch, messages, response_format):
+    """Walk run_chat with one deepseek key whose call empties, and return the
+    model string run_chat actually passed to call_llm."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    seen: list[str] = []
+    fake_key = SimpleNamespace(id=1, label="k", tier="free", provider="deepseek",
+                               token_encrypted="x")
+
+    async def fake_pick(provider, scope, **kw):
+        return fake_key if provider == "deepseek" and not seen else None
+
+    async def fake_call_llm(**kw):
+        seen.append(kw["model"])
+        return "", {"model": kw["model"], "tokens_in": 1, "tokens_out": 0,
+                    "cost_usd": 0.0, "latency_ms": 1}
+
+    async def _n(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", _n)
+    monkeypatch.setattr(svc, "release_cost", _n)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "_record_json_miss",
+                        lambda **kw: _wrap(svc._Flow.NEXT_PROVIDER))
+    monkeypatch.setattr(svc, "model_for",
+                        lambda p, c: "deepseek/deepseek-v4-flash")
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
+        messages=messages, model=None, max_tokens=2000, temperature=0.4,
+        response_format=response_format, workflow="stepan",
+    )
+    return seen
+
+
+async def _wrap(flow):
+    return flow, None
+
+
+async def test_run_chat_upgrades_deepseek_to_pro_for_big_json(monkeypatch):
+    big = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
+    seen = await _capture_deepseek_model(monkeypatch, big, {"type": "json_object"})
+    assert seen == ["deepseek/deepseek-v4-pro"]
+
+
+async def test_run_chat_keeps_deepseek_flash_for_small_or_plain(monkeypatch):
+    small = [{"role": "user", "content": "halo"}]
+    assert await _capture_deepseek_model(
+        monkeypatch, small, {"type": "json_object"}) == ["deepseek/deepseek-v4-flash"]
+    big_plain = [{"role": "system", "content": "x" * 25_000}]
+    assert await _capture_deepseek_model(
+        monkeypatch, big_plain, None) == ["deepseek/deepseek-v4-flash"]
+
+
 # ─── per-provider retry cap ──────────────────────────────────────────────────
 
 

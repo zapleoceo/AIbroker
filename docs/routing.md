@@ -303,12 +303,26 @@
 >   **Hybrid knob (same day):** because non-thinking v4 IS deepseek-chat, it
 >   inherits chat's deterministic EMPTY `json_object` body on ~30k-char
 >   prompts (resurfaced within minutes: 8 EmptyBody on Stepan followups,
->   input billed for nothing). Thinking mode demonstrably works there (482
->   prod calls, avg 10.4k-tok prompts, zero EmptyBody — the reasoning pass
->   gets the JSON emitted). So the adapter disables thinking EXCEPT when
->   json + prompt ≥ 24k chars + max_tokens ≥ 1000 (headroom for the
->   reasoning spend; below the floor thinking starves the content itself —
->   the 07-10 mt=120 failure).
+>   input billed for nothing). Thinking mode worked there at ~10k-tok prompts
+>   (482 prod calls, zero EmptyBody). So the flash adapter disables thinking
+>   EXCEPT when json + prompt ≥ 24k chars + max_tokens ≥ 1000.
+>   **v4-pro for big JSON (2026-07-21):** as Stepan's system prompt grew to
+>   ~50k chars the thinking net stopped holding — v4-flash + json_object now
+>   empties even WITH thinking (verified live 4/4 empty on a real 51k-char
+>   reply prompt, both thinking modes). v4-pro handles the same prompt (0/3
+>   empty, valid JSON, ~4.6s no-thinking) and still hits the per-key prompt
+>   cache (cache-read $0.00363/M ≈ 1/120th of miss), so the static-catalog
+>   prefix stays cheap. `run_chat` now upgrades ONLY big JSON deepseek calls to
+>   v4-pro via `deepseek_model_for_json` (json + prompt ≥ 24k chars); flash
+>   stays for everything else (3× cheaper, and it works below the threshold).
+>   The upgrade is chosen in `run_chat` (not the adapter) so `use_model`
+>   carries the pro model into cost estimation/booking — an adapter-side model
+>   swap would bill pro as flash. Pro always runs no-thinking (4.6s vs 18.5s,
+>   both valid). This guarantees valid JSON from deepseek itself instead of
+>   emptying and leaking the answer to the free tail, at optimal price
+>   (pro premium only on the big prompts that need it). The flash thinking net
+>   remains as defence-in-depth for any path that reaches the adapter without
+>   the run_chat upgrade.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.

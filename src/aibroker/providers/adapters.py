@@ -70,6 +70,37 @@ _DEEPSEEK_JSON_EMPTY_CHARS = 24_000
 _DEEPSEEK_THINKING_MT_FLOOR = 1_000
 
 
+def _prompt_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(str(m.get("content") or "")) for m in messages)
+
+
+def deepseek_model_for_json(
+    model: str | None,
+    response_format: dict[str, Any] | None,
+    messages: list[dict[str, Any]],
+) -> str | None:
+    """Which deepseek model to actually call for a (possibly JSON) request.
+
+    v4-flash empties json_object DETERMINISTICALLY once the prompt nears ~30k
+    chars — BOTH thinking modes (verified live on a real 51k-char Stepan reply
+    prompt: empty 4/4 with thinking, 4/4 without). The input is billed for
+    nothing and the answer only survives by falling through to the free tail.
+    v4-pro handles the same prompt (0/3 empty, valid JSON, ~4.6s no-thinking)
+    AND still hits the per-key prompt cache (cache-read priced at ~1/120th of
+    miss), so the static-catalog prefix stays cheap. So upgrade ONLY the big
+    JSON calls to pro; flash stays for everything else (3x cheaper, and it works
+    below the threshold). Caller must feed the RESULT into cost estimation so
+    the pro price is booked — see run_chat's use_model."""
+    if not model or "deepseek-v4-flash" not in model:
+        return model
+    rf = response_format or {}
+    if rf.get("type") not in ("json_object", "json_schema"):
+        return model
+    if _prompt_chars(messages) < _DEEPSEEK_JSON_EMPTY_CHARS:
+        return model
+    return model.replace("deepseek-v4-flash", "deepseek-v4-pro")
+
+
 class _DeepseekAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
@@ -87,26 +118,29 @@ class _DeepseekAdapter(ProviderAdapter):
         # via the documented body param (confirmed live 2026-07-17: valid JSON
         # at max_tokens=120, reasoning_content empty)…
         #
-        # …EXCEPT for a JSON request with a HUGE prompt and a roomy max_tokens.
-        # Non-thinking mode IS deepseek-chat (DeepSeek's own mapping), and
-        # deepseek-chat deterministically returns an EMPTY json_object body on
-        # ~30k-char prompts (verified 30k→empty 4/4 vs 16k→OK 4/4; resurfaced
-        # 2026-07-17 within minutes of disabling thinking: 8 EmptyBody on
-        # Stepan followups, input billed for nothing). Thinking mode is the one
-        # that demonstrably WORKS there — 482 prod calls, avg 10.4k-token
-        # prompts, zero EmptyBody — because the reasoning pass gets the model
-        # to actually emit the JSON. It needs max_tokens headroom (reasoning
-        # spends from the same budget), hence the mt floor: below it thinking
-        # would starve the content itself (the 07-10 mt=120 failure).
+        # v4-pro ALWAYS runs no-thinking here: on the big JSON prompts it's
+        # chosen for (see deepseek_model_for_json) it emits valid JSON without
+        # thinking in ~4.6s, vs ~18.5s with thinking (verified 0/3 empty either
+        # way) — the reasoning pass buys nothing but latency. So the thinking
+        # safety-net below is scoped to v4-FLASH only.
+        #
+        # For flash: a JSON request with a HUGE prompt used to keep thinking as
+        # a mitigation, because non-thinking flash (== deepseek-chat) returns an
+        # EMPTY json_object body on ~30k-char prompts. But thinking flash ALSO
+        # empties at ~50k (verified 4/4), so that net no longer holds at
+        # Stepan's current prompt size — run_chat now routes big JSON to v4-pro
+        # instead (deepseek_model_for_json), leaving flash only the small/plain
+        # calls it handles fine. The flash net stays as defence in depth for any
+        # caller that reaches the adapter without the run_chat upgrade.
         # Scoped to v4-*: deepseek-reasoner IS the thinking mode, and legacy
         # names pre-date the param.
-        if model.split("/", 1)[-1].startswith("deepseek-v4"):
+        tail = model.split("/", 1)[-1]
+        if tail.startswith("deepseek-v4"):
             rf_now = kwargs.get("response_format") or {}
-            prompt_chars = sum(
-                len(str(m.get("content") or "")) for m in kwargs.get("messages", []))
             keep_thinking = (
-                str(rf_now.get("type", "")).startswith("json")
-                and prompt_chars >= _DEEPSEEK_JSON_EMPTY_CHARS
+                tail.startswith("deepseek-v4-flash")
+                and str(rf_now.get("type", "")).startswith("json")
+                and _prompt_chars(kwargs.get("messages", [])) >= _DEEPSEEK_JSON_EMPTY_CHARS
                 and kwargs.get("max_tokens", 0) >= _DEEPSEEK_THINKING_MT_FLOOR
             )
             if not keep_thinking:
