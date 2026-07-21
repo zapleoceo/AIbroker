@@ -1,7 +1,11 @@
 """Per-provider adapters — request-shape quirks + per-key extras."""
 from __future__ import annotations
 
-from aibroker.providers.adapters import ProviderAdapter, adapter_for
+from aibroker.providers.adapters import (
+    ProviderAdapter,
+    adapter_for,
+    deepseek_model_for_json,
+)
 
 _SCHEMA = {"type": "json_schema", "json_schema": {"name": "r", "strict": True,
            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}},
@@ -75,6 +79,17 @@ def test_deepseek_v4_disables_thinking_below_the_size_or_mt_gates():
         "extra_body"]["thinking"] == {"type": "disabled"}
 
 
+def test_deepseek_v4_pro_disables_thinking_even_for_huge_json():
+    """v4-pro is chosen ONLY for the big JSON prompts that empty flash, and it
+    emits valid JSON there without thinking in ~4.6s (vs ~18.5s with) — so the
+    huge-json thinking net is scoped to flash; pro always runs no-thinking."""
+    kwargs: dict = {"messages": [{"role": "system", "content": "x" * 25_000},
+                                 {"role": "user", "content": "hi"}],
+                    "max_tokens": 2000, "response_format": {"type": "json_object"}}
+    adapter_for("deepseek").prepare("deepseek/deepseek-v4-pro", kwargs)
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+
+
 def test_deepseek_non_v4_models_get_no_thinking_param():
     """deepseek-reasoner IS the thinking mode and legacy names pre-date the
     param — sending it there risks a 400."""
@@ -90,6 +105,41 @@ def test_deepseek_v4_thinking_respects_caller_extra_body():
     kwargs: dict = {"extra_body": {"thinking": {"type": "enabled"}, "x": 1}}
     adapter_for("deepseek").prepare("deepseek/deepseek-v4-flash", kwargs)
     assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}, "x": 1}
+
+
+_BIG = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
+_SMALL = [{"role": "system", "content": "x" * 5_000}, {"role": "user", "content": "hi"}]
+
+
+def test_deepseek_model_upgrades_big_json_to_pro():
+    """Big JSON prompt empties v4-flash's json_object body (DeepSeek bug); v4-pro
+    handles it. The picker upgrades ONLY that case so cost is booked as pro."""
+    assert deepseek_model_for_json(
+        "deepseek/deepseek-v4-flash", {"type": "json_object"}, _BIG
+    ) == "deepseek/deepseek-v4-pro"
+    assert deepseek_model_for_json(
+        "deepseek/deepseek-v4-flash", dict(_SCHEMA), _BIG
+    ) == "deepseek/deepseek-v4-pro"
+
+
+def test_deepseek_model_keeps_flash_when_upgrade_unwarranted():
+    # small JSON prompt → flash works, stays cheap
+    assert deepseek_model_for_json(
+        "deepseek/deepseek-v4-flash", {"type": "json_object"}, _SMALL
+    ) == "deepseek/deepseek-v4-flash"
+    # big but NOT json → no empty-body bug, stays flash
+    assert deepseek_model_for_json(
+        "deepseek/deepseek-v4-flash", None, _BIG
+    ) == "deepseek/deepseek-v4-flash"
+    # already pinned to a non-flash model → untouched
+    assert deepseek_model_for_json(
+        "deepseek/deepseek-v4-pro", {"type": "json_object"}, _BIG
+    ) == "deepseek/deepseek-v4-pro"
+    # non-deepseek / unset model → returned as-is
+    assert deepseek_model_for_json(
+        "gemini/gemini-2.5-flash", {"type": "json_object"}, _BIG
+    ) == "gemini/gemini-2.5-flash"
+    assert deepseek_model_for_json(None, {"type": "json_object"}, _BIG) is None
 
 
 def test_cerebras_downgrades_json_schema_to_json_object():

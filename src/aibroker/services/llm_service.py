@@ -18,6 +18,7 @@ from aibroker.crypto import decrypt
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
+from aibroker.providers.adapters import deepseek_model_for_json
 from aibroker.providers.context_limits import (
     MIN_LEARNABLE_CEILING,
     estimate_prompt_tokens,
@@ -580,6 +581,13 @@ async def run_chat(
             use_model = model or model_for(provider, capability)
             if not use_model:
                 break  # provider can't serve this capability → next provider
+            if provider == "deepseek":
+                # Big JSON prompts empty deepseek-v4-flash's json_object body
+                # (DeepSeek bug) → upgrade to v4-pro so the call yields valid
+                # JSON. Done HERE (not in the adapter) so use_model carries the
+                # real model into cost estimation/booking — an adapter-side swap
+                # would bill pro as flash. No-op below the size/JSON threshold.
+                use_model = deepseek_model_for_json(use_model, response_format, messages)
             flow, outcome = await _run_attempt(
                 key=key, project=project, provider=provider, use_model=use_model,
                 capability=capability, messages=messages, model=model,
