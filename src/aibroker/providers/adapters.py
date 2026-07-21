@@ -118,28 +118,30 @@ class _DeepseekAdapter(ProviderAdapter):
         # via the documented body param (confirmed live 2026-07-17: valid JSON
         # at max_tokens=120, reasoning_content empty)…
         #
-        # v4-pro ALWAYS runs no-thinking here: on the big JSON prompts it's
-        # chosen for (see deepseek_model_for_json) it emits valid JSON without
-        # thinking in ~4.6s, vs ~18.5s with thinking (verified 0/3 empty either
-        # way) — the reasoning pass buys nothing but latency. So the thinking
-        # safety-net below is scoped to v4-FLASH only.
-        #
-        # For flash: a JSON request with a HUGE prompt used to keep thinking as
-        # a mitigation, because non-thinking flash (== deepseek-chat) returns an
-        # EMPTY json_object body on ~30k-char prompts. But thinking flash ALSO
-        # empties at ~50k (verified 4/4), so that net no longer holds at
-        # Stepan's current prompt size — run_chat now routes big JSON to v4-pro
-        # instead (deepseek_model_for_json), leaving flash only the small/plain
-        # calls it handles fine. The flash net stays as defence in depth for any
-        # caller that reaches the adapter without the run_chat upgrade.
+        # CORRECTED 2026-07-21 (hours after the v4-pro upgrade shipped): first
+        # attempt at "v4-pro always no-thinking" was based on a single N=3 live
+        # test on ONE prompt shape (flat system+user) that happened to show 0/3
+        # empty without thinking. Re-tested live against job 75792's REAL
+        # multi-turn (19-message) reply prompt at N=6 and got the opposite
+        # result — pro is WORSE without thinking there, not better:
+        #   pro no-thinking:   6/6 EMPTY  (100% — this shipped and made things
+        #                                  WORSE than pre-upgrade flash)
+        #   pro thinking:      2/6 EMPTY  (33% — still not perfect, but by far
+        #                                  the best of the 4 combinations)
+        #   flash thinking:    5/6 EMPTY  (83%)
+        #   flash no-thinking: 5/6 EMPTY  (83%)
+        # So the thinking-keep condition below applies uniformly to EVERY v4-*
+        # model, not just flash — pro gets no special-cased no-thinking. On
+        # multi-turn dialog prompts the reasoning pass is apparently what makes
+        # DeepSeek actually emit the JSON body at all, for both models; without
+        # it the empty-body bug reappears regardless of which v4 variant.
         # Scoped to v4-*: deepseek-reasoner IS the thinking mode, and legacy
         # names pre-date the param.
         tail = model.split("/", 1)[-1]
         if tail.startswith("deepseek-v4"):
             rf_now = kwargs.get("response_format") or {}
             keep_thinking = (
-                tail.startswith("deepseek-v4-flash")
-                and str(rf_now.get("type", "")).startswith("json")
+                str(rf_now.get("type", "")).startswith("json")
                 and _prompt_chars(kwargs.get("messages", [])) >= _DEEPSEEK_JSON_EMPTY_CHARS
                 and kwargs.get("max_tokens", 0) >= _DEEPSEEK_THINKING_MT_FLOOR
             )

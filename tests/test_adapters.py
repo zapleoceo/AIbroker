@@ -79,15 +79,20 @@ def test_deepseek_v4_disables_thinking_below_the_size_or_mt_gates():
         "extra_body"]["thinking"] == {"type": "disabled"}
 
 
-def test_deepseek_v4_pro_disables_thinking_even_for_huge_json():
-    """v4-pro is chosen ONLY for the big JSON prompts that empty flash, and it
-    emits valid JSON there without thinking in ~4.6s (vs ~18.5s with) — so the
-    huge-json thinking net is scoped to flash; pro always runs no-thinking."""
+def test_deepseek_v4_pro_keeps_thinking_for_huge_json_prompts():
+    """REGRESSION (shipped for a few hours 2026-07-21): pro was first wired to
+    always run no-thinking, based on an N=3 test on one flat-prompt shape that
+    showed 0/3 empty. Re-tested at N=6 against a REAL multi-turn (19-message)
+    reply prompt and got the opposite result: pro no-thinking empties 6/6
+    (100% — worse than pre-upgrade flash), pro WITH thinking empties only 2/6.
+    So pro gets the same thinking-keep condition as flash, not a special-cased
+    override — the reasoning pass is what makes DeepSeek actually emit the body
+    on multi-turn dialogs, for either v4 variant."""
     kwargs: dict = {"messages": [{"role": "system", "content": "x" * 25_000},
                                  {"role": "user", "content": "hi"}],
                     "max_tokens": 2000, "response_format": {"type": "json_object"}}
     adapter_for("deepseek").prepare("deepseek/deepseek-v4-pro", kwargs)
-    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    assert "extra_body" not in kwargs  # thinking left at its (enabled) default
 
 
 def test_deepseek_non_v4_models_get_no_thinking_param():
