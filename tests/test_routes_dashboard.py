@@ -992,6 +992,19 @@ def test_render_project_detail_hides_cache_card_when_inactive():
 # ─── Main dashboard render (unit, no DB) ───────────────────────────────────
 
 
+def _expected_until(until):
+    """How the renderer formats a cooldown-until timestamp: bare HH:MM when it
+    lands on today's UTC date, month-day prefixed when it doesn't (see
+    dashboard_render's `tf` pick). Mirrors that rule instead of hard-coding
+    %H:%M — a test built on `now + 30min` silently crosses midnight and the
+    format flips, which failed CI at 23:31 UTC (2026-07-23) with a green
+    codebase."""
+    from datetime import UTC, datetime
+
+    same_day = until.date() == datetime.now(UTC).replace(tzinfo=None).date()
+    return until.strftime("%H:%M" if same_day else "%m-%d %H:%M")
+
+
 def _fake_main_data(projects=(), keys=(), *, proj_spend: dict | None = None,
                      range_spend: float = 0.0123, range_calls: int = 42,
                      date_from=None, date_to=None,
@@ -1276,7 +1289,7 @@ def test_main_render_cooldown_key_shows_friendly_label_and_time():
     )
     body = _render(_fake_main_data(keys=[k])).body.decode()
     assert 'data-en="provider feature outage" data-ru="сбой фичи у провайдера"' in body
-    assert f"until {until.strftime('%H:%M')} UTC" in body
+    assert f"until {_expected_until(until)} UTC" in body
 
 
 def test_provider_with_key_appends_label_prefix():
@@ -1430,7 +1443,7 @@ def test_main_render_cooldown_key_shows_until_time():
     )
     body = _render(_fake_main_data(keys=[k])).body.decode()
     assert "This response_format type is unavailable now" in body
-    assert f"until {until.strftime('%H:%M')} UTC" in body
+    assert f"until {_expected_until(until)} UTC" in body
 
 
 def test_day_capped_key_shows_capped_not_alive():
