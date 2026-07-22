@@ -301,3 +301,33 @@ def deprioritize_for_json(chain: list[str]) -> list[str]:
     reliable = [p for p in capable if p not in JSON_UNRELIABLE_PROVIDERS]
     unreliable = [p for p in capable if p in JSON_UNRELIABLE_PROVIDERS]
     return reliable + unreliable
+
+
+def deprioritize_deepseek_for_savings(chain: list[str], *, should_defer: bool) -> list[str]:
+    """Sink deepseek behind any FREE provider that already follows it in
+    `chain`, when `should_defer` is True — the caller decides why (deepseek's
+    own DeepSeek-announced peak-hour 2x surcharge, see providers/peak_pricing.
+    py, and/or a big-JSON prompt that would otherwise force the pricier v4-pro
+    escalation, see providers/adapters.deepseek_model_for_json). Only
+    `chat:smart` puts deepseek at the HEAD of the chain (its cache-warm-anchor
+    design, 2026-07-17) — every other chain already positions deepseek after
+    its free tier, so this is a no-op there by construction (checked via "does
+    any free provider currently sit after deepseek", not a capability check).
+
+    2026-07-22: deepseek-v4-pro was 92.6% of stepan2's entire daily spend, and
+    63.8% of TODAY's deepseek cost landed in its own peak-pricing hours (UTC
+    01-04/06-10 — unfortunately WIB 08-11/13-17, Jakarta's real lead-inquiry
+    hours) despite fewer calls there than off-peak. Free JSON-capable
+    providers (gemini, sambanova's DeepSeek-V3.2) already serve the same big
+    prompts for $0 in testing — giving them first shot before paying either
+    surcharge, escalating to deepseek only when free genuinely fails, is pure
+    savings with no reliability cost (deepseek stays the fallback anchor, not
+    removed)."""
+    if not should_defer or "deepseek" not in chain:
+        return chain
+    idx = chain.index("deepseek")
+    if not any(p not in PAID_PROVIDERS for p in chain[idx + 1:]):
+        return chain  # no free provider follows deepseek — nothing to gain
+    free = [p for p in chain if p != "deepseek" and p not in PAID_PROVIDERS]
+    paid = [p for p in chain if p != "deepseek" and p in PAID_PROVIDERS]
+    return [*free, "deepseek", *paid]

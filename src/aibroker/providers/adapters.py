@@ -87,6 +87,20 @@ def _prompt_chars(messages: list[dict[str, Any]]) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
 
 
+def is_deepseek_big_json_prompt(
+    response_format: dict[str, Any] | None, messages: list[dict[str, Any]]
+) -> bool:
+    """True for a JSON request big enough to trigger deepseek-v4-flash's
+    empty-body bug (see deepseek_model_for_json) — shared with run_chat's
+    savings-side chain reorder (deprioritize_deepseek_for_savings) so both the
+    "which model" and "which chain position" decisions use the exact same
+    threshold, not two copies that could drift."""
+    rf = response_format or {}
+    if rf.get("type") not in ("json_object", "json_schema"):
+        return False
+    return _prompt_chars(messages) >= _DEEPSEEK_JSON_EMPTY_CHARS
+
+
 def deepseek_model_for_json(
     model: str | None,
     response_format: dict[str, Any] | None,
@@ -106,10 +120,7 @@ def deepseek_model_for_json(
     the pro price is booked — see run_chat's use_model."""
     if not model or "deepseek-v4-flash" not in model:
         return model
-    rf = response_format or {}
-    if rf.get("type") not in ("json_object", "json_schema"):
-        return model
-    if _prompt_chars(messages) < _DEEPSEEK_JSON_EMPTY_CHARS:
+    if not is_deepseek_big_json_prompt(response_format, messages):
         return model
     return model.replace("deepseek-v4-flash", "deepseek-v4-pro")
 

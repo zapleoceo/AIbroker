@@ -18,7 +18,7 @@ from aibroker.crypto import decrypt
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
-from aibroker.providers.adapters import deepseek_model_for_json
+from aibroker.providers.adapters import deepseek_model_for_json, is_deepseek_big_json_prompt
 from aibroker.providers.context_limits import (
     MIN_LEARNABLE_CEILING,
     estimate_prompt_tokens,
@@ -33,6 +33,7 @@ from aibroker.providers.litellm_adapter import (
     transcribe,
 )
 from aibroker.providers.observations import learned_ceilings, record_too_large
+from aibroker.providers.peak_pricing import peak_multiplier
 
 # Re-exported: tests and services/__init__ import classify_provider_error from here.
 from aibroker.providers.provider_errors import (
@@ -44,6 +45,7 @@ from aibroker.routing import (
     CostGuardError,
     chain_for,
     circuit,
+    deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     pick_and_reserve,
     release_cost,
@@ -506,8 +508,13 @@ async def run_chat(
     response_format: dict[str, Any] | None,
     workflow: str | None,
     paid_only: bool = False,
+    at: datetime | None = None,
 ) -> ChatOutcome | _BudgetExhausted | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
+
+    `at` overrides the clock used for deepseek's peak-hour savings check
+    (`peak_multiplier`) — tests pin it so the chain order isn't flaky
+    depending on when they happen to run; production passes None (= now, UTC).
 
     Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
     out a fresh LRU key each time and `_penalize` cools failed ones) before falling
@@ -542,6 +549,22 @@ async def run_chat(
     # JSON — cuts InvalidJSON at the source, not after the wasted call.
     if _wants_json(response_format):
         full_chain = deprioritize_for_json(full_chain)
+    # Savings: chat:smart puts deepseek at the head (cache-warm anchor) even
+    # though gemini/sambanova already serve the same JSON for $0 — fine most
+    # of the time, but not during deepseek's own peak-pricing hours (2x, see
+    # peak_pricing.py) or on a big-JSON prompt that would otherwise force the
+    # pricier v4-pro escalation (deepseek_model_for_json). 2026-07-22: v4-pro
+    # was 92.6% of stepan2's whole daily spend, and 63.8% of that day's
+    # deepseek cost landed in its own peak hours (fewer calls than off-peak,
+    # yet more cost) — free providers already validated on the same big
+    # prompts, so give them first shot and only escalate to deepseek when
+    # free genuinely fails. No reliability cost: deepseek stays the fallback.
+    should_defer_deepseek = (
+        peak_multiplier("deepseek", at) > 1.0
+        or is_deepseek_big_json_prompt(response_format, messages)
+    )
+    full_chain = deprioritize_deepseek_for_savings(
+        full_chain, should_defer=should_defer_deepseek)
     chain = await _size_filtered(full_chain, est_tokens, capability)
 
     # Dynamic per-request attempt budget = "try every key we have across the

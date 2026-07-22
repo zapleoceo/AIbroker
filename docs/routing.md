@@ -353,6 +353,32 @@
 >   needed. Three fixes in one day for the same root cause (thinking-keep →
 >   thinking-uniform-across-v4 → max_tokens headroom) — each one caught by
 >   real prod traffic, not the prior test.
+>   **Savings-side chain reorder (same day, hours later still):** even
+>   working correctly, deepseek-v4-pro was 92.6% of stepan2's ENTIRE daily
+>   spend, and 63.8% of that day's deepseek cost landed in DeepSeek's own
+>   peak-pricing hours (`providers/peak_pricing.py`: UTC 01-04/06-10 — WIB
+>   08-11/13-17, unfortunately Jakarta's real lead-inquiry hours) despite
+>   FEWER calls there than off-peak. Free JSON-capable providers (gemini,
+>   sambanova's DeepSeek-V3.2) already serve the same big prompts for $0 in
+>   testing. `deprioritize_deepseek_for_savings` (`routing/chains.py`) sinks
+>   deepseek behind any free provider that follows it in the chain, when
+>   `should_defer` is True — `run_chat` sets that flag when EITHER
+>   `peak_multiplier("deepseek", at) > 1.0` OR
+>   `is_deepseek_big_json_prompt(response_format, messages)` (the same
+>   threshold `deepseek_model_for_json` uses for the pro escalation, factored
+>   out so both decisions share one source of truth). Free gets first shot;
+>   deepseek still anchors the chain right before the paid tail, escalated to
+>   only when free genuinely fails — no reliability cost, pure savings. A
+>   no-op everywhere else: `chat:code`/`chat:edit` already position deepseek
+>   after their free tier (checked structurally — "does any free provider
+>   follow deepseek in this chain" — not a capability-name check), so only
+>   `chat:smart`'s cache-warm-anchor position is ever touched.
+>   `run_chat` gained an `at: datetime | None = None` param purely so tests
+>   can pin the clock — without it, this reorder is real-wall-clock-dependent
+>   and flips any test asserting deepseek-first order depending on when CI
+>   happens to run (caught 2 existing tests failing this way during
+>   development, mid-review, simply because it was a real peak hour at the
+>   time).
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
