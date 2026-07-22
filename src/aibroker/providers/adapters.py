@@ -62,11 +62,30 @@ class _AnthropicAdapter(ProviderAdapter):
 
 
 # Non-thinking deepseek (== deepseek-chat) goes deterministically EMPTY on
-# json_object once the prompt nears ~30k chars (verified 30k→empty 4/4,
-# 16k→OK 4/4). Threshold sits under the verified failure point with margin —
-# Stepan's failing followups were ~25k system + dialog. The mt floor keeps
-# thinking from starving the content budget on short-reply calls.
-_DEEPSEEK_JSON_EMPTY_CHARS = 24_000
+# json_object once the prompt gets large (originally probed at only two points:
+# 30k→empty 4/4, 16k→OK 4/4). The mt floor keeps thinking from starving the
+# content budget on short-reply calls.
+#
+# 2026-07-23: lowered 24k→16k. 24k was picked "under the verified failure point
+# with margin", but the 16k-30k range had never actually been measured, and the
+# real onset is far below 24k. Production evidence (Stepan chat:smart):
+#   - flash SUCCEEDS at avg 3397 prompt tokens (~11k chars)
+#   - flash EMPTIES at 6526-7183 prompt tokens (~22-24k chars)
+#   - a measured batch of 30 live prompts: median 23515 chars, 11/30 sitting in
+#     the 16k-24k band — i.e. ~37% of traffic was landing JUST under the old
+#     threshold, staying on flash, and emptying (the user's log dump showed ~27
+#     consecutive empties at tokens_in 7036-7084, output cut at 57-150 tokens).
+# 16k is the highest size flash is actually VERIFIED to handle (4/4 OK), so the
+# threshold now sits at evidence rather than at a guessed margin.
+#
+# This is a stop-gap that trades cost for reliability: those ~37% now escalate
+# to v4-pro (3x the per-token price) or get served free by the savings-side
+# reorder. The real fix is caller-side — Stepan's system prompt alone is 94% of
+# the payload (median 22122 of 23515 chars); trimming it under ~15k chars puts
+# this traffic back on cheap flash entirely. Raise this back toward 24k only
+# with fresh measurements, never by intuition (this constant has now been wrong
+# in that direction once).
+_DEEPSEEK_JSON_EMPTY_CHARS = 16_000
 _DEEPSEEK_THINKING_MT_FLOOR = 1_000
 
 # On the thinking-keep path, reasoning_content shares max_tokens with the
