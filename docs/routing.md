@@ -379,6 +379,25 @@
 >   happens to run (caught 2 existing tests failing this way during
 >   development, mid-review, simply because it was a real peak hour at the
 >   time).
+>   **Third trigger — empty-body storm (2026-07-22 evening):** after the fixes
+>   above, deepseek ran at **0% empty from 11:00-19:00 UTC**, then jumped to
+>   **34-46% empty on BOTH v4 models from 20:00 on**, for hours. Not our code
+>   (unchanged since 07:39) and not an outage — a trivial short JSON prompt
+>   still answered 3/3 on both models at the same moment, while production's
+>   6.5-8.8k-token prompts emptied: DeepSeek's long-context generation buckling
+>   under evening load. Every empty body is BILLED (input charged, no answer),
+>   and free providers were serving the same traffic fine throughout
+>   (sambanova: 111 successes at $0 during the storm). So `circuit` gained
+>   `note_empty_body` / `providers_in_empty_storm` (mirroring the timeout
+>   breaker, but with a longer `_EMPTY_MEMORY_S` = 600s window since a provider
+>   degradation outlasts a single call), fed from `_record_json_miss`, and
+>   `run_chat` adds it as a third `should_defer` trigger at
+>   `_EMPTY_STORM_MIN_KEYS` = 2 distinct keys (one flaky key must not reorder
+>   the chain). Deliberately a DEFERRAL, not the selector's hard skip that a
+>   timeout storm gets: an empty-storming provider still answers 54-66% of
+>   calls, and hard-skipping would push that traffic to the paid tail —
+>   anthropic measured ~7x deepseek per successful reply ($0.0445 vs $0.0065),
+>   i.e. the "safety" reroute would cost more than the waste it avoids.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.

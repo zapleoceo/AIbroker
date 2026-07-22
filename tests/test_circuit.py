@@ -36,3 +36,36 @@ def test_entries_expire(monkeypatch):
     monkeypatch.setattr(circuit, "_TIMEOUT_MEMORY_S", -1.0)   # everything now stale
     assert circuit.recent_timeout_key_ids() == frozenset()
     assert circuit.providers_in_timeout_storm(1) == frozenset()
+
+
+# ─── empty-body storm (billed-but-answerless provider degradation) ───────────
+
+
+def test_empty_storm_needs_min_distinct_keys():
+    circuit.reset()
+    circuit.note_empty_body("deepseek", 1)
+    assert circuit.providers_in_empty_storm(2) == frozenset()   # 1 key < threshold
+    circuit.note_empty_body("deepseek", 2)
+    assert circuit.providers_in_empty_storm(2) == frozenset({"deepseek"})
+    # Re-noting the SAME key doesn't inflate the distinct-key count.
+    circuit.note_empty_body("deepseek", 2)
+    assert circuit.providers_in_empty_storm(3) == frozenset()
+
+
+def test_empty_storm_is_per_provider_and_independent_of_timeouts():
+    circuit.reset()
+    circuit.note_empty_body("deepseek", 1)
+    circuit.note_empty_body("gemini", 2)
+    assert circuit.providers_in_empty_storm(2) == frozenset()   # 1 each
+    # empties must not register as timeouts (different action: defer vs skip)
+    assert circuit.providers_in_timeout_storm(1) == frozenset()
+    assert circuit.recent_timeout_key_ids() == frozenset()
+
+
+def test_empty_entries_expire(monkeypatch):
+    circuit.reset()
+    circuit.note_empty_body("deepseek", 5)
+    circuit.note_empty_body("deepseek", 6)
+    assert circuit.providers_in_empty_storm(2) == frozenset({"deepseek"})
+    monkeypatch.setattr(circuit, "_EMPTY_MEMORY_S", -1.0)   # everything now stale
+    assert circuit.providers_in_empty_storm(1) == frozenset()

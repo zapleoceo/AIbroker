@@ -508,6 +508,32 @@ async def test_run_chat_defers_deepseek_during_peak_hours_even_for_tiny_prompt(m
     assert picked == ["gemini", "deepseek"]
 
 
+async def test_run_chat_defers_deepseek_during_empty_body_storm(monkeypatch):
+    """2026-07-22: DeepSeek's evening degradation emptied 34-46% of calls on
+    BOTH v4 models for hours (billed input, no answer) while free providers
+    served the same traffic fine (sambanova: 111 successes at $0). Once
+    several deepseek keys have emptied, try the free tier first — off-peak,
+    small, non-JSON prompt, so ONLY the empty-storm signal can trigger it."""
+    from aibroker.routing import circuit
+
+    circuit.note_empty_body("deepseek", 101)
+    circuit.note_empty_body("deepseek", 102)
+    picked = await _picked_order(
+        monkeypatch, messages=_TINY, response_format=None, at=OFF_PEAK_AT)
+    assert picked == ["gemini", "deepseek"]
+
+
+async def test_run_chat_keeps_deepseek_first_when_one_key_empties(monkeypatch):
+    """A single flaky key is not a provider degradation — one empty must NOT
+    reorder the chain and give up deepseek's cache-warm anchor position."""
+    from aibroker.routing import circuit
+
+    circuit.note_empty_body("deepseek", 101)
+    picked = await _picked_order(
+        monkeypatch, messages=_TINY, response_format=None, at=OFF_PEAK_AT)
+    assert picked == ["deepseek", "gemini"]
+
+
 async def test_run_chat_defers_deepseek_for_big_json_even_off_peak(monkeypatch):
     """A big-JSON prompt defers deepseek independent of time of day — it would
     otherwise force the pricier v4-pro escalation; gemini/sambanova already
