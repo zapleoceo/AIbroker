@@ -9,6 +9,7 @@ from aibroker.routing.chains import (
     JSON_INCAPABLE_PROVIDERS,
     JSON_UNRELIABLE_PROVIDERS,
     chain_for,
+    deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     has_paid_tail,
     is_known_capability,
@@ -299,6 +300,48 @@ def test_json_request_drops_zai_but_plain_text_keeps_it():
     raw = chain_for("chat:fast")
     assert "zai" in raw
     assert "zai" not in deprioritize_for_json(raw)
+
+
+# ─── deprioritize_deepseek_for_savings — peak/big-JSON cost deferral ─────────
+
+
+def test_deprioritize_deepseek_for_savings_sinks_below_free_tier():
+    """chat:smart's real chain: deepseek anchors the head even though gemini/
+    sambanova already serve the same JSON for $0. When should_defer is True
+    (deepseek's own peak-hour surcharge, or a big-JSON prompt that would force
+    the pricier v4-pro escalation) give the free tier first shot; deepseek
+    still anchors right before the paid tail, not removed."""
+    chain = ["deepseek", "gemini", "sambanova", "anthropic", "openai"]
+    out = deprioritize_deepseek_for_savings(chain, should_defer=True)
+    assert out == ["gemini", "sambanova", "deepseek", "anthropic", "openai"]
+
+
+def test_deprioritize_deepseek_for_savings_noop_when_not_deferring():
+    """should_defer=False (off-peak, small/non-JSON prompt) keeps deepseek's
+    cache-warm anchor position — the whole point of putting it first."""
+    chain = ["deepseek", "gemini", "sambanova", "anthropic", "openai"]
+    assert deprioritize_deepseek_for_savings(chain, should_defer=False) == chain
+
+
+def test_deprioritize_deepseek_for_savings_noop_without_a_free_provider_after():
+    """chat:code/chat:edit already position deepseek after their free tier —
+    nothing to gain by reordering, so should_defer=True must be a true no-op
+    there (not accidentally reshuffle the paid tail's relative order)."""
+    # deepseek already last among a paid-only tail — no free provider follows
+    chain = ["gemini", "anthropic", "deepseek", "openai"]
+    assert deprioritize_deepseek_for_savings(chain, should_defer=True) == chain
+    # deepseek not in the chain at all
+    assert deprioritize_deepseek_for_savings(["gemini", "openai"], should_defer=True) \
+        == ["gemini", "openai"]
+
+
+def test_deprioritize_deepseek_for_savings_keeps_paid_tail_order():
+    """Only deepseek moves — anthropic/openai's relative order among
+    themselves is untouched (this only defers deepseek's OWN surcharge, it
+    isn't a generic paid-tier reshuffle)."""
+    chain = ["deepseek", "gemini", "openai", "anthropic"]
+    out = deprioritize_deepseek_for_savings(chain, should_defer=True)
+    assert out == ["gemini", "deepseek", "openai", "anthropic"]
 
 
 def test_prefilter_chain_excludes_zai():

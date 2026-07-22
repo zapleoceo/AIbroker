@@ -5,6 +5,7 @@ from aibroker.providers.adapters import (
     ProviderAdapter,
     adapter_for,
     deepseek_model_for_json,
+    is_deepseek_big_json_prompt,
 )
 
 _SCHEMA = {"type": "json_schema", "json_schema": {"name": "r", "strict": True,
@@ -133,6 +134,17 @@ def test_deepseek_v4_thinking_respects_caller_extra_body():
 
 _BIG = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
 _SMALL = [{"role": "system", "content": "x" * 5_000}, {"role": "user", "content": "hi"}]
+
+
+def test_is_deepseek_big_json_prompt_matches_the_model_upgrade_threshold():
+    """Shared with run_chat's savings-side chain reorder
+    (deprioritize_deepseek_for_savings) — must agree with
+    deepseek_model_for_json's own threshold check, not drift as a second
+    copy."""
+    assert is_deepseek_big_json_prompt({"type": "json_object"}, _BIG) is True
+    assert is_deepseek_big_json_prompt(dict(_SCHEMA), _BIG) is True
+    assert is_deepseek_big_json_prompt({"type": "json_object"}, _SMALL) is False
+    assert is_deepseek_big_json_prompt(None, _BIG) is False
 
 
 def test_deepseek_model_upgrades_big_json_to_pro():

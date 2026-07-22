@@ -1,9 +1,17 @@
 """services/llm_service — provider-error classification (the DRY classifier)."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from aibroker.services.llm_service import classify_provider_error
+
+# Pinned off-peak instant (deepseek's peak hours are UTC 1-3, 6-9 — see
+# providers/peak_pricing.py) so run_chat's savings-side chain reorder
+# (deprioritize_deepseek_for_savings) doesn't flip tests' expected provider
+# order depending on real wall-clock time when they happen to run.
+OFF_PEAK_AT = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 
 
 def test_classify_rate_limit():
@@ -450,6 +458,66 @@ async def test_run_chat_keeps_deepseek_flash_for_small_or_plain(monkeypatch):
         monkeypatch, big_plain, None) == ["deepseek/deepseek-v4-flash"]
 
 
+# ─── deepseek savings-side chain reorder (peak hours / big JSON) ────────────
+
+
+async def _picked_order(monkeypatch, *, messages, response_format, at):
+    """Walk run_chat with every pick returning None (chain fully walked, no
+    real call) and return the provider order actually tried — reveals whether
+    deprioritize_deepseek_for_savings reordered the chain."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picked.append(provider)
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
+        messages=messages, model=None, max_tokens=2000, temperature=0.4,
+        response_format=response_format, workflow="stepan", at=at,
+    )
+    return picked
+
+
+_TINY = [{"role": "user", "content": "hi"}]
+_HUGE_JSON = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
+
+
+async def test_run_chat_keeps_deepseek_first_off_peak_small_prompt(monkeypatch):
+    """The common case: off-peak, small/non-JSON — deepseek keeps its
+    cache-warm anchor position at the head of chat:smart."""
+    picked = await _picked_order(
+        monkeypatch, messages=_TINY, response_format=None, at=OFF_PEAK_AT)
+    assert picked == ["deepseek", "gemini"]
+
+
+async def test_run_chat_defers_deepseek_during_peak_hours_even_for_tiny_prompt(monkeypatch):
+    """2026-07-22: 63.8% of a day's deepseek cost landed in its own 2x peak
+    hours despite fewer calls than off-peak. During peak, gemini gets first
+    shot even on a prompt far too small to need the v4-pro escalation —
+    peak-hour deferral is independent of prompt size."""
+    peak_at = datetime(2026, 7, 20, 2, 30, tzinfo=UTC)  # deepseek peak hour
+    picked = await _picked_order(
+        monkeypatch, messages=_TINY, response_format=None, at=peak_at)
+    assert picked == ["gemini", "deepseek"]
+
+
+async def test_run_chat_defers_deepseek_for_big_json_even_off_peak(monkeypatch):
+    """A big-JSON prompt defers deepseek independent of time of day — it would
+    otherwise force the pricier v4-pro escalation; gemini/sambanova already
+    serve the same prompt for $0."""
+    picked = await _picked_order(
+        monkeypatch, messages=_HUGE_JSON, response_format={"type": "json_object"},
+        at=OFF_PEAK_AT)
+    assert picked == ["gemini", "deepseek"]
+
+
 # ─── per-provider retry cap ──────────────────────────────────────────────────
 
 
@@ -604,6 +672,7 @@ async def test_project_cap_downgrades_walk_to_free_not_abort(monkeypatch):
         project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
         messages=[{"role": "user", "content": "hi"}], model=None,
         max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+        at=OFF_PEAK_AT,
     )
     assert out is None                        # retryable — NOT BUDGET_EXHAUSTED
     assert ("deepseek", None) in picks        # paid tail tried, cap-blocked
@@ -1933,6 +2002,7 @@ async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
         messages=[{"role": "user", "content": "hi"}], model=None,
         max_tokens=128, temperature=0.7,
         response_format={"type": "json_object"}, workflow=None,
+        at=OFF_PEAK_AT,
     )
     assert picks.count("deepseek") == svc._MAX_EMPTY_RETRIES + 1  # capped, not 5
     assert out.provider == "gemini"
