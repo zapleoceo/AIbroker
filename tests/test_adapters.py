@@ -147,6 +147,25 @@ def test_is_deepseek_big_json_prompt_matches_the_model_upgrade_threshold():
     assert is_deepseek_big_json_prompt(None, _BIG) is False
 
 
+def test_deepseek_gray_zone_prompts_count_as_big():
+    """REGRESSION (2026-07-23): the threshold was 24k, chosen as a "safe
+    margin" below a 30k failure probe — but the 16k-30k range was never
+    measured and flash actually empties well below 24k. Live Stepan traffic:
+    median prompt 23515 chars with 11/30 sitting in the 16k-24k band, all
+    landing on flash and emptying (~27 consecutive empties at tokens_in
+    7036-7084). Anything at/above the verified-good 16k point must now route
+    to pro, so this band can't silently regress back onto flash."""
+    for size in (16_000, 20_000, 23_500):
+        msgs = [{"role": "system", "content": "x" * size}]
+        assert is_deepseek_big_json_prompt({"type": "json_object"}, msgs) is True, size
+        assert deepseek_model_for_json(
+            "deepseek/deepseek-v4-flash", {"type": "json_object"}, msgs
+        ) == "deepseek/deepseek-v4-pro", size
+    # just under the verified-good point still rides cheap flash
+    just_under = [{"role": "system", "content": "x" * 15_999}]
+    assert is_deepseek_big_json_prompt({"type": "json_object"}, just_under) is False
+
+
 def test_deepseek_model_upgrades_big_json_to_pro():
     """Big JSON prompt empties v4-flash's json_object body (DeepSeek bug); v4-pro
     handles it. The picker upgrades ONLY that case so cost is booked as pro."""

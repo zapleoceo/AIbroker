@@ -398,6 +398,26 @@
 >   calls, and hard-skipping would push that traffic to the paid tail —
 >   anthropic measured ~7x deepseek per successful reply ($0.0445 vs $0.0065),
 >   i.e. the "safety" reroute would cost more than the waste it avoids.
+>   **Threshold lowered 24k → 16k chars (2026-07-23).** The empties kept
+>   coming, and the breaker above could not fire on them: cache-sticky pick
+>   pins ALL of a project's deepseek traffic to ONE key, so a storm shows up as
+>   one key emptying repeatedly, never the 2 distinct keys the breaker needs.
+>   The actual cause was the threshold itself. 24k had been chosen as a "safe
+>   margin" under a 30k failure probe, but the 16k-30k band was never measured
+>   and flash empties far below 24k — production: flash SUCCEEDS at avg 3397
+>   prompt tokens (~11k chars) and EMPTIES at 6526-7183 (~22-24k chars). A
+>   measured batch of 30 live Stepan prompts: median 23515 chars, **11/30 in
+>   the 16k-24k band** — ~37% of traffic sitting just under the threshold,
+>   staying on flash, emptying. `_DEEPSEEK_JSON_EMPTY_CHARS` now sits at 16k,
+>   the highest size flash is actually VERIFIED to handle (4/4 OK), i.e. at
+>   evidence rather than at a guessed margin.
+>   Explicitly a STOP-GAP trading cost for reliability — that ~37% now
+>   escalates to v4-pro (3x per-token) or gets served free by the savings
+>   reorder. The real fix is caller-side: Stepan's system prompt alone is
+>   **94% of the payload** (median 22122 of 23515 chars), and trimming it under
+>   ~15k chars puts this traffic back on cheap flash entirely. Raise the
+>   constant back toward 24k only with fresh measurements — it has already been
+>   wrong in that direction once.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
