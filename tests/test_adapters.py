@@ -66,6 +66,25 @@ def test_deepseek_v4_keeps_thinking_for_huge_json_prompts():
     assert "extra_body" not in out  # thinking left at its (enabled) default
 
 
+def test_deepseek_v4_thinking_bumps_max_tokens_for_headroom():
+    """REGRESSION (2026-07-21, same day as the pro-keeps-thinking fix): at
+    Stepan's real max_tokens=2000, reasoning_content routinely ate nearly the
+    whole budget (usage_log: EmptyBody/InvalidJSON calls averaged 1662-1936
+    output tokens, right up against the 2000 cap; clean successes averaged
+    only 1202) — reasoning starves the visible JSON body of room to complete.
+    Live A/B on a real prompt (N=6, thinking enabled): mt=2000 → 1/6 bad;
+    mt=3000 → 0/6 bad AND faster (18s vs 28s avg — no truncation dead-end).
+    So the thinking-keep path raises max_tokens to the verified floor."""
+    out = _v4_kwargs(sys_chars=25_000, rf_type="json_object", mt=2000)
+    assert out["max_tokens"] == 3000
+    # a caller who already asks for MORE than the floor keeps their own value
+    out = _v4_kwargs(sys_chars=25_000, rf_type="json_object", mt=5000)
+    assert out["max_tokens"] == 5000
+    # thinking disabled (below the size/mt gates) → max_tokens left untouched
+    out = _v4_kwargs(sys_chars=5_000, rf_type="json_object", mt=2000)
+    assert out["max_tokens"] == 2000
+
+
 def test_deepseek_v4_disables_thinking_below_the_size_or_mt_gates():
     # small prompt → disabled even for json
     assert _v4_kwargs(sys_chars=5_000, rf_type="json_object", mt=2000)[

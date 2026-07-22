@@ -69,6 +69,19 @@ class _AnthropicAdapter(ProviderAdapter):
 _DEEPSEEK_JSON_EMPTY_CHARS = 24_000
 _DEEPSEEK_THINKING_MT_FLOOR = 1_000
 
+# On the thinking-keep path, reasoning_content shares max_tokens with the
+# visible JSON body — at Stepan's real max_tokens=2000 the reasoning pass
+# routinely eats nearly the whole budget (usage_log: EmptyBody/InvalidJSON
+# calls averaged 1662-1936 output tokens, right up against the 2000 cap;
+# clean successes averaged only 1202). Live A/B on job 75792's real prompt
+# (N=6 each, thinking enabled): mt=2000 → 1/6 bad, ~28s avg, 38s max;
+# mt=3000 → 0/6 bad, ~18s avg, 24s max (headroom removes the truncation AND
+# is FASTER — no retry-inducing dead end); mt=4000 → 1/6 bad again, higher
+# latency (not monotonic, no reason to go further). This floor only RAISES a
+# caller's max_tokens on the thinking-keep path, never lowers it — comfortably
+# under the 60s call timeout and the 90s chat:smart client budget either way.
+_DEEPSEEK_THINKING_HEADROOM_TOKENS = 3_000
+
 
 def _prompt_chars(messages: list[dict[str, Any]]) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
@@ -148,6 +161,9 @@ class _DeepseekAdapter(ProviderAdapter):
             if not keep_thinking:
                 kwargs.setdefault("extra_body", {}).setdefault(
                     "thinking", {"type": "disabled"})
+            else:
+                kwargs["max_tokens"] = max(
+                    kwargs.get("max_tokens", 0), _DEEPSEEK_THINKING_HEADROOM_TOKENS)
 
 
 class _CerebrasAdapter(ProviderAdapter):
