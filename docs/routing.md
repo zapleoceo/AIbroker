@@ -336,6 +336,23 @@
 >   empty-body bug outright. Lesson: a single small-N test on one prompt SHAPE
 >   doesn't generalize across prompt shapes (flat vs multi-turn) — this one
 >   needed real production traffic to catch.
+>   **max_tokens headroom (same day, hours later still):** with thinking kept,
+>   real prod calls still showed EmptyBody/InvalidJSON at Stepan's
+>   max_tokens=2000 — reasoning_content shares the SAME token budget as the
+>   visible JSON body, and usage_log showed the bad calls averaging 1662-1936
+>   output tokens (right up against the 2000 cap) vs 1202 for clean successes:
+>   reasoning was eating nearly the whole budget, starving the JSON. Live A/B
+>   on the same real prompt (N=6, thinking on): mt=2000 → 1/6 bad, ~28s avg,
+>   38s max; **mt=3000 → 0/6 bad, ~18s avg, 24s max** (headroom removes the
+>   truncation AND is faster — no retry-inducing dead end); mt=4000 → 1/6 bad
+>   again, higher latency (not monotonic, no reason to push further). The
+>   adapter now raises `max_tokens` to 3000 on the thinking-keep path
+>   (`_DEEPSEEK_THINKING_HEADROOM_TOKENS`) — only ever UP, never overriding a
+>   caller who already asks for more. Comfortably under the 60s call timeout
+>   and the 90s chat:smart client budget either way, so no timeout knob
+>   needed. Three fixes in one day for the same root cause (thinking-keep →
+>   thinking-uniform-across-v4 → max_tokens headroom) — each one caught by
+>   real prod traffic, not the prior test.
 > - **gemini `chat:smart` `2.5-pro` → `2.5-flash`**: 2.5-pro's free tier
 >   (~50-100 RPD/5 RPM) 429'd ~100% under smart volume (4096 err / 0 ok in 3d);
 >   2.5-flash (~250 RPD/10 RPM ≈ 2000/day across our keys) serves it for free.
