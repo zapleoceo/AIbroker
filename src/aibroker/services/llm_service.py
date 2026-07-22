@@ -79,6 +79,13 @@ _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
 # must not burn every key of the provider.
 _MAX_EMPTY_RETRIES = 1
 
+# Distinct keys of one provider that must return an empty body inside the
+# breaker window before we treat it as a provider-side degradation and try the
+# free tier ahead of it. 2 keys (not 1) so a single flaky key doesn't reorder
+# the chain — an empty body is billed but not fatal, and the provider still
+# answers most calls.
+_EMPTY_STORM_MIN_KEYS = 2
+
 # Absolute runaway backstop on provider-call attempts for a single request.
 # The real budget is dynamic — sum of per-provider key allowances across the
 # actual chain (see `_attempt_budget`), so every provider (incl. the paid tail)
@@ -371,6 +378,12 @@ async def _record_json_miss(
         http_status=200,
     )
     if empty:
+        # Feed the selection-side breaker: an empty body is BILLED (input
+        # charged, no answer), so a provider emitting them across several keys
+        # is a degradation worth routing around — run_chat tries the FREE tier
+        # first while it lasts (see circuit.providers_in_empty_storm for why
+        # this defers rather than hard-skips).
+        circuit.note_empty_body(provider, key.id)
         return _Flow.NEXT_KEY_EMPTY  # run_chat bounds this via _MAX_EMPTY_RETRIES
     log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
     return _Flow.NEXT_PROVIDER  # next provider, not next key of the same model
@@ -559,9 +572,17 @@ async def run_chat(
     # yet more cost) — free providers already validated on the same big
     # prompts, so give them first shot and only escalate to deepseek when
     # free genuinely fails. No reliability cost: deepseek stays the fallback.
+    # Third trigger (2026-07-22): a provider-side EMPTY-BODY degradation. Empty
+    # bodies are billed for no answer, and DeepSeek's evening degradation ran
+    # hours (0% empty 11:00-19:00 UTC, then 34-46% on BOTH v4 models while a
+    # trivial short prompt still answered — long-context generation buckling
+    # under provider load). Free providers were serving the same traffic fine
+    # throughout (sambanova: 111 successes at $0 during the storm), so try them
+    # first while it lasts. Deferral, not a skip — see providers_in_empty_storm.
     should_defer_deepseek = (
         peak_multiplier("deepseek", at) > 1.0
         or is_deepseek_big_json_prompt(response_format, messages)
+        or "deepseek" in circuit.providers_in_empty_storm(_EMPTY_STORM_MIN_KEYS)
     )
     full_chain = deprioritize_deepseek_for_savings(
         full_chain, should_defer=should_defer_deepseek)
