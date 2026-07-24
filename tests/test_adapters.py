@@ -1,6 +1,8 @@
 """Per-provider adapters — request-shape quirks + per-key extras."""
 from __future__ import annotations
 
+import json
+
 from aibroker.providers.adapters import (
     ProviderAdapter,
     adapter_for,
@@ -231,6 +233,85 @@ def test_anthropic_leaves_real_json_schema_and_no_format_alone():
     # a caller-supplied json_schema is already tool-use-capable — don't touch it
     assert _prepared("anthropic", response_format=dict(_SCHEMA))["response_format"] == _SCHEMA
     assert "response_format" not in _prepared("anthropic")
+
+
+# The exact decision-shaped payload the live chat:sales measurement used —
+# Unicode included, so the unwrap's re-serialization is proven byte-safe for
+# Bahasa/Cyrillic replies.
+_DECISION = {"reply": "Halo kak! Paket sosmed bisa mulai dari 2jt — насчёт скидки уточню.",
+             "reply_language": "id", "move": "handle_objection",
+             "stage": "negotiation", "dossier": {"budget_signal": "2jt/bulan"}}
+_JSON_OBJ = {"type": "json_object"}
+
+
+def _normalized(text: str, rf: dict | None = _JSON_OBJ) -> str:
+    return adapter_for("anthropic").normalize_json_text(text, rf)
+
+
+def test_anthropic_unwraps_tool_call_envelope():
+    """REGRESSION (2026-07-24): Claude's forced-tool JSON mode (the permissive
+    json_schema upgrade above) intermittently returns the tool INPUT wrapped in
+    a function-call envelope — {"parameters": {...caller's fields...}} — and
+    litellm passes it through verbatim (it unwraps only a "values" wrapper,
+    litellm#6741). Measured live on chat:sales (sonnet-5, ~22k-token system
+    prompt): ~half of replies enveloped; stepan2 PR #13 had to unwrap
+    client-side. The broker unwraps ALL known envelope keys so every caller
+    of the anthropic JSON path gets the clean body."""
+    for key in ("parameters", "arguments", "input"):
+        out = _normalized(json.dumps({key: _DECISION}))
+        assert json.loads(out) == _DECISION, key
+    # Unicode survives readable (ensure_ascii=False), not \u-escaped
+    assert "насчёт" in _normalized(json.dumps({"parameters": _DECISION},
+                                              ensure_ascii=False))
+
+
+def test_anthropic_leaves_clean_json_body_alone():
+    """The good half of live traffic — flat schema-shaped JSON — must pass
+    through byte-identical (no reserialization, no key reordering)."""
+    clean = json.dumps(_DECISION, ensure_ascii=False)
+    assert _normalized(clean) == clean
+    # json_schema requests get the same guarantee
+    assert _normalized(clean, dict(_SCHEMA)) == clean
+
+
+def test_anthropic_unwrap_is_json_requests_only():
+    """A plain-text request that happens to LOOK like an envelope is the
+    caller's own content — never touched."""
+    enveloped = json.dumps({"parameters": _DECISION})
+    assert _normalized(enveloped, None) == enveloped
+    assert _normalized(enveloped, {"type": "text"}) == enveloped
+
+
+def test_anthropic_unwrap_requires_unambiguous_envelope_shape():
+    """Only an object with EXACTLY one known envelope key holding an object is
+    unwrapped — anything else is presumed to be the caller's real payload."""
+    for text in (
+        "not json at all",
+        json.dumps([_DECISION]),                          # array, not object
+        json.dumps({"parameters": "just a string"}),      # inner not an object
+        json.dumps({"parameters": _DECISION, "extra": 1}),  # sibling key
+        json.dumps({"reply": "flat", "input": {"a": 1}}),   # envelope key not alone
+    ):
+        assert _normalized(text) == text
+
+
+def test_anthropic_unwrap_respects_schema_declared_fields():
+    """A caller whose OWN json_schema declares a top-level "input"/"parameters"
+    object must get it back untouched — the schema proves it's payload, not an
+    envelope."""
+    rf = {"type": "json_schema", "json_schema": {"name": "r", "schema": {
+        "type": "object", "properties": {"input": {"type": "object"}}}}}
+    body = json.dumps({"input": {"a": 1}})
+    assert _normalized(body, rf) == body
+
+
+def test_default_adapter_normalize_json_text_is_noop():
+    """Envelope unwrap is anthropic-scoped: other providers' bodies pass
+    through even when they look enveloped."""
+    enveloped = json.dumps({"parameters": _DECISION})
+    for provider in ("deepseek", "gemini", "groq", "nonexistent"):
+        assert adapter_for(provider).normalize_json_text(
+            enveloped, _JSON_OBJ) == enveloped, provider
 
 
 def test_schema_capable_providers_keep_json_schema():

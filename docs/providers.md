@@ -35,6 +35,31 @@ local routing policy (`stepan_shared/llm/routing.py`) is a *separate*,
 provider-direct fallback used only when `llm_backend=local` — it does not
 route through this broker and does not see anthropic.
 
+## Anthropic JSON mode — tool-call envelope unwrap (2026-07-24)
+
+Claude has no native `json_object` mode: the anthropic adapter upgrades it to
+a permissive `json_schema`, which LiteLLM serves via a **forced tool call**
+(`json_tool_call`) and converts back to plain content. Sonnet 5 intermittently
+emits the tool *input* wrapped in a generic function-call envelope —
+`{"parameters": {…the caller's actual fields…}}` — instead of the object
+itself, and LiteLLM forwards that envelope verbatim (its conversion unwraps
+only a `"values"` wrapper, litellm#6741). Measured live on `chat:sales`
+(sonnet-5, ~22k-token system prompt, `json_object`): **~half** of replies
+arrived enveloped; stepan2 had to unwrap client-side (its PR #13) before the
+broker-side fix landed.
+
+`ProviderAdapter.normalize_json_text(text, response_format)` is the
+post-response twin of `prepare`: a no-op by default, overridden for anthropic
+to unwrap ONE envelope level. `call_llm` applies it right after content
+extraction — before the JSON gate, `record_usage`, and the response cache — so
+every caller of the anthropic JSON path receives the clean body. Unwrap fires
+only on an unambiguous shape: a JSON request whose body is an object with
+exactly one key from `parameters`/`arguments`/`input` holding an object, and
+that key is not declared by the caller's own `json_schema` properties (a
+schema legitimately asking for a top-level `"input"` object is returned
+untouched). Everything else — plain-text requests, arrays, sibling keys,
+non-object inners — passes through byte-identical.
+
 ## Prompt caching (2026-07-01, wired end-to-end 2026-07-02)
 
 `apply_prompt_cache(model, messages)` marks the first system message with

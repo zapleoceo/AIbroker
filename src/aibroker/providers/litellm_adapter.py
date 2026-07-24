@@ -395,7 +395,8 @@ async def call_llm(
     # Per-provider request quirks (json_schema downgrade, gemini thinking-off,
     # …) live in one adapter each — see providers/adapters.py. adapter.prepare
     # mutates kwargs in place; the default adapter is a no-op.
-    adapter_for(model.split("/", 1)[0]).prepare(model, kwargs)
+    adapter = adapter_for(model.split("/", 1)[0])
+    adapter.prepare(model, kwargs)
     if extra:
         kwargs.update(extra)
 
@@ -425,6 +426,10 @@ async def call_llm(
             text = getattr(msg, "content", "") or ""
     else:
         text = ""
+    # JSON-mode response normalization (anthropic's forced-tool envelope
+    # unwrap) — `response_format` here is the CALLER's original ask, not the
+    # adapter-rewritten kwargs value, so the hook keys off intent.
+    text = adapter.normalize_json_text(text, response_format)
     usage = getattr(resp, "usage", None) or {}
     if isinstance(usage, dict):
         tokens_in = usage.get("prompt_tokens", 0) or 0
