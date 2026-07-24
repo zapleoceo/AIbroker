@@ -247,9 +247,19 @@ docker compose up -d
 
 | Secret | Notes |
 |---|---|
-| `HETZNER_HOST` | `195.201.31.49` |
-| `HETZNER_PORT` | `9617` |
+| `HETZNER_HOST` | origin server IP — value lives ONLY in the GitHub secret, never in this repo (see note below) |
+| `HETZNER_PORT` | non-standard SSH port — same, secret-only |
 | `HETZNER_SSH_KEY` | the restricted private key (`aibroker_gh_deploy`) |
+
+> **Why the host/port are not written here (2026-07-24):** this repository is
+> PUBLIC. The origin sits behind Cloudflare, so publishing the origin IP undoes
+> that protection entirely — anyone can then reach nginx directly
+> (`curl -H 'Host: aib.zapleo.com' http://<origin-ip>/…`) and bypass
+> Cloudflare's WAF, DDoS protection and rate limiting, plus probe SSH on the
+> non-standard port. The values were committed here previously, so they must be
+> treated as permanently public (git history keeps them) — the durable fix is
+> the firewall: allow :80 only from Cloudflare's published ranges, so a direct
+> origin request is dropped even by someone who knows the IP.
 | `TELEGRAM_BOT_TOKEN_VERA` | optional, for failure alerts |
 | `OWNER_TELEGRAM_ID` | optional, for failure alerts |
 
