@@ -32,8 +32,8 @@ from aibroker.services import (
 # solves). chat:deep is included (it's a run_chat capability) and is the one
 # capability that is async-ONLY.
 _JOB_CAPABILITIES = frozenset({
-    "chat:fast", "chat:smart", "chat:code", "chat:edit", "chat:deep",
-    "structured", "prefilter", "translate", "vision",
+    "chat:fast", "chat:smart", "chat:sales", "chat:code", "chat:edit",
+    "chat:deep", "structured", "prefilter", "translate", "vision",
 })
 
 router = APIRouter(tags=["proxy"])

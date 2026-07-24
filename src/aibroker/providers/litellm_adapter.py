@@ -92,6 +92,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # flash-lite quota is reachable only while the key itself is not cooling.
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
                "chat:smart": "gemini/gemini-2.5-flash",
+               "chat:sales": "gemini/gemini-2.5-flash",
                "chat:code": "gemini/gemini-2.5-flash",
                "chat:edit": "gemini/gemini-2.5-flash",
                "prefilter": "gemini/gemini-2.5-flash-lite",
@@ -114,6 +115,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # deepseek-coder is gone → chat:code also uses v4-flash.
     "deepseek": {"chat:fast": "deepseek/deepseek-v4-flash",
                  "chat:smart": "deepseek/deepseek-v4-flash",
+                 "chat:sales": "deepseek/deepseek-v4-flash",
                  "chat:edit": "deepseek/deepseek-v4-flash",
                  "chat:code": "deepseek/deepseek-v4-flash"},
     # 2026-07-16: openai/gpt-oss-120b:free DELISTED by OpenRouter (404
@@ -136,8 +138,13 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # tolerates the broker's temperature=0.7 (drop_params strips it — sonnet-5
     # rejects non-default sampling params). chat:fast/structured stay on
     # haiku-4-5 (fast tier, unrelated to Coach).
+    # 2026-07-23: chat:sales → claude-sonnet-5. Stepan2's "smart LLM sales" lane
+    # leads with Sonnet (strongest open-ended persuasion), billed on its own
+    # $5/day key. Same model as chat:smart's anthropic tail; a distinct
+    # capability so the sales lane's ordering/caps are independent.
     "anthropic": {"chat:fast": "anthropic/claude-haiku-4-5",
                   "chat:smart": "anthropic/claude-sonnet-5",
+                  "chat:sales": "anthropic/claude-sonnet-5",
                   "chat:code": "anthropic/claude-sonnet-5",
                   "chat:edit": "anthropic/claude-sonnet-5",
                   "structured": "anthropic/claude-haiku-4-5",
@@ -193,6 +200,7 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # doesn't need deepseek depth). MiniMax-M2.7 exists but is payment-gated for us.
     "sambanova": {"chat:fast": "sambanova/Meta-Llama-3.3-70B-Instruct",
                   "chat:smart": "sambanova/DeepSeek-V3.2",
+                  "chat:sales": "sambanova/DeepSeek-V3.2",
                   "chat:code": "sambanova/DeepSeek-V3.2",
                   "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
     # 2026-07-10: GitHub Models REMOVED entirely. Its free tier is tiny (~150

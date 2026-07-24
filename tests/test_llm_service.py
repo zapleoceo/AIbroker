@@ -508,6 +508,50 @@ async def test_run_chat_defers_deepseek_during_peak_hours_even_for_tiny_prompt(m
     assert picked == ["gemini", "deepseek"]
 
 
+async def _picked_order_for(monkeypatch, chain, *, messages, response_format, at):
+    """Like _picked_order but over an arbitrary chain (every pick returns None,
+    so the whole chain is walked and recorded in order)."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picked.append(provider)
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: list(chain))
+    await svc.run_chat(
+        project=SimpleNamespace(id=4, name="stepan2"), capability="chat:sales",
+        messages=messages, model=None, max_tokens=2000, temperature=0.4,
+        response_format=response_format, workflow="reply", at=at,
+    )
+    return picked
+
+
+_SALES_CHAIN = ["anthropic", "deepseek", "gemini", "sambanova"]
+
+
+async def test_run_chat_sales_leads_with_anthropic_off_peak(monkeypatch):
+    """chat:sales must open on anthropic Sonnet — the whole point of the lane."""
+    picked = await _picked_order_for(
+        monkeypatch, _SALES_CHAIN, messages=_TINY, response_format=None, at=OFF_PEAK_AT)
+    assert picked[0] == "anthropic"
+
+
+async def test_run_chat_sales_keeps_anthropic_first_during_peak_and_big_json(monkeypatch):
+    """Even when the savings reorder fires (deepseek peak hour AND a big JSON
+    prompt), anthropic keeps the lead — only deepseek sinks below the free
+    tail. Regression guard for the Sonnet-first requirement."""
+    peak_at = datetime(2026, 7, 20, 2, 30, tzinfo=UTC)  # deepseek peak hour
+    picked = await _picked_order_for(
+        monkeypatch, _SALES_CHAIN, messages=_HUGE_JSON,
+        response_format={"type": "json_object"}, at=peak_at)
+    assert picked[0] == "anthropic"                       # premium lead intact
+    assert picked == ["anthropic", "gemini", "sambanova", "deepseek"]
+
+
 async def test_run_chat_defers_deepseek_during_empty_body_storm(monkeypatch):
     """2026-07-22: DeepSeek's evening degradation emptied 34-46% of calls on
     BOTH v4 models for hours (billed input, no answer) while free providers

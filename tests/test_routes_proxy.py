@@ -641,6 +641,20 @@ async def test_jobs_submit_requires_capability_scope():
     assert r.status_code == 403
 
 
+async def test_jobs_submit_accepts_chat_sales_as_a_job_capability():
+    """chat:sales (Stepan2's Sonnet-first sales lane) is a real async-job
+    capability gated on llm:chat — a project WITHOUT llm:chat is rejected at
+    the scope gate (403), not bounced as an unknown capability (400). Proves
+    the route recognizes it and gates it on the shared llm:chat scope."""
+    plain, _ = await _make_project(["llm:embed"])  # no llm:chat
+    r = client.post(
+        "/v1/jobs?capability=chat:sales",
+        headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 403  # gated on scope, NOT 400 unknown-capability
+
+
 async def test_jobs_poll_404_for_unknown_job():
     plain, _ = await _make_project(["llm:chat"])
     r = client.get("/v1/jobs/999999", headers={"X-Project-Key": plain})

@@ -13,6 +13,7 @@ from typing import Literal
 Capability = Literal[
     "chat:fast",
     "chat:smart",
+    "chat:sales",
     "chat:code",
     "chat:edit",
     "chat:deep",
@@ -90,6 +91,24 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
         "gemini",
         "sambanova",
         "anthropic", "openai",
+    ],
+    # 2026-07-23: Stepan2's "smart LLM, no rigid script" sales mode. Owner-
+    # approved deliberate exception to free-first (like deepseek in chat:smart):
+    # ANTHROPIC SONNET LEADS because it's the strongest model for open-ended
+    # persuasive replies, and it is billed on its own $5/day key. deepseek is
+    # the cheap paid fallback if Sonnet's cap is spent; gemini/sambanova are the
+    # free tail after that. openai deliberately NOT wired here (owner: reserve
+    # the paid budget for Sonnet, not a second premium tier). anthropic keeps
+    # its lead through deprioritize_for_json (it's JSON-reliable, never sunk)
+    # AND deprioritize_deepseek_for_savings (which only ever moves deepseek and
+    # the free tail — providers AHEAD of deepseek are never touched). Prompt
+    # caching pays off here: apply_prompt_cache marks the (large, stable) system
+    # prefix and _CACHE_STICKY_PROVIDERS already pins anthropic per-project so
+    # the cache stays warm across replies.
+    "chat:sales": [
+        "anthropic",
+        "deepseek",
+        "gemini", "sambanova",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
@@ -192,6 +211,15 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
 CAPABILITY_SCOPE: dict[Capability, str] = {
     "chat:fast": "llm:chat",
     "chat:smart": "llm:chat",
+    # chat:sales reuses llm:chat rather than a dedicated scope: every provider in
+    # its chain (anthropic/deepseek/gemini/sambanova) already carries llm:chat,
+    # and stepan2 already holds it — so the lane works with ZERO key/project
+    # re-scoping and no risk of a mis-scoped key silently dropping out of the
+    # chain. Client picks the lane per-request via ?capability=chat:sales; cost
+    # is bounded by the Sonnet key's own daily cap, not by scope gating. (If a
+    # truly reserved/gated lane is ever wanted, swap this to a new "llm:sales"
+    # scope and add it to stepan2 + each chain key's scopes.)
+    "chat:sales": "llm:chat",
     "chat:code": "llm:chat",
     "chat:edit": "llm:edit",
     "chat:deep": "llm:deep",
@@ -322,12 +350,20 @@ def deprioritize_deepseek_for_savings(chain: list[str], *, should_defer: bool) -
     prompts for $0 in testing — giving them first shot before paying either
     surcharge, escalating to deepseek only when free genuinely fails, is pure
     savings with no reliability cost (deepseek stays the fallback anchor, not
-    removed)."""
+    removed).
+
+    Only deepseek and the providers AFTER it move: anything deliberately placed
+    AHEAD of deepseek (chat:sales leads with anthropic Sonnet) keeps its lead —
+    the free tail is promoted past deepseek, deepseek sinks below it, and the
+    prefix is untouched. So this is safe to apply to every chain: it can never
+    demote a leading premium provider, only reorder deepseek vs the free tail
+    that already trailed it."""
     if not should_defer or "deepseek" not in chain:
         return chain
     idx = chain.index("deepseek")
-    if not any(p not in PAID_PROVIDERS for p in chain[idx + 1:]):
+    prefix, suffix = chain[:idx], chain[idx + 1:]
+    free_after = [p for p in suffix if p not in PAID_PROVIDERS]
+    if not free_after:
         return chain  # no free provider follows deepseek — nothing to gain
-    free = [p for p in chain if p != "deepseek" and p not in PAID_PROVIDERS]
-    paid = [p for p in chain if p != "deepseek" and p in PAID_PROVIDERS]
-    return [*free, "deepseek", *paid]
+    paid_after = [p for p in suffix if p in PAID_PROVIDERS]
+    return [*prefix, *free_after, "deepseek", *paid_after]
