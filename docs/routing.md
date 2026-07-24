@@ -108,6 +108,35 @@
 > first non-system message, non-str/list content stays untouched, and the
 > function remains a no-op for non-anthropic providers.
 >
+> **2026-07-23 (prompt-cache: cache the HISTORY too, not just the system
+> prefix)**: the placement above wasted breakpoints and never cached the
+> dialogue. A breakpoint prefix-caches *everything before it*, so marking each
+> leading system message separately cached nothing extra — meanwhile the
+> conversation history was re-billed at full input price on **every turn**.
+> Now `apply_prompt_cache` places at most **two** breakpoints: one at the END
+> of the leading system run (caches the whole static prefix, however many
+> messages it spans) and one ROLLING breakpoint at the END of the conversation
+> (so next turn `[system + prior history]` is a cache read and only the new
+> message is fresh). Measured live on Sonnet with a real 51k-char Stepan system
+> prefix, each arm warmed independently — cache_read tokens on the next turn:
+>
+> | history | old (system-only) | new (system + history) | cost |
+> |---|---|---|---|
+> | 1k chars | 21205 | 21696 (+491) | **−14%** |
+> | 10k chars | 21205 | 26016 (+4811) | **−58%** |
+>
+> The gain scales with history length — i.e. exactly the long multi-turn sales
+> chat and backlog-reprocessing case. A small increment still caches (491
+> tokens is under anthropic's ~2048 minimum) because it *extends* the already
+> cached system prefix instead of standing alone. Same guards as before:
+> non-str/empty content is never marked, no-op for non-anthropic providers.
+>
+> Measurement footgun worth remembering: the first three A/B attempts compared
+> old-against-old, because the test imported `apply_prompt_cache` from the
+> deployed container (still running the old code) — only inspecting litellm's
+> transformed request body exposed it. When A/B-ing a not-yet-deployed change,
+> define BOTH arms in the test script.
+>
 > **2026-07-12 (PROVIDER-level affinity — considered, deliberately NOT
 > built)**: after the same-day key-level cache-affinity note below, the next
 > obvious step was pinning a whole (project → provider) pair. Rejected: the
