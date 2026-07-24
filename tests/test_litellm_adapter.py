@@ -28,16 +28,25 @@ def test_drop_params_enabled():
     assert litellm.drop_params is True
 
 
-def test_apply_prompt_cache_marks_anthropic_system():
+def _marked(msg: dict) -> bool:
+    c = msg["content"]
+    return isinstance(c, list) and c[0].get("cache_control") == {"type": "ephemeral"}
+
+
+def test_apply_prompt_cache_marks_system_prefix_end_and_history_end():
     from aibroker.providers.litellm_adapter import apply_prompt_cache
     msgs = [{"role": "system", "content": "big stable prompt"},
             {"role": "user", "content": "hi"}]
     out = apply_prompt_cache("anthropic/claude-haiku-4-5", msgs)
+    # breakpoint 1: end of the system prefix (whole static prefix cached)
     sysblk = out[0]["content"]
     assert isinstance(sysblk, list)
     assert sysblk[0]["cache_control"] == {"type": "ephemeral"}
     assert sysblk[0]["text"] == "big stable prompt"
-    assert out[1] == {"role": "user", "content": "hi"}   # user untouched
+    # breakpoint 2 (NEW): the last turn — the rolling history breakpoint, so
+    # next turn the whole [system + this turn] prefix is a cache read
+    assert _marked(out[1])
+    assert out[1]["content"][0]["text"] == "hi"
 
 
 def test_apply_prompt_cache_noop_for_other_providers():
@@ -48,45 +57,58 @@ def test_apply_prompt_cache_noop_for_other_providers():
     assert apply_prompt_cache("deepseek/deepseek-chat", msgs) == msgs
 
 
-def _marked(msg: dict) -> bool:
-    c = msg["content"]
-    return isinstance(c, list) and c[0].get("cache_control") == {"type": "ephemeral"}
-
-
-def test_apply_prompt_cache_marks_every_leading_system():
+def test_apply_prompt_cache_one_breakpoint_for_the_whole_system_prefix():
+    """A breakpoint prefix-caches everything before it, so ONE mark on the LAST
+    leading system message caches the entire multi-message system prefix — the
+    earlier system messages are NOT individually marked (that used to burn a
+    slot each for zero extra caching). The freed slot goes to the history."""
     from aibroker.providers.litellm_adapter import apply_prompt_cache
-    # no system → unchanged
-    assert apply_prompt_cache("anthropic/x", [{"role": "user", "content": "a"}]) == [
-        {"role": "user", "content": "a"}]
-    # Stepan sends its static prefix as SEVERAL leading system messages —
-    # all of them must be marked so the whole prefix bills as a cache read.
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "one"},
         {"role": "system", "content": "two"},
         {"role": "user", "content": "hi"}])
-    assert _marked(out[0]) and _marked(out[1])
-    assert out[2] == {"role": "user", "content": "hi"}
+    assert not _marked(out[0])            # earlier system msg: NOT marked
+    assert _marked(out[1])                # end of system prefix: marked
+    assert _marked(out[2])                # rolling history end: marked
 
 
-def test_apply_prompt_cache_caps_marks_at_four():
-    from aibroker.providers.litellm_adapter import (
-        _MAX_CACHE_MARKS,
-        apply_prompt_cache,
-    )
+def test_apply_prompt_cache_all_system_uses_a_single_breakpoint():
+    """6 leading system messages, no history → the system-prefix-end and the
+    history-end coincide on the last message, so exactly ONE breakpoint is
+    placed (was 4 under the old one-per-message cap)."""
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": f"s{i}"} for i in range(6)])
-    assert [_marked(m) for m in out] == [True] * _MAX_CACHE_MARKS + [False, False]
+    assert [_marked(m) for m in out] == [False] * 5 + [True]
 
 
-def test_apply_prompt_cache_run_stops_at_first_non_system():
+def test_apply_prompt_cache_rolling_history_grows_with_the_dialogue():
+    """The history breakpoint tracks the LAST message each turn, so a longer
+    multi-turn dialogue caches more of itself — the multi-turn sales win."""
+    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"}])
+    assert _marked(out[0])                # system prefix end
+    assert not _marked(out[1]) and not _marked(out[2])   # mid-history untouched
+    assert _marked(out[3])                # newest turn = rolling breakpoint
+
+
+def test_apply_prompt_cache_history_end_marked_even_after_a_late_system():
+    """The leading-system-run breakpoint stops at the first non-system message,
+    but the rolling history breakpoint is the LAST message overall — so a
+    system message that appears late still gets the history mark (it's the end
+    of the conversation), while the mid-dialogue user turn stays untouched."""
     from aibroker.providers.litellm_adapter import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "head"},
         {"role": "user", "content": "hi"},
-        {"role": "system", "content": "late"}])   # after the head run → untouched
-    assert _marked(out[0])
-    assert out[1] == {"role": "user", "content": "hi"}
-    assert out[2] == {"role": "system", "content": "late"}
+        {"role": "system", "content": "late"}])
+    assert _marked(out[0])                          # system prefix end (head)
+    assert out[1] == {"role": "user", "content": "hi"}   # mid-history untouched
+    assert _marked(out[2])                          # last message = history end
 
 
 def test_apply_prompt_cache_skips_nonstr_and_empty_in_head():
