@@ -6,14 +6,18 @@ JSON, some need a per-account URL. Left inline in `call_llm`, each quirk was
 another `if provider == …` branch; here each lives in ONE adapter, so adding a
 provider's quirk is a new class, not an edit to the shared call path.
 
-An adapter has two hooks, both no-op by default:
+An adapter has three hooks, all no-op by default:
   - `prepare(model, kwargs)` — mutate the outgoing LiteLLM kwargs (request-shape
     quirks: response_format downgrade, reasoning_effort). Stateless.
+  - `normalize_json_text(text, response_format)` — normalize a JSON-mode
+    response body before it reaches the caller (anthropic's tool-call envelope
+    unwrap). Stateless.
   - `key_extra(account_id)` — per-KEY kwargs beyond model/api_key (cloudflare's
     account-scoped api_base). Takes state from the specific key.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -22,6 +26,11 @@ class ProviderAdapter:
 
     def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         return None
+
+    def normalize_json_text(
+        self, text: str, _response_format: dict[str, Any] | None
+    ) -> str:
+        return text
 
     def key_extra(self, account_id: str | None) -> dict[str, Any] | None:
         return None
@@ -39,7 +48,51 @@ class _GeminiAdapter(ProviderAdapter):
         kwargs["reasoning_effort"] = "disable"
 
 
+# Claude's forced-tool JSON mode (the json_schema path below) sometimes emits
+# the tool INPUT wrapped in a generic function-call envelope — the whole
+# schema-shaped object nested under a single "parameters" (also seen from
+# other models as "arguments"/"input") key — instead of the object itself.
+# LiteLLM passes that envelope through verbatim (its json-mode conversion
+# unwraps only a "values" wrapper, litellm#6741), so the caller received
+# {"parameters": {...their fields...}}. Measured live on chat:sales
+# (sonnet-5, ~22k-token system prompt, json_object): ~half of replies came
+# enveloped (client-side measurement, stepan2 PR #13 worked around it there).
+# Broker-side is the right place to normalize — every caller of the anthropic
+# JSON path gets clean bodies, not just the one client that patched itself.
+_TOOL_ENVELOPE_KEYS = frozenset({"parameters", "arguments", "input"})
+
+
 class _AnthropicAdapter(ProviderAdapter):
+    def normalize_json_text(
+        self, text: str, _response_format: dict[str, Any] | None
+    ) -> str:
+        # Unwrap ONE envelope level, only when the shape is unambiguous: a JSON
+        # request whose body is an object with EXACTLY one key from the known
+        # envelope set, holding an object — and that key is NOT a field the
+        # caller's own schema declares (a schema legitimately asking for a
+        # top-level "input" object must never be unwrapped).
+        rf_type = str((_response_format or {}).get("type", ""))
+        if not rf_type.startswith("json"):
+            return text
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return text
+        if not (isinstance(data, dict) and len(data) == 1):
+            return text
+        ((key, inner),) = data.items()
+        if key not in _TOOL_ENVELOPE_KEYS or not isinstance(inner, dict):
+            return text
+        if key in self._declared_properties(_response_format):
+            return text
+        return json.dumps(inner, ensure_ascii=False)
+
+    @staticmethod
+    def _declared_properties(response_format: dict[str, Any] | None) -> frozenset[str]:
+        schema = ((response_format or {}).get("json_schema") or {}).get("schema") or {}
+        props = schema.get("properties") if isinstance(schema, dict) else None
+        return frozenset(props) if isinstance(props, dict) else frozenset()
+
     def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
         # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
         # (litellm silently drops the unsupported param), so with only a prompt

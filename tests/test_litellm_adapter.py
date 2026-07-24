@@ -1,6 +1,7 @@
 """providers/litellm_adapter — call_llm + embed wrappers (mocked LiteLLM)."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -323,6 +324,55 @@ async def test_call_llm_forwards_json_schema_verbatim():
         )
     assert captured["response_format"] == schema        # byte-for-byte, incl. strict
     assert captured["response_format"]["json_schema"]["strict"] is True
+
+
+def _fake_json_resp(content: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content),
+                                 finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+
+
+async def test_call_llm_unwraps_anthropic_tool_envelope():
+    """REGRESSION (2026-07-24, chat:sales live measurement): sonnet-5 in
+    litellm's forced-tool JSON mode intermittently returns the whole reply
+    wrapped as {"parameters": {...}} — ~half of live chat:sales turns — and
+    litellm forwards the envelope verbatim. call_llm must hand the caller the
+    INNER object, so clients don't each have to unwrap (stepan2 PR #13)."""
+    enveloped = '{"parameters": {"reply": "Halo kak!", "move": "give_value"}}'
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=_fake_json_resp(enveloped))):
+        text, _ = await call_llm(
+            model="anthropic/claude-sonnet-5",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"},
+        )
+    assert json.loads(text) == {"reply": "Halo kak!", "move": "give_value"}
+
+
+async def test_call_llm_keeps_anthropic_clean_json_and_other_providers():
+    """Both live variants: a flat (non-enveloped) anthropic body passes through
+    unchanged, and a non-anthropic provider's envelope-looking body is never
+    touched (the unwrap is scoped to the provider that has the quirk)."""
+    clean = '{"reply": "Halo!", "move": "give_value"}'
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=_fake_json_resp(clean))):
+        text, _ = await call_llm(
+            model="anthropic/claude-sonnet-5",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"},
+        )
+    assert text == clean
+    enveloped = '{"parameters": {"reply": "Halo!"}}'
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(return_value=_fake_json_resp(enveloped))):
+        text, _ = await call_llm(
+            model="deepseek/deepseek-v4-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"},
+        )
+    assert text == enveloped
 
 
 async def test_call_llm_disables_gemini_thinking_for_json():
