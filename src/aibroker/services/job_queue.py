@@ -193,9 +193,20 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         await _finish(row.id, status="error",
                        error_message="daily budget cap reached — retry after 00:00 UTC",
                        expect_started_at=row.started_at)
+        # This only fires on a job's FINAL retry (paid_only=True — see above),
+        # which by design skips the free tier entirely on that last attempt.
+        # Earlier retries of OTHER jobs for this project still fall through to
+        # free providers after a cap block (run_chat's require_tier="free"
+        # downgrade) — so the broker and free-tier traffic for this project
+        # are NOT stopped, only new PAID access is, until the cap resets.
+        cap = project.daily_cost_cap_usd
+        cap_text = f"${cap:g}/day" if cap else "its cap"
         await alert(f"budget:{row.project_id}",
-                    f"project <b>{project.name}</b> hit its daily budget cap — "
-                    "jobs paused until 00:00 UTC", throttle_min=24 * 60)
+                    f"project <b>{project.name}</b>: paid-tier budget capped "
+                    f"({cap_text}) — this job gave up on its final (paid-only) "
+                    "retry; free-tier providers still serve other requests; "
+                    "paid access resumes at 00:00 UTC",
+                    throttle_min=24 * 60)
         return
     if outcome is None:
         # No provider available right now — retry as capacity frees up.
