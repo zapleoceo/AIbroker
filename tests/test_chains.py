@@ -344,6 +344,43 @@ def test_deprioritize_deepseek_for_savings_keeps_paid_tail_order():
     assert out == ["gemini", "deepseek", "openai", "anthropic"]
 
 
+def test_deprioritize_deepseek_for_savings_never_demotes_a_leading_premium():
+    """chat:sales leads with anthropic Sonnet by owner choice. The savings
+    reorder must move ONLY deepseek and the free tail that trails it — anything
+    ahead of deepseek (Sonnet here) keeps its lead, so the sales lane can't be
+    silently downgraded off its premium model during peak hours / big JSON."""
+    chain = ["anthropic", "deepseek", "gemini", "sambanova"]
+    out = deprioritize_deepseek_for_savings(chain, should_defer=True)
+    assert out[0] == "anthropic"                       # premium lead preserved
+    assert out == ["anthropic", "gemini", "sambanova", "deepseek"]  # deepseek sunk
+    # and it stays a no-op when not deferring
+    assert deprioritize_deepseek_for_savings(chain, should_defer=False) == chain
+
+
+# ─── chat:sales — Sonnet-first sales lane (Stepan2) ─────────────────────────
+
+
+def test_chat_sales_leads_with_anthropic_sonnet():
+    """2026-07-23, owner-approved: chat:sales is Stepan2's "smart LLM sales"
+    lane. anthropic leads (strongest open-ended persuasion, own $5/day key),
+    deepseek is the cheap paid fallback, then the free tail. openai is
+    deliberately NOT wired (reserve the paid budget for Sonnet)."""
+    from aibroker.providers.litellm_adapter import model_for
+    chain = chain_for("chat:sales")
+    assert chain[0] == "anthropic"
+    assert model_for("anthropic", "chat:sales") == "anthropic/claude-sonnet-5"
+    assert chain[1] == "deepseek"                        # cheap paid fallback
+    assert {"gemini", "sambanova"} <= set(chain[2:])     # free tail
+    assert "openai" not in chain                         # not wired by design
+    assert has_paid_tail("chat:sales") is True           # Sonnet/deepseek paid
+
+
+def test_chat_sales_reuses_llm_chat_scope():
+    """No dedicated scope: every chain provider + stepan2 already carry
+    llm:chat, so the lane needs zero key/project re-scoping to work."""
+    assert scope_for("chat:sales") == "llm:chat"
+
+
 def test_prefilter_chain_excludes_zai():
     """prefilter requests are always JSON — zai in that chain was a guaranteed
     billed-but-unusable call (2026-07-16)."""
