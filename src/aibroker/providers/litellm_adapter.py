@@ -281,20 +281,49 @@ def estimate_llm_cost(
     to LiteLLM so a cache read prices at ~0.1x and a cache write at its real
     (higher) creation rate, instead of every prompt token pricing at the flat
     input rate. Without this, cost_usd over-counted anthropic calls that hit
-    cache — safe direction (never under-charges) but not the real bill."""
+    cache — safe direction (never under-charges) but not the real bill.
+
+    Extended-TTL correction: `litellm.cost_per_token` prices EVERY cache write
+    at the 5-minute rate — it has no ttl parameter at all (verified on our
+    version). We write with a 1-hour TTL (see _CACHE_TTL), which anthropic bills
+    at a higher rate that litellm exposes as a separate, unused pricing field.
+    So the premium is added here explicitly; skipping it would UNDER-count every
+    write by that difference and quietly blind the daily cost caps — the same
+    failure mode as the two stale-pricing incidents (2026-06-01, 2026-06-11).
+    Rates are read from litellm's map (never hardcoded), so they stay correct
+    when the vendor's prices change."""
     try:
         p_cost, c_cost = litellm.cost_per_token(
             model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out,
             cache_read_input_tokens=cache_read_tokens,
             cache_creation_input_tokens=cache_write_tokens,
         )
-        base = float(p_cost + c_cost)
+        base = float(p_cost + c_cost) + _extended_ttl_write_premium(
+            model, cache_write_tokens)
     except Exception as e:
         if model not in _pricing_warned:
             _pricing_warned.add(model)
             log.warning("no LiteLLM pricing for %s (%s) — cost recorded as 0", model, e)
         return 0.0
     return base * peak_multiplier(model.split("/", 1)[0], at)
+
+
+def _extended_ttl_write_premium(model: str, cache_write_tokens: int) -> float:
+    """Extra cost of writing the cache at `_CACHE_TTL` instead of the default
+    5 minutes, which is all `litellm.cost_per_token` can price. Returns 0.0 when
+    we're not using an extended TTL, when nothing was written, or when the model
+    has no separate long-TTL rate (then the default rate already applies)."""
+    if _CACHE_TTL is None or cache_write_tokens <= 0:
+        return 0.0
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:
+        return 0.0
+    default_rate = info.get("cache_creation_input_token_cost")
+    extended_rate = info.get(_CACHE_TTL_RATE_FIELD)
+    if not default_rate or not extended_rate:
+        return 0.0
+    return cache_write_tokens * (float(extended_rate) - float(default_rate))
 
 
 # Providers with EXPLICIT prompt caching (a stable system prefix is cached at
@@ -304,6 +333,29 @@ _EXPLICIT_CACHE_PROVIDERS = ("anthropic",)
 
 # Anthropic allows at most 4 cache_control breakpoints per request.
 _MAX_CACHE_MARKS = 4
+
+# Cache lifetime. anthropic's default `ephemeral` entry lives 5 minutes, with
+# the timer REFRESHED on every hit; "1h" buys a 12x wider window per entry.
+#
+# Justified on live 24h anthropic traffic (2026-07-24), by decomposing what we
+# actually PAY to write:
+#   full-prefix rewrites (>=15k tok): 38 calls, 949,559 tok  <- 90% of write cost
+#   history increments   (<15k tok): 138 calls,  99,595 tok
+# i.e. the dominant cost was NOT the per-turn increments but the shared system
+# prefix going cold and being re-written 38x/day. A 1h entry removes most of
+# those expiries. Break-even for the pricier extended write is a ~37% drop in
+# written tokens; with 90% of the volume being expiry-driven that clears
+# comfortably. Secondary gain: a lead's follow-up turn lands inside 5 min only
+# 73% of the time vs 89% within an hour, so the per-dialogue history breakpoint
+# hits more often too (median inter-call gap overall is 19s, per-dialogue 31s).
+#
+# Cost: an extended-TTL write bills higher than a 5-minute one, and litellm
+# CANNOT price that (cost_per_token has no ttl parameter) — the premium is
+# applied by _extended_ttl_write_premium so the recorded cost stays truthful and
+# the daily caps keep working. Set to None to go back to the 5-minute default;
+# the pricing correction disables itself with it.
+_CACHE_TTL: str | None = "1h"
+_CACHE_TTL_RATE_FIELD = "cache_creation_input_token_cost_above_1hr"
 
 
 def apply_prompt_cache(
@@ -359,12 +411,16 @@ def apply_prompt_cache(
     marks = {i for i in (sys_end, hist_end) if i >= 0 and _markable(i)}
     marks = set(sorted(marks)[:_MAX_CACHE_MARKS])
 
+    cache_control: dict[str, str] = {"type": "ephemeral"}
+    if _CACHE_TTL:
+        cache_control["ttl"] = _CACHE_TTL
+
     out: list[dict[str, Any]] = []
     for i, m in enumerate(messages):
         if i in marks:
             m = {**m, "content": [{
                 "type": "text", "text": m["content"],
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": dict(cache_control),
             }]}
         out.append(m)
     return out

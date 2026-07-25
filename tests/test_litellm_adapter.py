@@ -29,8 +29,11 @@ def test_drop_params_enabled():
 
 
 def _marked(msg: dict) -> bool:
+    """Has a cache breakpoint. Checks the TYPE only — the ttl is asserted
+    separately (test_apply_prompt_cache_uses_the_configured_ttl) so every
+    placement test doesn't have to change when the TTL policy does."""
     c = msg["content"]
-    return isinstance(c, list) and c[0].get("cache_control") == {"type": "ephemeral"}
+    return isinstance(c, list) and c[0].get("cache_control", {}).get("type") == "ephemeral"
 
 
 def test_apply_prompt_cache_marks_system_prefix_end_and_history_end():
@@ -41,12 +44,83 @@ def test_apply_prompt_cache_marks_system_prefix_end_and_history_end():
     # breakpoint 1: end of the system prefix (whole static prefix cached)
     sysblk = out[0]["content"]
     assert isinstance(sysblk, list)
-    assert sysblk[0]["cache_control"] == {"type": "ephemeral"}
+    assert sysblk[0]["cache_control"]["type"] == "ephemeral"
     assert sysblk[0]["text"] == "big stable prompt"
     # breakpoint 2 (NEW): the last turn — the rolling history breakpoint, so
     # next turn the whole [system + this turn] prefix is a cache read
     assert _marked(out[1])
     assert out[1]["content"][0]["text"] == "hi"
+
+
+def test_apply_prompt_cache_uses_the_configured_ttl():
+    """Every breakpoint carries the configured cache lifetime. Measured on live
+    traffic (2026-07-24): the shared system prefix never went cold on the 5-min
+    default (95% of calls within 5 min, timer refreshes on hit), but a lead's
+    follow-up turn lands inside 5 min only 73% of the time vs 89% within an
+    hour — the extended TTL is bought for the per-dialogue history breakpoint."""
+    from aibroker.providers.litellm_adapter import _CACHE_TTL, apply_prompt_cache
+    out = apply_prompt_cache("anthropic/x", [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"}])
+    for m in out:
+        cc = m["content"][0]["cache_control"]
+        assert cc["type"] == "ephemeral"
+        if _CACHE_TTL is None:
+            assert "ttl" not in cc      # plain 5-minute default
+        else:
+            assert cc["ttl"] == _CACHE_TTL
+
+
+def test_extended_ttl_write_premium_is_charged_on_cache_writes():
+    """REGRESSION GUARD: litellm.cost_per_token has NO ttl parameter — it prices
+    every cache write at the 5-minute rate. Writing with a longer TTL costs
+    more, so without an explicit premium every write would be UNDER-counted and
+    the daily caps would silently allow overspend (the 2026-06-01 / 2026-06-11
+    stale-pricing failure mode). Reads are unaffected."""
+    import litellm
+
+    from aibroker.providers.litellm_adapter import (
+        _CACHE_TTL,
+        _CACHE_TTL_RATE_FIELD,
+        estimate_llm_cost,
+    )
+    model = "anthropic/claude-sonnet-5"
+    info = litellm.get_model_info(model)
+    default_rate = info.get("cache_creation_input_token_cost")
+    extended_rate = info.get(_CACHE_TTL_RATE_FIELD)
+    if not (default_rate and extended_rate) or _CACHE_TTL is None:
+        pytest.skip("model has no separate extended-TTL write rate")
+
+    tokens = 100_000
+    charged = estimate_llm_cost(model, tokens, 0, cache_write_tokens=tokens)
+    litellm_only, _ = litellm.cost_per_token(
+        model=model, prompt_tokens=tokens, completion_tokens=0,
+        cache_creation_input_tokens=tokens)
+    # we must charge MORE than litellm alone, by exactly the rate difference
+    assert charged > float(litellm_only)
+    assert charged == pytest.approx(
+        float(litellm_only) + tokens * (float(extended_rate) - float(default_rate)))
+    # a pure cache READ carries no write premium
+    read_only = estimate_llm_cost(model, tokens, 0, cache_read_tokens=tokens)
+    read_litellm, _ = litellm.cost_per_token(
+        model=model, prompt_tokens=tokens, completion_tokens=0,
+        cache_read_input_tokens=tokens)
+    assert read_only == pytest.approx(float(read_litellm))
+
+
+def test_extended_ttl_write_premium_stays_zero_without_a_long_ttl_rate():
+    """The premium must apply ONLY where the vendor really charges more for a
+    long-TTL write. A model with no such rate (or an unpriced/unknown model)
+    gets nothing added — otherwise we'd invent cost that isn't billed and the
+    caps would throttle traffic for no reason (the mirror of under-counting)."""
+    from aibroker.providers.litellm_adapter import _extended_ttl_write_premium
+    # unknown model → get_model_info raises → no premium, no crash
+    assert _extended_ttl_write_premium("not-a-real/model-xyz", 10_000) == 0.0
+    # a real model with no separate long-TTL write rate (deepseek caches
+    # server-side; we never send it cache_control at all)
+    assert _extended_ttl_write_premium("deepseek/deepseek-v4-flash", 10_000) == 0.0
+    # nothing written → nothing to surcharge
+    assert _extended_ttl_write_premium("anthropic/claude-sonnet-5", 0) == 0.0
 
 
 def test_apply_prompt_cache_noop_for_other_providers():

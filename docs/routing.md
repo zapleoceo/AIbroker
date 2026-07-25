@@ -137,6 +137,35 @@
 > transformed request body exposed it. When A/B-ing a not-yet-deployed change,
 > define BOTH arms in the test script.
 >
+> **2026-07-24 (cache lifetime 5 min → 1 hour, `_CACHE_TTL`)**: anthropic's
+> default `ephemeral` entry lives 5 minutes (timer refreshed on every hit);
+> `"ttl": "1h"` widens that 12x. Justified by decomposing what we actually pay
+> to WRITE, over 24h of live anthropic traffic:
+>
+> | write kind | calls | tokens | share |
+> |---|---|---|---|
+> | full-prefix rewrite (≥15k tok — the prefix went cold) | 38 | 949,559 | **90%** |
+> | history increment (<15k tok) | 138 | 99,595 | 10% |
+>
+> So the dominant cost was never the per-turn increments — it was the shared
+> system prefix expiring and being re-written **38x/day**. Break-even for the
+> pricier extended write is a ~37% drop in written tokens; with 90% of the
+> volume expiry-driven that clears comfortably. Secondary gain: a lead's
+> follow-up turn lands inside 5 min only 73% of the time vs 89% within an hour,
+> so the per-dialogue history breakpoint hits more often too.
+>
+> **Pricing correction is mandatory, not optional** (`_extended_ttl_write_premium`):
+> `litellm.cost_per_token` has NO ttl parameter — verified on our version — so
+> it prices every cache write at the 5-minute rate ($2.50/M) while anthropic
+> bills a long-TTL write at `cache_creation_input_token_cost_above_1hr` ($4/M).
+> Sending `ttl:"1h"` without this correction under-counts **every write by 37%**
+> and silently blinds the daily caps — the same failure mode as the 2026-06-01
+> and 2026-06-11 stale-pricing incidents. Rates are read from litellm's own map,
+> never hardcoded, so they follow vendor price changes. Verified live: a 25,090
+> token write recorded $0.1008 vs litellm's own $0.0632, i.e. the $0.0376
+> premium (= 25,090 × ($4−$2.50)/M) is charged. Setting `_CACHE_TTL = None`
+> reverts to the 5-minute default and disables the correction with it.
+>
 > **2026-07-12 (PROVIDER-level affinity — considered, deliberately NOT
 > built)**: after the same-day key-level cache-affinity note below, the next
 > obvious step was pinning a whole (project → provider) pair. Rejected: the
