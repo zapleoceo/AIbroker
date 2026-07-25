@@ -81,8 +81,27 @@ def test_chat_smart_is_deepseek_first_by_owner_choice():
     # weak on smart and no smarter model exists on them (still primary on fast).
     assert {"mistral", "cohere", "openrouter",
             "cerebras", "groq", "cloudflare"}.isdisjoint(chain)
-    # and the emergency paid quality tail stays at the very end
-    assert chain[-2:] == ["anthropic", "openai"]
+    # 2026-07-24 (owner): rotate ONLY gemini / anthropic / DeepSeek-family
+    # models — openai removed, anthropic is now the last resort.
+    assert "openai" not in chain
+    assert chain[-1] == "anthropic"
+
+
+def test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models():
+    """2026-07-24 (owner): the smart lane may only reach gemini, anthropic, or
+    a DeepSeek-family model. sambanova qualifies on the MODEL, not the vendor —
+    its chat:smart model is sambanova/DeepSeek-V3.2 on a free tier, i.e.
+    deepseek quality at $0 (it carried the lane through DeepSeek's own
+    2026-07-22 empty-body degradation). If that model is ever re-pointed at a
+    non-DeepSeek one, this test must fail rather than silently widen the lane."""
+    from aibroker.providers.litellm_adapter import model_for
+    allowed_vendors = {"gemini", "anthropic", "deepseek"}
+    for provider in chain_for("chat:smart"):
+        model = model_for(provider, "chat:smart") or ""
+        assert provider in allowed_vendors or "deepseek" in model.lower(), (
+            f"{provider} serves chat:smart with {model!r}, which is neither "
+            f"gemini/anthropic nor a DeepSeek-family model"
+        )
 
 
 @pytest.mark.parametrize("capability", ["chat:fast", "chat:code"])
