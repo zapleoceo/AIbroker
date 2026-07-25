@@ -86,11 +86,20 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # free quota are spent, smart lands on the paid tail (higher cost) rather
     # than a cheap-but-weak gpt-oss reply. gpt-oss stays PRIMARY on chat:fast.
     # nvidia stays out (2026-07-10: v4-pro 91s timeouts; nemotron only chat:deep).
+    # 2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family
+    # models here — openai (gpt-5) removed. It was the last-resort tail and
+    # essentially never earned its place: by the time the chain got past
+    # deepseek + free gemini/sambanova + anthropic, the honest outcome is to
+    # retry rather than reach for the priciest model in the pool. sambanova
+    # STAYS because its chat:smart model IS a DeepSeek model
+    # (sambanova/DeepSeek-V3.2) served on a free tier — deepseek-quality at $0,
+    # which is exactly the capacity that carried the lane during DeepSeek's own
+    # 2026-07-22 empty-body degradation (111 successes at $0).
     "chat:smart": [
         "deepseek",
         "gemini",
         "sambanova",
-        "anthropic", "openai",
+        "anthropic",
     ],
     # 2026-07-23: Stepan2's "smart LLM, no rigid script" sales mode. Owner-
     # approved deliberate exception to free-first (like deepseek in chat:smart):
