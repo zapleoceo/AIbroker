@@ -456,8 +456,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">01</div>
         <h3 data-i18n="f1.t" data-en="Free-first routing" data-ru="Free-first маршрутизация"></h3>
         <p data-i18n="f1.d"
-           data-en="Per-capability chains (chat:fast, chat:smart, embed) try free tiers first. Paid keys only when free pool is exhausted or on cooldown."
-           data-ru="По способностям (chat:fast, chat:smart, embed) сначала пробует free-тарифы. Платные ключи — только если free-пул исчерпан или на cooldown."></p>
+           data-en="Per-capability chains try free tiers first (chat:fast is free-only). The money lanes are the deliberate exception: chat:smart leads with DeepSeek and chat:sales with Claude Sonnet, each on its own daily cap, falling back to the free pool."
+           data-ru="Цепочки по способностям сначала пробуют free-тарифы (chat:fast — только бесплатные). Денежные линии — осознанное исключение: chat:smart ведёт DeepSeek, chat:sales — Claude Sonnet, каждая со своим дневным капом и откатом в free-пул."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">02</div>
@@ -853,10 +853,15 @@ _LLMS_TXT = """# AIbroker
 - **Proxy mode**: the broker calls the provider with its own stored key and
   returns the response — clients never see provider credentials.
 - **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
-  `chat:code`, `chat:edit`, `chat:deep`, `prefilter`, `structured`,
-  `translate`, `vision`, `transcription`, `embedding`. Each maps to an
-  ordered provider chain (free-first) and a required scope. `chat:deep` is a
-  dedicated long-context/reasoning lane (1M-token context, no latency
+  `chat:sales`, `chat:code`, `chat:edit`, `chat:deep`, `prefilter`,
+  `structured`, `translate`, `vision`, `transcription`, `embedding`. Each maps
+  to an ordered provider chain and a required scope. Most chains are
+  free-first; `chat:smart` (DeepSeek-led) and `chat:sales` (Claude Sonnet-led)
+  are deliberate exceptions where answer quality outranks price, each bounded
+  by its own daily cap and still falling back to the free pool. `chat:sales`
+  additionally keeps Sonnet's reasoning on — it does not force JSON through
+  tool-use, because on that model the two are mutually exclusive. `chat:deep`
+  is a dedicated long-context/reasoning lane (1M-token context, no latency
   guarantee) gated behind its own scope so it never competes with live chat
   traffic.
 - **Scopes**: every project key carries a list of allowed scopes

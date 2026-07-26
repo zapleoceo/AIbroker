@@ -66,22 +66,22 @@ computed and discarded:
   token totals + reuse ratio) for the selected range — hidden entirely when a
   project never touches caching (most calls don't route through anthropic).
 
-| Provider | chat:fast | chat:smart | chat:code | vision | embedding |
-|---|---|---|---|---|---|
-| **cerebras** | gpt-oss-120b | gpt-oss-120b | gpt-oss-120b | — | — |
-| **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — |
-| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | — |
-| **deepseek** | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | — | — |
-| **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
-| **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | claude-sonnet-5 | claude-sonnet-5 | — |
-| **openai** | gpt-5-mini | gpt-5 | gpt-5 | gpt-5-mini | — |
-| **mistral** | mistral-small-latest | mistral-large-latest | codestral-latest | — | — |
-| **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | command-r7b-12-2024 | — | embed-english-v3.0 |
-| **sambanova** | Meta-Llama-3.3-70B-Instruct | DeepSeek-V3.2 | DeepSeek-V3.2 | — | — |
-| **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
-| **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — |
-| **zai** | glm-4.5-flash | — | — | — | — |
-| **voyage** | — | — | — | — | voyage-4 |
+| Provider | chat:fast | chat:smart | chat:sales | chat:code | vision | embedding |
+|---|---|---|---|---|---|---|
+| **cerebras** | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
+| **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — | — |
+| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | — |
+| **deepseek** | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | — | — |
+| **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
+| **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | **claude-sonnet-5** | claude-sonnet-5 | claude-sonnet-5 | — |
+| **openai** | gpt-5-mini | gpt-5 | — | gpt-5 | gpt-5-mini | — |
+| **mistral** | mistral-small-latest | mistral-large-latest | — | codestral-latest | — | — |
+| **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | — | command-r7b-12-2024 | — | embed-english-v3.0 |
+| **sambanova** | Meta-Llama-3.3-70B-Instruct | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | — | — |
+| **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
+| **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — | — |
+| **zai** | glm-4.5-flash | — | — | — | — | — |
+| **voyage** | — | — | — | — | — | voyage-4 |
 
 2026-07-16: openrouter's `openai/gpt-oss-120b:free` was DELISTED (404 on
 every call) — all its chat lanes + vision moved to

@@ -153,6 +153,25 @@ def test_paid_key_usable_cost_cap_follows_fresh_semantics():
     assert _paid_key_usable(under, {"deepseek"}, "llm:chat", _NOW)
 
 
+def test_paid_tail_caps_cover_every_paid_led_lane():
+    """REGRESSION (2026-07-26): this list used to be hand-written as
+    ("chat:smart",) and was NOT updated when chat:sales shipped — so the newest
+    money lane (anthropic Sonnet leading its chain on a dedicated $5/day key)
+    had no paid-tail alert at all. It is now derived from the chains, so a
+    future paid-led lane is covered the day it lands.
+
+    Free-first lanes stay OUT on purpose: there a paid provider IS the last
+    resort, so losing it is the design working, not an incident."""
+    from aibroker.routing.chains import CAPABILITY_CHAINS, PAID_PROVIDERS
+    expected = {cap for cap, chain in CAPABILITY_CHAINS.items()
+                if chain and chain[0] in PAID_PROVIDERS}
+    assert set(_PAID_TAIL_CAPS) == expected
+    assert {"chat:smart", "chat:sales"} <= set(_PAID_TAIL_CAPS)
+    # a free-led lane must NOT be alerted on
+    assert "chat:fast" not in _PAID_TAIL_CAPS
+    assert "chat:code" not in _PAID_TAIL_CAPS
+
+
 async def test_check_paid_tail_alerts_when_no_paid_key():
     """Empty key table → every paid-tail capability alerts, none recovers.
     The alert must carry the once-a-DAY reminder throttle (owner's choice,
