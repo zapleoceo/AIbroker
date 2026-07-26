@@ -113,6 +113,37 @@
 > dialogue. A breakpoint prefix-caches *everything before it*, so marking each
 > leading system message separately cached nothing extra — meanwhile the
 > conversation history was re-billed at full input price on **every turn**.
+> **2026-07-24 — CORRECTION, the "one breakpoint" idea below was WRONG in
+> production.** A breakpoint caches everything before it, so collapsing the
+> per-system-message marks into one terminal mark looked free. It is only free
+> while the ENTIRE leading system run is stable. Stepan's is not:
+>
+> ```
+> system[0] = 78,938 chars  — stable persona + catalogue (identical every call)
+> system[1] =    465-843    — per-lead LEAD DOSSIER (unique per lead)
+> ```
+>
+> The terminal mark therefore put the VARIABLE dossier inside the cache key, so
+> no two leads ever shared an entry and the 78,938-char stable part was never
+> cached at all. Measured in production 12h after it shipped: **5.5% hit rate,
+> ~29k tokens re-written on EVERY call, $0.12/call** — it drained the $5/day
+> Sonnet cap in hours, which is how it was noticed (Stepan reported "Sonnet dies
+> on the cap"). Proven on the real prompts, two different leads sharing one
+> persona: old marking `read=0 / write=35,488` (MISS), new marking
+> `read=35,488 / write=0` (HIT) — ~20x cheaper per call
+> ($0.142 → $0.0071).
+>
+> Fix: mark EVERY leading system message again (bounded, one slot reserved for
+> the history mark). That guarantees a breakpoint at the stable/variable
+> boundary wherever it falls; anthropic matches the LONGEST cached prefix, so
+> the extra marks cost nothing. Guarded by
+> `test_apply_prompt_cache_marks_every_leading_system_message`.
+>
+> Lesson: verifying that a cache entry is WRITTEN is not verifying that it is
+> later READ. The A/B that justified this change used one synthetic prompt with
+> a single stable system message, so it never exercised the stable/variable
+> split that real traffic has.
+>
 > Now `apply_prompt_cache` places at most **two** breakpoints: one at the END
 > of the leading system run (caches the whole static prefix, however many
 > messages it spans) and one ROLLING breakpoint at the END of the conversation
