@@ -33,6 +33,13 @@ from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_terminal_write
 
+# Where async transcription parks its base64 audio inside `request`. The queue
+# stores payloads as JSONB, which can't hold raw bytes — and putting the blob in
+# its own column would need a migration for one capability. base64 costs +33%
+# but the blob is cleared the moment the job finishes (see _finish), so it never
+# accumulates. Bounded by the route's own _MAX_AUDIO_BYTES.
+AUDIO_FIELD = "audio_b64"
+
 log = logging.getLogger(__name__)
 
 # NOTIFY channel shared with the dispatcher's LISTEN connection (job_queue.py).
@@ -123,8 +130,14 @@ async def submit_job(  # pragma: no cover
     temperature: float,
     response_format: dict[str, Any] | None,
     workflow: str | None,
+    extra: dict[str, Any] | None = None,
 ) -> int:
     """ENQUEUE a job for any chat `capability` and return its id immediately.
+
+    `extra` merges non-chat payload into the stored request — async
+    transcription uses it for the base64 audio + filename (see AUDIO_FIELD),
+    since the queue's JSONB column can't hold raw bytes. It also participates
+    in the dedup hash, so two different voice notes are never deduped into one.
 
     Submit no longer runs the call — it only inserts a `pending` row. The
     dispatcher loop (services/job_queue.py) claims and drains pending rows with
@@ -135,6 +148,7 @@ async def submit_job(  # pragma: no cover
         "messages": messages, "model": model,
         "max_tokens": max_tokens, "temperature": temperature,
         "response_format": response_format, "workflow": workflow,
+        **(extra or {}),
     }
     phash = payload_hash(project.id, capability, request)
     existing = await _find_inflight_duplicate(project.id, capability, phash)
@@ -220,6 +234,13 @@ async def _finish(  # pragma: no cover — job execution is the dispatcher's (jo
         row.result_meta = result_meta
         row.error_message = error_message
         row.completed_at = datetime.now(UTC).replace(tzinfo=None)
+        # Async transcription carries the whole audio file base64'd in the
+        # request payload. Once the job is terminal that blob is dead weight —
+        # nobody re-reads it, and deep_jobs is already the biggest table we
+        # back up nightly. Drop it here (keep the rest of the request for
+        # debugging), so audio lives in the DB only while it's being worked on.
+        if isinstance(row.request, dict) and row.request.get(AUDIO_FIELD):
+            row.request = {**row.request, AUDIO_FIELD: None}
 
 
 async def get_job(job_id: int, project_id: int) -> DeepJobRow | None:

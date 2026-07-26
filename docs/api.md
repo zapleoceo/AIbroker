@@ -49,6 +49,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
+| `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
@@ -62,6 +63,25 @@ the fallback chain finished; the job queue has no such ceiling and exhaustively
 rotates keys. `embed`/`transcribe` **stay synchronous** — they're fast (~1s),
 never hit that timeout, and routing them through submit/poll would only add
 latency for no benefit.
+
+### Transcription: sync or async (2026-07-26)
+
+`POST /v1/transcribe` (multipart `file`) still answers synchronously and is the
+right call when the fast path serves — groq returns in ~750 ms.
+
+`POST /v1/transcribe/jobs` takes the same multipart upload, returns `202` with a
+`job_id` immediately, and is polled with the ordinary `GET /v1/jobs/{id}`.
+Use it whenever a lost transcript is worse than a delayed one: the chain's
+fallback is a self-hosted faster-whisper that legitimately takes **131-168
+seconds** on this host, which is past any sane client read timeout — so the
+synchronous call silently LOST those transcripts whenever groq's daily quota
+was spent. Queued, the slow path finishes and the caller collects it, plus it
+inherits the queue's retries, backpressure and restart-survival.
+
+The audio is base64'd into the job payload (the queue stores JSONB and cannot
+hold raw bytes) and is **cleared the moment the job reaches a terminal state**,
+so voice notes never accumulate in the database or the nightly backup. The 25 MB
+Whisper ceiling is enforced before queueing.
 
 ### Capabilities (for `/v1/jobs`)
 
