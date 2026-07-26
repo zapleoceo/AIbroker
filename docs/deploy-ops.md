@@ -87,6 +87,33 @@ What it does:
 Rerun whenever you want a fresh snapshot — old `legacy:%` rows are
 wiped and re-imported, live broker rows are never touched.
 
+## Job retention (2026-07-26)
+
+`deep_jobs` had no retention and had grown to **1.6 GB / 103k rows** — every row
+stores the FULL request payload (Stepan's system prompt alone is ~79k chars, and
+async transcription parks base64 audio there too), so the nightly dump was
+~886 MB of finished work nobody would ever read again. Only 51 rows were
+actually live (`pending`).
+
+`job_queue.purge_finished_jobs()` deletes terminal jobs past
+`JOB_RETENTION_DAYS` (default **7**), batched at `JOB_RETENTION_BATCH`
+(default 5000) so a big first sweep can't hold a long lock — it simply takes
+several passes. The dispatcher calls it every `JOB_RETENTION_EVERY_TICKS`
+(default 300 ≈ 25 min at the idle poll), Postgres only. Both workers running it
+is harmless: the DELETE is idempotent.
+
+Only `done`/`error` rows with a `completed_at` are eligible — a `pending` or
+`running` job is untouchable regardless of age, so nothing can be deleted out
+from under the dispatcher or while a caller might still poll it. Verified
+against real Postgres before shipping (old done/error deleted; fresh done,
+pending and running all kept).
+
+No client change is needed: nothing but the queue itself reads `deep_jobs`, and
+callers poll their result within seconds.
+
+Tune per environment with `JOB_RETENTION_DAYS` / `JOB_RETENTION_BATCH` /
+`JOB_RETENTION_EVERY_TICKS`.
+
 ## Schema migrations
 
 Applied via `psql` directly against the running container — no Alembic in

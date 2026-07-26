@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -463,3 +464,49 @@ async def test_finish_clears_the_queued_audio_blob():
         assert done.result_text == "привет"
         assert done.request[AUDIO_FIELD] is None      # blob dropped
         assert done.request["filename"] == "v.ogg"    # context kept
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="make_interval/DELETE…LIMIT are Postgres-only")
+async def test_purge_finished_jobs_respects_status_and_age():
+    """Retention deletes only TERMINAL jobs past the window. An in-flight or
+    pending job must survive regardless of age — otherwise a job waiting on
+    backoff could be deleted out from under the dispatcher — and a freshly
+    finished one must survive so a caller polling its result still finds it."""
+    from datetime import timedelta
+
+    from aibroker.services.job_queue import _JOB_RETENTION_DAYS, purge_finished_jobs
+
+    old = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+        days=_JOB_RETENTION_DAYS + 1)
+    fresh = datetime.now(UTC).replace(tzinfo=None)
+    ids = {}
+    async with get_session() as s:
+        proj = ProjectRow(name="retention-test", project_key_hash="h",
+                          project_key_prefix="pk_x", allowed_scopes=["llm:chat"])
+        s.add(proj)
+        await s.flush()
+        for label, status_, completed in (
+            ("old_done", "done", old),        # → deleted
+            ("old_error", "error", old),      # → deleted
+            ("fresh_done", "done", fresh),    # → kept (caller may still poll)
+            ("old_pending", "pending", None),  # → kept (never terminal)
+            ("old_running", "running", None),  # → kept (in flight)
+        ):
+            row = DeepJobRow(project_id=proj.id, capability="chat:fast",
+                             status=status_, request={"messages": []},
+                             completed_at=completed)
+            if status_ in ("pending", "running"):
+                row.created_at = old
+            s.add(row)
+            await s.flush()
+            ids[label] = row.id
+
+    deleted = await purge_finished_jobs()
+    assert deleted >= 2
+
+    async with get_session() as s:
+        assert await s.get(DeepJobRow, ids["old_done"]) is None
+        assert await s.get(DeepJobRow, ids["old_error"]) is None
+        assert await s.get(DeepJobRow, ids["fresh_done"]) is not None
+        assert await s.get(DeepJobRow, ids["old_pending"]) is not None
+        assert await s.get(DeepJobRow, ids["old_running"]) is not None
