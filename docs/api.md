@@ -69,7 +69,8 @@ latency for no benefit.
 `POST /v1/transcribe` (multipart `file`) still answers synchronously and is the
 right call when the fast path serves — groq returns in ~750 ms.
 
-`POST /v1/transcribe/jobs` takes the same multipart upload, returns `202` with a
+`POST /v1/transcribe/jobs` (`transcribe_submit` in `routes/proxy.py`) takes
+the same multipart upload, returns `202` with a
 `job_id` immediately, and is polled with the ordinary `GET /v1/jobs/{id}`.
 Use it whenever a lost transcript is worse than a delayed one: the chain's
 fallback is a self-hosted faster-whisper that legitimately takes **131-168
