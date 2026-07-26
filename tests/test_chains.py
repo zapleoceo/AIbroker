@@ -174,13 +174,22 @@ def test_transcription_has_gemini_fallback():
     assert "gemini" in chain
 
 
-def test_transcription_local_asr_first():
-    """2026-07-18: self-hosted faster-whisper (vera3's asr-local) goes first —
-    free, private, no external rate limit. groq/gemini/openai stay as fallback
-    for when ASR_LOCAL_URL is unset or the service is unreachable."""
+def test_transcription_leads_with_groq_not_local_asr():
+    """REGRESSION (2026-07-26): local asr-local led this chain from 2026-07-18
+    as "free, private, no external rate limit". On this host it is not a fast
+    path at all — measured over 24h: local 131-168 SECONDS per transcription
+    with 35 timeouts vs 23 successes, groq 753-1150 ms for the same work, also
+    free. Leading with local burned up to the 180s ASR timeout on EVERY request
+    before falling through, and those fall-throughs drained groq's daily quota;
+    once it was gone (and gemini rate-limited, and no key carries llm:audio for
+    openai) callers got no answer at all.
+
+    local stays as the backstop for exactly the case it was added for — groq's
+    daily quota being exhausted — just no longer in front of it."""
     chain = chain_for("transcription")
-    assert chain[0] == "local"
-    assert chain.index("local") < chain.index("groq")
+    assert chain[0] == "groq"
+    assert chain.index("groq") < chain.index("local")
+    assert "local" in chain          # still the free/private backstop
 
 
 def test_structured_excludes_cerebras():

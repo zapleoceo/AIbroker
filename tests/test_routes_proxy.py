@@ -398,7 +398,10 @@ async def test_transcribe_happy_path():
     assert r.status_code == 200
     data = r.json()
     assert data["text"] == "привет это голосовое"
-    assert data["provider"] == "local"   # first in transcription chain (self-hosted ASR)
+    # whoever leads the transcription chain serves it — asserted against the
+    # chain itself so a deliberate reorder doesn't look like a broken route
+    from aibroker.routing.chains import chain_for
+    assert data["provider"] == chain_for("transcription")[0]
     assert data["request_id"] == 101
 
 
@@ -415,7 +418,12 @@ async def test_transcribe_local_applies_correction_pass():
         tokens_in=20, tokens_out=10, cost_usd=0.0, latency_ms=300,
         key_label="k", request_id=202,
     )
-    with patch("aibroker.services.llm_service.pick_and_reserve",
+    # pin the chain to local: this asserts the LOCAL correction pass, which is
+    # independent of where local sits in the production order (groq leads since
+    # 2026-07-26 — see test_transcription_leads_with_groq_not_local_asr)
+    with patch("aibroker.services.llm_service.chain_for",
+                return_value=["local", "groq"]), \
+         patch("aibroker.services.llm_service.pick_and_reserve",
                 AsyncMock(return_value=_fake_key())), \
          patch("aibroker.services.llm_service.transcribe",
                 AsyncMock(return_value=("привет ето галасовое сообщение", fake_meta))), \
