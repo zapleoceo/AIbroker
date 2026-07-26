@@ -430,3 +430,36 @@ async def test_claim_batch_concurrent_workers_never_double_claim():
     assert set(a) | set(b) <= set(ids)
     assert not (set(a) & set(b)), f"double-claimed jobs: {set(a) & set(b)}"
     assert len(a) + len(b) == 6  # nothing lost either
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="needs a real deep_jobs row (BIGSERIAL/JSONB)")
+async def test_finish_clears_the_queued_audio_blob():
+    """Async transcription parks the whole voice note base64'd in the job's
+    JSONB request (the queue has nowhere else to put bytes). Once the job is
+    terminal that blob is dead weight — nobody re-reads it, and deep_jobs is
+    already the largest table in the nightly backup. _finish must null it while
+    keeping the rest of the request for debugging."""
+    from aibroker.services.deep_jobs import AUDIO_FIELD, _finish
+
+    async with get_session() as s:
+        proj = ProjectRow(name="audio-cleanup-test", key_hash="h",
+                          allowed_scopes=["llm:audio"])
+        s.add(proj)
+        await s.flush()
+        row = DeepJobRow(
+            project_id=proj.id, capability="transcription", status="running",
+            request={"messages": [], "workflow": "media",
+                     "filename": "v.ogg", AUDIO_FIELD: "QUJDRA=="},
+        )
+        s.add(row)
+        await s.flush()
+        job_id = row.id
+
+    await _finish(job_id, status="done", result_text="привет")
+
+    async with get_session() as s:
+        done = await s.get(DeepJobRow, job_id)
+        assert done.status == "done"
+        assert done.result_text == "привет"
+        assert done.request[AUDIO_FIELD] is None      # blob dropped
+        assert done.request["filename"] == "v.ogg"    # context kept

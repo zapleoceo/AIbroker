@@ -367,6 +367,36 @@ async def test_transcribe_rejects_empty_file():
     assert r.status_code == 400
 
 
+async def test_transcribe_async_submit_gates_on_scope_and_validates_audio():
+    """POST /v1/transcribe/jobs is the async twin of /v1/transcribe: same scope
+    gate and same audio validation, but it enqueues instead of holding the
+    connection. It exists because the chain's local fallback legitimately takes
+    131-168s on this host — past any sane client read timeout, so a sync call
+    lost those transcripts whenever groq's daily quota was spent."""
+    # wrong scope → 403, exactly like the sync route
+    plain, _ = await _make_project(["llm:chat"])   # no llm:audio
+    r = client.post("/v1/transcribe/jobs", headers={"X-Project-Key": plain},
+                    files={"file": ("v.ogg", b"x", "audio/ogg")})
+    assert r.status_code == 403
+
+    # empty upload → 400, not an enqueued job that can never succeed
+    plain, _ = await _make_project(["llm:audio"])
+    r = client.post("/v1/transcribe/jobs", headers={"X-Project-Key": plain},
+                    files={"file": ("v.ogg", b"", "audio/ogg")})
+    assert r.status_code == 400
+
+
+async def test_transcribe_async_rejects_oversized_audio():
+    """The 25 MB Whisper ceiling is enforced BEFORE queueing — otherwise the
+    blob would be base64'd into the job row only to fail at the provider."""
+    from aibroker.routes.proxy import _MAX_AUDIO_BYTES
+    plain, _ = await _make_project(["llm:audio"])
+    r = client.post("/v1/transcribe/jobs", headers={"X-Project-Key": plain},
+                    files={"file": ("v.ogg", b"x" * (_MAX_AUDIO_BYTES + 1),
+                                    "audio/ogg")})
+    assert r.status_code == 413
+
+
 async def test_transcribe_503_when_no_key():
     plain, _ = await _make_project(["llm:audio"])
     with patch("aibroker.services.llm_service.pick_and_reserve",

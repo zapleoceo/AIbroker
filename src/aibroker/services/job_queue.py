@@ -25,6 +25,7 @@ Why a drained queue instead of the old fire-and-forget `asyncio.create_task`:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
@@ -38,8 +39,12 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.routing.chains import has_paid_tail
-from aibroker.services.deep_jobs import JOBS_CHANNEL, _finish
-from aibroker.services.llm_service import BUDGET_EXHAUSTED, run_chat
+from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
+from aibroker.services.llm_service import (
+    BUDGET_EXHAUSTED,
+    run_chat,
+    run_transcribe,
+)
 from aibroker.telemetry.notifier import alert
 
 log = logging.getLogger(__name__)
@@ -150,6 +155,26 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
         )
 
 
+async def _run_transcription_job(project: ProjectRow, req: dict[str, Any]):  # pragma: no cover — exercised via the Postgres drain_once tests
+    """Async transcription: decode the queued audio and walk the normal
+    transcription chain.
+
+    Async exists for this capability because the chain's fallback (self-hosted
+    faster-whisper) legitimately takes 131-168s on this host — far past any
+    sane client read timeout, so a sync call simply lost those transcripts.
+    Queued, the slow path gets to finish and the caller polls for it. The fast
+    path (groq, ~750ms) is unaffected and still available synchronously.
+
+    TranscribeFailed propagates to _execute's handler → requeue/fail like any
+    other job error, so a voice is retried rather than dropped."""
+    audio = base64.b64decode(req[AUDIO_FIELD])
+    return await run_transcribe(
+        project=project, audio=audio,
+        filename=req.get("filename") or "audio.ogg",
+        workflow=req.get("workflow"),
+    )
+
+
 async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     """Run one claimed job to a terminal state (done) or re-queue/fail it.
     Reached only from a real claimed row → Postgres-only via drain_once tests
@@ -173,13 +198,17 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if paid_only:
         log.info("final retry — paid tail only, job %d", row.id)
     try:
-        outcome = await run_chat(
-            project=project, capability=row.capability,
-            messages=req["messages"], model=req.get("model"),
-            max_tokens=req["max_tokens"], temperature=req["temperature"],
-            response_format=req.get("response_format"), workflow=req.get("workflow"),
-            paid_only=paid_only,
-        )
+        if row.capability == "transcription":
+            outcome = await _run_transcription_job(project, req)
+        else:
+            outcome = await run_chat(
+                project=project, capability=row.capability,
+                messages=req["messages"], model=req.get("model"),
+                max_tokens=req["max_tokens"], temperature=req["temperature"],
+                response_format=req.get("response_format"),
+                workflow=req.get("workflow"),
+                paid_only=paid_only,
+            )
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
@@ -203,15 +232,19 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                                 f"no provider available for {row.capability}",
                                 expect_started_at=row.started_at)
         return
+    # getattr-with-default: a TranscribeOutcome carries no token/cache counters
+    # (there is nothing to count for audio), so the shared shape stays uniform
+    # for pollers instead of the transcription branch needing its own writer.
     await _finish(
         row.id, status="done", result_text=outcome.text,
         result_meta={
             "provider": outcome.provider, "model": outcome.model,
-            "tokens_in": outcome.tokens_in, "tokens_out": outcome.tokens_out,
+            "tokens_in": getattr(outcome, "tokens_in", 0),
+            "tokens_out": getattr(outcome, "tokens_out", 0),
             "cost_usd": outcome.cost_usd, "latency_ms": outcome.latency_ms,
             "key_label": outcome.key_label, "request_id": outcome.request_id,
-            "cache_read_tokens": outcome.cache_read_tokens,
-            "cache_write_tokens": outcome.cache_write_tokens,
+            "cache_read_tokens": getattr(outcome, "cache_read_tokens", 0),
+            "cache_write_tokens": getattr(outcome, "cache_write_tokens", 0),
         },
         expect_started_at=row.started_at,
     )

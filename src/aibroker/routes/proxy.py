@@ -8,6 +8,7 @@ services.llm_service, shape the response. All orchestration lives in the service
 """
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Any
 
@@ -26,11 +27,14 @@ from aibroker.services import (
     submit_deep_job,
     submit_job,
 )
+from aibroker.services.deep_jobs import AUDIO_FIELD
 
-# Capabilities the async job API serves — everything run_chat handles. embed
-# and transcription stay sync-only (fast, no held-connection problem async
-# solves). chat:deep is included (it's a run_chat capability) and is the one
-# capability that is async-ONLY.
+# Capabilities the generic /v1/jobs endpoint serves — everything run_chat
+# handles, i.e. everything whose payload is chat messages. embed stays
+# sync-only (fast, no held-connection problem to solve). TRANSCRIPTION is
+# async too, but through its own multipart route (/v1/transcribe/jobs) since
+# its payload is an audio file, not messages — it is polled via the same
+# GET /v1/jobs/{id}. chat:deep is the one capability that is async-ONLY.
 _JOB_CAPABILITIES = frozenset({
     "chat:fast", "chat:smart", "chat:sales", "chat:code", "chat:edit",
     "chat:deep", "structured", "prefilter", "translate", "vision",
@@ -153,20 +157,27 @@ class TranscribeResponse(BaseModel):
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
+async def _read_audio_upload(file: UploadFile) -> bytes:
+    """Shared validation for both transcription entry points."""
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(400, "empty audio file")
+    if len(audio) > _MAX_AUDIO_BYTES:
+        raise HTTPException(413, f"audio exceeds {_MAX_AUDIO_BYTES // (1024 * 1024)} MB")
+    return audio
+
+
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_endpoint(
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
     ctx: ProjectCtx = Depends(require_project),
 ) -> TranscribeResponse:
-    """Audio → text. Multipart upload `file`. Chain: local → groq → gemini → openai."""
+    """Audio → text, SYNCHRONOUS. Multipart `file`. Chain: groq → local →
+    gemini → openai. Prefer POST /v1/transcribe/jobs when the slow local
+    fallback might serve — see that route."""
     _require_capability_scope(ctx, scope_for("transcription"))
-
-    audio = await file.read()
-    if not audio:
-        raise HTTPException(400, "empty audio file")
-    if len(audio) > _MAX_AUDIO_BYTES:
-        raise HTTPException(413, f"audio exceeds {_MAX_AUDIO_BYTES // (1024 * 1024)} MB")
+    audio = await _read_audio_upload(file)
 
     try:
         outcome = await run_transcribe(
@@ -327,6 +338,38 @@ async def jobs_submit(
         response_format=body.response_format, workflow=body.workflow,
     )
     return JobSubmitResponse(  # pragma: no cover
+        job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
+    )
+
+
+@router.post("/transcribe/jobs", response_model=JobSubmitResponse,
+             status_code=status.HTTP_202_ACCEPTED)
+async def transcribe_submit(
+    file: UploadFile = File(...),
+    workflow: str | None = Query(None),
+    ctx: ProjectCtx = Depends(require_project),
+) -> JobSubmitResponse:
+    """Audio → text, ASYNC: returns a job_id immediately, poll GET /v1/jobs/{id}.
+
+    Same chain and result as POST /v1/transcribe; the difference is who waits.
+    The chain's fallback (self-hosted faster-whisper) legitimately takes
+    131-168s on this host, which is past any sane client read timeout — so a
+    synchronous call simply LOST those transcripts when groq's daily quota was
+    spent. Queued, that slow path gets to finish and the caller polls for it,
+    with the queue's retries/backpressure/restart-survival on top.
+
+    The sync endpoint stays for the fast path (groq, ~750ms) and for callers
+    that prefer one round-trip."""
+    _require_capability_scope(ctx, scope_for("transcription"))
+    audio = await _read_audio_upload(file)
+    job_id = await submit_job(  # pragma: no cover — needs the real queue (Postgres)
+        project=ctx.project, capability="transcription",
+        messages=[], model=None, max_tokens=0, temperature=0.0,
+        response_format=None, workflow=workflow,
+        extra={AUDIO_FIELD: base64.b64encode(audio).decode(),
+               "filename": file.filename or "audio.ogg"},
+    )
+    return JobSubmitResponse(  # pragma: no cover — same
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
     )
 
