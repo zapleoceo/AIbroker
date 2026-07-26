@@ -18,9 +18,16 @@ from typing import Any
 
 
 class ProviderAdapter:
-    """Default adapter: no quirks. Providers with none use this."""
+    """Default adapter: no quirks. Providers with none use this.
 
-    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
+    `capability` is the lane the call belongs to (chat:sales, chat:smart, …).
+    Most quirks are provider-wide and ignore it; anthropic needs it because the
+    same model (claude-sonnet-5) serves several lanes that want DIFFERENT
+    trade-offs — see _AnthropicAdapter. Optional so callers without a lane in
+    hand (health probes) keep working."""
+
+    def prepare(self, _model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
         return None
 
     def key_extra(self, account_id: str | None) -> dict[str, Any] | None:
@@ -28,7 +35,8 @@ class ProviderAdapter:
 
 
 class _GeminiAdapter(ProviderAdapter):
-    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
         # Gemini 2.5 "thinks" against max_tokens. On JSON that truncates the
         # object mid-string; on any reply it adds latency that overran our call
         # timeout (measured Timeouts on gemini-2.5-flash chat:fast/smart, 2026-
@@ -39,18 +47,51 @@ class _GeminiAdapter(ProviderAdapter):
         kwargs["reasoning_effort"] = "disable"
 
 
+# Lanes where Claude's REASONING is worth more than a server-side JSON
+# guarantee. Forcing JSON through tool-use suppresses thinking outright, so
+# these lanes keep the softer prompt-driven JSON and lean on the broker's own
+# JSON gate + retry instead. See _AnthropicAdapter for the measurements.
+_THINKING_FIRST_CAPABILITIES = frozenset({"chat:sales"})
+
+
 class _AnthropicAdapter(ProviderAdapter):
-    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
-        # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
-        # (litellm silently drops the unsupported param), so with only a prompt
-        # instruction Claude sometimes replies in PLAIN TEXT — especially on
-        # follow-ups ("write a short friendly follow-up") — and the JSON gate
-        # rejects it as InvalidJSON (measured 2026-07-10: ~30% on chat:smart).
-        # Convert a json_object request to a PERMISSIVE json_schema: litellm
-        # routes json_schema through Claude's native tool-use, which forces a
-        # valid JSON object. Permissive (additionalProperties) so the caller's
-        # own fields — driven by the prompt, not this schema — are preserved
-        # (verified: 8/8 valid, all 17 Stepan fields present).
+    def prepare(self, _model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
+        # Sonnet-5 REASONING (2026-07-24, all verified live on the prod key):
+        #   - it thinks BY DEFAULT — a bare call already returns a thinking
+        #     block, so there is nothing to "switch on";
+        #   - `thinking={"type":"enabled"}` is REJECTED outright by the API
+        #     ("thinking.type.enabled is not supported for this model") — the
+        #     real knob is `reasoning_effort` (high keeps it, low disables it);
+        #   - and our OWN json_object -> json_schema rewrite below SUPPRESSES
+        #     thinking, because litellm routes json_schema through Claude's
+        #     forced tool-use.
+        # Measured, 3 runs each, on a JSON-instructed sales prompt:
+        #     json_schema (default effort)     thinking 0/3   valid_json 3/3
+        #     json_schema + effort=high        thinking 1/3   valid_json 2/3
+        #     no response_format               thinking 2/3   valid_json 3/3
+        #     no response_format + effort=high thinking 3/3   valid_json 3/3
+        # So thinking and forced JSON are mutually exclusive here, and forcing
+        # both is the worst cell of the table (it breaks the JSON too).
+        #
+        # chat:sales is the "smart LLM, no rigid script" lane: the reasoning IS
+        # the product, so it drops the forced-JSON rewrite and asks for high
+        # effort. Its JSON correctness is covered by the broker's existing JSON
+        # gate (+ bounded retry), the same safety net every other provider uses.
+        if capability in _THINKING_FIRST_CAPABILITIES:
+            kwargs["reasoning_effort"] = "high"
+            return
+        # Every other lane keeps the guarantee. Claude does NOT honour OpenAI's
+        # response_format={"type":"json_object"} (litellm silently drops the
+        # unsupported param), so with only a prompt instruction Claude sometimes
+        # replies in PLAIN TEXT — especially on follow-ups ("write a short
+        # friendly follow-up") — and the JSON gate rejects it as InvalidJSON
+        # (measured 2026-07-10: ~30% on chat:smart). Convert a json_object
+        # request to a PERMISSIVE json_schema: litellm routes json_schema
+        # through Claude's native tool-use, which forces a valid JSON object.
+        # Permissive (additionalProperties) so the caller's own fields — driven
+        # by the prompt, not this schema — are preserved (verified: 8/8 valid,
+        # all 17 Stepan fields present).
         rf = kwargs.get("response_format")
         if rf and rf.get("type") == "json_object":
             kwargs["response_format"] = {
@@ -145,7 +186,8 @@ def deepseek_model_for_json(
 
 
 class _DeepseekAdapter(ProviderAdapter):
-    def prepare(self, model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
         # "This response_format type is unavailable now") but accepts
         # json_object — confirmed live 2026-07-07. Downgrade so the provider
@@ -197,7 +239,8 @@ class _DeepseekAdapter(ProviderAdapter):
 
 
 class _CerebrasAdapter(ProviderAdapter):
-    def prepare(self, _model: str, kwargs: dict[str, Any]) -> None:
+    def prepare(self, _model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
         # Cerebras rejects strict json_schema whose array fields carry validation
         # keywords it doesn't implement ("Invalid fields for schema with types
         # ['array']: {'maxItems'}", ~194 BadRequests/45min on Stepan's chat:smart,

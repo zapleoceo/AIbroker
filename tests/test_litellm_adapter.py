@@ -382,6 +382,41 @@ async def test_call_llm_passes_response_format_kwarg():
     assert captured["api_key"] == "k"
 
 
+async def test_call_llm_hands_the_capability_to_the_adapter():
+    """The lane must reach the adapter: anthropic's claude-sonnet-5 serves both
+    chat:sales (keep reasoning, no forced JSON) and chat:smart (force JSON via
+    tool-use), and the ONLY thing distinguishing them is this argument. If the
+    plumbing breaks, chat:sales silently loses its thinking again."""
+    captured = {}
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="{}"),
+                                     finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="anthropic/claude-sonnet-5",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"}, capability="chat:sales")
+    assert captured["reasoning_effort"] == "high"
+    assert captured["response_format"] == {"type": "json_object"}  # not rewritten
+
+    captured.clear()
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=fake_acompletion):
+        await call_llm(
+            model="anthropic/claude-sonnet-5",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"}, capability="chat:smart")
+    assert captured["response_format"]["type"] == "json_schema"   # forced JSON
+    assert "reasoning_effort" not in captured
+
+
 async def test_call_llm_forwards_json_schema_verbatim():
     """Native structured output (#1): a full json_schema response_format must
     reach the provider UNCHANGED — that's what grammar-constrains generation to

@@ -166,6 +166,47 @@
 > premium (= 25,090 × ($4−$2.50)/M) is charged. Setting `_CACHE_TTL = None`
 > reverts to the 5-minute default and disables the correction with it.
 >
+> **2026-07-24 (anthropic reasoning on `chat:sales` — and what actually blocked
+> it)**: the ask was "pass thinking through to anthropic on chat:sales". Probing
+> the live prod key showed the premise needed correcting on every point:
+>
+> - Sonnet-5 **already thinks by default** — a bare call returns a thinking
+>   block, so there is nothing to switch on;
+> - `thinking={"type":"enabled"}` is **rejected outright** by the API
+>   (`"thinking.type.enabled" is not supported for this model`) — the working
+>   knob is `reasoning_effort` (`high` keeps reasoning, `low` disables it);
+> - and the real blocker was **our own code**: `_AnthropicAdapter` rewrites
+>   `json_object` → `json_schema`, litellm routes that through Claude's forced
+>   tool-use, and under forced tool-use Sonnet **stops thinking**.
+>
+> Measured, 3 runs each, on a JSON-instructed sales prompt:
+>
+> | request shape | thinking | valid JSON |
+> |---|---|---|
+> | `json_schema`, default effort (**the old behaviour**) | 0/3 | 3/3 |
+> | `json_schema` + `reasoning_effort=high` | 1/3 | **2/3** |
+> | no `response_format` | 2/3 | 3/3 |
+> | **no `response_format` + `reasoning_effort=high`** | **3/3** | **3/3** |
+>
+> So reasoning and *forced* JSON are mutually exclusive on this model, and
+> demanding both is the worst cell — it breaks the JSON as well. `chat:sales` is
+> the lane where the reasoning IS the product, so it now keeps the caller's
+> `json_object` untouched and asks for high effort; JSON correctness falls back
+> to the broker's own JSON gate + bounded retry, the same net every other
+> provider relies on. Every other lane keeps forced tool-use unchanged — the
+> ~30% plain-text InvalidJSON that motivated the rewrite is still real there.
+>
+> Mechanically this needed the lane to reach the adapter: `ProviderAdapter.
+> prepare(model, kwargs, capability=None)` and `call_llm(..., capability=...)`.
+> One model (claude-sonnet-5) serves several lanes with opposite trade-offs, so
+> the model name alone could never distinguish them. `capability` is optional,
+> so health probes and any other adapter are unaffected.
+>
+> For reference, **DeepSeek also reasons**, and the broker already drives it:
+> `extra_body={"thinking": {...}}` on v4 models, disabled by default and forced
+> ON for JSON prompts ≥16k chars (see `_DeepseekAdapter` — without it DeepSeek
+> returns an empty body on large prompts).
+
 > **2026-07-12 (PROVIDER-level affinity — considered, deliberately NOT
 > built)**: after the same-day key-level cache-affinity note below, the next
 > obvious step was pinning a whole (project → provider) pair. Rejected: the

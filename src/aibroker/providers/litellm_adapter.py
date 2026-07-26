@@ -456,6 +456,7 @@ async def call_llm(
     response_format: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     timeout: float | None = None,
+    capability: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Call LiteLLM. Returns (text, meta).
 
@@ -467,6 +468,11 @@ async def call_llm(
     connection but never responds blocks until the client's own read timeout
     fires (a hard 504/abort) instead of the broker cleanly failing over to the
     next key/provider. None = no cap (LiteLLM default).
+
+    `capability` is passed to the provider adapter: one model can serve several
+    lanes that want different trade-offs (anthropic's claude-sonnet-5 forces
+    JSON via tool-use on most lanes, but keeps its reasoning on chat:sales —
+    the two are mutually exclusive). Optional; adapters ignore it by default.
     """
     kwargs: dict[str, Any] = {
         "model": model,
@@ -482,7 +488,7 @@ async def call_llm(
     # Per-provider request quirks (json_schema downgrade, gemini thinking-off,
     # …) live in one adapter each — see providers/adapters.py. adapter.prepare
     # mutates kwargs in place; the default adapter is a no-op.
-    adapter_for(model.split("/", 1)[0]).prepare(model, kwargs)
+    adapter_for(model.split("/", 1)[0]).prepare(model, kwargs, capability)
     if extra:
         kwargs.update(extra)
 
