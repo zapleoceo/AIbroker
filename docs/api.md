@@ -65,8 +65,16 @@ latency for no benefit.
 
 ### Capabilities (for `/v1/jobs`)
 
-`chat:fast`, `chat:smart`, `chat:code`, `chat:edit`, `chat:deep`, `prefilter`,
-`structured`, `translate`, `vision`.
+`chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
+`chat:deep`, `prefilter`, `structured`, `translate`, `vision`.
+
+`chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
+Claude Sonnet leads the chain on its own daily cap, then DeepSeek, then the
+free tier. Unlike every other lane it does NOT force JSON through Claude's
+tool-use, because on Sonnet forcing JSON suppresses the model's reasoning and
+the two cannot be had at once — structured output is instead validated by the
+broker's JSON gate, so a caller asking for `response_format` still gets JSON,
+just guarded rather than grammar-forced. Uses the ordinary `llm:chat` scope.
 
 `translate` routes to small fast non-reasoning models first
 (mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,

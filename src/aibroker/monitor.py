@@ -30,17 +30,31 @@ from aibroker.db import close_engine, get_session, init_engine
 from aibroker.db.models import ApiKeyRow
 from aibroker.providers.health_probes import probe_all
 from aibroker.providers.quotas import quota_for_key
-from aibroker.routing.chains import chain_for, scope_for
+from aibroker.routing.chains import chain_for, has_paid_tail, scope_for
 from aibroker.telemetry import alert, recover
 
 log = logging.getLogger(__name__)
 
-# Chat capabilities whose chains end in a paid "guaranteed-answer" tail (see
-# routing/chains.py + test_chains.py's paid-tail invariant). Losing every
-# usable paid key silently degrades them to free-only best-effort — worth an
-# operator alert, not just a 503 spike later. 2026-07-21: chat:fast dropped —
-# it's now free-only by design (no paid tail to guard).
-_PAID_TAIL_CAPS: tuple[str, ...] = ("chat:smart",)
+def _paid_led_capabilities() -> tuple[str, ...]:
+    """Capabilities whose chain LEADS with a paid provider — the lanes where
+    paid keys are the design, not a last resort. Losing every usable paid key
+    there silently degrades the lane to free-only best-effort, which is worth
+    an operator alert rather than an unexplained quality/503 drift later.
+
+    DERIVED, not hand-listed (2026-07-26): the hand-written tuple said
+    ("chat:smart",) and was not updated when chat:sales shipped — so the
+    newest money lane (anthropic Sonnet on its own $5/day key, leading the
+    chain) had no paid-tail alert at all. Every free-first lane is excluded on
+    purpose: there a paid provider IS the last resort, so losing it is the
+    system working as designed, and alerting on it would be noise."""
+    from aibroker.routing.chains import CAPABILITY_CHAINS, PAID_PROVIDERS
+    return tuple(
+        cap for cap, chain in CAPABILITY_CHAINS.items()
+        if chain and chain[0] in PAID_PROVIDERS and has_paid_tail(cap)
+    )
+
+
+_PAID_TAIL_CAPS: tuple[str, ...] = _paid_led_capabilities()
 
 
 INTERVAL_S = int(os.environ.get("MONITOR_INTERVAL_S", "600"))
