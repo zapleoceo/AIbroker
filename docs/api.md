@@ -70,11 +70,14 @@ latency for no benefit.
 
 `chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
 Claude Sonnet leads the chain on its own daily cap, then DeepSeek, then the
-free tier. Unlike every other lane it does NOT force JSON through Claude's
-tool-use, because on Sonnet forcing JSON suppresses the model's reasoning and
-the two cannot be had at once — structured output is instead validated by the
-broker's JSON gate, so a caller asking for `response_format` still gets JSON,
-just guarded rather than grammar-forced. Uses the ordinary `llm:chat` scope.
+free tier. Uses the ordinary `llm:chat` scope. Like every other lane it FORCES
+JSON when you send `response_format` (Claude has no native `json_object` mode,
+so the broker upgrades it to a permissive `json_schema` served via tool-use,
+and unwraps LiteLLM's tool envelope for you). A brief 2026-07-26 experiment
+exempted this lane to keep Sonnet's reasoning — forced tool-use and reasoning
+are mutually exclusive on this model — but it produced 44% unusable replies in
+production and was reverted. If you want the reasoning instead of the JSON
+guarantee, simply omit `response_format` on this lane.
 
 `translate` routes to small fast non-reasoning models first
 (mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,

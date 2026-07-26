@@ -6,14 +6,18 @@ JSON, some need a per-account URL. Left inline in `call_llm`, each quirk was
 another `if provider == …` branch; here each lives in ONE adapter, so adding a
 provider's quirk is a new class, not an edit to the shared call path.
 
-An adapter has two hooks, both no-op by default:
+An adapter has three hooks, all no-op by default:
   - `prepare(model, kwargs)` — mutate the outgoing LiteLLM kwargs (request-shape
     quirks: response_format downgrade, reasoning_effort). Stateless.
+  - `normalize_json_text(text, response_format)` — normalize a JSON-mode
+    response BODY before it reaches the caller (anthropic's tool-call envelope
+    unwrap). The post-response twin of `prepare`. Stateless.
   - `key_extra(account_id)` — per-KEY kwargs beyond model/api_key (cloudflare's
     account-scoped api_base). Takes state from the specific key.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -29,6 +33,12 @@ class ProviderAdapter:
     def prepare(self, _model: str, kwargs: dict[str, Any],
                 capability: str | None = None) -> None:
         return None
+
+    def normalize_json_text(
+        self, text: str, _response_format: dict[str, Any] | None
+    ) -> str:
+        """Clean up a JSON-mode response body. Default: return it unchanged."""
+        return text
 
     def key_extra(self, account_id: str | None) -> dict[str, Any] | None:
         return None
@@ -47,51 +57,41 @@ class _GeminiAdapter(ProviderAdapter):
         kwargs["reasoning_effort"] = "disable"
 
 
-# Lanes where Claude's REASONING is worth more than a server-side JSON
-# guarantee. Forcing JSON through tool-use suppresses thinking outright, so
-# these lanes keep the softer prompt-driven JSON and lean on the broker's own
-# JSON gate + retry instead. See _AnthropicAdapter for the measurements.
-_THINKING_FIRST_CAPABILITIES = frozenset({"chat:sales"})
+# Keys LiteLLM can leave a forced-tool JSON reply wrapped in. Claude has no
+# native json_object mode, so the adapter upgrades it to a permissive
+# json_schema, which LiteLLM serves via a FORCED TOOL CALL and converts back to
+# content. Sonnet intermittently emits the tool *input* inside a generic
+# function-call envelope — {"parameters": {…the caller's real fields…}} — and
+# LiteLLM forwards it verbatim (its conversion unwraps only a "values" wrapper,
+# litellm#6741). Measured live on chat:sales: ~half of replies arrived wrapped.
+_TOOL_ENVELOPE_KEYS = ("parameters", "arguments", "input")
 
 
 class _AnthropicAdapter(ProviderAdapter):
     def prepare(self, _model: str, kwargs: dict[str, Any],
                 capability: str | None = None) -> None:
-        # Sonnet-5 REASONING (2026-07-24, all verified live on the prod key):
-        #   - it thinks BY DEFAULT — a bare call already returns a thinking
-        #     block, so there is nothing to "switch on";
-        #   - `thinking={"type":"enabled"}` is REJECTED outright by the API
-        #     ("thinking.type.enabled is not supported for this model") — the
-        #     real knob is `reasoning_effort` (high keeps it, low disables it);
-        #   - and our OWN json_object -> json_schema rewrite below SUPPRESSES
-        #     thinking, because litellm routes json_schema through Claude's
-        #     forced tool-use.
-        # Measured, 3 runs each, on a JSON-instructed sales prompt:
-        #     json_schema (default effort)     thinking 0/3   valid_json 3/3
-        #     json_schema + effort=high        thinking 1/3   valid_json 2/3
-        #     no response_format               thinking 2/3   valid_json 3/3
-        #     no response_format + effort=high thinking 3/3   valid_json 3/3
-        # So thinking and forced JSON are mutually exclusive here, and forcing
-        # both is the worst cell of the table (it breaks the JSON too).
+        # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
+        # (litellm silently drops the unsupported param), so with only a prompt
+        # instruction Claude often replies in PLAIN TEXT and the JSON gate
+        # rejects it as InvalidJSON (~30% on chat:smart, 2026-07-10). Convert a
+        # json_object request to a PERMISSIVE json_schema: litellm routes
+        # json_schema through Claude's native tool-use, which forces a valid
+        # JSON object. Permissive (additionalProperties) so the caller's own
+        # fields — driven by the prompt, not this schema — are preserved
+        # (verified: 8/8 valid, all 17 Stepan fields present).
         #
-        # chat:sales is the "smart LLM, no rigid script" lane: the reasoning IS
-        # the product, so it drops the forced-JSON rewrite and asks for high
-        # effort. Its JSON correctness is covered by the broker's existing JSON
-        # gate (+ bounded retry), the same safety net every other provider uses.
-        if capability in _THINKING_FIRST_CAPABILITIES:
-            kwargs["reasoning_effort"] = "high"
-            return
-        # Every other lane keeps the guarantee. Claude does NOT honour OpenAI's
-        # response_format={"type":"json_object"} (litellm silently drops the
-        # unsupported param), so with only a prompt instruction Claude sometimes
-        # replies in PLAIN TEXT — especially on follow-ups ("write a short
-        # friendly follow-up") — and the JSON gate rejects it as InvalidJSON
-        # (measured 2026-07-10: ~30% on chat:smart). Convert a json_object
-        # request to a PERMISSIVE json_schema: litellm routes json_schema
-        # through Claude's native tool-use, which forces a valid JSON object.
-        # Permissive (additionalProperties) so the caller's own fields — driven
-        # by the prompt, not this schema — are preserved (verified: 8/8 valid,
-        # all 17 Stepan fields present).
+        # 2026-07-26 — chat:sales USED to be exempt from this, to keep Sonnet's
+        # reasoning (forced tool-use suppresses thinking; the two are mutually
+        # exclusive on this model). Production killed that trade-off: with the
+        # exemption live, chat:sales returned **44% InvalidJSON** (19 of 43
+        # billed calls unusable). Sampling the bodies showed why — Claude does
+        # not "almost" produce JSON there, it ignores the instruction entirely
+        # and answers in prose (3/3 plain Bahasa replies on the real 81k-char
+        # sales prompt). The earlier 3/3-valid measurement had used a short
+        # prompt that literally said "reply ONLY with a JSON object", which does
+        # not survive the real prompt. So the guarantee wins: every lane forces
+        # JSON again. Reasoning returns for free if a caller stops sending
+        # response_format on this lane.
         rf = kwargs.get("response_format")
         if rf and rf.get("type") == "json_object":
             kwargs["response_format"] = {
@@ -100,6 +100,35 @@ class _AnthropicAdapter(ProviderAdapter):
                                 "schema": {"type": "object",
                                            "additionalProperties": True}},
             }
+
+    def normalize_json_text(
+        self, text: str, response_format: dict[str, Any] | None
+    ) -> str:
+        """Unwrap ONE level of LiteLLM's forced-tool envelope (see
+        _TOOL_ENVELOPE_KEYS). Fires only on an unambiguous shape: a JSON
+        request whose body is an object holding EXACTLY one of those keys, whose
+        value is itself an object, and which the caller's own json_schema does
+        not declare — a schema legitimately asking for a top-level "input"
+        object is returned untouched. Everything else (plain-text requests,
+        arrays, sibling keys, non-object inners) passes through byte-identical.
+        """
+        rf = response_format or {}
+        if str(rf.get("type", "")) not in ("json_object", "json_schema"):
+            return text
+        try:
+            body = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if not isinstance(body, dict) or len(body) != 1:
+            return text
+        key = next(iter(body))
+        if key not in _TOOL_ENVELOPE_KEYS or not isinstance(body[key], dict):
+            return text
+        # the caller genuinely asked for this key at the top level → keep it
+        declared = (rf.get("json_schema") or {}).get("schema", {})
+        if key in (declared.get("properties") or {}):
+            return text
+        return json.dumps(body[key], ensure_ascii=False)
 
 
 # Non-thinking deepseek (== deepseek-chat) goes deterministically EMPTY on

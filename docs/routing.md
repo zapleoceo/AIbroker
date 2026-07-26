@@ -233,6 +233,27 @@
 > the model name alone could never distinguish them. `capability` is optional,
 > so health probes and any other adapter are unaffected.
 >
+> **2026-07-26 — REVERTED after ~2h in production.** The trade-off above did
+> not survive real traffic: with chat:sales exempt from forced JSON, the lane
+> returned **44% InvalidJSON** (19 of 43 billed calls unusable). Sampling the
+> bodies showed Claude does not *almost* produce JSON there — it ignores the
+> instruction entirely and answers in prose (3/3 plain Bahasa replies on the
+> real 81k-char sales prompt). The earlier 3/3-valid measurement had used a
+> short prompt that literally said "reply ONLY with a JSON object", which does
+> not survive the real one — a reminder that a synthetic prompt can flip this
+> class of result. Every lane forces JSON again; Sonnet's reasoning returns for
+> free the day a caller stops sending `response_format` on this lane.
+>
+> The forced path has its own defect, now fixed broker-side: LiteLLM serves
+> `json_schema` via a FORCED TOOL CALL, and Sonnet intermittently returns the
+> tool *input* wrapped in `{"parameters": {…}}`, which LiteLLM forwards verbatim
+> (it unwraps only a `"values"` wrapper, litellm#6741) — ~half of chat:sales
+> replies arrived enveloped. `ProviderAdapter.normalize_json_text` (the
+> post-response twin of `prepare`) unwraps ONE level, before the JSON gate,
+> `record_usage` and the response cache, so callers and cached copies get the
+> real object. Unwrap fires only on an unambiguous shape (single envelope key,
+> object inner, not declared by the caller's own schema).
+>
 > For reference, **DeepSeek also reasons**, and the broker already drives it:
 > `extra_body={"thinking": {...}}` on v4 models, disabled by default and forced
 > ON for JSON prompts ≥16k chars (see `_DeepseekAdapter` — without it DeepSeek
