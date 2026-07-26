@@ -233,6 +233,39 @@ def test_anthropic_leaves_real_json_schema_and_no_format_alone():
     assert "response_format" not in _prepared("anthropic")
 
 
+def test_anthropic_chat_sales_keeps_reasoning_instead_of_forcing_json():
+    """2026-07-24, verified live on the prod key: Sonnet-5 thinks BY DEFAULT,
+    `thinking={"type":"enabled"}` is rejected by the API outright, and the real
+    knob is `reasoning_effort`. Crucially our OWN json_object -> json_schema
+    rewrite SUPPRESSES thinking (litellm routes json_schema through Claude's
+    forced tool-use). Measured 3 runs each on a JSON-instructed sales prompt:
+
+        json_schema (default effort)      thinking 0/3   valid_json 3/3
+        json_schema + effort=high         thinking 1/3   valid_json 2/3
+        no response_format                thinking 2/3   valid_json 3/3
+        no response_format + effort=high   thinking 3/3   valid_json 3/3
+
+    chat:sales is the lane where the reasoning IS the product, so it must keep
+    the caller's json_object untouched (no forced tool-use) and ask for high
+    effort; the broker's JSON gate covers correctness."""
+    kwargs = {"response_format": {"type": "json_object"}}
+    adapter_for("anthropic").prepare("anthropic/claude-sonnet-5", kwargs, "chat:sales")
+    assert kwargs["reasoning_effort"] == "high"
+    # NOT rewritten to json_schema — that is what kills the thinking
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_anthropic_other_lanes_still_force_json_and_dont_set_effort():
+    """The JSON guarantee stays everywhere else — chat:smart's anthropic tail
+    still gets forced tool-use (its ~30% plain-text InvalidJSON was the reason
+    the rewrite exists), and no reasoning_effort is imposed on those lanes."""
+    for cap in ("chat:smart", "chat:code", "chat:edit", None):
+        kwargs = {"response_format": {"type": "json_object"}}
+        adapter_for("anthropic").prepare("anthropic/claude-sonnet-5", kwargs, cap)
+        assert kwargs["response_format"]["type"] == "json_schema", cap
+        assert "reasoning_effort" not in kwargs, cap
+
+
 def test_schema_capable_providers_keep_json_schema():
     """openai/gemini support json_schema — the adapter must NOT downgrade it."""
     assert _prepared("openai", response_format=dict(_SCHEMA))["response_format"] == _SCHEMA

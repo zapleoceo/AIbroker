@@ -437,6 +437,7 @@ async def _run_attempt(
             response_format=response_format,
             extra=extra_for_provider(provider, getattr(key, "account_id", None)),
             timeout=call_timeout,
+            capability=capability,
         )
         meta["cost_usd"] = _billed_cost(key, meta)
     except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
