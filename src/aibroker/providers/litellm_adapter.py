@@ -399,16 +399,30 @@ def apply_prompt_cache(
         c = messages[i].get("content")
         return isinstance(c, str) and bool(c.strip())
 
-    # End of the leading contiguous system run (the static system prefix).
-    sys_end = -1
+    # EVERY leading system message gets its own breakpoint — not just the end
+    # of the run. A breakpoint caches everything up to itself, so one terminal
+    # mark looks equivalent, but only while the whole run is stable. It isn't:
+    # Stepan sends [78,938-char stable persona][~700-char per-lead DOSSIER], so
+    # a single terminal mark puts the VARIABLE dossier inside the cache key and
+    # no two leads ever share an entry. Measured in production after exactly
+    # that mistake shipped: 5.5% hit rate, ~29k tokens re-written on EVERY call,
+    # $0.12/call — it drained the $5/day Sonnet cap in hours. Marking each
+    # system message restores a breakpoint at the stable/variable boundary
+    # wherever it happens to fall; anthropic matches the LONGEST cached prefix,
+    # so the extra marks cost nothing and the 78,938-char prefix always hits.
+    sys_ends: list[int] = []
     for i, m in enumerate(messages):
         if m.get("role") != "system":
             break
-        sys_end = i
+        if _markable(i):
+            sys_ends.append(i)
     # End of the whole conversation so far (the rolling history breakpoint).
     hist_end = next((i for i in range(len(messages) - 1, -1, -1) if _markable(i)), -1)
 
-    marks = {i for i in (sys_end, hist_end) if i >= 0 and _markable(i)}
+    # Reserve one slot for the history mark, spend the rest on the system run.
+    marks = set(sys_ends[:max(_MAX_CACHE_MARKS - 1, 1)])
+    if hist_end >= 0:
+        marks.add(hist_end)
     marks = set(sorted(marks)[:_MAX_CACHE_MARKS])
 
     cache_control: dict[str, str] = {"type": "ephemeral"}

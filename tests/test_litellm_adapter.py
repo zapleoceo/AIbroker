@@ -131,29 +131,41 @@ def test_apply_prompt_cache_noop_for_other_providers():
     assert apply_prompt_cache("deepseek/deepseek-chat", msgs) == msgs
 
 
-def test_apply_prompt_cache_one_breakpoint_for_the_whole_system_prefix():
-    """A breakpoint prefix-caches everything before it, so ONE mark on the LAST
-    leading system message caches the entire multi-message system prefix — the
-    earlier system messages are NOT individually marked (that used to burn a
-    slot each for zero extra caching). The freed slot goes to the history."""
+def test_apply_prompt_cache_marks_every_leading_system_message():
+    """REGRESSION (shipped 2026-07-23, caught in prod 2026-07-24): a single mark
+    on the LAST leading system message looked equivalent — a breakpoint caches
+    everything before it — but that is only true while the whole run is stable.
+    Stepan's prefix is [78,938-char stable persona][~700-char per-lead DOSSIER],
+    so the terminal mark put the VARIABLE dossier inside the cache key and no
+    two leads ever shared an entry: 5.5% hit rate, ~29k tokens re-written on
+    EVERY call, $0.12/call, draining the $5/day Sonnet cap in hours.
+
+    Marking each system message puts a breakpoint at the stable/variable
+    boundary wherever it falls; anthropic matches the LONGEST cached prefix, so
+    the extra marks cost nothing and the stable part always hits."""
     from aibroker.providers.litellm_adapter import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
-        {"role": "system", "content": "one"},
-        {"role": "system", "content": "two"},
+        {"role": "system", "content": "stable persona"},
+        {"role": "system", "content": "per-lead dossier"},
         {"role": "user", "content": "hi"}])
-    assert not _marked(out[0])            # earlier system msg: NOT marked
-    assert _marked(out[1])                # end of system prefix: marked
-    assert _marked(out[2])                # rolling history end: marked
+    assert _marked(out[0])   # stable part cached on its own — the whole point
+    assert _marked(out[1])   # end of the system run
+    assert _marked(out[2])   # rolling history end
 
 
-def test_apply_prompt_cache_all_system_uses_a_single_breakpoint():
-    """6 leading system messages, no history → the system-prefix-end and the
-    history-end coincide on the last message, so exactly ONE breakpoint is
-    placed (was 4 under the old one-per-message cap)."""
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+def test_apply_prompt_cache_respects_the_breakpoint_budget():
+    """anthropic allows _MAX_CACHE_MARKS breakpoints. With more leading system
+    messages than the budget, one slot stays reserved for the history mark so
+    the multi-turn win isn't lost to a long system run."""
+    from aibroker.providers.litellm_adapter import (
+        _MAX_CACHE_MARKS,
+        apply_prompt_cache,
+    )
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": f"s{i}"} for i in range(6)])
-    assert [_marked(m) for m in out] == [False] * 5 + [True]
+    assert sum(_marked(m) for m in out) <= _MAX_CACHE_MARKS
+    assert _marked(out[0])     # earliest (most stable) prefix is marked
+    assert _marked(out[-1])    # history end still gets its slot
 
 
 def test_apply_prompt_cache_rolling_history_grows_with_the_dialogue():
