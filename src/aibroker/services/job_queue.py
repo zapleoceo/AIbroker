@@ -69,6 +69,22 @@ _MAX_RETRIES = int(os.environ.get("JOB_MAX_RETRIES", "8"))
 # and double-executed. See fix 2026-07-10.)
 _STALE_RUNNING_S = 25 * 60
 
+# How long a FINISHED job (done/error) is kept before it is deleted. Nothing
+# reads them: the dashboard and monitor never touch deep_jobs, and a caller
+# polls its result within seconds — a week is already far past any real poll.
+# Left unbounded until 2026-07-26 the table had grown to 1.6 GB / 103k rows,
+# because every row stores the FULL request payload (Stepan's system prompt
+# alone is ~79k chars, and async transcription now parks audio there too). That
+# made the nightly dump ~886 MB of finished work nobody would ever read again.
+# Deletion is capped per pass so a first run on a huge backlog can't lock the
+# table or blow up WAL — it simply takes several passes to catch up.
+_JOB_RETENTION_DAYS = int(os.environ.get("JOB_RETENTION_DAYS", "7"))
+_JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
+# Dispatcher ticks between retention sweeps. The tick fires as often as once a
+# second, and this is pure housekeeping — at the 5s idle poll this is roughly
+# every 25 minutes, and a busy loop only makes it more frequent, never less.
+_PURGE_EVERY_TICKS = int(os.environ.get("JOB_RETENTION_EVERY_TICKS", "300"))
+
 
 def _backoff_s(retry_count: int) -> int:
     """Delay before a re-queued job is eligible again: 5,10,20,… capped at 300."""
@@ -250,6 +266,33 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     )
 
 
+async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DELETE, covered by test_job_queue.py's Postgres test
+    """Delete terminal jobs older than the retention window. Returns how many
+    went. Batched (see _JOB_RETENTION_BATCH) so a large first sweep can't hold
+    a long lock; the next tick continues where this one stopped.
+
+    Only `done`/`error` rows are eligible — never `pending`/`running`, so an
+    in-flight job (or one waiting on backoff) is untouchable regardless of age.
+    Idempotent and safe to run on every tick."""
+    async with get_session() as s:
+        deleted = (await s.execute(
+            text(
+                "DELETE FROM deep_jobs WHERE id IN ("
+                "  SELECT id FROM deep_jobs "
+                "  WHERE status IN ('done', 'error') "
+                "    AND completed_at IS NOT NULL "
+                "    AND completed_at < now() - make_interval(days => :days) "
+                "  LIMIT :batch"
+                ")"
+            ),
+            {"days": _JOB_RETENTION_DAYS, "batch": _JOB_RETENTION_BATCH},
+        )).rowcount or 0
+    if deleted:
+        log.info("job retention: deleted %d finished jobs older than %dd",
+                 deleted, _JOB_RETENTION_DAYS)
+    return deleted
+
+
 async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     """One dispatch pass: re-queue stale, claim up to `limit`, run them all to
     completion. Returns how many were claimed. Used directly by tests (awaits
@@ -341,6 +384,10 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
     inflight: set[asyncio.Task[Any]] = set()
     wake = asyncio.Event()
     listener: asyncio.Task[None] | None = None
+    # Retention runs on a slow counter rather than every tick: it is pure
+    # housekeeping and the tick fires up to once a second. Both workers running
+    # it is harmless — the DELETE is idempotent and batched.
+    ticks_until_purge = 0
     if await _dialect_name() == "postgresql":
         listener = asyncio.create_task(_listen_for_jobs(wake, stop))
     idle_timeout = _IDLE_POLL_INTERVAL_S if listener is not None else _POLL_INTERVAL_S
@@ -353,6 +400,11 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
         claimed = 0
         try:
             await _requeue_stale_running()
+            if listener is not None:          # Postgres-only (make_interval)
+                ticks_until_purge -= 1
+                if ticks_until_purge <= 0:
+                    ticks_until_purge = _PURGE_EVERY_TICKS
+                    await purge_finished_jobs()
             free = _MAX_CONCURRENCY - len(inflight)
             if free > 0:
                 for row in await _claim_batch(free):
