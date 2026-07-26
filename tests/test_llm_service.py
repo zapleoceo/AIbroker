@@ -1543,6 +1543,9 @@ async def test_run_transcribe_empty_local_escalates_never_dropped(monkeypatch):
     monkeypatch.setattr(svc, "note_affinity_shared", _noop)
     monkeypatch.setattr(svc, "_handle_attempt_failure", _noop)
     monkeypatch.setattr(svc, "decrypt", lambda _x: "plain")
+    # local-first here on purpose: this asserts the empty-local ESCALATION,
+    # not the production order (groq leads since 2026-07-26).
+    monkeypatch.setattr(svc, "chain_for", lambda _cap: ["local", "groq"])
 
     out = await svc.run_transcribe(project=_fake_project(), audio=b"x",
                                     filename="a.ogg", workflow="media")

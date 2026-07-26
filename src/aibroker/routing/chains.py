@@ -201,14 +201,23 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # entries stay (same "known but not chained" treatment as github before
     # its own prod key test — see docs/routing.md).
     "vision": ["gemini", "openrouter", "openai"],
-    # 2026-07-18: "local" (self-hosted faster-whisper, vera3's asr-local
-    # service on the same host) goes FIRST — free, private, no external rate
-    # limit, so a transcription request never has to wait on groq's daily
-    # Whisper quota or a saturated gemini pool. Falls through to groq/gemini/
-    # openai when ASR_LOCAL_URL is unset or the service is unreachable (see
-    # litellm_adapter._transcribe_via_local_asr).
-    # whisper: groq is free + fast (whisper-large-v3-turbo); openai paid fallback.
-    "transcription": ["local", "groq", "gemini", "openai"],
+    # 2026-07-18: "local" (self-hosted faster-whisper on this host) was put
+    # FIRST — free, private, no external rate limit, so a request never waits on
+    # groq's daily Whisper quota. 2026-07-26: MOVED BEHIND groq. On this box it
+    # is not a fast path at all:
+    #   local  131-168 SECONDS per transcription, 35 timeouts vs 23 successes/24h
+    #   groq   753-1150 ms — ~150x faster, also free
+    # It runs on WHISPER_CPU_THREADS=1 / cpus=1.0 because the host has only 2
+    # cores at load ~1.7 (raising that OOM'd before — see docs/deploy-ops.md), so
+    # the slowness is structural, not tunable. Leading with it meant every
+    # request burned up to the 180s ASR timeout BEFORE falling through, and those
+    # fall-throughs are what drained groq's daily quota — after which nothing was
+    # left and callers got no answer at all (Stepan, 2026-07-26: local cooling +
+    # groq quota-exhausted until 00:00 UTC + gemini rate-limited, and openai
+    # unreachable since no key carries llm:audio).
+    # Order now: fast-and-free first, local as the backstop for when groq's daily
+    # quota IS exhausted — which is exactly the case it was added for.
+    "transcription": ["groq", "local", "gemini", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.
     "embedding": ["voyage", "cohere"],
 }
