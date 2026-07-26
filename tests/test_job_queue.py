@@ -442,8 +442,8 @@ async def test_finish_clears_the_queued_audio_blob():
     from aibroker.services.deep_jobs import AUDIO_FIELD, _finish
 
     async with get_session() as s:
-        proj = ProjectRow(name="audio-cleanup-test", key_hash="h",
-                          allowed_scopes=["llm:audio"])
+        proj = ProjectRow(name="audio-cleanup-test", project_key_hash="h",
+                          project_key_prefix="aib_x", allowed_scopes=["llm:audio"])
         s.add(proj)
         await s.flush()
         row = DeepJobRow(
