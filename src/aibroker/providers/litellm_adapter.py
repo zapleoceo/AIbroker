@@ -532,6 +532,12 @@ async def call_llm(
             text = getattr(msg, "content", "") or ""
     else:
         text = ""
+    # Post-response provider quirk, the twin of adapter.prepare above: anthropic
+    # unwraps LiteLLM's forced-tool JSON envelope here. Applied BEFORE the JSON
+    # gate, record_usage and the response cache, so every caller — and every
+    # cached copy — gets the clean body rather than each client unwrapping it.
+    text = adapter_for(model.split("/", 1)[0]).normalize_json_text(
+        text, response_format)
     usage = getattr(resp, "usage", None) or {}
     if isinstance(usage, dict):
         tokens_in = usage.get("prompt_tokens", 0) or 0

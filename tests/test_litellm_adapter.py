@@ -1,6 +1,7 @@
 """providers/litellm_adapter — call_llm + embed wrappers (mocked LiteLLM)."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -395,10 +396,10 @@ async def test_call_llm_passes_response_format_kwarg():
 
 
 async def test_call_llm_hands_the_capability_to_the_adapter():
-    """The lane must reach the adapter: anthropic's claude-sonnet-5 serves both
-    chat:sales (keep reasoning, no forced JSON) and chat:smart (force JSON via
-    tool-use), and the ONLY thing distinguishing them is this argument. If the
-    plumbing breaks, chat:sales silently loses its thinking again."""
+    """The lane reaches the adapter. Nothing keys off it for anthropic today
+    (chat:sales lost its exemption after measuring 44% InvalidJSON), but the
+    plumbing is what lets a lane ever diverge — and it must not crash or leak
+    the argument into the provider payload."""
     captured = {}
 
     async def fake_acompletion(**kwargs):
@@ -415,18 +416,42 @@ async def test_call_llm_hands_the_capability_to_the_adapter():
             model="anthropic/claude-sonnet-5",
             messages=[{"role": "user", "content": "x"}], api_key="k",
             response_format={"type": "json_object"}, capability="chat:sales")
-    assert captured["reasoning_effort"] == "high"
-    assert captured["response_format"] == {"type": "json_object"}  # not rewritten
+    assert captured["response_format"]["type"] == "json_schema"   # forced JSON
+    assert "capability" not in captured        # broker-side only, never sent
 
-    captured.clear()
+
+async def test_call_llm_unwraps_the_anthropic_tool_envelope():
+    """End-to-end through call_llm: LiteLLM's forced-tool envelope is unwrapped
+    before the body is returned — so the JSON gate, record_usage and the
+    response cache all see the caller's real object, not {"parameters": {…}}.
+    Measured live: ~half of chat:sales replies arrived enveloped."""
+    async def enveloped(**_kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps({"parameters": {"reply": "halo",
+                                                       "move": "ask_budget"}})),
+                finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+        )
+
     with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
-                side_effect=fake_acompletion):
-        await call_llm(
+                side_effect=enveloped):
+        text, _meta = await call_llm(
             model="anthropic/claude-sonnet-5",
             messages=[{"role": "user", "content": "x"}], api_key="k",
-            response_format={"type": "json_object"}, capability="chat:smart")
-    assert captured["response_format"]["type"] == "json_schema"   # forced JSON
-    assert "reasoning_effort" not in captured
+            response_format={"type": "json_object"})
+    assert json.loads(text) == {"reply": "halo", "move": "ask_budget"}
+
+    # a NON-anthropic provider returning the same shape is left alone
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                side_effect=enveloped):
+        text, _meta = await call_llm(
+            model="deepseek/deepseek-v4-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k",
+            response_format={"type": "json_object"})
+    assert json.loads(text) == {"parameters": {"reply": "halo",
+                                               "move": "ask_budget"}}
 
 
 async def test_call_llm_forwards_json_schema_verbatim():

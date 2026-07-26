@@ -1,6 +1,8 @@
 """Per-provider adapters — request-shape quirks + per-key extras."""
 from __future__ import annotations
 
+import json
+
 from aibroker.providers.adapters import (
     ProviderAdapter,
     adapter_for,
@@ -233,37 +235,71 @@ def test_anthropic_leaves_real_json_schema_and_no_format_alone():
     assert "response_format" not in _prepared("anthropic")
 
 
-def test_anthropic_chat_sales_keeps_reasoning_instead_of_forcing_json():
-    """2026-07-24, verified live on the prod key: Sonnet-5 thinks BY DEFAULT,
-    `thinking={"type":"enabled"}` is rejected by the API outright, and the real
-    knob is `reasoning_effort`. Crucially our OWN json_object -> json_schema
-    rewrite SUPPRESSES thinking (litellm routes json_schema through Claude's
-    forced tool-use). Measured 3 runs each on a JSON-instructed sales prompt:
-
-        json_schema (default effort)      thinking 0/3   valid_json 3/3
-        json_schema + effort=high         thinking 1/3   valid_json 2/3
-        no response_format                thinking 2/3   valid_json 3/3
-        no response_format + effort=high   thinking 3/3   valid_json 3/3
-
-    chat:sales is the lane where the reasoning IS the product, so it must keep
-    the caller's json_object untouched (no forced tool-use) and ask for high
-    effort; the broker's JSON gate covers correctness."""
-    kwargs = {"response_format": {"type": "json_object"}}
-    adapter_for("anthropic").prepare("anthropic/claude-sonnet-5", kwargs, "chat:sales")
-    assert kwargs["reasoning_effort"] == "high"
-    # NOT rewritten to json_schema — that is what kills the thinking
-    assert kwargs["response_format"] == {"type": "json_object"}
-
-
-def test_anthropic_other_lanes_still_force_json_and_dont_set_effort():
-    """The JSON guarantee stays everywhere else — chat:smart's anthropic tail
-    still gets forced tool-use (its ~30% plain-text InvalidJSON was the reason
-    the rewrite exists), and no reasoning_effort is imposed on those lanes."""
-    for cap in ("chat:smart", "chat:code", "chat:edit", None):
+def test_anthropic_forces_json_on_every_lane_including_sales():
+    """REGRESSION (shipped ~2h, 2026-07-26): chat:sales was exempted from the
+    forced-JSON rewrite so Sonnet would keep reasoning (forced tool-use
+    suppresses thinking — the two are mutually exclusive on this model).
+    Production killed the trade-off: 44% InvalidJSON (19 of 43 billed calls
+    unusable). Sampling the bodies showed Claude doesn't *almost* produce JSON
+    there — it ignores the instruction entirely and answers in prose (3/3 plain
+    Bahasa replies on the real 81k-char sales prompt). The earlier 3/3-valid
+    measurement used a short prompt literally saying "reply ONLY with JSON",
+    which does not survive the real one. The guarantee wins on EVERY lane."""
+    for cap in ("chat:sales", "chat:smart", "chat:code", "chat:edit", None):
         kwargs = {"response_format": {"type": "json_object"}}
         adapter_for("anthropic").prepare("anthropic/claude-sonnet-5", kwargs, cap)
         assert kwargs["response_format"]["type"] == "json_schema", cap
         assert "reasoning_effort" not in kwargs, cap
+
+
+def test_anthropic_unwraps_the_forced_tool_envelope():
+    """Claude has no native json_object mode, so we upgrade to json_schema and
+    LiteLLM serves it via a FORCED TOOL CALL. Sonnet intermittently returns the
+    tool *input* inside a generic envelope — {"parameters": {…}} — and LiteLLM
+    forwards it verbatim (it unwraps only a "values" wrapper, litellm#6741).
+    Measured live: ~half of chat:sales replies arrived enveloped, forcing the
+    client to unwrap. The broker unwraps ONE level so callers get the real
+    object."""
+    a = adapter_for("anthropic")
+    rf = {"type": "json_object"}
+    for key in ("parameters", "arguments", "input"):
+        body = json.dumps({key: {"reply": "halo", "move": "ask_budget"}})
+        assert json.loads(a.normalize_json_text(body, rf)) == {
+            "reply": "halo", "move": "ask_budget"}
+    # unicode survives the round-trip un-escaped
+    out = a.normalize_json_text(json.dumps({"parameters": {"reply": "привет"}}), rf)
+    assert json.loads(out) == {"reply": "привет"}
+
+
+def test_anthropic_envelope_unwrap_only_on_an_unambiguous_shape():
+    """Guards — anything that could legitimately BE the caller's own object is
+    returned byte-identical, so the unwrap can never eat real data."""
+    a = adapter_for("anthropic")
+    rf = {"type": "json_object"}
+    clean = json.dumps({"reply": "halo"})
+    assert a.normalize_json_text(clean, rf) == clean          # already clean
+    sibling = json.dumps({"parameters": {"a": 1}, "other": 2})
+    assert a.normalize_json_text(sibling, rf) == sibling      # sibling keys
+    inner_scalar = json.dumps({"parameters": "not-an-object"})
+    assert a.normalize_json_text(inner_scalar, rf) == inner_scalar
+    assert a.normalize_json_text("[1, 2]", rf) == "[1, 2]"    # array body
+    assert a.normalize_json_text("plain prose", rf) == "plain prose"
+    # plain-text request → never touched, even if it happens to look enveloped
+    assert a.normalize_json_text(json.dumps({"input": {"x": 1}}), None) ==         json.dumps({"input": {"x": 1}})
+    # a schema that legitimately declares the key keeps it
+    schema_rf = {"type": "json_schema", "json_schema": {"schema": {
+        "type": "object", "properties": {"input": {"type": "object"}}}}}
+    declared = json.dumps({"input": {"x": 1}})
+    assert a.normalize_json_text(declared, schema_rf) == declared
+
+
+def test_default_adapter_never_touches_the_body():
+    """The hook is opt-in: every non-anthropic provider returns the body
+    unchanged, so this can't silently reshape another provider's JSON."""
+    for provider in ("deepseek", "gemini", "cerebras", "unknown-provider"):
+        body = json.dumps({"parameters": {"reply": "x"}})
+        assert adapter_for(provider).normalize_json_text(
+            body, {"type": "json_object"}) == body, provider
 
 
 def test_schema_capable_providers_keep_json_schema():
