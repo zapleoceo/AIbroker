@@ -335,6 +335,13 @@ into N equal-width time slices and counts ok/error per slice — one query for
 capability, one for workflow (both small: buckets × distinct values, not raw
 rows). Each row's bars scale to that row's OWN busiest bucket, not the
 busiest across all rows, so a quiet workflow stays visible next to a loud one.
+The svg is sized by CSS, not by attributes (2026-07-30): it carries only a
+`viewBox` plus `preserveAspectRatio="none"`, and `.brk-card td.sp` gives the
+cell a percentage width. Because the svg then has no intrinsic width the
+column has no minimum content width, so on a narrow viewport it yields space
+to the label/cost columns instead of pushing the chart past the card's right
+edge — which is exactly what a hard-coded `width="96"` used to do. Bucket
+count is therefore constant at any width; only bar thickness changes.
 `_fetch_type_sparklines` is `# pragma: no cover` like the other Postgres-only
 fetchers in `dashboard_data.py` (`_fetch_calls_1h`, `_fetch_provider_summary`)
 — `now()`/`width_bucket`/`extract(epoch)` have no SQLite equivalent, so
