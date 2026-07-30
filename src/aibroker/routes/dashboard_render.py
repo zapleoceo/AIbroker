@@ -783,9 +783,9 @@ def _cache_card(cache_read: int, cache_write: int, tin: int = 0) -> str:
     """
 
 
-# Sparkline geometry (px). Thin bars, 1px gaps — _SPARK_BUCKETS (24) of them
-# at these dims render ~96px wide, fitting the narrow half of the split
-# capability/workflow card.
+# Sparkline geometry — viewBox units, NOT px. The svg carries no width
+# attribute and is stretched to its cell by CSS (.spark), so the bars squash
+# or spread with the tile instead of overflowing it on a narrow viewport.
 _SPARK_BAR_W = 3
 _SPARK_GAP = 1
 _SPARK_H = 20
@@ -819,9 +819,12 @@ def _sparkline_svg(buckets: list[tuple[int, int]]) -> str:
                 f'<rect x="{x}" y="{_SPARK_H - total_h}" width="{_SPARK_BAR_W}" '
                 f'height="{err_h}" fill="#f44336"/>'
             )
+    # No width/height attributes: CSS sizes it to the cell. preserveAspectRatio
+    # "none" lets the viewBox stretch horizontally, so bar count stays constant
+    # and only bar thickness changes with the available width.
     return (
-        f'<svg class="spark" width="{w}" height="{_SPARK_H}" '
-        f'viewBox="0 0 {w} {_SPARK_H}" preserveAspectRatio="none">'
+        f'<svg class="spark" viewBox="0 0 {w} {_SPARK_H}" '
+        f'preserveAspectRatio="none" aria-hidden="true">'
         f'{"".join(bars)}</svg>'
     )
 
@@ -923,13 +926,13 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
             lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
                       f'<td class="num">{r.n}</td>'
                       f'<td class="num">{_cost_span(float(r.spend))}</td>'
-                      f'<td>{_sparkline_svg(cap_spark.get(r.cap, _empty_spark))}</td></tr>',
+                      f'<td class="sp">{_sparkline_svg(cap_spark.get(r.cap, _empty_spark))}</td></tr>',
             colspan=4)
         + _bd_section("By workflow", "По workflow", list(d["by_workflow"]),
             lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
                       f'<td class="num">{r.n}</td>'
                       f'<td class="num">{_cost_span(float(r.spend))}</td>'
-                      f'<td>{_sparkline_svg(wf_spark.get(r.wf, _empty_spark))}</td></tr>',
+                      f'<td class="sp">{_sparkline_svg(wf_spark.get(r.wf, _empty_spark))}</td></tr>',
             colspan=4)
         + '</div>'
     )
