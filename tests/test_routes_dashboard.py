@@ -1165,6 +1165,19 @@ def test_sparkline_svg_empty_series_renders_no_bars():
     assert "<svg" in svg   # still a valid (empty) chart, not blank string
 
 
+def test_sparkline_svg_has_no_fixed_pixel_width():
+    """Regression: a hard-coded width="96" made the column unshrinkable, so the
+    histograms spilled past the card's right edge on a narrow viewport. Width
+    must come from CSS; the viewBox alone carries the geometry."""
+    from aibroker.routes.dashboard_render import _SPARK_H, _sparkline_svg
+    svg = _sparkline_svg([(1, 0)] * 24)
+    head = svg[: svg.index(">") + 1]
+    assert "width=" not in head
+    assert "height=" not in head
+    assert f'viewBox="0 0 96 {_SPARK_H}"' in head
+    assert 'preserveAspectRatio="none"' in head
+
+
 def test_render_project_detail_shows_capability_sparkline_bars():
     """Each capability/workflow row gets its own mini ok/error histogram —
     keyed by that row's own label, not shared/mixed with other rows'."""
