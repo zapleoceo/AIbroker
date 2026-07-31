@@ -88,9 +88,11 @@ def test_cooldown_end_monthly_vs_short():
     from aibroker.routing.cooldown import next_utc_month_start
 
     monthly = _cooldown_end("monthly quota")
-    # ~= next UTC month start (naive), far more than a day out.
+    # Anchored to the next UTC month start — that anchor is the whole contract.
+    # An additional "> a day out" assertion would only hold mid-month and broke
+    # this test on 2026-07-31 (month end was ~16h away, not >24h).
     assert abs((monthly - next_utc_month_start().replace(tzinfo=None)).total_seconds()) < 2
-    assert (monthly - datetime.now(UTC).replace(tzinfo=None)).total_seconds() > 86400
+    assert monthly > datetime.now(UTC).replace(tzinfo=None)
 
     short = _cooldown_end("rate limit")
     delta = (short - datetime.now(UTC).replace(tzinfo=None)).total_seconds()

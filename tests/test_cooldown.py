@@ -221,7 +221,10 @@ async def test_cooldown_until_mistral_unauthorized_goes_to_next_month():
         1, "mistral", 'MistralException - {"detail":"Unauthorized"}')
     offset = (until - next_utc_month_start()).total_seconds()
     assert 0 <= offset <= 90                                    # + anti-herd jitter
-    assert (until - datetime.now(UTC)).total_seconds() > 86400  # far more than a day
+    # The month-start anchor above IS the contract. Do NOT also assert the
+    # remaining wait exceeds a day: that only holds mid-month and made this
+    # test fail every 31st (caught 2026-07-31, ~16h to month end).
+    assert until > datetime.now(UTC)
     # Scoped to mistral: the same text for another provider is NOT monthly (it
     # would fall through to the adaptive short backoff, not next-month).
     from aibroker.routing.cooldown import _is_provider_monthly
@@ -324,7 +327,9 @@ async def test_cooldown_until_monthly_goes_to_next_month():
     )
     offset = (until - next_utc_month_start()).total_seconds()
     assert 0 <= offset <= 90                                    # + anti-herd jitter
-    assert (until - datetime.now(UTC)).total_seconds() > 86400  # far more than a day
+    # Anchor-only, deliberately — see the sibling monthly test: a
+    # "> a day remaining" assertion is calendar-dependent, not a spec.
+    assert until > datetime.now(UTC)
 
 
 def test_is_daily_quota_error_detects_cloudflare_neurons():
