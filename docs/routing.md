@@ -436,11 +436,20 @@
 > random per key/call). run_chat retries the SAME provider's next key (usually
 > valid) instead of skipping the provider; recorded as `EmptyBody` (vs the
 > `InvalidJSON` used for non-empty malformed bodies, which still skip the model).
-> CAPPED at `_MAX_EMPTY_RETRIES=1`: some prompts make json_object empty
-> DETERMINISTICALLY (a full ~30k-char system prompt is empty on every key/call —
-> verified 30k→empty 4/4 vs 16k→OK 4/4), so retrying every key just burns the
-> provider. After the cap it's a normal miss → next provider. Root trigger is the
-> caller's oversized system prompt, not the broker.
+> CAPPED at `_MAX_EMPTY_RETRIES=3` (raised from 1 on 2026-07-31). The old cap of
+> 1 assumed a big-prompt empty was DETERMINISTIC — "empty on every key/call".
+> Six hours of live `chat:sales` on `deepseek-v4-pro` disproved that: 185 ok vs
+> 179 `EmptyBody` at avg_in 31247/31299 and cache_read 30722/30916 — same model,
+> same key, same prompt size, same cache behaviour, only the outcome differs.
+> It's a ~49% coin flip, so the retry count is the lever: 2 attempts leave 24%
+> unanswered, 4 leave 6%. Retries are cheap because `pick_and_reserve` does not
+> exclude keys already tried, and DeepSeek's prompt cache is per-key — a retry
+> re-reads the warm 31k-token prefix at ~1/120th of miss price (98.2% cache-read
+> measured on key 110). The cost is ~15s of added latency per extra attempt,
+> well inside the 60s call timeout and the 18-min walk deadline. Still capped
+> (`_max_keys("deepseek")` is 5) so a genuine provider outage fails over instead
+> of spending every key. After the cap it's a normal miss → next provider. Root
+> trigger is still the caller's oversized system prompt, not the broker.
 > - **deepseek moved to `deepseek-v4-flash`** (chat:fast/smart/edit/code,
 >   2026-07-17) ahead of `deepseek-chat`'s deprecation (2026-07-24 15:59 UTC).
 >   The 07-10 revert-story is now understood: v4 defaults to THINKING mode and
@@ -480,8 +489,9 @@
 >   1000). On multi-turn dialogs the reasoning pass is apparently what makes
 >   DeepSeek actually emit the body at all, for either v4 variant; forcing it
 >   off just reproduces the empty-body bug on pro too. Even with thinking
->   kept, ~33% empty is NOT zero — `_MAX_EMPTY_RETRIES=1` gives one same-
->   provider retry (~11% chance both attempts empty), and if BOTH empty the
+>   kept, ~33% empty is NOT zero (measured again 2026-07-31: ~49% on live
+>   chat:sales) — `_MAX_EMPTY_RETRIES=3` gives three same-provider retries
+>   (~6% chance all four attempts empty), and if ALL empty the
 >   walk falls to the free tail same as before this whole change existed; this
 >   upgrade narrows the failure window, it doesn't eliminate DeepSeek's
 >   empty-body bug outright. Lesson: a single small-N test on one prompt SHAPE

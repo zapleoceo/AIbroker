@@ -2035,6 +2035,62 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
     assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
 
 
+async def test_run_chat_empty_body_retry_rescues_same_provider(monkeypatch):
+    """A big-prompt DeepSeek empty is a ~coin flip, not a dead end (measured
+    2026-07-31: 185 ok vs 179 EmptyBody on identical requests), so a retry on
+    the SAME provider must be able to rescue the call instead of conceding it
+    to the next one. Guards _MAX_EMPTY_RETRIES against being tuned back down to
+    a value that can't outlast a run of misses."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    calls = {"n": 0}
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+        # One active key, re-picked on every retry — the real deepseek shape.
+        return SimpleNamespace(id=1, label="k1", tier="paid",
+                                provider=provider, token_encrypted="x")
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        if kw["model"].startswith("deepseek"):
+            calls["n"] += 1
+            body = "   " if calls["n"] <= 2 else '{"ok": true}'
+        else:
+            body = '{"from": "gemini"}'
+        return body, {"model": kw["model"], "tokens_in": 100, "tokens_out": 0,
+                      "cost_usd": 0.0, "latency_ms": 50,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7,
+        response_format={"type": "json_object"}, workflow=None,
+        at=OFF_PEAK_AT,
+    )
+    assert out.provider == "deepseek"       # rescued, not conceded to gemini
+    assert out.text == '{"ok": true}'
+    assert "gemini" not in picks
+    assert calls["n"] == 3                  # two misses, then the answer
+
+
 async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
     """A provider that returns empty bodies DETERMINISTICALLY (deepseek
     json_object on a 30k prompt) must burn at most _MAX_EMPTY_RETRIES + 1 keys

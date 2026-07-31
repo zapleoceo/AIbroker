@@ -74,10 +74,29 @@ _COOLDOWN = timedelta(minutes=5)
 _MAX_KEYS_PER_PROVIDER = 5
 _MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
 # Empty/whitespace JSON bodies: retry the same provider at most this many times
-# (transient throttle recovers on retry) before treating it as a real miss and
-# moving on — a deterministic empty (e.g. DeepSeek json_object on a 30k prompt)
-# must not burn every key of the provider.
-_MAX_EMPTY_RETRIES = 1
+# before treating it as a real miss and moving on.
+#
+# Was 1, on the premise that a big-prompt DeepSeek empty is DETERMINISTIC
+# ("empty on every key/call") and retrying only burns the provider. Measured
+# 2026-07-31 over 6h of live chat:sales on deepseek-v4-pro, that premise is
+# false — it is a coin flip, not a dead end:
+#     ok         185   avg_in 31247   avg_out 810   cache_read 30722
+#     EmptyBody  179   avg_in 31299   avg_out 518   cache_read 30916
+# Same model, same key, same prompt size, same cache behaviour — only the
+# outcome differs, so nothing in the request lets us predict or avoid it.
+# Against a ~49% independent miss rate the retry count IS the fix: 2 attempts
+# leave 24% unanswered, 4 leave 6%.
+#
+# Retries are cheap here specifically because they land on the SAME key —
+# pick_and_reserve does not exclude keys already tried in this request, and
+# DeepSeek's prompt cache is per-key, so a retry re-reads the warm 31k-token
+# prefix at ~1/120th of miss price (measured 98.2% cache-read on key 110).
+# The cost is latency: ~15s per extra attempt, far inside the 18-min walk
+# deadline and the 60s per-call timeout.
+#
+# Still capped (not "try every key"): _max_keys("deepseek") is 5, and a genuine
+# provider-wide outage must not spend all of them before the chain fails over.
+_MAX_EMPTY_RETRIES = 3
 
 # Distinct keys of one provider that must return an empty body inside the
 # breaker window before we treat it as a provider-side degradation and try the
@@ -665,13 +684,13 @@ async def run_chat(
                 break
             if flow is _Flow.NEXT_KEY_EMPTY:
                 if empty_retries < _MAX_EMPTY_RETRIES:
-                    # Retry the SAME provider's next key ONCE — that rescues a
-                    # transient throttle. But cap it: some prompts make DeepSeek's
-                    # json_object return empty DETERMINISTICALLY (verified: a
-                    # 30k-char system prompt is empty on every key/call), and
-                    # retrying every key there just burns the whole provider for
-                    # nothing. After the cap, treat it like any other JSON miss and
-                    # move to the next provider.
+                    # Retry the SAME provider — an empty body is a ~coin-flip on
+                    # big JSON prompts (see _MAX_EMPTY_RETRIES), so another draw
+                    # is the only lever we have; nothing in the request predicts
+                    # it. With one active key the retry re-picks that same key,
+                    # keeping its warm prompt cache. Still bounded: after the cap
+                    # this is treated like any other JSON miss and the walk moves
+                    # to the next provider rather than spending every key.
                     empty_retries += 1
                     log.warning("provider %s returned empty body — retrying next key", provider)
                     continue
