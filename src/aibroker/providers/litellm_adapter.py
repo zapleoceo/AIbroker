@@ -90,27 +90,31 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # alternative of that quality. Caveat: our 429 cooldown is per KEY, so a
     # flash-quota 429 still parks the whole key incl. its flash-lite bucket —
     # flash-lite quota is reachable only while the key itself is not cooling.
-    # 2026-08-16: the QUALITY lanes move to gemini-3.7-flash (released 08-13,
-    # confirmed present in the live ListModels response and answering in 926ms
-    # with reasoning_effort="low" — see _GeminiAdapter for why "disable" 400s
-    # there). It is also the cheapest of the 3.x flash line on paid tier
-    # ($0.75/$3.75 vs 3.6's $1.50/$7.50), so it is both the newest and the
-    # cheapest upgrade available.
+    # 2026-08-16: gemini-3.7-flash (released 08-13) was tried on the quality
+    # lanes and REVERTED the same day. Do not retry it on a small sample.
     #
-    # High-volume/latency-critical lanes deliberately STAY on 2.5: chat:fast
-    # and structured carry Vera's bulk traffic where 2.5-flash answered in
-    # 411ms, and prefilter/translate stay on flash-lite, the cheapest model
-    # Google sells. Moving those without a volume measurement would trade a
-    # known-good latency profile for an unmeasured one.
+    # The move was made on a single call per cell against a trivial prompt,
+    # where 3.7 looked strictly better (flat 9 output tokens, no truncation at
+    # max_tokens=16). That did not generalise. Re-measured at N=10 on a REAL
+    # sales-shaped prompt, and confirmed by production traffic:
+    #                     ok      out   median   p90     max
+    #   3.7-flash        7/10      87    1495   3101    8017   (3 ServiceUnavailable)
+    #   2.5-flash       10/10      77     878   1177    1253
+    #   vision, prod  2 ok +1 TimeoutError @4196ms   vs   77 ok @1998ms, 0 timeouts
+    # So 3.7 was worse on every axis that matters — availability, latency AND
+    # output tokens — most likely still stabilising three days after launch.
+    # The _GeminiAdapter reasoning_effort fix stays: it is correct regardless,
+    # and is what a future retry will need. Re-measure at N>=10 on a realistic
+    # prompt before moving any lane again.
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
-               "chat:smart": "gemini/gemini-3.7-flash",
-               "chat:sales": "gemini/gemini-3.7-flash",
-               "chat:code": "gemini/gemini-3.7-flash",
-               "chat:edit": "gemini/gemini-3.7-flash",
+               "chat:smart": "gemini/gemini-2.5-flash",
+               "chat:sales": "gemini/gemini-2.5-flash",
+               "chat:code": "gemini/gemini-2.5-flash",
+               "chat:edit": "gemini/gemini-2.5-flash",
                "prefilter": "gemini/gemini-2.5-flash-lite",
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash-lite",
-               "vision": "gemini/gemini-3.7-flash",
+               "vision": "gemini/gemini-2.5-flash",
                "transcription": "gemini/gemini-2.5-flash"},
     # 2026-07-17: moved to deepseek-v4-flash AHEAD of deepseek-chat's
     # deprecation (2026-07-24 15:59 UTC; DeepSeek: "deepseek-chat corresponds
