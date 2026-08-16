@@ -262,8 +262,12 @@ def test_deepseek_is_on_v4_flash_everywhere():
 
 def test_gemini_smart_is_flash_not_starved_pro():
     """REGRESSION (2026-07-10): gemini-2.5-pro's free tier (~50-100 RPD/5 RPM)
-    can't serve smart volume — moved chat:smart to 2.5-flash (~250 RPD/10 RPM)."""
-    assert model_for("gemini", "chat:smart") == "gemini/gemini-2.5-flash"
+    can't serve smart volume — chat:smart must stay on a FLASH-tier model.
+    2026-08-16: the specific flash moved 2.5 → 3.7, so assert the tier (the
+    actual invariant) rather than one frozen version string."""
+    smart = model_for("gemini", "chat:smart")
+    assert "flash" in smart and "pro" not in smart
+    assert smart == "gemini/gemini-3.7-flash"
 
 
 def test_gemini_utility_lanes_use_flash_lite_quota_bucket():
@@ -271,10 +275,17 @@ def test_gemini_utility_lanes_use_flash_lite_quota_bucket():
     1000 RPD bucket (4× flash's 250) was unused while flash burned quota on
     utility calls. A/B on our keys: translate byte-identical, prefilter JSON
     identical. Quality-sensitive lanes (vision/smart/structured) MUST stay on
-    flash — the freed quota is theirs."""
+    flash — the freed quota is theirs.
+
+    2026-08-16: the quality lanes moved again, to gemini-3.7-flash. Because the
+    free quota is per MODEL per key, that splits them into a THIRD bucket:
+    utility on flash-lite, bulk (chat:fast/structured) on 2.5-flash, quality on
+    3.7-flash — so the three groups stop competing for one another's RPD."""
     for cap in ("prefilter", "translate"):
         assert model_for("gemini", cap) == "gemini/gemini-2.5-flash-lite", cap
-    for cap in ("chat:smart", "structured", "vision", "chat:edit"):
+    for cap in ("chat:smart", "vision", "chat:edit", "chat:sales"):
+        assert model_for("gemini", cap) == "gemini/gemini-3.7-flash", cap
+    for cap in ("chat:fast", "structured"):
         assert model_for("gemini", cap) == "gemini/gemini-2.5-flash", cap
 
 
