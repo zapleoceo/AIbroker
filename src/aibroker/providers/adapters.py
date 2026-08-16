@@ -44,8 +44,35 @@ class ProviderAdapter:
         return None
 
 
-class _GeminiAdapter(ProviderAdapter):
+class _ZaiAdapter(ProviderAdapter):
     def prepare(self, _model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
+        # GLM defaults to thinking mode and spends the WHOLE max_tokens budget
+        # on hidden reasoning, returning an empty body — the same failure shape
+        # DeepSeek's v4 had. Measured live 2026-08-16 on a trivial "reply ok"
+        # prompt at max_tokens=64:
+        #     glm-4.7-flash  as-is        → out=64, text=''
+        #     glm-4.7-flash  thinking off → out=2,  text='ok'
+        #     glm-4.5-flash  as-is        → out=64, text=''
+        #     glm-4.5-flash  thinking off → out=2,  text='ok'
+        # Identical on both model versions, so this is the provider's default,
+        # not a model regression. It explains why 7 live zai keys served only
+        # ~15 calls a week: every reply came back empty and was rejected by the
+        # JSON/empty gate. setdefault so an explicit caller value still wins.
+        kwargs.setdefault("extra_body", {}).setdefault("thinking", {"type": "disabled"})
+
+
+# Gemini 3.7+ rejects the MINIMAL thinking level that litellm maps
+# reasoning_effort="disable" onto ("Thinking level MINIMAL is not supported for
+# this model", HTTP 400 — measured live 2026-08-16). "low" is accepted and is
+# just as cheap in practice: on the same prompt 3.7-flash returned out=1 in
+# 926ms with "low" versus out=92 in 3567ms with no thinking parameter at all.
+# Older models keep "disable" — 3.6-flash still accepts it (out=1, 894ms).
+_GEMINI_NO_DISABLE_PREFIXES = ("gemini-3.7", "gemini-3.8", "gemini-4")
+
+
+class _GeminiAdapter(ProviderAdapter):
+    def prepare(self, model: str, kwargs: dict[str, Any],
                 capability: str | None = None) -> None:
         # Gemini 2.5 "thinks" against max_tokens. On JSON that truncates the
         # object mid-string; on any reply it adds latency that overran our call
@@ -54,7 +81,15 @@ class _GeminiAdapter(ProviderAdapter):
         # is the chat:deep/nvidia lane — so disable thinking UNCONDITIONALLY
         # (was JSON-only). Mirrors Stepan's thinkingBudget=0. Other providers
         # ignore reasoning_effort=disable, so it stays scoped to gemini.
-        kwargs["reasoning_effort"] = "disable"
+        #
+        # 2026-08-16: model-aware, because "disable" became a hard 400 on
+        # gemini-3.7+ (see _GEMINI_NO_DISABLE_PREFIXES). The intent is unchanged
+        # — spend as little as possible on reasoning — only the wire value
+        # differs per model generation.
+        tail = model.split("/", 1)[-1]
+        kwargs["reasoning_effort"] = (
+            "low" if tail.startswith(_GEMINI_NO_DISABLE_PREFIXES) else "disable"
+        )
 
 
 # Keys LiteLLM can leave a forced-tool JSON reply wrapped in. Claude has no
@@ -302,6 +337,7 @@ _ADAPTERS: dict[str, ProviderAdapter] = {
     "deepseek": _DeepseekAdapter(),
     "cerebras": _CerebrasAdapter(),
     "cloudflare": _CloudflareAdapter(),
+    "zai": _ZaiAdapter(),
 }
 _DEFAULT_ADAPTER = ProviderAdapter()
 

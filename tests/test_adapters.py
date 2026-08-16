@@ -341,6 +341,36 @@ def test_cloudflare_key_extra_none_without_account_id():
     assert adapter_for("cloudflare").key_extra("") is None
 
 
+def _prepared_model(provider: str, model: str, **kwargs) -> dict:
+    """Like _prepared, but for quirks that branch on the MODEL, not the provider."""
+    adapter_for(provider).prepare(model, kwargs)
+    return kwargs
+
+
+def test_gemini_thinking_value_is_model_aware():
+    """gemini-3.7+ hard-400s on the MINIMAL level that reasoning_effort='disable'
+    maps to ('Thinking level MINIMAL is not supported for this model', measured
+    live 2026-08-16), so it must get 'low' instead. Older models keep 'disable';
+    both spend ~nothing on reasoning (out=1 on a trivial prompt either way)."""
+    assert _prepared_model("gemini", "gemini/gemini-3.7-flash"
+                           )["reasoning_effort"] == "low"
+    assert _prepared_model("gemini", "gemini/gemini-2.5-flash"
+                           )["reasoning_effort"] == "disable"
+    assert _prepared_model("gemini", "gemini/gemini-3.6-flash"
+                           )["reasoning_effort"] == "disable"
+
+
+def test_zai_disables_thinking():
+    """GLM defaults to thinking mode and burns the entire max_tokens budget on
+    hidden reasoning, returning an empty body (measured 2026-08-16: out=64 /
+    text='' as-is vs out=2 / text='ok' with thinking off, on BOTH 4.5 and 4.7).
+    That silently starved 7 live zai keys down to ~15 calls a week."""
+    assert _prepared("zai")["extra_body"]["thinking"] == {"type": "disabled"}
+    # An explicit caller value wins — the adapter only supplies a default.
+    kept = _prepared("zai", extra_body={"thinking": {"type": "enabled"}})
+    assert kept["extra_body"]["thinking"] == {"type": "enabled"}
+
+
 def test_default_adapter_key_extra_is_none():
     assert adapter_for("cerebras").key_extra("anything") is None
     assert isinstance(adapter_for("nonexistent"), ProviderAdapter)

@@ -70,7 +70,7 @@ computed and discarded:
 |---|---|---|---|---|---|---|
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
 | **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — | — |
-| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | — |
+| **gemini** | gemini-2.5-flash | gemini-3.7-flash | gemini-3.7-flash | gemini-3.7-flash | gemini-3.7-flash | — |
 | **deepseek** | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | — | — |
 | **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | **claude-sonnet-5** | claude-sonnet-5 | claude-sonnet-5 | — |
@@ -80,8 +80,36 @@ computed and discarded:
 | **sambanova** | Meta-Llama-3.3-70B-Instruct | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | — | — |
 | **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
 | **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — | — |
-| **zai** | glm-4.5-flash | — | — | — | — | — |
+| **zai** | glm-4.7-flash | — | — | — | — | — |
 | **voyage** | — | — | — | — | — | voyage-4 |
+
+2026-08-16 — two model moves, both driven by live probes rather than release
+notes, and one non-move:
+
+- **gemini quality lanes → `gemini-3.7-flash`** (released 08-13; confirmed in
+  the live ListModels response). It refuses the MINIMAL thinking level that
+  `reasoning_effort="disable"` maps to — HTTP 400 "Thinking level MINIMAL is
+  not supported for this model" — so `_GeminiAdapter` now picks `low` for
+  3.7+ and keeps `disable` for everything older. Measured against 2.5-flash on
+  the same prompt at max_tokens 16/256/1024/2000, JSON and plain: 3.7 answered
+  correctly in every cell at a flat 9 output tokens, while 2.5 used 12-24, wrapped
+  plain-text replies in a ```json fence, and TRUNCATED at max_tokens=16. So the
+  upgrade is cheaper per call, not just newer. `chat:fast`, `structured`,
+  `prefilter` and `translate` deliberately stay on 2.5-flash / flash-lite —
+  they carry the bulk volume where 2.5-flash answers in ~411ms, and moving them
+  on latency grounds needs a volume measurement we have not taken.
+- **zai → `glm-4.7-flash`** plus a new `_ZaiAdapter`. The version bump is the
+  minor half: GLM defaults to thinking mode and spent the ENTIRE max_tokens
+  budget on hidden reasoning, returning an empty body on both 4.5 and 4.7
+  (out=64 / text='' at max_tokens=64; out=2 / text='ok' with thinking off).
+  That is why 7 live keys served ~15 calls a week — every reply was rejected by
+  the empty-body gate. `glm-4.6-flash` does not exist ("Unknown Model").
+- **cohere and sambanova were NOT changed.** Both were on the same "upgrade the
+  model string" shortlist and both failed it for reasons a model bump cannot
+  fix: every cohere key answers `"You are using a Trial key, which is limited"`
+  on the OLD and NEW model alike, so the keys are exhausted, not the model; and
+  `Llama-4-Maverick-17B-128E-Instruct` returns "not available on SambaNova
+  Cloud". Check the key/account before rewriting a model name.
 
 2026-07-16: openrouter's `openai/gpt-oss-120b:free` was DELISTED (404 on
 every call) — all its chat lanes + vision moved to

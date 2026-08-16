@@ -90,15 +90,27 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # alternative of that quality. Caveat: our 429 cooldown is per KEY, so a
     # flash-quota 429 still parks the whole key incl. its flash-lite bucket —
     # flash-lite quota is reachable only while the key itself is not cooling.
+    # 2026-08-16: the QUALITY lanes move to gemini-3.7-flash (released 08-13,
+    # confirmed present in the live ListModels response and answering in 926ms
+    # with reasoning_effort="low" — see _GeminiAdapter for why "disable" 400s
+    # there). It is also the cheapest of the 3.x flash line on paid tier
+    # ($0.75/$3.75 vs 3.6's $1.50/$7.50), so it is both the newest and the
+    # cheapest upgrade available.
+    #
+    # High-volume/latency-critical lanes deliberately STAY on 2.5: chat:fast
+    # and structured carry Vera's bulk traffic where 2.5-flash answered in
+    # 411ms, and prefilter/translate stay on flash-lite, the cheapest model
+    # Google sells. Moving those without a volume measurement would trade a
+    # known-good latency profile for an unmeasured one.
     "gemini": {"chat:fast": "gemini/gemini-2.5-flash",
-               "chat:smart": "gemini/gemini-2.5-flash",
-               "chat:sales": "gemini/gemini-2.5-flash",
-               "chat:code": "gemini/gemini-2.5-flash",
-               "chat:edit": "gemini/gemini-2.5-flash",
+               "chat:smart": "gemini/gemini-3.7-flash",
+               "chat:sales": "gemini/gemini-3.7-flash",
+               "chat:code": "gemini/gemini-3.7-flash",
+               "chat:edit": "gemini/gemini-3.7-flash",
                "prefilter": "gemini/gemini-2.5-flash-lite",
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash-lite",
-               "vision": "gemini/gemini-2.5-flash",
+               "vision": "gemini/gemini-3.7-flash",
                "transcription": "gemini/gemini-2.5-flash"},
     # 2026-07-17: moved to deepseek-v4-flash AHEAD of deepseek-chat's
     # deprecation (2026-07-24 15:59 UTC; DeepSeek: "deepseek-chat corresponds
@@ -247,7 +259,12 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # bigger models here, so chat:smart stays off this provider. LiteLLM DOES
     # have a real (zero) price for glm-4.5-flash — cost_usd isn't blind like
     # nvidia/cloudflare.
-    "zai": {"chat:fast": "zai/glm-4.5-flash", "prefilter": "zai/glm-4.5-flash"},
+    # 2026-08-16: glm-4.5-flash → glm-4.7-flash. Both are free and both were
+    # returning EMPTY bodies (thinking mode ate the whole budget — fixed in
+    # _ZaiAdapter); with thinking off, 4.7-flash answers correctly on 5 of our
+    # 7 keys. glm-4.6-flash does NOT exist ("Unknown Model"), so this is the
+    # next real version, not a guess.
+    "zai": {"chat:fast": "zai/glm-4.7-flash", "prefilter": "zai/glm-4.7-flash"},
 }
 
 def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] | None:
