@@ -450,6 +450,17 @@
 > (`_max_keys("deepseek")` is 5) so a genuine provider outage fails over instead
 > of spending every key. After the cap it's a normal miss → next provider. Root
 > trigger is still the caller's oversized system prompt, not the broker.
+> **A cap-blocked paid key no longer disqualifies its provider's free keys
+> (2026-08-26).** On `CostGuardError` the walk downgrades to `require_tier=
+> "free"` and now RETRIES THE SAME PROVIDER before moving on, instead of
+> breaking straight to the next one. The old break was correct while every
+> provider was all-paid or all-free. gemini is MIXED — one paid key plus
+> seven free — and the moment that paid key gained `llm:chat`, one CapBlock
+> on it wrote off the whole provider: measured on stepan2 with its project
+> cap spent, 25 consecutive attempts were CapBlock and the free gemini keys
+> were never tried. The retry is bounded by the same `_max_keys` loop, and
+> `pick_and_reserve` is now filtered to free, so no second CapBlock can be
+> booked for that provider.
 > **Free gemini now leads both money lanes (2026-08-26).** `chat:smart` is
 > `gemini, deepseek, sambanova, anthropic`; `chat:sales` keeps Sonnet in front
 > but is now `anthropic, gemini, deepseek, sambanova`. This reverses the

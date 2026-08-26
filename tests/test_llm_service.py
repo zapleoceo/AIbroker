@@ -2322,3 +2322,61 @@ async def test_run_chat_honours_a_pinned_model_over_rotation(monkeypatch):
         at=OFF_PEAK_AT,
     )
     assert set(seen) == {"gemini/pinned"}
+
+
+async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch):
+    """A MIXED provider (gemini: 1 paid key + 7 free) must not be written off
+    because its paid key is cap-blocked. Measured 2026-08-26 on stepan2 with the
+    project cap spent: 25 consecutive attempts were CapBlock and the free gemini
+    keys were never tried, because the walk broke to the next provider on the
+    first budget block."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[tuple[str, str | None]] = []
+
+    async def fake_pick(provider, scope, require_tier=None, **kw):
+        picked.append((provider, require_tier))
+        if provider != "gemini":
+            return None
+        # first call (no tier filter) hands back the PAID key, then free ones
+        tier = "paid" if require_tier is None else "free"
+        return SimpleNamespace(id=16 if tier == "paid" else 21, label="k",
+                               tier=tier, provider=provider, token_encrypted="x")
+
+    async def fake_reserve(*, api_key, project, estimated_cost):
+        if api_key.tier == "paid":
+            raise svc.CostGuardError("project", 0.6, 0.5993, 0.01)
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        return '{"ok": true}', {"model": kw["model"], "tokens_in": 10, "tokens_out": 2,
+                                "cost_usd": 0.0, "latency_ms": 5,
+                                "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
+    monkeypatch.setattr(svc, "rotation_for", lambda p, c: ())
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.01)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini", "sambanova"])
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+    monkeypatch.setattr(svc, "audit", lambda **kw: _noop())
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=4, name="stepan2"), capability="chat:smart",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow=None,
+        at=OFF_PEAK_AT,
+    )
+    assert out is not None and out.provider == "gemini"   # served by the FREE key
+    # gemini was asked twice: once unfiltered (paid, cap-blocked), then free-only
+    assert picked[0] == ("gemini", None)
+    assert ("gemini", "free") in picked

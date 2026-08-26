@@ -709,6 +709,17 @@ async def run_chat(
                     require_tier = "free"
                     log.info("chat:%s paid budget-capped — walking free-only tail",
                              capability)
+                    # Retry THIS provider free-only before moving on. It used
+                    # to break straight to the next provider, which was fine
+                    # while every provider was all-paid or all-free. gemini is
+                    # MIXED (1 paid key + 7 free), and once the paid one gained
+                    # llm:chat a single CapBlock on it disqualified the whole
+                    # provider: measured 2026-08-26 on stepan2 with its project
+                    # cap spent, 25 consecutive attempts were CapBlock and the
+                    # free gemini keys were never tried at all. The retry is
+                    # bounded by the same _max_keys loop, and pick_and_reserve
+                    # now filters to free, so no second CapBlock can be booked.
+                    continue
                 break
             if flow is _Flow.NEXT_KEY_EMPTY:
                 if empty_retries < _MAX_EMPTY_RETRIES:
