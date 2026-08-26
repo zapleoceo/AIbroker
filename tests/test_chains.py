@@ -62,19 +62,27 @@ def test_strict_free_first(capability):
         )
 
 
-def test_chat_smart_is_deepseek_first_by_owner_choice():
+def test_chat_smart_leads_with_free_gemini_on_measured_quality():
     """2026-07-17, owner-approved (cap raised $0.50→$1 for it): chat:smart is
     Stepan's money lane — quality beats price. deepseek v4-flash leads so every
     sales reply comes from ONE strong model with a warm per-account prompt
     cache (cache-hit input $0.0028/M ≈ $0.0004/reply) instead of whichever
     free key happens to be uncooled. The free pool stays as the fallback tail
     (deepseek flake and the $1 cap budget-downgrade both walk over to it).
-    Also pre-positions the lane for cerebras' free-tier death 2026-08-17."""
+    Also pre-positions the lane for cerebras' free-tier death 2026-08-17.
+
+    2026-08-26 SUPERSEDED: deepseek no longer leads. Replaying Stepan's real
+    135k-char prompt (N=8, his own max_tokens=2000) showed the paid anchor is
+    the WEAK link, not the strong one: deepseek-v4-flash 6/8 valid with 2
+    replies truncated mid-JSON (finish_reason=length, 2035 output tokens
+    against a 2000 ceiling — its thinking pass eats the budget), median 18.4s;
+    gemini answered 8/8 in ~90 tokens at 1.4s and never truncated. Free is not
+    a quality downgrade on this workload, so free leads."""
     chain = chain_for("chat:smart")
-    assert chain[0] == "deepseek"
-    # the free smart-quality fallback (gemini + sambanova's free DeepSeek-V3.2)
-    # sits right behind the deepseek anchor
-    assert {"gemini", "sambanova"} <= set(chain[1:])
+    assert chain[0] == "gemini"
+    assert chain[1] == "deepseek"   # paid fallback, still ahead of the rest
+    # sambanova's free DeepSeek-V3.2 stays in the tail
+    assert "sambanova" in chain
     # 2026-07-21 quality prune: only providers that give GOOD smart answers.
     # cohere (86% InvalidJSON), openrouter (0 ok ever), mistral (dead keys) gone;
     # gpt-oss providers (cerebras/groq/cloudflare) removed too — owner found them
@@ -392,13 +400,19 @@ def test_chat_sales_leads_with_anthropic_sonnet():
     """2026-07-23, owner-approved: chat:sales is Stepan2's "smart LLM sales"
     lane. anthropic leads (strongest open-ended persuasion, own $5/day key),
     deepseek is the cheap paid fallback, then the free tail. openai is
-    deliberately NOT wired (reserve the paid budget for Sonnet)."""
+    deliberately NOT wired (reserve the paid budget for Sonnet).
+
+    2026-08-26: gemini moved ahead of deepseek (Sonnet still leads). On
+    Stepan's real 135k-char prompt at N=8, deepseek truncated 2 of 8 replies
+    mid-JSON at 18.4s median while gemini went 8/8 clean at 1.4s — so the FREE
+    provider is now the first fallback and the paid one backs it up."""
     from aibroker.providers.litellm_adapter import model_for
     chain = chain_for("chat:sales")
     assert chain[0] == "anthropic"
     assert model_for("anthropic", "chat:sales") == "anthropic/claude-sonnet-5"
-    assert chain[1] == "deepseek"                        # cheap paid fallback
-    assert {"gemini", "sambanova"} <= set(chain[2:])     # free tail
+    assert chain[1] == "gemini"                          # free, measured better
+    assert chain[2] == "deepseek"                        # cheap paid fallback
+    assert "sambanova" in chain[3:]                      # free tail
     assert "openai" not in chain                         # not wired by design
     assert has_paid_tail("chat:sales") is True           # Sonnet/deepseek paid
 

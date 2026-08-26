@@ -95,9 +95,25 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # (sambanova/DeepSeek-V3.2) served on a free tier — deepseek-quality at $0,
     # which is exactly the capacity that carried the lane during DeepSeek's own
     # 2026-07-22 empty-body degradation (111 successes at $0).
+    # 2026-08-26: gemini moved AHEAD of deepseek in both money lanes, on a
+    # measurement against Stepan's REAL 135k-char sales prompt (N=8, replayed
+    # from a pending deep_jobs row, JSON mode, his own max_tokens=2000):
+    #                          ok    invalid  truncated  out avg  median  p90
+    #   deepseek-v4-flash     6/8      2       2 (length)   2035   18413ms 26054
+    #   gemini-3.1-flash-lite 8/8      0       0             113    1405ms  1579
+    #   gemini-3.5-flash-lite 8/8      0       0              84    1366ms  1661
+    #   gemini-3.6-flash      8/8      0       0              81    9676ms 14632
+    # DeepSeek averaged 2035 output tokens against a 2000 ceiling: its thinking
+    # pass eats the budget and one reply in four stops mid-JSON with
+    # finish_reason=length. Raising the headroom is not the fix — 4000 was
+    # measured WORSE on 2026-07-21. Gemini answers the same prompt in ~90
+    # tokens, 13x faster, never truncates, and is FREE. So the free provider
+    # is not a downgrade here, it is strictly better on the workload that
+    # matters, and it stops paying DeepSeek's post-2026-08-16 4x rates for
+    # broken JSON. deepseek stays as the paid fallback behind it.
     "chat:smart": [
-        "deepseek",
         "gemini",
+        "deepseek",
         "sambanova",
         "anthropic",
     ],
@@ -116,8 +132,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # the cache stays warm across replies.
     "chat:sales": [
         "anthropic",
+        "gemini",      # free AND measurably better than deepseek here
         "deepseek",
-        "gemini", "sambanova",
+        "sambanova",
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",

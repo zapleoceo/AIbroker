@@ -168,7 +168,15 @@ def test_paid_tail_caps_cover_every_paid_led_lane():
     expected = {cap for cap, chain in CAPABILITY_CHAINS.items()
                 if chain and chain[0] in PAID_PROVIDERS}
     assert set(_PAID_TAIL_CAPS) == expected
-    assert {"chat:smart", "chat:sales"} <= set(_PAID_TAIL_CAPS)
+    assert "chat:sales" in _PAID_TAIL_CAPS       # anthropic Sonnet still leads
+    # 2026-08-26: chat:smart DROPPED OUT, and that is the derivation working,
+    # not a regression — free gemini now leads that chain (measured 8/8 clean
+    # vs deepseek's 6/8 with 2 truncated replies on Stepan's real prompt), so
+    # by this module's own rule it is a free-first lane. Known trade-off: the
+    # "no usable paid key" alert that fired for chat:smart on 2026-08-14 will
+    # not fire for it any more. Losing the paid tail there is now a
+    # degradation to a BETTER-measured free provider, not an outage.
+    assert "chat:smart" not in _PAID_TAIL_CAPS
     # a free-led lane must NOT be alerted on
     assert "chat:fast" not in _PAID_TAIL_CAPS
     assert "chat:code" not in _PAID_TAIL_CAPS
