@@ -794,3 +794,34 @@ async def test_transcribe_local_asr_4xx_stays_plain_error(monkeypatch):
          pytest.raises(RuntimeError) as exc_info:
         await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
     assert not isinstance(exc_info.value, TimeoutError)
+
+
+def test_models_for_returns_primary_first_then_rotation():
+    """The primary from DEFAULT_MODEL must stay first so a provider with no
+    rotation configured behaves exactly as it did with plain model_for."""
+    from aibroker.providers.litellm_adapter import model_for, models_for
+
+    got = models_for("gemini", "chat:sales")
+    assert got[0] == model_for("gemini", "chat:sales")
+    assert len(got) > 1                       # gemini has extra quota buckets
+    assert len(got) == len(set(got))          # no duplicates to waste attempts on
+
+
+def test_models_for_is_a_noop_without_rotation():
+    from aibroker.providers.litellm_adapter import model_for, models_for
+
+    assert models_for("mistral", "chat:smart") == [model_for("mistral", "chat:smart")]
+    assert models_for("nosuch", "chat:smart") == []
+
+
+def test_gemini_rotation_never_uses_a_latest_alias():
+    """REGRESSION GUARD: '-latest' aliases resolve to whatever generation Google
+    points them at. Measured 2026-08-26, gemini-flash-lite-latest failed 5/5 with
+    a 400 — it resolves to a 3.7-class model that rejects
+    reasoning_effort='disable', and the alias also slips past _GeminiAdapter's
+    version-prefix check, so the adapter cannot pick the right value for it."""
+    from aibroker.providers.litellm_adapter import MODEL_ROTATION
+
+    for cap, models in MODEL_ROTATION["gemini"].items():
+        for m in models:
+            assert not m.endswith("-latest"), (cap, m)

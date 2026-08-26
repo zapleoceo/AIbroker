@@ -278,8 +278,71 @@ def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] 
     return adapter_for(provider).key_extra(account_id)
 
 
+# Extra models a provider can serve a capability with, tried when the primary
+# is unavailable. This exists for ONE measured reason: Google meters the free
+# tier as GenerateRequestsPerDayPerProjectPerModel-FreeTier, and on our
+# projects that quota is **20 requests per day, per model, per key** (read
+# straight off a 429 body on 2026-08-26 - Google publishes 250, but the live
+# cap varies by region and account age and ours is 20).
+#
+# Because the counter is PER MODEL, an exhausted gemini-2.5-flash says nothing
+# about the other flash-class models on the same key. Measured that day on one
+# key: 2.5-flash exhausted while EIGHT other models still answered. Using a
+# single model per capability therefore left ~78% of our free Gemini capacity
+# untouched - 8 keys x 20/day x 2 models = 320 calls/day used, against ~1440
+# available.
+#
+# Every model listed here was measured N=5 on a real sales-shaped JSON prompt
+# before being included (2026-08-26); only 5/5-valid-JSON models qualify as a
+# silent fallback:
+#     gemini-3.5-flash-lite   5/5 valid, median  906ms
+#     gemini-3.6-flash        5/5 valid, median 1807ms
+#     gemini-3.1-flash-lite   5/5 valid, median 3455ms
+# Deliberately EXCLUDED after the same measurement:
+#     gemini-flash-lite-latest  0/5 - alias resolves to a 3.7-class model that
+#                                     rejects reasoning_effort='disable' (400);
+#                                     the alias also defeats the version-prefix
+#                                     check in _GeminiAdapter, so never rotate
+#                                     onto a '-latest' alias.
+#     gemini-flash-latest       1/5 - ServiceUnavailable
+#     gemini-3.7-flash          3/5 - ServiceUnavailable (still stabilising)
+#     gemini-3-flash-preview    4/5 - ServiceUnavailable, and a 6.4s median
+MODEL_ROTATION: dict[str, dict[str, tuple[str, ...]]] = {
+    "gemini": {
+        cap: ("gemini/gemini-3.5-flash-lite",
+              "gemini/gemini-3.6-flash",
+              "gemini/gemini-3.1-flash-lite")
+        for cap in ("chat:fast", "chat:smart", "chat:sales", "chat:code",
+                    "chat:edit", "structured", "prefilter", "translate")
+    },
+}
+
+
 def model_for(provider: str, capability: str) -> str | None:
     return DEFAULT_MODEL.get(provider, {}).get(capability)
+
+
+def rotation_for(provider: str, capability: str) -> tuple[str, ...]:
+    """The EXTRA models only, without consulting DEFAULT_MODEL.
+
+    Split out from models_for so a caller that already resolved the primary
+    its own way can bolt the rotation on top — llm_service does exactly that,
+    because its primary comes from model_for (which tests monkeypatch) and a
+    second DEFAULT_MODEL lookup here would quietly ignore that patch."""
+    return MODEL_ROTATION.get(provider, {}).get(capability, ())
+
+
+def models_for(provider: str, capability: str) -> list[str]:
+    """Every model `provider` may serve `capability` with, primary first.
+
+    The primary (DEFAULT_MODEL) stays first, so a provider with no rotation
+    configured gets a one-element list and the caller behaves exactly as it
+    did with plain model_for."""
+    primary = model_for(provider, capability)
+    if primary is None:
+        return []
+    extras = MODEL_ROTATION.get(provider, {}).get(capability, ())
+    return [primary, *(m for m in extras if m != primary)]
 
 
 _pricing_warned: set[str] = set()

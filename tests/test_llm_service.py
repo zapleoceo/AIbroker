@@ -2235,3 +2235,90 @@ async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypa
     assert row.cooldown_until is not None
     parked_s = (row.cooldown_until - datetime.now(UTC).replace(tzinfo=None)).total_seconds()
     assert 200 < parked_s <= 330  # the flat _COOLDOWN (5 min), not the adaptive path
+
+
+async def test_run_chat_rotates_models_within_a_provider(monkeypatch):
+    """Google meters its free tier per MODEL per key (20/day on our projects),
+    so marching every key of a provider through the same exhausted model wastes
+    the whole provider. Consecutive attempts must land on DIFFERENT models."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    seen_models: list[str] = []
+    key_ids = iter([21, 22, 25])
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=next(key_ids), label="k", tier="free",
+                               provider=provider, token_encrypted="x")
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        seen_models.append(kw["model"])
+        raise RuntimeError("429 rate limit")   # force the walk to keep going
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
+    monkeypatch.setattr(svc, "rotation_for",
+                        lambda p, c: ("gemini/alt-a", "gemini/alt-b"))
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+    monkeypatch.setattr(svc, "_penalize", lambda *a, **k: _noop())
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=128, temperature=0.7, response_format=None, workflow=None,
+        at=OFF_PEAK_AT,
+    )
+    assert len(seen_models) >= 3
+    assert len(set(seen_models[:3])) == 3, seen_models   # three attempts, three models
+
+
+async def test_run_chat_honours_a_pinned_model_over_rotation(monkeypatch):
+    """An explicit caller model must never be rotated away from."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    seen: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=7, label="k", tier="free",
+                               provider=provider, token_encrypted="x")
+
+    async def fake_noop(**kw):
+        return None
+
+    async def fake_call_llm(**kw):
+        seen.append(kw["model"])
+        raise RuntimeError("429 rate limit")
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
+    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
+    monkeypatch.setattr(svc, "rotation_for", lambda p, c: ("gemini/alt-a",))
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
+    monkeypatch.setattr(svc, "_penalize", lambda *a, **k: _noop())
+
+    await svc.run_chat(
+        project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
+        messages=[{"role": "user", "content": "hi"}], model="gemini/pinned",
+        max_tokens=128, temperature=0.7, response_format=None, workflow=None,
+        at=OFF_PEAK_AT,
+    )
+    assert set(seen) == {"gemini/pinned"}

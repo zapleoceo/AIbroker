@@ -30,6 +30,7 @@ from aibroker.providers.litellm_adapter import (
     estimate_llm_cost,
     extra_for_provider,
     model_for,
+    rotation_for,
     transcribe,
 )
 from aibroker.providers.observations import learned_ceilings, record_too_large
@@ -625,7 +626,15 @@ async def run_chat(
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
-        for _ in range(_max_keys(provider)):
+        # Starting offset into the provider's model pool, fixed ONCE per
+        # provider from the first key we actually get. Varying it per key id
+        # (LRU order differs between requests) spreads which model burns its
+        # daily quota first; advancing by attempt_in_provider alone then
+        # guarantees consecutive attempts hit DIFFERENT models. Mixing both
+        # into one modulo did not: key 21/attempt 0 and key 25/attempt 2 both
+        # land on index 0 with a 3-model pool.
+        rotation_base: int | None = None
+        for attempt_in_provider in range(_max_keys(provider)):
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)
@@ -642,7 +651,26 @@ async def run_chat(
             if key is None:
                 break  # no (more) available key for this provider → next provider
             attempts += 1
-            use_model = model or model_for(provider, capability)
+            # Rotate across the provider's models instead of hammering one.
+            # Google meters its free tier PER MODEL per key (20/day on our
+            # projects), so a 429 on the primary says nothing about the
+            # others — see MODEL_ROTATION. Offsetting by key.id as well as
+            # by attempt spreads the load over model x key pairs instead of
+            # marching every key through the same exhausted model, and keeps
+            # the choice deterministic for a given key (testable, and stable
+            # for a provider's prompt cache). Providers without a rotation
+            # get a one-element list, so this is a no-op for them.
+            primary = model_for(provider, capability)
+            if model:
+                use_model = model            # caller pinned it — no rotation
+            elif primary is None:
+                use_model = None
+            else:
+                pool = [primary, *(m for m in rotation_for(provider, capability)
+                                   if m != primary)]
+                if rotation_base is None:
+                    rotation_base = key.id
+                use_model = pool[(rotation_base + attempt_in_provider) % len(pool)]
             if not use_model:
                 break  # provider can't serve this capability → next provider
             if provider == "deepseek":

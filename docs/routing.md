@@ -450,6 +450,39 @@
 > (`_max_keys("deepseek")` is 5) so a genuine provider outage fails over instead
 > of spending every key. After the cap it's a normal miss → next provider. Root
 > trigger is still the caller's oversized system prompt, not the broker.
+> **Model rotation inside a provider (2026-08-26).** `run_chat` no longer
+> sends every key of a provider at the SAME model. Google meters its free
+> tier as `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, and on our
+> projects that is **20 requests per day, per model, per key** — read
+> straight off a 429 body (Google publishes 250; the live cap varies by
+> region and account age). Because the counter is per MODEL, an exhausted
+> `gemini-2.5-flash` says nothing about the rest: measured on one key the
+> same day, 2.5-flash was exhausted while EIGHT other flash-class models
+> still answered. One model per capability therefore stranded ~78% of our
+> free Gemini capacity (8 keys x 20/day x 2 models = 320 calls/day used, of
+> ~1440 available).
+>
+> `MODEL_ROTATION` (providers/litellm_adapter.py) lists the extra models;
+> `rotation_for()` returns them WITHOUT touching DEFAULT_MODEL, so
+> llm_service can keep resolving the primary through `model_for` (which the
+> tests monkeypatch) and bolt the rotation on top. The index is
+> `(rotation_base + attempt_in_provider) % len(pool)`, where `rotation_base`
+> is fixed once per provider from the first key actually picked: the key id
+> varies the model that burns its quota first (LRU order differs per
+> request), while advancing by attempt alone guarantees consecutive attempts
+> hit DIFFERENT models. Folding both into one modulo does NOT — key 21 at
+> attempt 0 and key 25 at attempt 2 both land on index 0 of a 3-model pool.
+>
+> Only models measured N=5 on a real sales-shaped JSON prompt and scoring
+> 5/5 valid JSON are listed. `-latest` aliases are banned outright (guarded
+> by a test): `gemini-flash-lite-latest` failed 5/5 with a 400 because it
+> resolves to a 3.7-class model that rejects `reasoning_effort="disable"`,
+> and the alias also slips past the version-prefix check in `_GeminiAdapter`.
+>
+> Caveat that still stands: our 429 cooldown is per KEY, so a quota 429 on
+> one model still parks the whole key. Rotation helps because the NEXT
+> attempt uses a different key AND a different model; it does not make an
+> already-cooling key's other buckets reachable.
 > - **deepseek moved to `deepseek-v4-flash`** (chat:fast/smart/edit/code,
 >   2026-07-17) ahead of `deepseek-chat`'s deprecation (2026-07-24 15:59 UTC).
 >   The 07-10 revert-story is now understood: v4 defaults to THINKING mode and
