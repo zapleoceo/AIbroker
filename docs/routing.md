@@ -450,6 +450,28 @@
 > (`_max_keys("deepseek")` is 5) so a genuine provider outage fails over instead
 > of spending every key. After the cap it's a normal miss → next provider. Root
 > trigger is still the caller's oversized system prompt, not the broker.
+> **Free gemini now leads both money lanes (2026-08-26).** `chat:smart` is
+> `gemini, deepseek, sambanova, anthropic`; `chat:sales` keeps Sonnet in front
+> but is now `anthropic, gemini, deepseek, sambanova`. This reverses the
+> 2026-07-17 "deepseek leads, quality beats price" decision, on a replay of
+> Stepan's REAL pending sales job (135k chars, his own max_tokens=2000, N=8,
+> JSON mode):
+>
+> | model | ok | invalid | truncated | out avg | median | p90 |
+> |---|---|---|---|---|---|---|
+> | deepseek-v4-flash | 6/8 | 2 | **2 (length)** | 2035 | 18413ms | 26054ms |
+> | gemini-3.1-flash-lite | 8/8 | 0 | 0 | 113 | 1405ms | 1579ms |
+> | gemini-3.5-flash-lite | 8/8 | 0 | 0 | 84 | 1366ms | 1661ms |
+> | gemini-3.6-flash | 8/8 | 0 | 0 | 81 | 9676ms | 14632ms |
+>
+> The paid anchor was the weak link: deepseek averages 2035 output tokens
+> against a 2000 ceiling, so its thinking pass eats the budget and one reply
+> in four stops mid-JSON. More headroom is not the fix — 4000 measured worse
+> on 2026-07-21. Free is not a downgrade on this workload.
+>
+> Consequence to know: `chat:smart` is no longer paid-led, so
+> `_PAID_TAIL_CAPS` drops it and the "no usable paid key" alert stops firing
+> for that lane (asserted in tests/test_monitor.py). `chat:sales` keeps it.
 > **Model rotation inside a provider (2026-08-26).** `run_chat` no longer
 > sends every key of a provider at the SAME model. Google meters its free
 > tier as `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, and on our
@@ -462,7 +484,10 @@
 > free Gemini capacity (8 keys x 20/day x 2 models = 320 calls/day used, of
 > ~1440 available).
 >
-> `MODEL_ROTATION` (providers/litellm_adapter.py) lists the extra models;
+> `MODEL_ROTATION` (providers/litellm_adapter.py) lists the extra models.
+> `models_for()` is the plain read of it — primary from DEFAULT_MODEL first,
+> then the extras — and is what a caller wants when it has no primary of its
+> own. `rotation_for()` returns the extras ALONE;
 > `rotation_for()` returns them WITHOUT touching DEFAULT_MODEL, so
 > llm_service can keep resolving the primary through `model_for` (which the
 > tests monkeypatch) and bolt the rotation on top. The index is
