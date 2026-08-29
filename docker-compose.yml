@@ -78,6 +78,11 @@ services:
     environment:
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-1}
+      # Drop the model after 10 idle minutes; 0 disables. Real traffic is
+      # ~19 transcriptions/day, so it would otherwise hold ~200MB doing
+      # nothing on a host that is already 1.3GB into swap. A cold load is
+      # 4.4s, against calls that take 15-180s anyway.
+      WHISPER_IDLE_UNLOAD_S: ${WHISPER_IDLE_UNLOAD_S:-600}
     cpus: 1.0
     mem_limit: 1500m
     expose:

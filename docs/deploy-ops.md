@@ -155,6 +155,35 @@ compose network. `api` reaches it at `ASR_LOCAL_URL` (default
 `http://aibroker-asr-local:8000`); unreachable/unset degrades safely to
 groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
 
+**Idle unload (2026-08-28).** The model is no longer preloaded at startup and
+is dropped after `WHISPER_IDLE_UNLOAD_S` idle seconds (default 600; 0
+disables). `get_model()` was already lazy, so this is only a reaper task plus
+a last-used stamp; the reaper takes the same `_transcribe_lock` the decode
+path uses, so it can never unload mid-request.
+
+Measured on this host that day, in-container:
+
+```
+before import        9 MB
+after import        62 MB   <- libraries alone
+model loaded       519 MB   (4.4s)
+after del + gc     252 MB
+```
+
+The running container sat at ~195MB resident. Against ~19 transcriptions a
+DAY the model is idle ~99% of the time, and the host is 2 cores / 3.7GB with
+1.3GB already in swap — so a permanently resident idle model gets paged out
+anyway and paged back in on the next call. Paying the 4.4s load explicitly on
+a cold request is cheaper and more predictable than that, on calls whose
+measured latency is 15-180s regardless.
+
+**Not changed, and why.** `cpus: 1.0` and `WHISPER_CPU_THREADS=1` stay: the
+host has 2 cores and vera3-postgres was measured pinning ~99% of one, so
+giving ASR a second core would contend with production rather than speed
+anything up. `beam_size=5` stays too — a synthetic-audio benchmark could not
+separate it from fixed overhead (no real speech means the decoder barely
+runs), so there is no measurement supporting a drop, and it was chosen
+deliberately for non-English accuracy.
 **Model size ceiling on this host (2026-07-18).** Tried bumping `small` ->
 `large-v3-turbo` (bigger encoder, better multilingual accuracy — worth it
 since volume is low, ~10 req/day, no backfill, so the model's RAM footprint

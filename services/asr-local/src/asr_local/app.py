@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import json
 import logging
 import os
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -33,10 +35,21 @@ CPU_THREADS = int(os.environ.get("WHISPER_CPU_THREADS", "1"))
 # ?language=auto explicitly anyway; this is only the fallback for a direct
 # caller that omits the query param.
 DEFAULT_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "auto")
+# Unload the model after this many idle seconds (0 disables). Measured on
+# this host 2026-08-28: the loaded model costs ~200MB resident but a cold
+# load takes only 4.4s, and real traffic is ~19 transcriptions a DAY — so it
+# sits idle ~99% of the time. The host has 2 cores / 3.7GB and was already
+# 1.3GB into swap, which is exactly the pressure that makes a permanently
+# resident idle model expensive: it gets paged out anyway, then paged back
+# in on the next request. Paying 4.4s explicitly on a cold call is cheaper
+# and more predictable than that, on calls that already take 15-180s.
+_IDLE_UNLOAD_S = float(os.environ.get("WHISPER_IDLE_UNLOAD_S", "600"))
+_IDLE_CHECK_S = 60.0
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 _model: Any | None = None
 _transcribe_lock = asyncio.Lock()
+_last_used: float = 0.0
 
 
 def get_model() -> Any:
@@ -51,10 +64,42 @@ def get_model() -> Any:
     return _model
 
 
+def _unload_model() -> bool:
+    """Drop the model so its ~200MB goes back to the host. Safe because
+    get_model() reloads lazily; callers only ever touch it under the
+    transcribe lock, so no request can be mid-decode when this runs."""
+    global _model
+    if _model is None:
+        return False
+    _model = None
+    gc.collect()
+    log.info("whisper unloaded after %.0fs idle", _IDLE_UNLOAD_S)
+    return True
+
+
+async def _idle_reaper() -> None:  # pragma: no cover — timing loop
+    while True:
+        await asyncio.sleep(_IDLE_CHECK_S)
+        if _model is None or not _last_used:
+            continue
+        if time.monotonic() - _last_used < _IDLE_UNLOAD_S:
+            continue
+        # Take the same lock the decode path uses: never unload mid-request.
+        async with _transcribe_lock:
+            _unload_model()
+
+
 @asynccontextmanager
-async def lifespan(_app: FastAPI):  # pragma: no cover — startup preload only
-    await asyncio.to_thread(get_model)
-    yield
+async def lifespan(_app: FastAPI):  # pragma: no cover — background task only
+    # No eager preload any more: with idle-unload on, preloading would just
+    # burn 200MB until the reaper takes it away again. First request pays
+    # the 4.4s load instead.
+    task = asyncio.create_task(_idle_reaper()) if _IDLE_UNLOAD_S > 0 else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
 
 
 app = FastAPI(title="asr-local", lifespan=lifespan)
@@ -108,6 +153,8 @@ async def transcribe(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=413,
                             detail=f"audio > {_MAX_AUDIO_BYTES} bytes")
     lang = request.query_params.get("language") or DEFAULT_LANGUAGE
+    global _last_used
     async with _transcribe_lock:
+        _last_used = time.monotonic()
         return await asyncio.to_thread(
             _run_transcribe, audio, None if lang == "auto" else lang)
