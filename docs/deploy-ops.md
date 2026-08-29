@@ -177,6 +177,19 @@ anyway and paged back in on the next call. Paying the 4.4s load explicitly on
 a cold request is cheaper and more predictable than that, on calls whose
 measured latency is 15-180s regardless.
 
+`gc.collect()` alone is NOT enough, and measuring only the fresh-start number
+hides it. After a load/unload cycle the process had freed the model but glibc
+kept the arenas, so the host still saw 230MB — a ~50MB saving, not ~210MB.
+`_return_arenas_to_os()` calls `malloc_trim(0)`; measured in-container:
+
+```
+model loaded        508 MB
+after del + gc      241 MB   <- what the host still saw
+after malloc_trim    72 MB   <- what it sees now
+```
+
+It is guarded, so a non-glibc base image just skips it.
+
 **Not changed, and why.** `cpus: 1.0` and `WHISPER_CPU_THREADS=1` stay: the
 host has 2 cores and vera3-postgres was measured pinning ~99% of one, so
 giving ASR a second core would contend with production rather than speed
