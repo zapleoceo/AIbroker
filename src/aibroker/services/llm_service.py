@@ -178,8 +178,25 @@ def _attempt_budget(chain: list[str]) -> int:
     return min(_MAX_ATTEMPTS_ABS, sum(_max_keys(p) for p in chain))
 
 
-def _call_timeout(capability: str) -> float:
-    return _DEEP_CALL_TIMEOUT_S if capability == "chat:deep" else _CALL_TIMEOUT_S
+def _call_timeout(capability: str, provider: str | None = None) -> float:
+    """Per-call ceiling. Depends on the PROVIDER as well as the capability
+    since 2026-08-31: self-hosted `local` vision runs a 4B model on this box's
+    CPU at ~69s for a chat screenshot and up to ~192s for a dense document —
+    the flat 60s would abort every single call, cool the key, and fall through
+    to the cloud providers that are rate-limited in the first place, burning
+    CPU for nothing. Cloud vision is unchanged at 60s; only the local provider,
+    which cannot rack up a bill by being slow, gets the longer rope."""
+    if capability == "chat:deep":
+        return _DEEP_CALL_TIMEOUT_S
+    if provider == "local":
+        # Deliberately above the adapter's own httpx timeout
+        # (VISION_LOCAL_TIMEOUT_S) so the HTTP client times out FIRST and
+        # raises a labelled TimeoutError, instead of asyncio.wait_for cutting
+        # the coroutine with no provider context to log.
+        from aibroker.config import get_settings
+
+        return get_settings().VISION_LOCAL_TIMEOUT_S + 30.0
+    return _CALL_TIMEOUT_S
 
 
 async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
@@ -307,6 +324,13 @@ class ChatOutcome:
     request_id: int
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # Vision extras (2026-08-31). Populated only by the self-hosted `local`
+    # provider, which classifies the image on the same grammar-constrained pass
+    # that answers the caller. None everywhere else — `text` keeps its meaning
+    # for EVERY provider so a fallback from local to gemini mid-chain can't
+    # change the response shape under the caller.
+    vision_type: str | None = None
+    vision_format: str | None = None
 
 
 class _BudgetExhausted:
@@ -476,6 +500,26 @@ async def _run_attempt(
     # key ends up debited by exactly the real cost, never the estimate.
     await release_cost(api_key=key, estimated_cost=estimated_cost)
 
+    # An empty body from `local` is never a real answer — it is a 4B model on
+    # CPU that produced nothing. Returning it as success would hand the caller
+    # a 200 with no description and it would never retry, exactly the silent-
+    # drop that run_transcribe guards against for local whisper. Escalate to
+    # the next PROVIDER, not the next key: local has one key and one process,
+    # so re-asking it is deterministic. (The generic empty-body path below is
+    # unreachable here — it is gated on _wants_json, and vision callers send
+    # no response_format.)
+    if provider == "local" and not (text or "").strip():
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model, capability=capability,
+            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+            latency_ms=meta.get("latency_ms"), status="error",
+            error_kind="EmptyBody", http_status=502,
+        )
+        log.warning("local %s returned empty body — escalating to next provider",
+                    capability)
+        return _Flow.NEXT_PROVIDER, None
+
     # Deterministic JSON quality gate: an unparseable JSON body (gemini
     # truncated, deepseek rogue) is billed but treated as a failure.
     if _wants_json(response_format) and not _is_valid_json(text):
@@ -507,6 +551,8 @@ async def _run_attempt(
         key_label=key.label, request_id=request_id,
         cache_read_tokens=meta.get("cache_read_tokens", 0),
         cache_write_tokens=meta.get("cache_write_tokens", 0),
+        vision_type=meta.get("vision_type"),
+        vision_format=meta.get("vision_format"),
     )
 
 
@@ -614,7 +660,6 @@ async def run_chat(
     # a 503 (a saturated provider yields no key → 0 attempts, so the chain
     # falls through to it fast). Bounded by the absolute runaway backstop.
     attempt_cap = _attempt_budget(chain)
-    call_timeout = _call_timeout(capability)
     require_tier = "paid" if paid_only else None
     # Every capability gets a wall-clock deadline so a storm walk can't outlast
     # the job's stale-reclaim window and get re-executed by another worker.
@@ -685,7 +730,8 @@ async def run_chat(
                 capability=capability, messages=messages, model=model,
                 max_tokens=max_tokens, temperature=temperature,
                 response_format=response_format, workflow=workflow,
-                est_tokens=est_tokens, call_timeout=call_timeout,
+                est_tokens=est_tokens,
+                call_timeout=_call_timeout(capability, provider),
             )
             if flow is _Flow.SUCCESS:
                 return outcome

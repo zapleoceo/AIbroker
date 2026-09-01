@@ -72,6 +72,24 @@ class Settings(BaseSettings):
     # local, private, free provider that's just still working.
     ASR_LOCAL_TIMEOUT_S: float = 180.0
 
+    # Self-hosted vision (llama.cpp serving Qwen3-VL-4B-Instruct Q4_K_M on
+    # CPU) — empty = the "local" provider is unreachable and vision falls
+    # straight through to gemini/openrouter/openai (see routing/chains.py).
+    VISION_LOCAL_URL: str = ""
+    # Measured on this host 2026-08-31: 69s for a chat screenshot through
+    # llama-server with the model already resident, 81-192s (median 163s) for
+    # the same images through the one-shot CLI that reloads the model every
+    # call. Documents are the slow end. 300s leaves room for the slowest
+    # document plus a cold model load (22s) without cooling the key on a
+    # provider that is simply still working — the same reasoning as
+    # ASR_LOCAL_TIMEOUT_S above.
+    VISION_LOCAL_TIMEOUT_S: float = 300.0
+    # Longest edge, in pixels, an image is downscaled to before it reaches the
+    # model. NOT a nicety: at native resolution the vision encoder does not fit
+    # in memory on this host, and a native-resolution probe ran past 600s
+    # without ever completing while the same image at 1024px took 69s.
+    VISION_LOCAL_MAX_PX: int = 1024
+
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
 

@@ -1,0 +1,241 @@
+"""Self-hosted vision (llama.cpp / Qwen3-VL-4B) — the `local` provider on the
+vision chain.
+
+The service itself is upstream `llama-server` (no code of ours), so everything
+worth testing lives in the broker's adapter branch: pulling the prompt and the
+image out of an OpenAI-shape multimodal message, downscaling the image, and —
+most importantly — collapsing llama-server's structured JSON back to PROSE
+before it reaches the caller.
+"""
+from __future__ import annotations
+
+import base64
+import io
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import httpx
+import pytest
+
+from aibroker.config import get_settings
+from aibroker.providers.litellm_adapter import (
+    _describe_via_local_vision,
+    _downscale,
+    _split_vision_messages,
+    call_llm,
+    model_for,
+)
+from aibroker.services.llm_service import _call_timeout
+
+_URL = "http://vision-local:8080"
+
+
+def _png(w: int, h: int) -> bytes:
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (30, 90, 150)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _msgs(image: bytes | None = None, text: str = "что на фото?",
+          url: str | None = None) -> list[dict]:
+    blocks: list[dict] = [{"type": "text", "text": text}]
+    if image is not None:
+        blocks.append({"type": "image_url", "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(image).decode()}})
+    elif url is not None:
+        blocks.append({"type": "image_url", "image_url": {"url": url}})
+    return [{"role": "user", "content": blocks}]
+
+
+def _reply(content: dict | str, status: int = 200) -> SimpleNamespace:
+    body = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    return SimpleNamespace(
+        status_code=status, text=body,
+        json=lambda: {"choices": [{"message": {"content": body}}],
+                      "usage": {"prompt_tokens": 379, "completion_tokens": 123}},
+    )
+
+
+# ─── wiring ─────────────────────────────────────────────────────────────────
+
+
+def test_model_for_local_vision():
+    assert model_for("local", "vision") == "local/qwen3vl"
+
+
+def test_call_timeout_is_provider_aware():
+    """A flat 60s would abort every local call: one image measured 69s on this
+    hardware, 192s for a dense document."""
+    assert _call_timeout("vision", "gemini") == 60.0
+    assert _call_timeout("vision", "local") > 200.0
+    # chat:deep keeps precedence over the provider rule.
+    assert _call_timeout("chat:deep", "local") == 19 * 60.0
+
+
+# ─── message splitting ──────────────────────────────────────────────────────
+
+
+def test_split_extracts_prompt_and_inline_image():
+    raw = _png(20, 10)
+    prompt, image = _split_vision_messages(_msgs(raw, "опиши"))
+    assert prompt == "опиши"
+    assert image == raw
+
+
+def test_split_ignores_remote_url():
+    """A remote URL is left for the cloud providers, which can fetch it —
+    llama-server would have to egress from our host to do the same."""
+    prompt, image = _split_vision_messages(_msgs(url="https://example.com/a.jpg"))
+    assert image is None
+    assert prompt == "что на фото?"
+
+
+def test_split_survives_undecodable_base64():
+    msgs = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!not!!!"}}]}]
+    _, image = _split_vision_messages(msgs)
+    assert image is None
+
+
+def test_split_handles_plain_string_content():
+    prompt, image = _split_vision_messages([{"role": "user", "content": "просто текст"}])
+    assert prompt == "просто текст"
+    assert image is None
+
+
+# ─── downscaling ────────────────────────────────────────────────────────────
+
+
+def test_downscale_shrinks_long_edge_and_keeps_aspect():
+    from PIL import Image
+
+    out = _downscale(_png(2000, 1000), 1024)
+    im = Image.open(io.BytesIO(out))
+    assert max(im.size) == 1024
+    assert im.size == (1024, 512)
+
+
+def test_downscale_leaves_small_image_alone():
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(_downscale(_png(300, 200), 1024)))
+    assert im.size == (300, 200)
+
+
+def test_downscale_passes_through_unreadable_bytes():
+    """An exotic format degrades to 'let the model try' rather than failing."""
+    assert _downscale(b"not an image at all", 1024) == b"not an image at all"
+
+
+# ─── the call ───────────────────────────────────────────────────────────────
+
+
+async def test_local_vision_returns_prose_not_json(monkeypatch):
+    """THE regression this whole design turns on. local leads the vision chain
+    and gemini can answer the very next call, so `text` must be prose for both
+    — a provider-dependent response shape would break the caller precisely on
+    fallback. The structured extras ride in meta instead."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    reply = _reply({"type": "чек", "format": "markdown",
+                    "content": "Чек из FESTIVAL MARKET на 200,000"})
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=reply)):
+        text, meta = await _describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
+    assert text == "Чек из FESTIVAL MARKET на 200,000"
+    assert not text.startswith("{")
+    assert meta["vision_type"] == "чек"
+    assert meta["vision_format"] == "markdown"
+    assert meta["cost_usd"] == 0.0          # self-hosted: free by construction
+    assert meta["model"] == "local/qwen3vl"
+    assert meta["tokens_in"] == 379
+
+
+async def test_local_vision_downscales_before_sending(monkeypatch):
+    """Not an optimization: at native resolution the encoder does not fit in
+    memory on the prod host — a probe ran past 600s without completing."""
+    from PIL import Image
+
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    captured = {}
+
+    async def fake_post(url, payload, timeout):
+        captured["payload"] = payload
+        return _reply({"type": "фото", "format": "text", "content": "кот"})
+
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                side_effect=fake_post):
+        await _describe_via_local_vision(
+            messages=_msgs(_png(3000, 1500)), max_tokens=400, temperature=0.1)
+
+    sent = captured["payload"]["messages"][-1]["content"][-1]["image_url"]["url"]
+    im = Image.open(io.BytesIO(base64.b64decode(sent.split("base64,", 1)[1])))
+    assert max(im.size) == get_settings().VISION_LOCAL_MAX_PX
+    # Grammar-constrained decoding, so the JSON is guaranteed, not hoped for.
+    assert captured["payload"]["response_format"]["type"] == "json_schema"
+
+
+async def test_local_vision_falls_back_to_raw_body_when_not_json(monkeypatch):
+    """The grammar should make this unreachable; if the server was started
+    without schema support the body is still a usable answer."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply("  просто описание  "))):
+        text, meta = await _describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
+    assert text == "просто описание"
+    assert meta["vision_type"] is None
+
+
+async def test_local_vision_without_url_configured(monkeypatch):
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", "")
+    with pytest.raises(RuntimeError, match="VISION_LOCAL_URL"):
+        await _describe_via_local_vision(
+            messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
+
+
+async def test_local_vision_rejects_request_without_inline_image(monkeypatch):
+    """Hand it to the chain's cloud providers, which can fetch a remote URL."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with pytest.raises(RuntimeError, match="no inline image"):
+        await _describe_via_local_vision(
+            messages=_msgs(url="https://example.com/a.jpg"),
+            max_tokens=400, temperature=0.1)
+
+
+async def test_local_vision_unreachable_becomes_timeout_error(monkeypatch):
+    """TimeoutError, not a bare HTTPError: classify_provider_error gives a
+    plain 'error' NO cooldown, so every following request would re-hit a dead
+    endpoint with zero backoff."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(side_effect=httpx.ConnectError("refused"))),          pytest.raises(TimeoutError, match="vision-local unreachable"):
+        await _describe_via_local_vision(
+            messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
+
+
+@pytest.mark.parametrize("status,exc", [(503, TimeoutError), (400, RuntimeError)])
+async def test_local_vision_http_error_classes(monkeypatch, status, exc):
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply("boom", status=status))),          pytest.raises(exc):
+        await _describe_via_local_vision(
+            messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
+
+
+async def test_call_llm_routes_local_prefix_away_from_litellm(monkeypatch):
+    """call_llm is the single entry point for nine capabilities and `local` is
+    not a LiteLLM provider — acompletion has never heard of the prefix."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply(
+                    {"type": "фото", "format": "text", "content": "кот на диване"}))), \
+         patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+                AsyncMock(side_effect=AssertionError("must not reach litellm"))):
+        text, meta = await call_llm(
+            model="local/qwen3vl", messages=_msgs(_png(40, 40)),
+            api_key="unused", capability="vision")
+    assert text == "кот на диване"

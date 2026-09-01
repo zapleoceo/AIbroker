@@ -152,12 +152,32 @@ def test_vision_only_vision_providers():
 
 def test_vision_excludes_anthropic_keeps_openai_fallback():
     """anthropic removed from vision (2026-07-01): it 400'd on Vera's image
-    URLs. gemini stays primary, openai is the paid fallback when gemini is
-    RPM-exhausted."""
+    URLs. openai is the paid fallback when the free tiers are exhausted.
+
+    2026-08-31: gemini is no longer chain[0] — self-hosted `local` leads (see
+    test_vision_leads_with_local). gemini keeps its place as the FIRST CLOUD
+    provider, which is what this regression is really about: the anthropic
+    removal must not have promoted anything else ahead of it."""
     chain = chain_for("vision")
     assert "anthropic" not in chain
-    assert chain[0] == "gemini"
+    assert chain[chain.index("local") + 1] == "gemini"
     assert "openai" in chain
+
+
+def test_vision_leads_with_local():
+    """2026-08-31: self-hosted Qwen3-VL (services: vision-local) heads the
+    vision chain. Vision was running an 8% success rate — 1762 ok against
+    ~20000 CapBlock/RateLimit errors over 14 days — so the cloud providers are
+    precisely the ones not answering. Local is unmetered; the cloud tail stays
+    for peak-hour overflow and for images passed by remote URL, which the local
+    provider deliberately does not fetch.
+
+    Contrast with transcription, where `local` sits SECOND on purpose: there,
+    groq is both free and ~150x faster, so leading with local burned the
+    timeout before falling through. No such free-and-fast option exists here."""
+    chain = chain_for("vision")
+    assert chain[0] == "local"
+    assert chain[1:] == ["gemini", "openrouter", "openai"]
 
 
 def test_vision_has_free_openrouter_fallback():

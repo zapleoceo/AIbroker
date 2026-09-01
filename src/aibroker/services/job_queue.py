@@ -261,6 +261,11 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             "key_label": outcome.key_label, "request_id": outcome.request_id,
             "cache_read_tokens": getattr(outcome, "cache_read_tokens", 0),
             "cache_write_tokens": getattr(outcome, "cache_write_tokens", 0),
+            # Vision extras — None for every provider but self-hosted `local`,
+            # and for every capability but vision. Same getattr-with-default
+            # trick as the token counters above: TranscribeOutcome has neither.
+            "vision_type": getattr(outcome, "vision_type", None),
+            "vision_format": getattr(outcome, "vision_format", None),
         },
         expect_started_at=row.started_at,
     )

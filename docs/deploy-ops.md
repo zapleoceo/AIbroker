@@ -146,6 +146,85 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
+## Local vision (2026-08-31)
+
+`vision-local` runs **upstream `llama-server`** (`ghcr.io/ggml-org/llama.cpp:server`)
+serving **Qwen3-VL-4B-Instruct Q4_K_M** on CPU. Container
+`aibroker-vision-local`; `api` reaches it at `VISION_LOCAL_URL` (default
+`http://aibroker-vision-local:8080`). Unset or unreachable degrades safely to
+`gemini -> openrouter -> openai`.
+
+**Why it exists.** Vision was running an 8% success rate: over 14 days, 1762 ok
+against ~20000 errors (12102 `CapBlock`, 3828 gemini `RateLimitError`, 4053
+openrouter `RateLimitError`), essentially all of it one client's traffic at
+240-300 distinct images/day.
+
+**Unlike `asr-local`, we write no service code.** `llama-server` already
+provides everything the asr-local wrapper had to hand-roll: an OpenAI-shaped
+`/v1/chat/completions` that accepts `image_url`, `--sleep-idle-seconds` for
+idle unload, `/health` that is exempt from the idle timer (so the compose
+healthcheck cannot keep the model awake), and `response_format: json_schema`
+for grammar-constrained output. All broker-side logic lives in
+`providers/litellm_adapter._describe_via_local_vision`.
+
+**Model is MOUNTED, not baked into an image.** Deploys build on the production
+host inside a 10-minute CI step (`/usr/local/bin/aibroker-deploy`); pulling
+3.3GB of weights into a layer on every Dockerfile touch would put that budget
+at risk for nothing. One-time host setup:
+
+    mkdir -p /var/lib/aibroker-vision/model && cd /var/lib/aibroker-vision/model
+    curl -fLO https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3VL-4B-Instruct-Q4_K_M.gguf
+    curl -fLO https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-4B-Instruct-F16.gguf
+    # then rename to qwen3-vl-4b-Q4_K_M.gguf / qwen3-vl-4b-mmproj-F16.gguf,
+    # or point VISION_MODEL_DIR elsewhere.
+
+### Measured on this host, 2026-08-31
+
+| | |
+|---|---|
+| model load | 22s |
+| chat screenshot, model resident | **69s** |
+| dense document | up to 192s |
+| one-shot CLI (reloads model per call) | 81-192s, median 163s |
+| **peak RSS** | **5105MB** -> `mem_limit: 5600m` |
+
+Peak RSS climbs 4781 -> 5105MB across consecutive runs and then plateaus:
+most of it is page cache for the mmap'd weights, which the kernel reclaims
+under pressure. Composition: 2.5GB weights + 0.84GB mmproj (F16) + 1.13GB f16
+KV cache at `-c 8192` + compute buffers.
+
+**Images MUST be downscaled to 1024px on the long edge** — done broker-side in
+`_downscale` (Pillow), governed by `VISION_LOCAL_MAX_PX`. This is load-bearing,
+not an optimization: at native resolution the vision encoder does not fit in
+memory here.
+
+### Two failed configurations, recorded so they aren't retried
+
+**Native-resolution input + `--memory=3800m` + quantized KV cache (`--cache-type-k/v q8_0`):**
+a single image ran past **600s without ever completing**, at 179-190% CPU — it
+was not hung, it was thrashing. At 3.51GB against a 3.8GB cap with swap
+disabled, the page cache for the 2.5GB mmap'd GGUF was being evicted and
+re-read from disk continuously. The same image at 1024px with a 5600m limit
+took 69s. **A too-small memory cap on an mmap-backed model does not OOM — it
+silently runs ~10x slower.**
+
+**`--parallel 2`** was not adopted: a second slot buys a second KV cache
+(~1.1GB) this host does not have the RAM for.
+
+### While it runs
+
+Available RAM drops to ~1.5GB and load average to ~3.5 on 4 cores. At
+240-300 images/day that is 11-14h/day in that state. `mem_limit` is mandatory:
+without one the kernel may pick postgres as the OOM victim rather than the
+model.
+
+### Peak-hour overflow is expected and correct
+
+Distinct images per hour: median 10, p90 21, **peak 162** (00:00 UTC, every
+day). One serialized worker clears ~50/hour, so in the peak hour the cloud tail
+of the chain takes the overflow. That is the design, not a failure — `local`
+returning nothing simply walks the chain to `gemini`.
+
 ## Local ASR (2026-07-18, moved in-repo same day; model-bump attempted same day, reverted)
 
 `services/asr-local/` — self-hosted `faster-whisper` (`small`, int8, 1 CPU

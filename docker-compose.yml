@@ -96,6 +96,53 @@ services:
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
+  # Self-hosted vision — llama.cpp serving Qwen3-VL-4B-Instruct Q4_K_M on CPU.
+  # Backs the 'local' vision provider (providers/litellm_adapter.py,
+  # routing/chains.py, where it leads the chain). Added 2026-08-31 because
+  # vision was running an 8% success rate: 1762 ok against ~20000 CapBlock and
+  # RateLimit errors over 14 days, all of it one client's traffic.
+  #
+  # Upstream image, NOT a local build, and the model is MOUNTED rather than
+  # baked: deploys build on the production host inside a 10-minute CI step
+  # (see /usr/local/bin/aibroker-deploy), and pulling 3.3GB of weights into an
+  # image layer on every Dockerfile touch would put that budget at risk for no
+  # gain. One-time host setup is in docs/deploy-ops.md "Local vision".
+  #
+  # Numbers measured on this host 2026-08-31 (see docs/deploy-ops.md):
+  #   69s   chat screenshot, model resident
+  #   192s  dense document (the slow end)
+  #   5105MB peak RSS -> mem_limit 5600m. It plateaus there because most of it
+  #          is page cache for the mmap'd weights, which the kernel reclaims
+  #          under pressure; a 3800m cap made it thrash and blow past 600s.
+  # threads 3 of 4 cores, cpus 2.5: the box also runs Vera/Stepan2/postgres.
+  # --parallel 1 serializes decodes — a second slot would buy a second KV
+  # cache (~1.1GB) we do not have the RAM for.
+  vision-local:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: aibroker-vision-local
+    command: >
+      -m /models/qwen3-vl-4b-Q4_K_M.gguf
+      --mmproj /models/qwen3-vl-4b-mmproj-F16.gguf
+      -c 8192 --threads 3 --parallel 1
+      --sleep-idle-seconds ${VISION_IDLE_UNLOAD_S:-900}
+      --host 0.0.0.0 --port 8080
+    volumes:
+      - ${VISION_MODEL_DIR:-/var/lib/aibroker-vision/model}:/models:ro
+    cpus: 2.5
+    mem_limit: 5600m
+    expose:
+      - "8080"
+    # /health is exempt from llama-server's idle timer, so polling it can
+    # neither keep the model awake nor trigger a reload.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
   api:
     build:
       context: .
@@ -109,6 +156,8 @@ services:
       redis:
         condition: service_started
       asr-local:
+        condition: service_started
+      vision-local:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
@@ -127,6 +176,8 @@ services:
       # Same compose network now (asr-local above) — no more cross-project
       # network join. Empty/unreachable degrades safely to groq/gemini/openai.
       ASR_LOCAL_URL: ${ASR_LOCAL_URL:-http://aibroker-asr-local:8000}
+      # Empty/unreachable degrades safely to gemini/openrouter/openai.
+      VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
     ports:
       - "127.0.0.1:8004:8000"
     restart: unless-stopped

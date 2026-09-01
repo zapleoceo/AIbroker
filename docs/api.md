@@ -221,6 +221,59 @@ rotates keys within it. If you need a specific fallback provider, call
 `/v1/embed?provider=cohere` yourself and re-embed the affected batch — don't
 mix vectors from two providers in one index.
 
+### Vision (`?capability=vision`)
+
+Submitted through the generic async job endpoints
+(`POST /v1/jobs?capability=vision`, poll `GET /v1/jobs/{id}`). Payload is one
+message whose `content` is a block list —
+`[{"type":"text",...},{"type":"image_url","image_url":{"url":...}}]`, i.e. an
+image plus a prompt.
+
+Chain: `local` (self-hosted Qwen3-VL, see below) → `gemini` → `openrouter` →
+`openai`.
+
+#### `local` — self-hosted Qwen3-VL-4B (2026-08-31)
+
+Chain-FIRST. Free, private, unmetered — added because the cloud vision tier was
+answering only ~8% of calls (see `docs/deploy-ops.md` "Local vision" for the
+error breakdown and the measured latency/RSS numbers). Backed by upstream
+`llama-server` in the `vision-local` compose service; reached over plain HTTP by
+`_describe_via_local_vision` / `_post_local_vision`, never through LiteLLM —
+`local/` is a routing label, not a LiteLLM provider.
+
+Two conditions hand the request straight on to the cloud tail instead:
+
+- **the image is a remote URL, not inline base64** — the cloud providers can
+  fetch it; llama-server would have to egress from our host to do the same, and
+  deliberately does not.
+- **an empty body** — a 4B model on CPU that produced nothing is not a real
+  answer. Booked as `EmptyBody`/502 and escalated to the next provider (not the
+  next key: `local` is one process, so re-asking it is deterministic). Mirrors
+  the same guard on local whisper below.
+
+**Response shape is unchanged.** `text` carries PROSE for every provider on
+this chain, `local` included — the local model answers under a JSON grammar
+internally, and the adapter unwraps it before returning. This matters because
+`local` leads the chain and any cloud provider can serve the very next call: a
+provider-dependent shape would break callers precisely on fallback.
+
+Two OPTIONAL fields ride alongside, populated only when `local` answered and
+`null` otherwise:
+
+| field | meaning |
+|---|---|
+| `vision_type` | detected kind — `чек`, `накладная`, `банковский экран`, `переписка`, `постер`, `документ`, `таблица`, `фото`, `другое` |
+| `vision_format` | shape of `text` — `text`, `markdown`, `json` |
+
+Both are classified on the *same single pass* that answers the caller's prompt
+(a second pass would double the CPU cost of an already ~69s call). A client
+reading only `text` is unaffected.
+
+Timeout is `VISION_LOCAL_TIMEOUT_S` (300s), not the 60s every other provider
+gets: one image measured 69s and a dense document 192s on this hardware, so the
+flat ceiling would abort every call, cool the key, and fall through to the
+rate-limited cloud providers — burning CPU for nothing.
+
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional

@@ -355,6 +355,28 @@
 > verified accepted by gemini (a live probe reached 429, not a 400); the
 > transcription *output* awaits a gemini key with capacity (paid id=16 top-up).
 
+> **2026-08-31 (local vision leads)**: `vision` became
+> `[local, gemini, openrouter, openai]`. Self-hosted Qwen3-VL-4B on this host
+> (compose service `vision-local`, upstream `llama-server`) now heads the chain.
+> Rationale: over 14 days vision succeeded on 8% of calls — 1762 ok against
+> ~20000 CapBlock/RateLimit errors — so the cloud providers were precisely the
+> ones not answering, while one client kept submitting 240-300 distinct images
+> a day.
+>
+> This is the OPPOSITE call to `transcription`, where `local` deliberately sits
+> SECOND, and for a consistent reason. There, groq is both free AND ~150x
+> faster, so leading with local burned the timeout before falling through and
+> drained groq's daily quota with fall-through traffic. Here there is no
+> free-and-fast alternative: local is ~69s/image and unmetered, the cloud tier
+> is rate-limited. The cloud tail stays for two jobs — the 00:00 UTC peak hour
+> (162 images arrive in an hour, ~3x what one serialized worker clears) and
+> images passed by remote URL, which the local provider does not fetch.
+>
+> `local` needs its OWN `api_keys` row (`provider='local'`,
+> `label='vision-local'`, scope `llm:vision`) — NOT the `llm:vision` scope added
+> to the existing asr-local key. `cooldown_until`/`is_alive` are per-row, so
+> sharing one would let a vision-side failure cool the working ASR fallback.
+
 > **2026-07-11 (vision free fallback)**: the `vision` chain was `[gemini,
 > openai]`. Under load every gemini key cooled down at once (vision shares the
 > gemini pool with chat) and there's no openai vision key, so vision jobs

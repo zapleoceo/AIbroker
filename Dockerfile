@@ -24,7 +24,8 @@ RUN pip install --no-cache-dir hatchling \
         "sqlalchemy[asyncio]>=2.0" "asyncpg>=0.30" \
         "cryptography>=43" "httpx>=0.27" \
         "litellm==1.92.0" "redis>=5" "structlog>=24.4" \
-        "python-multipart>=0.0.9" "jinja2>=3.1" "click>=8.1" "tzdata>=2024.1"
+        "python-multipart>=0.0.9" "jinja2>=3.1" "click>=8.1" "tzdata>=2024.1" \
+        "pillow>=11"
 
 # Code
 COPY src/ ./src/

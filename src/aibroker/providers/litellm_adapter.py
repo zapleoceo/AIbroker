@@ -7,6 +7,8 @@ and the API key. No HTTP code in our broker for individual providers.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import time
 from datetime import datetime
@@ -73,7 +75,13 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # HTTP API directly, not LiteLLM). Chain-first in transcription (see
     # routing/chains.py); groq/openai stay as fallback when ASR_LOCAL_URL is
     # unset or the service is unreachable.
-    "local": {"transcription": "local/whisper"},
+    # 2026-08-31: self-hosted Qwen3-VL-4B-Instruct Q4_K_M via llama.cpp on the
+    # same host, added for the same reason as whisper above — the vision chain
+    # was starved (14 days: 1762 ok against ~20000 rate-limit/cap errors, an
+    # 8% success rate). Same "routing label only" convention: the string is
+    # never sent anywhere, _describe_via_local_vision calls llama-server's
+    # OpenAI-compatible endpoint directly.
+    "local": {"transcription": "local/whisper", "vision": "local/qwen3vl"},
     # 2026-07-10: chat:smart gemini-2.5-pro → gemini-2.5-flash. On the free tier
     # 2.5-pro is capped at ~50-100 req/day @ 5 RPM per key, so under Stepan's
     # smart volume it 429'd ~100% (4096 errors / 0 ok in 3 days) — pure wasted
@@ -544,6 +552,170 @@ def _cache_tokens(usage: Any) -> tuple[int, int]:
     return read, write
 
 
+# Schema llama-server decodes UNDER GRAMMAR CONSTRAINT, so the JSON is
+# guaranteed well-formed rather than hoped for — a 4B model at Q4 asked to
+# emit a JSON header as free text gets it wrong often enough to matter.
+# `content` carries the answer to whatever the CALLER asked; type/format are
+# classified on the same single pass (a second pass would double the CPU cost
+# on a box where one image already costs ~69s).
+_VISION_TYPES = ["чек", "накладная", "банковский экран", "переписка",
+                 "постер", "документ", "таблица", "фото", "другое"]
+_VISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": _VISION_TYPES},
+        "format": {"type": "string", "enum": ["text", "markdown", "json"]},
+        "content": {"type": "string"},
+    },
+    "required": ["type", "format", "content"],
+}
+_VISION_SYSTEM = (
+    "Ты распознаёшь изображения. Верни JSON: type — вид изображения, "
+    "format — в каком виде подан content (text для обычного текста, markdown "
+    "для таблиц и чеков, json для строго структурированных данных), "
+    "content — ответ на запрос пользователя. Числа переписывай точно как на "
+    "изображении, не округляй. Не выдумывай того, чего не видно."
+)
+# Guard mirroring asr-local's _MAX_AUDIO_BYTES: a caller must not be able to
+# push an arbitrarily large blob through the resize step.
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _split_vision_messages(messages: list[dict[str, Any]]) -> tuple[str, bytes | None]:
+    """(prompt text, raw image bytes) out of OpenAI-shape multimodal messages.
+    Only data: URLs are decoded — a remote URL is left for the cloud providers,
+    which can fetch it; llama-server would have to egress from our host to do
+    the same, which this deliberately does not do."""
+    import binascii
+
+    texts: list[str] = []
+    image: bytes | None = None
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+            continue
+        for block in content or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                texts.append(block.get("text") or "")
+            elif block.get("type") == "image_url" and image is None:
+                url = (block.get("image_url") or {}).get("url") or ""
+                if url.startswith("data:") and "base64," in url:
+                    try:
+                        image = base64.b64decode(url.split("base64,", 1)[1])
+                    except (binascii.Error, ValueError):
+                        image = None
+    return "\n".join(t for t in texts if t).strip(), image
+
+
+def _downscale(image: bytes, max_px: int) -> bytes:
+    """Longest edge to `max_px`. Load-bearing, not an optimization: at native
+    resolution the vision encoder does not fit in memory on this host — a probe
+    ran past 600s without completing, while the same image at 1024px took 69s.
+    Returns the original bytes unchanged if Pillow can't read it, so an exotic
+    format degrades to "let the model try" instead of failing the request."""
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover — Pillow is a hard dep of the image
+        return image
+    import io as _io
+
+    try:
+        im = Image.open(_io.BytesIO(image))
+        im = im.convert("RGB")
+    except Exception:  # noqa: BLE001 — any unreadable image: pass it through
+        return image
+    longest = max(im.size)
+    if longest > max_px:
+        scale = max_px / longest
+        im = im.resize((max(1, round(im.width * scale)),
+                        max(1, round(im.height * scale))), Image.LANCZOS)
+    buf = _io.BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+async def _post_local_vision(url: str, payload: dict[str, Any],
+                             timeout: float) -> httpx.Response:  # pragma: no cover — thin network I/O, exercised via _describe_via_local_vision's mocked tests
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(url, json=payload)
+
+
+async def _describe_via_local_vision(
+    *, messages: list[dict[str, Any]], max_tokens: int, temperature: float,
+) -> tuple[str, dict[str, Any]]:
+    """Self-hosted Qwen3-VL via llama.cpp — free, private, no external quota.
+
+    Returns PROSE in the text slot, exactly like gemini/openrouter/openai do
+    for this capability. That is deliberate: local sits at the head of the
+    vision chain and any of those can answer the very next call, so a
+    provider-dependent response shape would break the caller precisely on
+    fallback. The structured extras ride in meta instead."""
+    settings = get_settings()
+    base = settings.VISION_LOCAL_URL
+    if not base:
+        raise RuntimeError("VISION_LOCAL_URL not configured")
+    prompt, image = _split_vision_messages(messages)
+    if image is None:
+        # No inline image: nothing a local model can do that the chain's cloud
+        # providers can't do better (they can fetch a remote URL). Hand it on.
+        raise RuntimeError("no inline image for local vision")
+    if len(image) > _MAX_IMAGE_BYTES:
+        raise RuntimeError(f"image > {_MAX_IMAGE_BYTES} bytes")
+    small = await asyncio.to_thread(_downscale, image, settings.VISION_LOCAL_MAX_PX)
+    payload = {
+        "messages": [
+            {"role": "system", "content": _VISION_SYSTEM},
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/jpeg;base64," + base64.b64encode(small).decode()}},
+            ]},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "response_format": {"type": "json_schema", "schema": _VISION_SCHEMA},
+    }
+    t0 = time.time()
+    try:
+        resp = await _post_local_vision(
+            f"{base}/v1/chat/completions", payload, settings.VISION_LOCAL_TIMEOUT_S)
+    except httpx.HTTPError as e:
+        # Same reclassification as asr-local: a plain 'error' gets NO cooldown,
+        # so every following request would re-hit a dead endpoint with zero
+        # backoff. TimeoutError cools the key instead.
+        raise TimeoutError(f"vision-local unreachable: {e}") from e
+    latency_ms = int((time.time() - t0) * 1000)
+    if resp.status_code >= 500:
+        raise TimeoutError(f"vision-local {resp.status_code}: {resp.text[:200]}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"vision-local {resp.status_code}: {resp.text[:200]}")
+    body = resp.json()
+    raw = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    usage = body.get("usage") or {}
+    vtype = vformat = None
+    try:
+        parsed = json.loads(raw)
+        text = (parsed.get("content") or "").strip()
+        vtype, vformat = parsed.get("type"), parsed.get("format")
+    except (ValueError, AttributeError):
+        # The grammar should make this unreachable; if the server was started
+        # without schema support, the body is still a usable answer.
+        text = raw.strip()
+    meta = {
+        "model": "local/qwen3vl", "tokens_in": usage.get("prompt_tokens", 0) or 0,
+        "tokens_out": usage.get("completion_tokens", 0) or 0,
+        # Self-hosted: free by construction. Set directly rather than through
+        # estimate_llm_cost, which would log an "unpriced model" warning.
+        "cost_usd": 0.0, "latency_ms": latency_ms,
+        "cache_read_tokens": 0, "cache_write_tokens": 0, "finish_reason": None,
+        "vision_type": vtype, "vision_format": vformat,
+    }
+    return text, meta
+
+
 async def call_llm(
     *,
     model: str,
@@ -572,6 +744,13 @@ async def call_llm(
     JSON via tool-use on most lanes, but keeps its reasoning on chat:sales —
     the two are mutually exclusive). Optional; adapters ignore it by default.
     """
+    # Dispatch on the MODEL PREFIX, mirroring transcribe()'s own `local` branch:
+    # this function is the single entry point for nine capabilities, and the
+    # `local` provider is not a LiteLLM provider at all — acompletion has never
+    # heard of the prefix. Must sit before kwargs is built.
+    if model.split("/", 1)[0] == "local":
+        return await _describe_via_local_vision(
+            messages=messages, max_tokens=max_tokens, temperature=temperature)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": apply_prompt_cache(model, messages),

@@ -217,7 +217,18 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # until that conversion is written. DEFAULT_MODEL/quotas/cooldown/probe
     # entries stay (same "known but not chained" treatment as github before
     # its own prod key test — see docs/routing.md).
-    "vision": ["gemini", "openrouter", "openai"],
+    # 2026-08-31: "local" (self-hosted Qwen3-VL-4B via llama.cpp on this host)
+    # put FIRST. The opposite call to transcription below, and for the opposite
+    # reason: there, local whisper was ~150x SLOWER than groq, which is also
+    # free, so leading with it burned the timeout before falling through. Here
+    # there is no fast free alternative — vision ran an 8% success rate over 14
+    # days (1762 ok against ~20000 CapBlock/RateLimit errors), so the cloud
+    # providers are the ones that aren't answering. Local is ~69s per image and
+    # unmetered; the cloud tail stays for overflow in the 00:00 UTC peak hour
+    # (162 images arrive in one hour, ~3x what one serialized worker clears)
+    # and for anything local can't take, e.g. an image passed by remote URL
+    # rather than inline base64.
+    "vision": ["local", "gemini", "openrouter", "openai"],
     # 2026-07-18: "local" (self-hosted faster-whisper on this host) was put
     # FIRST — free, private, no external rate limit, so a request never waits on
     # groq's daily Whisper quota. 2026-07-26: MOVED BEHIND groq. On this box it

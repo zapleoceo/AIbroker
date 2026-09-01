@@ -231,6 +231,14 @@ class DeepJobResponse(BaseModel):
     key_label: str | None = None
     request_id: int | None = None
     error: str | None = None
+    # Vision only, and only when the self-hosted `local` provider answered:
+    # what the image was, and what shape `text` is in. Additive on purpose —
+    # `text` stays prose for every provider, so a client that only reads `text`
+    # sees no difference whether local or gemini served the call.
+    vision_type: str | None = Field(
+        None, description="vision: detected image kind (чек, переписка, …)")
+    vision_format: str | None = Field(
+        None, description="vision: shape of `text` — text | markdown | json")
     poll_after_s: int | None = Field(
         None, description="present only while status=pending"
     )
@@ -284,6 +292,8 @@ def _job_response(row: Any) -> DeepJobResponse:
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),
+        vision_type=meta.get("vision_type"),
+        vision_format=meta.get("vision_format"),
     )
 
 
