@@ -676,7 +676,15 @@ async def _describe_via_local_vision(
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "response_format": {"type": "json_schema", "schema": _VISION_SCHEMA},
+        # NESTING MATTERS and is verified against the running server, not the
+        # docs: {"type":"json_schema","schema":{...}} is accepted and SILENTLY
+        # IGNORED — llama-server answers with free-form JSON whose keys have
+        # nothing to do with the schema. Only the OpenAI-style
+        # json_schema.schema nesting actually constrains decoding (probe:
+        # a single-value enum came back as the only legal value under this
+        # form, and as unrelated invented keys under the flat one).
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"schema": _VISION_SCHEMA}},
     }
     t0 = time.time()
     try:
@@ -701,9 +709,20 @@ async def _describe_via_local_vision(
         text = (parsed.get("content") or "").strip()
         vtype, vformat = parsed.get("type"), parsed.get("format")
     except (ValueError, AttributeError):
-        # The grammar should make this unreachable; if the server was started
-        # without schema support, the body is still a usable answer.
+        # Grammar-constrained decoding should make this unreachable. If it
+        # happens anyway (server started without schema support, a truncated
+        # body), a body that still LOOKS like JSON must not be handed to the
+        # caller as prose — that is exactly the shape break this provider is
+        # designed to avoid, and it would only ever hit the fallback path, so
+        # it would be rare and confusing. Return empty instead: run_chat books
+        # EmptyBody and walks the chain to gemini. Genuine prose is kept.
         text = raw.strip()
+        if text.startswith(("{", "[")):
+            log.warning("vision-local returned unparseable JSON-like body "
+                        "(%d chars) — treating as empty so the chain "
+                        "escalates rather than leaking JSON to the caller",
+                        len(text))
+            text = ""
     meta = {
         "model": "local/qwen3vl", "tokens_in": usage.get("prompt_tokens", 0) or 0,
         "tokens_out": usage.get("completion_tokens", 0) or 0,

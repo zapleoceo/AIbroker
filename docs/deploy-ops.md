@@ -208,6 +208,17 @@ re-read from disk continuously. The same image at 1024px with a 5600m limit
 took 69s. **A too-small memory cap on an mmap-backed model does not OOM — it
 silently runs ~10x slower.**
 
+**`response_format: {"type":"json_schema","schema":{...}}`** — the flat form —
+is accepted by llama-server and **silently ignored**: it answers with
+free-form JSON whose keys have nothing to do with the schema. Caught in
+production on the first live image, which came back with a `vision_type`
+that is not in the enum at all. Only the OpenAI-style nesting,
+`{"type":"json_schema","json_schema":{"schema":{...}}}`, actually constrains
+decoding — verified by probing a single-value enum against the running
+server: constrained under the nested form, invented keys under the flat one.
+There is no error and no warning, so this can only be caught by asserting on
+output, never by watching for a failure.
+
 **`--parallel 2`** was not adopted: a second slot buys a second KV cache
 (~1.1GB) this host does not have the RAM for.
 

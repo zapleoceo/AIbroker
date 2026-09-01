@@ -175,7 +175,16 @@ async def test_local_vision_downscales_before_sending(monkeypatch):
     im = Image.open(io.BytesIO(base64.b64decode(sent.split("base64,", 1)[1])))
     assert max(im.size) == get_settings().VISION_LOCAL_MAX_PX
     # Grammar-constrained decoding, so the JSON is guaranteed, not hoped for.
-    assert captured["payload"]["response_format"]["type"] == "json_schema"
+    # The NESTING is the load-bearing part and was verified against a running
+    # llama-server: the flat {"type":"json_schema","schema":...} form is
+    # accepted and silently ignored (the server answers with free-form JSON),
+    # so a probe of a single-value enum came back as invented keys. Only
+    # json_schema.schema actually constrains decoding. Asserted because
+    # regressing it fails silently in production, not loudly in CI.
+    rf = captured["payload"]["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["schema"]["properties"]["type"]["enum"]
+    assert "schema" not in rf, "flat nesting is silently ignored by llama-server"
 
 
 async def test_local_vision_falls_back_to_raw_body_when_not_json(monkeypatch):
@@ -188,6 +197,18 @@ async def test_local_vision_falls_back_to_raw_body_when_not_json(monkeypatch):
             messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
     assert text == "просто описание"
     assert meta["vision_type"] is None
+
+
+async def test_local_vision_json_like_garbage_becomes_empty(monkeypatch):
+    """A body that fails to parse but still LOOKS like JSON must NOT reach the
+    caller as prose — that is the exact shape break this provider exists to
+    avoid. Empty makes run_chat book EmptyBody and walk on to gemini."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply('{"type": "чек", "content": trunc'))):
+        text, _ = await _describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
+    assert text == ""
 
 
 async def test_local_vision_without_url_configured(monkeypatch):
