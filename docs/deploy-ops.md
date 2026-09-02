@@ -146,6 +146,49 @@ up), 64 MB `allkeys-lru` cap, no published ports (compose-network only).
 If the container is down the app fails open to its old in-process behaviour
 — worst case a slightly colder provider prompt-cache, never an outage.
 
+## Deploy entrypoint (versioned since 2026-09-02)
+
+`infra/aibroker-deploy.sh` is the restricted entrypoint pinned in root's
+`authorized_keys` (`command="/usr/local/bin/aibroker-deploy"`), so a deploy key
+can run that and nothing else. It used to exist ONLY on the server, unversioned
+and unreviewed; it now lives in the repo and is installed with
+`bash /var/www/aibroker/infra/install-deploy.sh` (which keeps a timestamped
+backup and refuses to install a script that fails `bash -n`).
+
+Installing is deliberately NOT part of the deploy: a deploy must not rewrite
+the entrypoint currently executing it.
+
+### What it checks, and why
+
+The old version waited for `aibroker-api` to answer `/healthz` and exited 0.
+That was blind in two directions, and both bit us:
+
+1. **A sibling service could fail entirely** and the deploy still reported
+   success — nothing but `api` was ever checked.
+2. **A container could keep running a STALE config.** After a manual
+   `docker run` during a measurement, `docker compose up -d` left
+   `aibroker-vision-local` on its previous `-c 8192 --sleep-idle-seconds 900`
+   command; `docker ps` reported `healthy` throughout. **Container status says
+   nothing about which config a container was started with.**
+
+So it now runs two gates after `compose up -d`:
+
+**Drift gate.** `docker compose up -d --dry-run` reports what a *second* `up`
+would still have to do. On a fully-applied deploy every line ends in
+`Running` / `Healthy` / `Waiting`; any other verb (`Recreate`, `Create`,
+`Starting`, `Started`) means a container is not running the config we just
+deployed. Verified both ways: silent on a clean state, and it catches a
+container stopped out from under compose. Exit 12.
+
+**Health gate, every service.** Waits up to 180s for all of them, not just
+`api`. Services without a healthcheck (monitor, redis, pgbouncer) only have to
+be `running`; the rest must be `healthy`. On failure it dumps `compose ps` plus
+the last 30 log lines of each offending service. Exit 11.
+
+On success it prints the resolved `args` of `vision-local` and `asr-local`, so
+the deploy log records *which configuration* actually started — the question
+the old script left unanswerable.
+
 ## Local vision (2026-08-31)
 
 `vision-local` runs **upstream `llama-server`** (`ghcr.io/ggml-org/llama.cpp:server`)
