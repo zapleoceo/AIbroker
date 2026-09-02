@@ -581,15 +581,22 @@ _VISION_SYSTEM = (
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
-def _split_vision_messages(messages: list[dict[str, Any]]) -> tuple[str, bytes | None]:
-    """(prompt text, raw image bytes) out of OpenAI-shape multimodal messages.
-    Only data: URLs are decoded — a remote URL is left for the cloud providers,
-    which can fetch it; llama-server would have to egress from our host to do
-    the same, which this deliberately does not do."""
+def _split_vision_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[bytes]]:
+    """(prompt text, decoded inline images) out of OpenAI-shape multimodal
+    messages. Only data: URLs are decoded — a remote URL is left for the cloud
+    providers, which can fetch it; llama-server would have to egress from our
+    host to do the same, which this deliberately does not do.
+
+    Returns EVERY inline image, not just the first. The caller decides what to
+    do with more than one; silently keeping only the first would answer a
+    two-image question from one image and report success (see
+    _describe_via_local_vision)."""
     import binascii
 
     texts: list[str] = []
-    image: bytes | None = None
+    images: list[bytes] = []
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str):
@@ -600,14 +607,14 @@ def _split_vision_messages(messages: list[dict[str, Any]]) -> tuple[str, bytes |
                 continue
             if block.get("type") == "text":
                 texts.append(block.get("text") or "")
-            elif block.get("type") == "image_url" and image is None:
+            elif block.get("type") == "image_url":
                 url = (block.get("image_url") or {}).get("url") or ""
                 if url.startswith("data:") and "base64," in url:
                     try:
-                        image = base64.b64decode(url.split("base64,", 1)[1])
+                        images.append(base64.b64decode(url.split("base64,", 1)[1]))
                     except (binascii.Error, ValueError):
-                        image = None
-    return "\n".join(t for t in texts if t).strip(), image
+                        continue
+    return "\n".join(t for t in texts if t).strip(), images
 
 
 def _downscale(image: bytes, max_px: int) -> bytes:
@@ -615,7 +622,13 @@ def _downscale(image: bytes, max_px: int) -> bytes:
     resolution the vision encoder does not fit in memory on this host — a probe
     ran past 600s without completing, while the same image at 1024px took 69s.
     Returns the original bytes unchanged if Pillow can't read it, so an exotic
-    format degrades to "let the model try" instead of failing the request."""
+    format degrades to "let the model try" instead of failing the request.
+
+    An image already within `max_px` is returned BYTE-FOR-BYTE. It used to be
+    re-encoded to JPEG q90 regardless, which put every small screenshot through
+    a lossy pass — directly at odds with this provider's own instruction to
+    copy numbers exactly, on receipts and bank screens where a mangled digit is
+    the whole failure mode."""
     try:
         from PIL import Image
     except ImportError:  # pragma: no cover — Pillow is a hard dep of the image
@@ -624,14 +637,14 @@ def _downscale(image: bytes, max_px: int) -> bytes:
 
     try:
         im = Image.open(_io.BytesIO(image))
+        if max(im.size) <= max_px:
+            return image          # already small enough — do not touch a pixel
         im = im.convert("RGB")
     except Exception:  # noqa: BLE001 — any unreadable image: pass it through
         return image
-    longest = max(im.size)
-    if longest > max_px:
-        scale = max_px / longest
-        im = im.resize((max(1, round(im.width * scale)),
-                        max(1, round(im.height * scale))), Image.LANCZOS)
+    scale = max_px / max(im.size)
+    im = im.resize((max(1, round(im.width * scale)),
+                    max(1, round(im.height * scale))), Image.LANCZOS)
     buf = _io.BytesIO()
     im.save(buf, "JPEG", quality=90)
     return buf.getvalue()
@@ -657,11 +670,20 @@ async def _describe_via_local_vision(
     base = settings.VISION_LOCAL_URL
     if not base:
         raise RuntimeError("VISION_LOCAL_URL not configured")
-    prompt, image = _split_vision_messages(messages)
-    if image is None:
+    prompt, images = _split_vision_messages(messages)
+    if not images:
         # No inline image: nothing a local model can do that the chain's cloud
         # providers can't do better (they can fetch a remote URL). Hand it on.
         raise RuntimeError("no inline image for local vision")
+    if len(images) > 1:
+        # Refuse rather than answer from image 1 of N. This provider LEADS the
+        # vision chain, so quietly describing only the first image would return
+        # a confident, successful, wrong answer and the request would never
+        # reach gemini/openai — which do receive the whole message list. One
+        # slot, one image at a time; multi-image belongs upstream.
+        raise RuntimeError(
+            f"local vision takes one image, got {len(images)} — escalating")
+    image = images[0]
     if len(image) > _MAX_IMAGE_BYTES:
         raise RuntimeError(f"image > {_MAX_IMAGE_BYTES} bytes")
     small = await asyncio.to_thread(_downscale, image, settings.VISION_LOCAL_MAX_PX)

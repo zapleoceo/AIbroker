@@ -80,30 +80,44 @@ def test_call_timeout_is_provider_aware():
 
 def test_split_extracts_prompt_and_inline_image():
     raw = _png(20, 10)
-    prompt, image = _split_vision_messages(_msgs(raw, "опиши"))
+    prompt, images = _split_vision_messages(_msgs(raw, "опиши"))
     assert prompt == "опиши"
-    assert image == raw
+    assert images == [raw]
+
+
+def test_split_returns_every_image_not_just_the_first():
+    """REGRESSION: it used to keep only the first and drop the rest silently."""
+    a, b = _png(20, 10), _png(30, 15)
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "сравни"},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(a).decode()}},
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(b).decode()}},
+    ]}]
+    _, images = _split_vision_messages(msgs)
+    assert images == [a, b]
 
 
 def test_split_ignores_remote_url():
     """A remote URL is left for the cloud providers, which can fetch it —
     llama-server would have to egress from our host to do the same."""
-    prompt, image = _split_vision_messages(_msgs(url="https://example.com/a.jpg"))
-    assert image is None
+    prompt, images = _split_vision_messages(_msgs(url="https://example.com/a.jpg"))
+    assert images == []
     assert prompt == "что на фото?"
 
 
 def test_split_survives_undecodable_base64():
     msgs = [{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!not!!!"}}]}]
-    _, image = _split_vision_messages(msgs)
-    assert image is None
+    _, images = _split_vision_messages(msgs)
+    assert images == []
 
 
 def test_split_handles_plain_string_content():
-    prompt, image = _split_vision_messages([{"role": "user", "content": "просто текст"}])
+    prompt, images = _split_vision_messages([{"role": "user", "content": "просто текст"}])
     assert prompt == "просто текст"
-    assert image is None
+    assert images == []
 
 
 # ─── downscaling ────────────────────────────────────────────────────────────
@@ -118,11 +132,13 @@ def test_downscale_shrinks_long_edge_and_keeps_aspect():
     assert im.size == (1024, 512)
 
 
-def test_downscale_leaves_small_image_alone():
-    from PIL import Image
-
-    im = Image.open(io.BytesIO(_downscale(_png(300, 200), 1024)))
-    assert im.size == (300, 200)
+def test_downscale_leaves_small_image_byte_identical():
+    """REGRESSION: an already-small image used to be re-encoded to JPEG q90
+    anyway. This provider's own prompt tells the model to copy numbers exactly;
+    putting a receipt screenshot through a lossy pass first works against that,
+    for no benefit."""
+    src = _png(300, 200)
+    assert _downscale(src, 1024) == src
 
 
 def test_downscale_passes_through_unreadable_bytes():
@@ -216,6 +232,21 @@ async def test_local_vision_without_url_configured(monkeypatch):
     with pytest.raises(RuntimeError, match="VISION_LOCAL_URL"):
         await _describe_via_local_vision(
             messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
+
+
+async def test_local_vision_refuses_multiple_images(monkeypatch):
+    """local LEADS the vision chain, so answering a two-image question from
+    image 1 would return a confident wrong answer and the request would never
+    reach gemini/openai, which do get the whole message list."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    a, b = _png(20, 10), _png(30, 15)
+    msgs = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(x).decode()}}
+        for x in (a, b)]}]
+    with pytest.raises(RuntimeError, match="one image"):
+        await _describe_via_local_vision(
+            messages=msgs, max_tokens=400, temperature=0.1)
 
 
 async def test_local_vision_rejects_request_without_inline_image(monkeypatch):

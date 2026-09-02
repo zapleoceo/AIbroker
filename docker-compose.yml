@@ -117,14 +117,40 @@ services:
   # threads 3 of 4 cores, cpus 2.5: the box also runs Vera/Stepan2/postgres.
   # --parallel 1 serializes decodes — a second slot would buy a second KV
   # cache (~1.1GB) we do not have the RAM for.
+  #
+  # 2026-09-02, after 7 host-wide OOM kills in 24h (llama-server was the victim
+  # every time, at 4.4-5.5GB anon-rss; the cgroup cap never fired — the HOST ran
+  # out). Two changes, both measured:
+  #
+  # -c 8192 -> 6144. KV cache is 144KiB/token here (36 layers x 8 KV heads x
+  # 128 head_dim, f16), so this returns ~288MB. 6144 and not 4096: over 183 real
+  # calls tokens_in was p50=851, p90=979, p99=1235, MAX=4451, and tokens_out
+  # peaked at 341 — so 4096 would truncate the largest real document we have
+  # actually served, while 6144 clears it with ~21% headroom.
+  #
+  # --sleep-idle-seconds 900 -> 120. Real gaps between bursts are 28-37 min,
+  # i.e. always longer than 900s, so the model was already sleeping before
+  # nearly every burst — the 900 bought almost no avoided reloads (measured: 16
+  # sleeps against 8 reloads in one window, a wake costs ~16s) while holding
+  # ~5GB through idle windows on a host with ~1.4GB free. 120s frees that for
+  # roughly 13 extra minutes per gap. Intra-burst images arrive seconds apart
+  # and still find the model awake.
+  #
+  # NOT adopted: --no-repack. It would keep the weights as reclaimable
+  # file-backed mmap instead of ~3.3GB of anonymous private-dirty copies (the
+  # repacked AVX layouts are why anon-rss dwarfs file-rss), which is the most
+  # direct fix for the OOM mechanism — but measured on the same image it ran
+  # 310s against 203s, +53%. Against the 300s call timeout that would abort
+  # nearly every request. Repacking is bought with memory and sold as speed,
+  # and we cannot pay in speed at 130s average.
   vision-local:
     image: ghcr.io/ggml-org/llama.cpp:server
     container_name: aibroker-vision-local
     command: >
       -m /models/qwen3-vl-4b-Q4_K_M.gguf
       --mmproj /models/qwen3-vl-4b-mmproj-F16.gguf
-      -c 8192 --threads 3 --parallel 1
-      --sleep-idle-seconds ${VISION_IDLE_UNLOAD_S:-900}
+      -c ${VISION_CTX:-6144} --threads 3 --parallel 1
+      --sleep-idle-seconds ${VISION_IDLE_UNLOAD_S:-120}
       --host 0.0.0.0 --port 8080
     volumes:
       - ${VISION_MODEL_DIR:-/var/lib/aibroker-vision/model}:/models:ro

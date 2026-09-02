@@ -222,6 +222,59 @@ output, never by watching for a failure.
 **`--parallel 2`** was not adopted: a second slot buys a second KV cache
 (~1.1GB) this host does not have the RAM for.
 
+### 2026-09-02: seven host-wide OOM kills in 24h, and what fixed what
+
+llama-server was killed 7 times in 24h at 4.4-5.5GB anon-rss. Crucially these
+were **global** OOM kills (`constraint=CONSTRAINT_NONE`, `global_oom`), NOT the
+container's cgroup limit — it died below its own 5.47GiB cap because the HOST
+ran out. `docker inspect` reports `OOMKilled: false` for exactly this reason.
+The kernel picked llama-server every time on merit: its `oom_score` is 922
+against 666-680 for everything else on the box, so tuning `oom_score_adj` would
+change nothing.
+
+**Where the memory actually is.** Measured under load: `RssAnon 3446MB` vs
+`RssFile 595MB`. The main GGUF *is* mmap'd, but only ~455-591MB of its 2.36GB
+stays resident and it thrashes (`workingset_refault_file` 979688 against 10847
+for anon). The mmproj has **no mapping at all** — llama.cpp's multimodal loader
+reads it into the heap, so all 836MB is unconditionally anonymous. On top of
+that `--repack` (default: enabled) converts Q4_K tensors into AVX-friendly
+layouts at load time, which means copying them into fresh anonymous buffers.
+Hence `file-rss: 0kB` in the OOM records: by kill time there was no reclaimable
+page cache left anywhere on the host.
+
+**Adopted, both measured:**
+- `-c 8192` -> `6144`. Returns ~288MB of KV cache. NOT 4096: across 183 real
+  calls `tokens_in` was p50=851 / p90=979 / p99=1235 / **max=4451**, and
+  `tokens_out` peaked at 341 — 4096 would truncate the largest document we have
+  actually served.
+- `--sleep-idle-seconds 900` -> `120`. Real gaps between bursts are 28-37 min,
+  so the model already slept before nearly every burst; 900 bought almost no
+  avoided reloads (16 sleeps against 8 reloads in one window; a wake costs
+  ~16s) while holding ~5GB through idle windows on a host with ~1.4GB free.
+
+**Rejected, and why — do not retry without new evidence:**
+- `--no-repack`. It is the most direct fix for the mechanism above: the weights
+  would stay as reclaimable file-backed mmap instead of ~3.3GB of anonymous
+  private-dirty copies. But on the same image it ran **310s against 203s,
+  +53%**. Against the 300s call timeout that aborts nearly every request.
+  Repacking is bought with memory and sold as speed, and at a 130s average we
+  have no speed to sell.
+- mmproj F16 -> Q8_0 would save 364MiB straight out of anonymous memory, which
+  is the right kind of memory to attack. But **no Q8_0 mmproj exists on the
+  host** — it has to be produced first, and its accuracy cost on receipts and
+  bank screens is unmeasured. Open, not rejected.
+- Raising swap / tuning `vm.swappiness` (currently 10): no. The 4-5GB is
+  anonymous memory actively read during inference; forcing it to swap trades an
+  OOM for multi-second per-page stalls.
+- Trimming other containers: nothing to take. All ~34 others total 1.8-2.2GB,
+  postgres configs are stock, no restart loops, no duplicate services.
+
+**Open question.** One real image (1920x2560 portrait document, 768x1024 after
+downscale, ~768 vision tokens) failed to complete in 900s AND again in 700s,
+while neighbours at 589824 pixels finished in 94-203s. A 4x+ time difference
+for 33% more pixels is not explained by size. Unresolved; it is part of why
+`local` books ~35 TimeoutErrors, which correctly fall through to gemini.
+
 ### While it runs
 
 Available RAM drops to ~1.5GB and load average to ~3.5 on 4 cores. At
