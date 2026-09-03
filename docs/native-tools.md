@@ -42,6 +42,9 @@ Calls must finish with `tool_calls`; final text must finish with `stop`. Provide
 models reporting a different terminal convention are not compatible yet.
 Validation is covered offline with mocked provider responses; live model
 conformance and latency remain rollout gates before enabling production agents.
+The API image installs `orjson` explicitly because LiteLLM's Gemini native-tool
+serialization imports it at runtime; a missing optional transitive package must
+fail CI/deploy rather than fail the first production tool request.
 
 The public contract is represented by `FunctionDefinition` and `ToolDefinition`.
 `tool_model_provider` validates a provider-qualified model override,
