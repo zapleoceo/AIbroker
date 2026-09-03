@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.routing import scope_for
@@ -28,6 +28,7 @@ from aibroker.services import (
     submit_job,
 )
 from aibroker.services.deep_jobs import AUDIO_FIELD
+from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 
 # Capabilities the generic /v1/jobs endpoint serves — everything run_chat
 # handles, i.e. everything whose payload is chat messages. embed stays
@@ -53,7 +54,21 @@ class ChatMessage(BaseModel):
     # str for plain text; list[dict] for OpenAI-style multimodal content
     # blocks (e.g. [{"type":"text",...}, {"type":"image_url",...}]). LiteLLM
     # passes both shapes through to vision-capable models natively.
-    content: str | list[dict[str, Any]]
+    content: str | list[dict[str, Any]] | None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def valid_tool_message(self) -> ChatMessage:
+        if self.content is None and not (self.role == "assistant" and self.tool_calls):
+            raise ValueError("null content requires assistant tool_calls")
+        if self.tool_calls and self.role != "assistant":
+            raise ValueError("tool_calls require assistant role")
+        if self.role == "tool" and not self.tool_call_id:
+            raise ValueError("tool message requires tool_call_id")
+        if self.tool_call_id and self.role != "tool":
+            raise ValueError("tool_call_id requires tool role")
+        return self
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +83,42 @@ class ChatRequest(BaseModel):
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     response_format: dict[str, Any] | None = None
     workflow: str | None = None
+    tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
+    tool_choice: str | dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def valid_tools(self) -> ChatRequest:
+        if self.tools:
+            tool_model_provider(self.model)
+            if self.response_format:
+                raise ValueError("tools and response_format are mutually exclusive")
+            validate_choice([tool.model_dump(exclude_none=True) for tool in self.tools],
+                            self.tool_choice)
+        elif self.tool_choice is not None:
+            raise ValueError("tool_choice requires tools")
+        pending: set[str] = set()
+        seen: set[str] = set()
+        for message in self.messages:
+            if message.role == "tool":
+                if message.tool_call_id is None or message.tool_call_id not in pending:
+                    raise ValueError("tool result must match an outstanding call")
+                pending.remove(message.tool_call_id)
+            else:
+                if pending:
+                    raise ValueError("all tool results must precede the next message")
+                for call in message.tool_calls or []:
+                    call_id = call.get("id")
+                    function = call.get("function")
+                    if (not isinstance(call_id, str) or not call_id or call_id in seen
+                            or call.get("type") != "function" or not isinstance(function, dict)
+                            or not isinstance(function.get("name"), str)
+                            or not isinstance(function.get("arguments"), str)):
+                        raise ValueError("invalid assistant tool-call history")
+                    pending.add(call_id)
+                    seen.add(call_id)
+        if pending:
+            raise ValueError("missing tool results")
+        return self
 
 
 class EmbedRequest(BaseModel):
@@ -231,6 +282,9 @@ class DeepJobResponse(BaseModel):
     key_label: str | None = None
     request_id: int | None = None
     error: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
     # Vision only, and only when the self-hosted `local` provider answered:
     # what the image was, and what shape `text` is in. Additive on purpose —
     # `text` stays prose for every provider, so a client that only reads `text`
@@ -294,6 +348,8 @@ def _job_response(row: Any) -> DeepJobResponse:
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),
         vision_type=meta.get("vision_type"),
         vision_format=meta.get("vision_format"),
+        tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
+        refusal=meta.get("refusal"),
     )
 
 
@@ -343,9 +399,11 @@ async def jobs_submit(
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
     job_id = await submit_job(  # pragma: no cover
         project=ctx.project, capability=capability,
-        messages=[m.model_dump() for m in body.messages],
+        messages=[m.model_dump(exclude_unset=True) for m in body.messages],
         model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
         response_format=body.response_format, workflow=body.workflow,
+        extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
+                "tool_choice": body.tool_choice} if body.tools else None),
     )
     return JobSubmitResponse(  # pragma: no cover
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,

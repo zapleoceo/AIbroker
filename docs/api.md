@@ -1,5 +1,8 @@
 # API reference
 
+Native agent tool calls: see [native tools contract](native-tools.md) for optional
+`tools`/`tool_choice`, tool-result history, validation and rollout limitations.
+
 Base URL (production): `https://aib.zapleo.com`
 
 OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)

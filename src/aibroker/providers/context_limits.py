@@ -19,6 +19,7 @@ that CAN serve it, so the answer (and its quality) is identical.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 # Bootstrap seeds — used only until a real rejection is observed per provider.
@@ -101,6 +102,14 @@ def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate from message chars. ~4 chars/token (English);
     Russian is denser so this under-counts — compensated by the 90% margin."""
     chars = sum(_content_chars(m.get("content")) for m in messages)
+    # Native assistant calls carry potentially large JSON arguments outside
+    # content. Count only these extra fields, so text/image contents are not
+    # counted twice and legacy estimates remain unchanged.
+    for message in messages:
+        tool_fields = {field: message[field] for field in ("tool_calls", "tool_call_id")
+                       if message.get(field) is not None}
+        if tool_fields:
+            chars += len(json.dumps(tool_fields, ensure_ascii=False, separators=(",", ":")))
     return chars // 4
 
 
