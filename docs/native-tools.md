@@ -43,5 +43,12 @@ models reporting a different terminal convention are not compatible yet.
 Validation is covered offline with mocked provider responses; live model
 conformance and latency remain rollout gates before enabling production agents.
 
+The public contract is represented by `FunctionDefinition` and `ToolDefinition`.
+`tool_model_provider` validates a provider-qualified model override,
+`validate_choice` binds `tool_choice` to declared functions, and
+`validate_result` validates the completed provider turn before the broker can
+return it to a client. These helpers validate and route data only; they never
+execute the client's tools.
+
 No database migration is needed: tool contracts participate in the existing
 JSONB request payload and dedup hash; results use existing result metadata.
