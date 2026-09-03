@@ -768,6 +768,8 @@ async def call_llm(
     extra: dict[str, Any] | None = None,
     timeout: float | None = None,
     capability: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """Call LiteLLM. Returns (text, meta).
 
@@ -789,6 +791,10 @@ async def call_llm(
     # this function is the single entry point for nine capabilities, and the
     # `local` provider is not a LiteLLM provider at all — acompletion has never
     # heard of the prefix. Must sit before kwargs is built.
+    if tools:
+        from aibroker.services.tool_contract import TOOL_PROVIDERS
+        if model.split("/", 1)[0] not in TOOL_PROVIDERS or response_format:
+            raise ValueError("incompatible native tool request")
     if model.split("/", 1)[0] == "local":
         return await _describe_via_local_vision(
             messages=messages, max_tokens=max_tokens, temperature=temperature)
@@ -803,12 +809,16 @@ async def call_llm(
         kwargs["timeout"] = timeout
     if response_format:
         kwargs["response_format"] = response_format
+    if tools:
+        kwargs.update(tools=tools, tool_choice=tool_choice or "auto", drop_params=False)
     # Per-provider request quirks (json_schema downgrade, gemini thinking-off,
     # …) live in one adapter each — see providers/adapters.py. adapter.prepare
     # mutates kwargs in place; the default adapter is a no-op.
     adapter_for(model.split("/", 1)[0]).prepare(model, kwargs, capability)
     if extra:
         kwargs.update(extra)
+    if tools and (kwargs.get("tools") != tools or kwargs.get("drop_params") is not False):
+        raise ValueError("adapter cannot downgrade native tool requests")
 
     t0 = time.time()
     # 2026-07-07: confirmed live — LiteLLM's own `timeout` kwarg does NOT
@@ -862,8 +872,18 @@ async def call_llm(
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
         "finish_reason": (choices[0].finish_reason if choices else None),
+        "tool_calls": _native_field(msg, "tool_calls") if choices else None,
+        "refusal": _native_field(msg, "refusal") if choices else None,
     }
     return text, meta
+
+
+def _native_field(message: Any, name: str) -> Any:
+    value = message.get(name) if isinstance(message, dict) else getattr(message, name, None)
+    if isinstance(value, list):
+        return [item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
+                for item in value]
+    return value
 
 
 async def embed(

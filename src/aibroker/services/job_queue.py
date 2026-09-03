@@ -224,6 +224,7 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                 response_format=req.get("response_format"),
                 workflow=req.get("workflow"),
                 paid_only=paid_only,
+                tools=req.get("tools"), tool_choice=req.get("tool_choice"),
             )
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
@@ -266,6 +267,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             # trick as the token counters above: TranscribeOutcome has neither.
             "vision_type": getattr(outcome, "vision_type", None),
             "vision_format": getattr(outcome, "vision_format", None),
+            "tool_calls": getattr(outcome, "tool_calls", None),
+            "finish_reason": getattr(outcome, "finish_reason", None),
+            "refusal": getattr(outcome, "refusal", None),
         },
         expect_started_at=row.started_at,
     )

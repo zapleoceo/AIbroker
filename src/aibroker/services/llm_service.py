@@ -60,6 +60,7 @@ from aibroker.routing.selector import (
     record_usage,
 )
 from aibroker.services import response_cache
+from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
 from aibroker.telemetry import audit
 
 log = logging.getLogger(__name__)
@@ -331,6 +332,9 @@ class ChatOutcome:
     # change the response shape under the caller.
     vision_type: str | None = None
     vision_format: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
 
 
 class _BudgetExhausted:
@@ -438,6 +442,7 @@ async def _run_attempt(
     capability: str, messages: list[dict[str, Any]], model: str | None,
     max_tokens: int, temperature: float, response_format: dict[str, Any] | None,
     workflow: str | None, est_tokens: int, call_timeout: float,
+    tools: list[dict[str, Any]] | None = None, tool_choice: Any = None,
 ) -> tuple[_Flow, ChatOutcome | None]:
     """One chat key attempt: reserve cost → call → book the result → verdict."""
     # Worst-case cost estimate (assumes the full max_tokens budget is
@@ -482,6 +487,7 @@ async def _run_attempt(
             extra=extra_for_provider(provider, getattr(key, "account_id", None)),
             timeout=call_timeout,
             capability=capability,
+            **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
         )
         meta["cost_usd"] = _billed_cost(key, meta)
     except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
@@ -499,6 +505,17 @@ async def _run_attempt(
     # below books the REAL final cost (meta["cost_usd"]) on top, so the
     # key ends up debited by exactly the real cost, never the estimate.
     await release_cost(api_key=key, estimated_cost=estimated_cost)
+
+    if tools and (failure := validate_result(text, meta, tools, tool_choice)):
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model, capability=capability,
+            workflow=workflow, tokens_in=meta["tokens_in"],
+            tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+            latency_ms=meta["latency_ms"], status="error", error_kind=failure,
+            http_status=502,
+        )
+        return _Flow.NEXT_PROVIDER, None
 
     # An empty body from `local` is never a real answer — it is a 4B model on
     # CPU that produced nothing. Returning it as success would hand the caller
@@ -539,8 +556,9 @@ async def _run_attempt(
         http_status=200,
     )
     # Cache deterministic (translate/prefilter) successes for verbatim repeats.
-    response_cache.put(capability, messages, text, model=model,
-                        max_tokens=max_tokens, temperature=temperature)
+    if not tools:
+        response_cache.put(capability, messages, text, model=model,
+                            max_tokens=max_tokens, temperature=temperature)
     # A success pins this (project, provider) to this key so the NEXT pick
     # lands where the provider-side prompt cache is already warm.
     await note_affinity_shared(project.id, provider, key.id)
@@ -553,6 +571,8 @@ async def _run_attempt(
         cache_write_tokens=meta.get("cache_write_tokens", 0),
         vision_type=meta.get("vision_type"),
         vision_format=meta.get("vision_format"),
+        tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
+        refusal=meta.get("refusal"),
     )
 
 
@@ -589,6 +609,8 @@ async def run_chat(
     workflow: str | None,
     paid_only: bool = False,
     at: datetime | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
 ) -> ChatOutcome | _BudgetExhausted | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
@@ -608,13 +630,14 @@ async def run_chat(
     spent — the caller can then fail the job honestly instead of masking it as
     "no provider available" and burning retries that can't create budget.
     """
+    pinned_tool_provider = tool_model_provider(model) if tools else None
     scope = scope_for(capability)
 
     # Exact-match cache for deterministic capabilities (translate/prefilter):
     # the same inputs recur verbatim, so a cached answer is correct and skips
     # the whole LLM round-trip. No-op for chat/* (not deterministic).
-    cached = response_cache.get(capability, messages, model=model,
-                                 max_tokens=max_tokens, temperature=temperature)
+    cached = (None if tools else response_cache.get(capability, messages, model=model,
+                                 max_tokens=max_tokens, temperature=temperature))
     if cached is not None:
         return ChatOutcome(
             text=cached, provider="cache", model="cache",
@@ -624,6 +647,10 @@ async def run_chat(
 
     est_tokens = estimate_prompt_tokens(messages)
     full_chain = chain_for(capability)
+    if tools:
+        full_chain = [provider for provider in full_chain if provider in TOOL_PROVIDERS
+                      and (pinned_tool_provider is None or provider == pinned_tool_provider)]
+        est_tokens += len(json.dumps(tools, ensure_ascii=False)) // 3 + 1
     # JSON requests: try JSON-reliable providers first (gpt-oss/cohere sink to
     # the back) so a structured call doesn't lead with a model that mangles
     # JSON — cuts InvalidJSON at the source, not after the wasted call.
@@ -732,6 +759,7 @@ async def run_chat(
                 response_format=response_format, workflow=workflow,
                 est_tokens=est_tokens,
                 call_timeout=_call_timeout(capability, provider),
+                tools=tools, tool_choice=tool_choice,
             )
             if flow is _Flow.SUCCESS:
                 return outcome
