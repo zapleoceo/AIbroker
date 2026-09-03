@@ -318,6 +318,65 @@ while neighbours at 589824 pixels finished in 94-203s. A 4x+ time difference
 for 33% more pixels is not explained by size. Unresolved; it is part of why
 `local` books ~35 TimeoutErrors, which correctly fall through to gemini.
 
+### 2026-09-04: the actual root cause — Docker was handing out host swap
+
+The 09-02 note above got the mechanism right and the reason wrong. It said the
+cgroup cap "never fired" without explaining why. Here is why:
+
+**`mem_limit` without `memswap_limit` grants the container TWICE the limit in
+swap.** Confirmed on the running container: `Memory=5872025600`,
+`MemorySwap=11744051200` — exactly 2x. So llama-server honestly stayed inside
+its 5600m of RAM (the cgroup was right to stay silent) while quietly draining
+all 4GB of **host** swap. Only once that was gone did the kernel run out
+globally and start picking victims across the whole box — 27 kills over 02-03.09,
+with postgres as eligible a victim as llama-server.
+
+`memswap_limit: 5600m` (equal to `mem_limit`) denies swap entirely. The cgroup
+then reclaims its own page cache under pressure, and an over-limit request is
+killed **inside its own cgroup**: one image fails, the container restarts, the
+rest of the host is untouched. Verified live over 4 hours on 09-03:
+
+| | before | after |
+|---|---|---|
+| host available RAM | 754 MB | **3562 MB** |
+| host swap | 4095/4095 | 2539/4095, draining |
+| OOM kills, host | 27 in 48h | **0** |
+| OOM kills, cgroup | — | 0 |
+
+**`mem_limit` is deliberately NOT lowered with it.** A limit is a ceiling, not
+a reservation — the host is pressured by what the container actually uses
+(~4.3GB), so trimming the ceiling frees nothing and only makes a cgroup kill
+more likely. 3800m was already measured to thrash.
+
+### 2026-09-04: mmproj F16 -> Q8_0
+
+The vision encoder is a separate file from the language weights and llama.cpp's
+multimodal loader **never mmaps it** — all 836MB lands in anonymous,
+unreclaimable memory, precisely the memory that gets a process OOM-killed.
+Halving its precision takes that back from the right pocket.
+
+A/B over 10 real production images, same prompt and schema:
+
+| | F16 | Q8_0 |
+|---|---|---|
+| peak RSS | 4.736 GiB | **4.289 GiB** (-447 MiB) |
+| latency, mean | 192.4s | 183.8s (no real difference) |
+| printed numbers | — | **identical on every image** |
+
+Receipt 559,00 RUB, refund 1.207.152d, transactions 49,000.00, showtimes
+18:00/20:00 — all matched, and neither model invented a number. 5 of 10 answers
+were word-for-word identical.
+
+Q8_0 is measurably coarser on **handwriting and fine print only**: a handwritten
+"Вера" became "Вераида", and "Налог — 0,00 руб" was clipped to "Нал -". On one
+image it was *better*, recovering a status line and shop name F16 missed.
+Accepted because memory is the acute problem and printed figures — what this
+provider exists to read — were untouched. `VISION_MMPROJ` switches back to the
+F16 file without touching anything else.
+
+Both models share one real defect, unrelated to quantisation: they read
+Vietnamese dong `₫` as roubles `₽`.
+
 ### While it runs
 
 Available RAM drops to ~1.5GB and load average to ~3.5 on 4 cores. At

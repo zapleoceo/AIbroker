@@ -136,6 +136,25 @@ services:
   # roughly 13 extra minutes per gap. Intra-burst images arrive seconds apart
   # and still find the model awake.
   #
+  # mmproj F16 -> Q8_0 (2026-09-04). The vision encoder is a SEPARATE file from
+  # the language weights, and llama.cpp's multimodal loader never mmaps it — all
+  # of it lands in anonymous, unreclaimable memory, which is exactly the memory
+  # that gets a process OOM-killed. Halving its precision returns that memory
+  # from the right pocket.
+  # A/B on 10 real images from production, same prompt, same schema:
+  #   peak RSS   F16 4.736GiB   vs   Q8_0 4.289GiB   (-447MiB)
+  #   latency    F16 192.4s avg vs   Q8_0 183.8s avg (no real difference)
+  #   PRINTED NUMBERS IDENTICAL on every image that had them — receipt 559,00
+  #   RUB, refund 1.207.152d, transactions 49,000.00, showtimes 18:00/20:00.
+  #   Neither invented a number. 5 of 10 answers were word-for-word identical.
+  # Q8_0 is measurably coarser ONLY on handwriting and fine print: a handwritten
+  # "Вера" became "Вераида" and "Налог — 0,00 руб" was clipped to "Нал -". On one
+  # image it was BETTER, recovering a status line and a shop name F16 missed.
+  # Accepted because the memory is the acute problem and printed figures — the
+  # thing this provider exists to read — were untouched. Revisit if handwriting
+  # ever becomes load-bearing; VISION_MMPROJ switches back to F16 with no
+  # redeploy of anything else.
+  #
   # NOT adopted: --no-repack. It would keep the weights as reclaimable
   # file-backed mmap instead of ~3.3GB of anonymous private-dirty copies (the
   # repacked AVX layouts are why anon-rss dwarfs file-rss), which is the most
@@ -148,7 +167,7 @@ services:
     container_name: aibroker-vision-local
     command: >
       -m /models/qwen3-vl-4b-Q4_K_M.gguf
-      --mmproj /models/qwen3-vl-4b-mmproj-F16.gguf
+      --mmproj /models/${VISION_MMPROJ:-qwen3-vl-4b-mmproj-Q8_0.gguf}
       -c ${VISION_CTX:-6144} --threads 3 --parallel 1
       --sleep-idle-seconds ${VISION_IDLE_UNLOAD_S:-120}
       --host 0.0.0.0 --port 8080
@@ -156,6 +175,34 @@ services:
       - ${VISION_MODEL_DIR:-/var/lib/aibroker-vision/model}:/models:ro
     cpus: 2.5
     mem_limit: 5600m
+    # memswap_limit == mem_limit means NO swap for this container, and it is the
+    # MISSING HALF of the note above. That note has the mechanism right — "the
+    # cgroup cap never fired, the HOST ran out" — but not the reason. Docker
+    # with mem_limit set and memswap_limit unset grants TWICE the limit in swap:
+    # `docker inspect` showed Memory=5872025600 MemorySwap=11744051200, exactly
+    # 2x. So the container honestly stayed under its 5600m of RAM (the cgroup
+    # cap was right to stay silent) while quietly draining all 4GB of HOST swap.
+    # Only once that was gone did the kernel run out globally and pick a victim
+    # across the whole box — 27 kills over 02-03.09, with postgres as eligible
+    # as llama-server.
+    #
+    # With swap denied the cgroup reclaims its own page cache under pressure,
+    # and an over-limit request dies INSIDE its own cgroup: one image fails, the
+    # container restarts, nothing else on the host is touched.
+    #
+    # Verified live 2026-09-03 over 4 hours before being lost to a deploy (it
+    # was edited in the working tree without committing):
+    #   host available RAM   754MB -> 3562MB
+    #   host swap            4095/4095 -> 2539/4095 and draining
+    #   OOM kills, host      27 in 48h -> 0
+    #   OOM kills, cgroup    0
+    #
+    # mem_limit is deliberately NOT lowered alongside this. A limit is a
+    # CEILING, not a reservation — the host is only pressured by what the
+    # container actually uses (~4.3GB), so trimming the ceiling buys no memory
+    # and only makes a cgroup kill more likely. 3800m was already measured to
+    # thrash; -c 4096 would truncate the largest document actually served.
+    memswap_limit: 5600m
     expose:
       - "8080"
     # /health is exempt from llama-server's idle timer, so polling it can
