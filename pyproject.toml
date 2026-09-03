@@ -25,6 +25,7 @@ dependencies = [
     # in memory on the prod host (a probe ran past 600s without completing;
     # the same image at 1024px took 69s).
     "pillow>=11",
+    "orjson>=3.10",
 ]
 
 [project.optional-dependencies]
