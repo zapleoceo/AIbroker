@@ -1,0 +1,32 @@
+[Unit]
+# Cgroup parent for aibroker-vision-local. It exists for exactly one property:
+# MemorySwapMax=0.
+#
+# Why not just `memswap_limit` in docker-compose.yml (which is set, and which
+# docker does honour at container creation)? Because it does not SURVIVE.
+# With the systemd cgroup driver, docker hands systemd the memory limit as a
+# systemd property — so `MemoryMax` is remembered — but writes the SWAP limit
+# straight into the cgroup file, behind systemd's back. `systemctl show` on a
+# container scope proves it: MemoryMax=5872025600 but MemorySwapMax=infinity.
+# Any `systemctl daemon-reload` then rewrites the attributes systemd manages
+# and resets the ones it does not know about, so memory.swap.max silently
+# returns to `max`.
+#
+# Measured on this host, 2026-09-05:
+#   before daemon-reload:  container memory.swap.max = 0
+#   after  daemon-reload:  container memory.swap.max = max
+# A single reload — the kind any package install triggers — undid it. Three
+# reloads happened at 06:44 that morning, and by 14:00 swap was 99% full again
+# with llama-server holding 1.5GB of it, exactly the state the compose setting
+# was supposed to prevent.
+#
+# A slice is a real unit with a file on disk, so systemd owns MemorySwapMax and
+# restores it on every reload. cgroup v2 enforces memory.swap.max
+# hierarchically — a descendant can never exceed an ancestor — so the container
+# cannot swap regardless of what its own file says. Verified across a
+# daemon-reload: slice swap.max stayed 0 both before and after.
+Description=AIbroker vision — denied swap so it cannot drain the host's
+Before=slices.target
+
+[Slice]
+MemorySwapMax=0

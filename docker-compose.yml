@@ -203,6 +203,22 @@ services:
     # and only makes a cgroup kill more likely. 3800m was already measured to
     # thrash; -c 4096 would truncate the largest document actually served.
     memswap_limit: 5600m
+    # ...and memswap_limit alone is NOT enough, because it does not survive.
+    # Docker gives systemd the MEMORY limit as a systemd property but writes the
+    # SWAP limit straight into the cgroup file behind systemd's back. `systemctl
+    # show` on the container scope proves it: MemoryMax=5872025600 but
+    # MemorySwapMax=infinity. Any `systemctl daemon-reload` — a package install
+    # is enough — then rewrites what systemd manages and resets what it does
+    # not know about, so memory.swap.max silently reverts to `max`.
+    # Measured 2026-09-05: swap.max was 0 before a reload and `max` after it.
+    # Three reloads fired at 06:44 that morning; by 14:00 swap was 99% full
+    # again with llama-server holding 1.5GB of it.
+    # The slice is a real unit systemd owns, so it restores MemorySwapMax=0 on
+    # every reload, and cgroup v2 enforces swap limits hierarchically — a
+    # descendant can never exceed an ancestor. Install it with
+    # infra/install-host-units.sh; if the slice is absent the container still
+    # starts, it just falls back to the fragile memswap_limit above.
+    cgroup_parent: aibroker-vision.slice
     expose:
       - "8080"
     # /health is exempt from llama-server's idle timer, so polling it can

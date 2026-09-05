@@ -377,6 +377,49 @@ F16 file without touching anything else.
 Both models share one real defect, unrelated to quantisation: they read
 Vietnamese dong `₫` as roubles `₽`.
 
+### 2026-09-05: `memswap_limit` was real but did not SURVIVE
+
+Swap was back at 99% two days later, with llama-server holding 1.5GB of it.
+The setting had not been undone by any deploy — it was undone by systemd.
+
+With the systemd cgroup driver, docker hands systemd the MEMORY limit as a
+systemd property but writes the SWAP limit straight into the cgroup file,
+behind systemd's back. `systemctl show` on the container scope shows the split
+exactly:
+
+    MemoryMax=5872025600        <- systemd knows it
+    MemorySwapMax=infinity      <- systemd has never heard of it
+
+Any `systemctl daemon-reload` then rewrites the attributes systemd manages and
+resets the ones it does not, so `memory.swap.max` silently returns to `max`.
+Proven directly on this host with a throwaway container:
+
+    before daemon-reload:  memory.swap.max = 0
+    after  daemon-reload:  memory.swap.max = max
+
+Three reloads fired at 06:44 that morning — the kind any package install
+triggers — and by 14:00 the swap alerts were back.
+
+**The durable fix is a systemd slice.** `infra/aibroker-vision.slice` carries
+`MemorySwapMax=0`; a slice is a real unit with a file on disk, so systemd owns
+the property and restores it on every reload. cgroup v2 enforces swap limits
+hierarchically — a descendant can never exceed an ancestor — so the container
+cannot swap no matter what its own file says. `cgroup_parent` in compose puts
+it there. Verified across a reload: the slice's `swap.max` stayed 0 both before
+and after, while the container's own value drifted as before and no longer
+mattered.
+
+Install with `bash /var/www/aibroker/infra/install-host-units.sh`. It is not
+part of the deploy on purpose — a deploy key must not be able to write systemd
+units. If the slice is missing the container still starts; it simply falls back
+to the fragile `memswap_limit`.
+
+**General lesson for this box:** a container-level limit that docker writes
+directly to a cgroup is not durable under the systemd driver. Anything that
+must survive belongs on a systemd unit. Verify with `systemctl show <scope> -p
+MemorySwapMax`, not with `docker inspect` — docker will happily report a limit
+the kernel is no longer enforcing.
+
 ### While it runs
 
 Available RAM drops to ~1.5GB and load average to ~3.5 on 4 cores. At
