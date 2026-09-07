@@ -6,6 +6,7 @@
 |---|---|---|
 | Provider API keys at rest | DB dump leaked | Fernet (AES-128 CBC + HMAC-SHA256) with key from `.env`. Encrypted column `api_keys.token_encrypted`. |
 | Provider API keys in transit | Logs, wire capture | Only ever sent to the actual provider over TLS by LiteLLM. Never logged. |
+| Provider API keys echoed in provider ERROR bodies | `api_keys.last_error`, dashboard, DB backups | Some providers quote the offending key in a 401/403 body. Since 2026-09-07 `_penalize` scrubs key-shaped substrings (`sk-…`, `AIza…`, `gsk_…`, `csk-…`, `Bearer …`, `key=…`) before the reason is persisted or rendered. Before that, this row of the table was not quite true. |
 | `X-Admin-Key` | Brute force, replay | High-entropy random (48 bytes). HMAC compare. Not stored anywhere except server `.env`. |
 | `X-Project-Key` | DB compromise → revealing keys | Stored as `sha256(plain).hexdigest()` only. Plaintext prefix (12 chars) for ops display. |
 | Dashboard sessions | Cookie theft | HMAC-SHA256 signed (`<uid>.<exp>.<sig>`), `httponly`, `secure`, `samesite=lax`, 30d TTL. Single owner. |

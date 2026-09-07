@@ -32,15 +32,25 @@ _TIMEOUT_MEMORY_S = 120.0
 _EMPTY_MEMORY_S = 600.0
 
 _key_timeouts: dict[int, float] = {}
-_provider_timeouts: dict[str, dict[int, float]] = {}
+# Provider-level storms are bucketed by (provider, scope), not provider alone
+# (2026-09-07). One provider NAME can front several unrelated backends: `local`
+# is both self-hosted whisper (llm:audio) and self-hosted Qwen3-VL (llm:vision),
+# two processes with disjoint keys. Keyed by provider only, one vision timeout
+# plus one unrelated ASR timeout inside 120s counted as "2 keys storming" and
+# soft-skipped BOTH backends for two minutes, though only one was unhealthy —
+# and with one key per backend a genuine single-backend storm can never reach
+# the 2-key threshold, so every such skip was a false positive. The key-level
+# penalty (`recent_timeout_key_ids`) stays global: a hung key is hung whatever
+# scope asked. scope=None is the legacy provider-only bucket.
+_provider_timeouts: dict[tuple[str, str | None], dict[int, float]] = {}
 _provider_empties: dict[str, dict[int, float]] = {}
 
 
-def note_timeout(provider: str, key_id: int) -> None:
-    """Record that `key_id` (of `provider`) just timed out."""
+def note_timeout(provider: str, key_id: int, scope: str | None = None) -> None:
+    """Record that `key_id` (of `provider`, serving `scope`) just timed out."""
     now = time.monotonic()
     _key_timeouts[key_id] = now
-    _provider_timeouts.setdefault(provider, {})[key_id] = now
+    _provider_timeouts.setdefault((provider, scope), {})[key_id] = now
 
 
 def recent_timeout_key_ids() -> frozenset[int]:
@@ -51,20 +61,23 @@ def recent_timeout_key_ids() -> frozenset[int]:
     return frozenset(_key_timeouts)
 
 
-def providers_in_timeout_storm(min_keys: int) -> frozenset[str]:
-    """Providers with ≥ `min_keys` distinct keys timed out inside the window —
-    a degraded free provider the chain should fail over cheaply (prunes)."""
+def providers_in_timeout_storm(min_keys: int, scope: str | None = None) -> frozenset[str]:
+    """Providers with ≥ `min_keys` distinct keys timed out inside the window
+    while serving `scope` — a degraded free provider the chain should fail
+    over cheaply (prunes). Only the matching scope bucket counts: see the note
+    on `_provider_timeouts` for why a vision storm must not skip ASR."""
     now = time.monotonic()
     storm: set[str] = set()
-    for provider in list(_provider_timeouts):
-        fresh = {kid: ts for kid, ts in _provider_timeouts[provider].items()
+    for bucket in list(_provider_timeouts):
+        fresh = {kid: ts for kid, ts in _provider_timeouts[bucket].items()
                  if now - ts < _TIMEOUT_MEMORY_S}
-        if fresh:
-            _provider_timeouts[provider] = fresh
-            if len(fresh) >= min_keys:
-                storm.add(provider)
-        else:
-            del _provider_timeouts[provider]
+        if not fresh:
+            del _provider_timeouts[bucket]
+            continue
+        _provider_timeouts[bucket] = fresh
+        provider, bucket_scope = bucket
+        if bucket_scope == scope and len(fresh) >= min_keys:
+            storm.add(provider)
     return frozenset(storm)
 
 

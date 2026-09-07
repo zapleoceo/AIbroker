@@ -1037,12 +1037,59 @@ async def transcribe(
     latency_ms = int((time.time() - t0) * 1000)
     # Response is an object with .text (or a dict)
     text = resp.get("text", "") if isinstance(resp, dict) else (getattr(resp, "text", "") or "")
+    # Whisper bills per audio-minute, not per token. Prefer the duration the
+    # provider reports; fall back to a bitrate estimate from the byte size.
+    # Was a flat 0.0 (2026-09-07 review): a PAID whisper key's daily cap was
+    # decorative — nothing ever debited it. _billed_cost still zeroes free keys.
+    duration = resp.get("duration") if isinstance(resp, dict) else getattr(resp, "duration", None)
+    audio_s = float(duration) if duration else _estimate_audio_seconds(len(audio))
     meta = {
         "model": model,
-        # Whisper bills per audio-second, not tokens; cost left to caller/usage.
         "tokens_in": 0,
         "tokens_out": 0,
-        "cost_usd": 0.0,
+        "cost_usd": whisper_cost(model, audio_s),
+        "audio_s": round(audio_s, 1),
         "latency_ms": latency_ms,
     }
     return text.strip(), meta
+
+
+# USD per audio MINUTE for per-duration transcription models (list prices,
+# 2026-09). Anything not listed is treated as unpriced → $0, same as
+# estimate_llm_cost's unknown-model behaviour, and logged once.
+_WHISPER_USD_PER_MIN: dict[str, float] = {
+    "openai/whisper-1": 0.006,
+    "groq/whisper-large-v3-turbo": 0.04 / 60,
+    "groq/whisper-large-v3": 0.111 / 60,
+}
+# Voice notes are opus/ogg at ~24-32 kbps; mp3 uploads run higher, which only
+# makes this OVER-estimate duration (safe direction for a cost reservation).
+_ASSUMED_AUDIO_BPS = 32_000
+
+
+def _estimate_audio_seconds(n_bytes: int) -> float:
+    return n_bytes * 8 / _ASSUMED_AUDIO_BPS
+
+
+def whisper_cost(model: str, audio_s: float) -> float:
+    """Per-minute price × duration for a whisper-style model; 0.0 if unpriced."""
+    rate = _WHISPER_USD_PER_MIN.get(model)
+    if rate is None:
+        if model not in _pricing_warned:
+            _pricing_warned.add(model)
+            log.warning("no per-minute pricing for %s — transcription cost recorded as 0", model)
+        return 0.0
+    return rate * audio_s / 60.0
+
+
+def estimate_transcription_cost(model: str, n_bytes: int) -> float:
+    """Worst-case-leaning cost of transcribing `n_bytes` of audio with `model`,
+    for the cost guard's reservation BEFORE the call (the real duration is
+    only known afterwards). Whisper models price by minute; chat-based
+    transcription (gemini) prices by token, ~32 audio tokens per second."""
+    audio_s = _estimate_audio_seconds(n_bytes)
+    if model in _WHISPER_USD_PER_MIN:
+        return whisper_cost(model, audio_s)
+    if model.split("/", 1)[0] == "local":
+        return 0.0
+    return estimate_llm_cost(model, int(audio_s * 32), 2048)

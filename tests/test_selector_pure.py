@@ -115,10 +115,17 @@ async def test_pick_soft_skips_free_provider_in_timeout_storm():
     from aibroker.routing.selector import pick_and_reserve
 
     circuit.reset()
-    circuit.note_timeout("gemini", 101)
-    circuit.note_timeout("gemini", 102)
+    # Storms are bucketed per (provider, scope) since 2026-09-07 — note the
+    # timeouts under the scope the pick asks for.
+    circuit.note_timeout("gemini", 101, scope="llm:chat")
+    circuit.note_timeout("gemini", 102, scope="llm:chat")
     # Returns None BEFORE touching the DB (no Postgres-only query runs on SQLite).
     assert await pick_and_reserve("gemini", "llm:chat", project_id=1) is None
+    # A different scope's pick is NOT skipped by this storm.
+    circuit.reset()
+    circuit.note_timeout("gemini", 101, scope="llm:vision")
+    circuit.note_timeout("gemini", 102, scope="llm:vision")
+    assert circuit.providers_in_timeout_storm(2, scope="llm:chat") == frozenset()
     circuit.reset()
 
 

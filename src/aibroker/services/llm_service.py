@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from aibroker.providers.context_limits import (
 from aibroker.providers.litellm_adapter import (
     embed,
     estimate_llm_cost,
+    estimate_transcription_cost,
     extra_for_provider,
     model_for,
     rotation_for,
@@ -200,18 +202,41 @@ def _call_timeout(capability: str, provider: str | None = None) -> float:
     return _CALL_TIMEOUT_S
 
 
-async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
-    """Cooldown on rate-limit, mark dead on auth error. Returns the error kind."""
+# Key-shaped substrings a provider may echo back in an error body. The
+# dashboard renders `last_error` verbatim and it lands in every DB backup, so
+# scrub BEFORE persisting — docs/security.md promises provider keys are never
+# logged, and until 2026-09-07 this path could quietly break that promise.
+_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),          # openai/anthropic/deepseek-style
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"),         # google
+    re.compile(r"\bgsk_[A-Za-z0-9]{16,}"),             # groq
+    re.compile(r"\bcsk-[A-Za-z0-9]{16,}"),             # cerebras
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"),
+    re.compile(r"(?i)(api[_-]?key|token|key)=[^&\s\"']{8,}"),
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Replace anything that looks like a credential with a fixed marker."""
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[redacted]", text)
+    return text
+
+
+async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = None) -> str:
+    """Cooldown on rate-limit, mark dead on auth error. Returns the error kind.
+    `capability` scopes the timeout circuit-breaker (see routing/circuit)."""
     kind = classify_provider_error(exc, key.provider)
     # Short, human-readable reason surfaced on the dashboard (2026-07-05) — the
     # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
     # money" from "rate limited" apart, or when a cooldown actually ends.
-    reason = str(exc)[:200]
+    reason = _scrub_secrets(str(exc))[:200]
     timed_out = is_timeout(exc)
     if timed_out:
         # Feed the selection-side circuit-breaker so a bulk-timing-out provider
         # is soft-skipped and this hung key isn't re-pinned by affinity.
-        circuit.note_timeout(key.provider, key.id)
+        circuit.note_timeout(key.provider, key.id,
+                             scope=scope_for(capability) if capability else None)
     if kind == "rate_limit":
         # 2026-06-29: cooldown resolved by the provider's own signal —
         # retry-after hint > daily-quota (until UTC midnight) > adaptive
@@ -234,6 +259,14 @@ async def _penalize(key: ApiKeyRow, exc: Exception) -> str:
             await mark_cooldown(key.id, until, reason, session=s)
     elif kind == "auth":
         await mark_dead(key.id, reason)
+        # Traffic-side deaths were untraceable (2026-09-07 review): the only
+        # paid gemini key was found dead with `last_error` still holding the
+        # monitor's earlier "rate limit" hint, and nothing said what killed it.
+        # The monitor alerts on ITS deaths; this path books its own.
+        await audit(actor="system:llm_service", action="key.dead",
+                    target=f"key:{key.id}",
+                    metadata={"provider": key.provider, "label": key.label,
+                              "capability": capability, "reason": reason})
     return kind
 
 
@@ -376,7 +409,7 @@ async def _handle_call_error(
         log.warning("provider %s model %s unavailable (%s) — next provider",
                     provider, use_model, type(exc).__name__)
         return _Flow.NEXT_PROVIDER  # not next key of the same dead model
-    kind = await _penalize(key, exc)
+    kind = await _penalize(key, exc, capability=capability)
     # Self-learn the size ceiling: if the provider rejected the
     # prompt for being too big, remember it so we skip this
     # provider for prompts ≥ this size next time (no hardcoded cap).
@@ -558,7 +591,8 @@ async def _run_attempt(
     # Cache deterministic (translate/prefilter) successes for verbatim repeats.
     if not tools:
         response_cache.put(capability, messages, text, model=model,
-                            max_tokens=max_tokens, temperature=temperature)
+                            max_tokens=max_tokens, temperature=temperature,
+                            project_id=project.id)
     # A success pins this (project, provider) to this key so the NEXT pick
     # lands where the provider-side prompt cache is already warm.
     await note_affinity_shared(project.id, provider, key.id)
@@ -637,7 +671,8 @@ async def run_chat(
     # the same inputs recur verbatim, so a cached answer is correct and skips
     # the whole LLM round-trip. No-op for chat/* (not deterministic).
     cached = (None if tools else response_cache.get(capability, messages, model=model,
-                                 max_tokens=max_tokens, temperature=temperature))
+                                 max_tokens=max_tokens, temperature=temperature,
+                                 project_id=project.id))
     if cached is not None:
         return ChatOutcome(
             text=cached, provider="cache", model="cache",
@@ -827,6 +862,43 @@ class EmbedOutcome:
     request_id: int
 
 
+
+class _CapBlocked(Exception):
+    """A cost-guard rejection on the embed/transcribe paths. `fatal` means the
+    PROJECT or GLOBAL cap is spent — every paid key is blocked identically, so
+    the walk must stop; a per-key cap only blocks this key."""
+
+    def __init__(self, fatal: bool) -> None:
+        super().__init__("daily budget cap reached — retry after 00:00 UTC")
+        self.fatal = fatal
+
+
+async def _reserve_or_block(
+    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
+    capability: str, workflow: str | None, estimated_cost: float,
+) -> None:
+    """reserve_cost + the same bookkeeping _run_attempt does on a block.
+
+    Until 2026-09-07 run_embed and run_transcribe never reserved at all —
+    reserve_cost had exactly one caller, inside the chat path — so the project
+    and global daily caps were simply not evaluated for /v1/embed and
+    /v1/transcribe. A project could spend past its cap through either. Free
+    keys still cost $0 and are exempt inside reserve_cost, as on the chat path."""
+    try:
+        await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
+    except CostGuardError as e:
+        await audit(actor=f"project:{project.name}", action="cap_block",
+                    target=f"provider={provider}", metadata={"reason": str(e)})
+        await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=model, capability=capability,
+            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
+            latency_ms=None, status="error", error_kind="CapBlock",
+            http_status=402,
+        )
+        raise _CapBlocked(fatal=e.kind in ("project", "global")) from e
+
+
 class EmbedFailed(Exception):
     """Every key of `provider` failed — route maps this to HTTP 502."""
 
@@ -836,7 +908,7 @@ async def _handle_attempt_failure(
     capability: str, workflow: str | None, exc: Exception,
 ) -> None:
     """Shared embed/transcribe failure tail: penalize the key, book the error row."""
-    await _penalize(key, exc)
+    await _penalize(key, exc, capability=capability)
     await _record_error(
         key=key, project=project, provider=provider, model=model,
         capability=capability, workflow=workflow, exc=exc,
@@ -875,11 +947,26 @@ async def run_embed(
         if key is None:
             break  # no (more) available key for this provider
         any_key_seen = True
+        estimated_cost = (
+            0.0 if key.tier == "free"
+            else estimate_llm_cost(use_model, sum(len(t) for t in inputs) // 4, 0)
+        )
+        try:
+            await _reserve_or_block(
+                key=key, project=project, provider=provider, model=use_model,
+                capability="embedding", workflow=workflow, estimated_cost=estimated_cost)
+        except _CapBlocked as e:
+            last_exc = e
+            if e.fatal:
+                raise EmbedFailed(str(e)) from e
+            continue  # this key's own cap — a sibling key may still have room
         plain = decrypt(key.token_encrypted)
         try:
             vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
             meta["cost_usd"] = _billed_cost(key, meta)
         except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+            if estimated_cost > 0:
+                await release_cost(api_key=key, estimated_cost=estimated_cost)
             last_exc = e
             await _handle_attempt_failure(
                 key=key, project=project, provider=provider,
@@ -888,6 +975,11 @@ async def run_embed(
             log.warning("provider %s key %s embed failed, trying next key: %s",
                         provider, key.label, e)
             continue
+        # Reservation was the worst case; record_usage books the real cost. A
+        # $0 estimate reserved nothing (reserve_cost's own free-tier skip), so
+        # there is nothing to release — and no DB round trip for free keys.
+        if estimated_cost > 0:
+            await release_cost(api_key=key, estimated_cost=estimated_cost)
         request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model, capability="embedding",
@@ -1013,6 +1105,20 @@ async def run_transcribe(
             use_model = model_for(provider, "transcription")
             if not use_model:
                 break
+            estimated_cost = (
+                0.0 if key.tier == "free"
+                else estimate_transcription_cost(use_model, len(audio))
+            )
+            try:
+                await _reserve_or_block(
+                    key=key, project=project, provider=provider, model=use_model,
+                    capability="transcription", workflow=workflow,
+                    estimated_cost=estimated_cost)
+            except _CapBlocked as e:
+                last_exc = e
+                if e.fatal:
+                    raise TranscribeFailed(str(e)) from e
+                continue  # this key's own cap — try the provider's next key
             plain = decrypt(key.token_encrypted)
             try:
                 text, meta = await transcribe(
@@ -1020,12 +1126,16 @@ async def run_transcribe(
                 )
                 meta["cost_usd"] = _billed_cost(key, meta)
             except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+                if estimated_cost > 0:
+                    await release_cost(api_key=key, estimated_cost=estimated_cost)
                 last_exc = e
                 await _handle_attempt_failure(
                     key=key, project=project, provider=provider,
                     model=use_model, capability="transcription", workflow=workflow, exc=e,
                 )
                 continue  # next key of the same provider
+            if estimated_cost > 0:
+                await release_cost(api_key=key, estimated_cost=estimated_cost)
             # local's small model + aggressive VAD can clip a REAL message to an
             # empty string. Returning that as a successful "" silently DROPS the
             # voice (caller sees 200 with no text, never retries). An empty from

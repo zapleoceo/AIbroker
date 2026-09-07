@@ -246,7 +246,7 @@ async def test_run_chat_model_unavailable_skips_provider_without_penalty(monkeyp
                       "cost_usd": 0.0, "latency_ms": 5,
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
-    async def fake_penalize(k, e):
+    async def fake_penalize(k, e, **_kw):
         penalized.append(k.id)
         return "error"
 
@@ -363,7 +363,7 @@ async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
     async def fake_record_too_large(provider, est):
         recorded.append((provider, est))
 
-    async def fake_penalize(key, exc):
+    async def fake_penalize(key, exc, **_kw):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
@@ -621,7 +621,7 @@ async def test_run_chat_caps_gemini_retries(monkeypatch):
     async def fake_call_llm(**kw):
         raise RuntimeError("429 rate limit exceeded")
 
-    async def fake_penalize(k, e):
+    async def fake_penalize(k, e, **_kw):
         return "rate_limit"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
@@ -1002,7 +1002,7 @@ async def test_run_chat_translate_cache_hit_skips_providers(monkeypatch):
 
     msgs = [{"role": "user", "content": "Halo"}]
     response_cache.put("translate", msgs, "Hello", model=None,
-                        max_tokens=128, temperature=0.7)
+                        max_tokens=128, temperature=0.7, project_id=1)
 
     out = await svc.run_chat(
         project=SimpleNamespace(id=1, name="vera"), capability="translate",
@@ -1053,7 +1053,7 @@ async def test_run_chat_translate_caches_success(monkeypatch):
         response_format=None, workflow="translate",
     )
     assert response_cache.get("translate", msgs, model=None,
-                               max_tokens=128, temperature=0.7) == "Hello"
+                               max_tokens=128, temperature=0.7, project_id=1) == "Hello"
     response_cache.clear()
 
 
@@ -1095,7 +1095,7 @@ async def test_run_chat_does_not_cache_chat_capability(monkeypatch):
         response_format=None, workflow="x",
     )
     assert response_cache.get("chat:fast", msgs, model=None,
-                               max_tokens=128, temperature=0.7) is None
+                               max_tokens=128, temperature=0.7, project_id=1) is None
 
 
 # ─── size-filter skipped for small prompts (#2) ──────────────────────────────
@@ -1207,7 +1207,7 @@ async def test_run_chat_stops_at_absolute_backstop(monkeypatch):
         attempts["n"] += 1
         raise RuntimeError("boom generic error")
 
-    async def fake_penalize(k, e):
+    async def fake_penalize(k, e, **_kw):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
@@ -1777,7 +1777,7 @@ async def test_run_embed_retries_next_key_on_transient_failure(monkeypatch):
         picks.append(provider)
         return keys[idx] if idx < len(keys) else None
 
-    async def fake_penalize(key, exc):
+    async def fake_penalize(key, exc, **_kw):
         return "error"
 
     async def fake_embed(**kw):
@@ -1814,7 +1814,7 @@ async def test_run_embed_raises_after_exhausting_all_keys(monkeypatch):
         return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
                                 token_encrypted="x")
 
-    async def fake_penalize(key, exc):
+    async def fake_penalize(key, exc, **_kw):
         return "error"
 
     async def fake_embed(**kw):
@@ -1849,7 +1849,7 @@ async def test_run_embed_never_falls_back_to_a_different_provider(monkeypatch):
         return SimpleNamespace(id=1, label="k", tier="free", provider=provider,
                                 token_encrypted="x")
 
-    async def fake_penalize(key, exc):
+    async def fake_penalize(key, exc, **_kw):
         return "error"
 
     async def fake_embed(**kw):
@@ -2008,7 +2008,7 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
     async def fake_call_llm(**kw):
         raise TimeoutError()
 
-    async def fake_penalize(k, e):
+    async def fake_penalize(k, e, **_kw):
         return "rate_limit"
 
     monkeypatch.setattr(svc, "record_usage", fake_record_usage)

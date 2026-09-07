@@ -42,12 +42,18 @@ def is_cacheable(capability: str) -> bool:
 
 def _key(
     capability: str, messages: list[dict[str, Any]],
-    model: str | None, max_tokens: int, temperature: float,
+    model: str | None, max_tokens: int, temperature: float, project_id: int,
 ) -> str:
     """Hash the full request signature — same inputs must map to the same key,
-    different sampling params must not collide."""
+    different sampling params must not collide.
+
+    `project_id` is part of the key (2026-09-07 review). Without it, two
+    projects sending the same text shared one cached answer — and `prefilter`
+    classifies inbound lead messages, so that was one tenant's answer about
+    its lead being served to another tenant for the 10-minute TTL. Every
+    other layer of this broker is project-scoped; the cache was the exception."""
     payload = json.dumps(
-        [capability, messages, model, max_tokens, temperature],
+        [project_id, capability, messages, model, max_tokens, temperature],
         sort_keys=True, ensure_ascii=False, default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -55,13 +61,13 @@ def _key(
 
 def get(
     capability: str, messages: list[dict[str, Any]], *,
-    model: str | None, max_tokens: int, temperature: float,
+    model: str | None, max_tokens: int, temperature: float, project_id: int,
 ) -> str | None:
     """Cached response text for this exact request, or None (miss/expired/
     not-cacheable)."""
     if not is_cacheable(capability):
         return None
-    k = _key(capability, messages, model, max_tokens, temperature)
+    k = _key(capability, messages, model, max_tokens, temperature, project_id)
     hit = _store.get(k)
     if hit is None:
         return None
@@ -75,13 +81,13 @@ def get(
 
 def put(
     capability: str, messages: list[dict[str, Any]], text: str, *,
-    model: str | None, max_tokens: int, temperature: float,
+    model: str | None, max_tokens: int, temperature: float, project_id: int,
 ) -> None:
     """Store a successful response. No-op for non-cacheable capabilities or
     empty output."""
     if not is_cacheable(capability) or not text:
         return
-    k = _key(capability, messages, model, max_tokens, temperature)
+    k = _key(capability, messages, model, max_tokens, temperature, project_id)
     _store[k] = (time.time(), text)
     _store.move_to_end(k)
     while len(_store) > _MAX_ENTRIES:

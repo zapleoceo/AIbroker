@@ -14,7 +14,7 @@ def _clear_cache():
 
 
 _MSGS = [{"role": "user", "content": "Halo apa kabar"}]
-_KW = {"model": None, "max_tokens": 128, "temperature": 0.3}
+_KW = {"model": None, "max_tokens": 128, "temperature": 0.3, "project_id": 1}
 
 
 def test_translate_and_prefilter_are_cacheable_chat_is_not():
@@ -36,10 +36,11 @@ def test_non_cacheable_capability_never_stores():
 
 
 def test_different_params_do_not_collide():
-    response_cache.put("translate", _MSGS, "A", model=None, max_tokens=128, temperature=0.3)
+    response_cache.put("translate", _MSGS, "A", model=None, max_tokens=128, temperature=0.3,
+                       project_id=1)
     # different temperature → different key → miss, not the wrong cached answer
     assert response_cache.get("translate", _MSGS, model=None,
-                               max_tokens=128, temperature=0.9) is None
+                               max_tokens=128, temperature=0.9, project_id=1) is None
 
 
 def test_different_text_is_a_separate_entry():
@@ -99,3 +100,13 @@ def test_prefilter_expired_after_ttl_translate_unaffected(monkeypatch):
     monkeypatch.setattr(response_cache.time, "time", lambda: t + 11 * 60)
     assert response_cache.get("prefilter", _MSGS, **_KW) is None
     assert response_cache.get("translate", _MSGS, **_KW) == "Hello"
+
+
+def test_cache_is_isolated_per_project():
+    """REGRESSION (2026-09-07 review): the key had no project_id, so project A's
+    cached prefilter verdict about ITS lead was served to project B for the
+    whole TTL. Same text, different tenant, must miss."""
+    response_cache.put("prefilter", _MSGS, "lead: hot", **_KW)
+    other = {**_KW, "project_id": 2}
+    assert response_cache.get("prefilter", _MSGS, **other) is None
+    assert response_cache.get("prefilter", _MSGS, **_KW) == "lead: hot"

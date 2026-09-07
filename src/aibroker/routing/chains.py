@@ -341,8 +341,19 @@ def scope_for(capability: Capability) -> str:
 # is our free workhorse (≈0 on chat), so it's not demoted. Kept in the chain as
 # a last resort (a maybe-malformed retry still beats a 503) but pushed behind
 # the JSON-reliable providers whenever the caller asks for JSON.
+#
+# 2026-09-07: groq ADDED. The note above ("~0 InvalidJSON at volume, grammar-
+# constrained JSON mode") was true when written and is now the problem: groq's
+# grammar mode rejects the request server-side with 400 "Failed to validate
+# JSON. Please adjust your prompt" — a BadRequestError, so it never showed up
+# as InvalidJSON in our gate. Measured over 7 days on all four groq keys:
+#   structured  553 ok / 383 BadRequestError   (41% of attempts wasted)
+#   chat:fast  2203 ok / 258 BadRequestError
+# 641 guaranteed-failed attempts a week, each costing latency before the walk
+# moves on. Plain-text groq traffic is unaffected — this only reorders JSON
+# requests, exactly like cohere/openrouter.
 JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
-    {"cerebras", "cohere", "openrouter"}
+    {"cerebras", "cohere", "openrouter", "groq"}
 )
 
 # Providers with ZERO response_format support — not "often malformed" but

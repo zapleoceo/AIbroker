@@ -180,6 +180,19 @@ GET /v1/jobs/123
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
 
+**Caps apply to `/v1/embed` and `/v1/transcribe` too (2026-09-07).** Until
+then the cost guard had exactly one caller — the chat path — so a project could
+spend past its daily cap through embeddings or transcription, and a PAID
+whisper key was always booked at $0.00 (its own cap was decorative). Both
+endpoints now reserve before the call and release after, like chat; a spent
+project/global cap ends the walk with the same `daily budget cap reached —
+retry after 00:00 UTC` message (HTTP 503 on these two sync endpoints), a
+per-key cap just moves to the provider's next key. Whisper calls are priced
+per audio-minute (`whisper_cost`; the pre-call reservation uses
+`estimate_transcription_cost`) (`openai/whisper-1` $0.006/min; groq whisper at list) from
+the provider-reported duration, or a bitrate estimate when it is absent. Free
+keys are unchanged: $0, no reservation.
+
 **Budget-cap error is honest + terminal (2026-07-16).** When a job fails
 because the project's (or the global) daily cost cap is spent, the `error`
 field reads exactly `daily budget cap reached — retry after 00:00 UTC` — NOT

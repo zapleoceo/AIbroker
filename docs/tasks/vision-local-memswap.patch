@@ -1,0 +1,85 @@
+From ba9ed76a1a145216a190e8dd9a7f84a96e7f6b2b Mon Sep 17 00:00:00 2001
+From: zapleoceo <zaporozec_d@itstep.org>
+Date: Thu, 3 Sep 2026 19:09:00 +0000
+Subject: [PATCH] fix(vision): deny swap to vision-local, the missing half of
+ the OOM fix
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The 2026-09-02 note in this file records the mechanism correctly — "the
+cgroup cap never fired, the HOST ran out" — but not why the cap never
+fired. Docker without memswap_limit grants twice the memory limit in swap,
+so vision-local stayed under its 5600m of RAM while draining all 4GB of
+host swap. Only once swap was gone did the kernel run out globally and
+choose a victim across the whole box: 27 oom-kills over 02-03.09, with
+postgres as eligible as llama-server. It also spammed the owner with 14
+RAM alerts in five hours, because 88-91% is simply what this box looks
+like while the model is resident.
+
+memswap_limit == mem_limit denies swap. The cgroup then reclaims its own
+page cache under pressure instead of pushing the host into global OOM, and
+an over-limit request is killed inside its own cgroup: one image fails,
+the container restarts, nothing else is touched.
+
+-c and mem_limit are deliberately untouched. 4096 would truncate the
+largest document actually served (MAX=4451 tokens) and 3800m was measured
+to thrash — both are recorded above and both were briefly, wrongly changed
+before this commit.
+
+## Evidence
+
+Applied live on 2026-09-03 before this commit, then lost to a deploy
+(edited in the working tree without committing — the reason for this
+commit). Measured over the 4 hours it was in effect:
+
+  memory.swap.max in the container cgroup: 0
+  host available RAM:  754 MB -> 3562 MB
+  host swap:           4095/4095 -> 2539/4095 and draining
+  oom kills, host:     27 in 48h -> 0
+  oom kills, cgroup:   0
+  vision-local:        healthy, serving
+
+After the deploy reverted it, swap was back to 3974/4095 within hours and
+llama-server was holding 1505 MB of it.
+
+Known remaining exposure, not addressed here: ten containers still run
+with no mem_limit at all (aibroker api/monitor/pgbouncer/postgres/redis,
+all five stepan2 services), and the host is still slightly over-committed
+at 5600m + ~2.2GB on 7.56GB.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ docker-compose.yml | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/docker-compose.yml b/docker-compose.yml
+index c6e9d57..a4131df 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -156,6 +156,22 @@ services:
+       - ${VISION_MODEL_DIR:-/var/lib/aibroker-vision/model}:/models:ro
+     cpus: 2.5
+     mem_limit: 5600m
++    # memswap_limit == mem_limit means NO swap for this container. Without it
++    # docker grants 2x the limit (11.2GB) in swap, and that is the missing half
++    # of the 2026-09-02 note above: the cgroup cap 'never fired' because the
++    # container stayed under 5600m of RAM while draining all 4GB of HOST swap.
++    # Only then did the kernel run out globally and pick a victim across the
++    # whole box (global_oom, 27 kills 02-03.09; postgres was as eligible as
++    # llama-server). With swap denied the cgroup reclaims its own page cache
++    # first, and an over-limit request is killed inside its own cgroup: one
++    # image fails, the container restarts, nothing else is touched.
++    #
++    # -c and mem_limit are deliberately left exactly as measured above. The
++    # host stays slightly over-committed at 5600m + ~2.2GB of other services
++    # on 7.56GB; the remaining levers are the ten containers that still have
++    # no mem_limit at all (aibroker api/monitor/pgbouncer/postgres/redis and
++    # all five stepan2 services), not this one.
++    memswap_limit: 5600m
+     expose:
+       - "8080"
+     # /health is exempt from llama-server's idle timer, so polling it can
+-- 
+2.34.1
+

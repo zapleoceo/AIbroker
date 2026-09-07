@@ -312,7 +312,9 @@ def test_deprioritize_for_json_pushes_unreliable_to_back():
     sink to the back, also keeping their relative order."""
     chain = ["cerebras", "groq", "gemini", "mistral", "cohere", "deepseek"]
     out = deprioritize_for_json(chain)
-    assert out == ["groq", "gemini", "mistral", "deepseek", "cerebras", "cohere"]
+    # 2026-09-07: groq joined the unreliable set (see test_deprioritize_for_json_groq_is_sunk);
+    # unreliable providers keep their ORIGINAL relative order at the back.
+    assert out == ["gemini", "mistral", "deepseek", "cerebras", "groq", "cohere"]
 
 
 def test_deprioritize_for_json_never_drops_an_unreliable_provider():
@@ -325,12 +327,17 @@ def test_deprioritize_for_json_never_drops_an_unreliable_provider():
     assert len(out) == len(chain)
 
 
-def test_deprioritize_for_json_groq_stays_reliable():
-    """groq runs gpt-oss but is JSON-reliable at volume (grammar-constrained
-    mode) — it must NOT be demoted the way cerebras is."""
-    assert "groq" not in JSON_UNRELIABLE_PROVIDERS
+def test_deprioritize_for_json_groq_is_sunk():
+    """2026-09-07: groq JOINED the unreliable set. Its grammar-constrained JSON
+    mode, once the reason it stayed reliable, now rejects our requests
+    server-side (400 "Failed to validate JSON") — measured 641 wasted attempts
+    a week across all four keys, 41% of structured attempts. It is sunk, not
+    dropped: a plain-text groq call is unaffected and a maybe-failing JSON retry
+    still beats a 503."""
+    assert "groq" in JSON_UNRELIABLE_PROVIDERS
     assert "cerebras" in JSON_UNRELIABLE_PROVIDERS
-    assert deprioritize_for_json(["cerebras", "groq"]) == ["groq", "cerebras"]
+    out = deprioritize_for_json(["groq", "gemini", "mistral"])
+    assert out == ["gemini", "mistral", "groq"]
 
 
 def test_deprioritize_for_json_noop_when_all_reliable():

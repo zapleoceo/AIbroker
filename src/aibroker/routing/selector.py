@@ -237,7 +237,7 @@ async def pick_and_reserve(
     # free pool. Only the guaranteed-answer PAID escalation is exempt (it must
     # not be starved by a transient storm). 2026-07-19 review.
     if require_tier != "paid" and provider in circuit.providers_in_timeout_storm(
-            _TIMEOUT_STORM_MIN_KEYS):
+            _TIMEOUT_STORM_MIN_KEYS, scope=scope):
         return None
 
     conds = [

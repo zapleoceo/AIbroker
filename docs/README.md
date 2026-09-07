@@ -1,6 +1,6 @@
 # AIbroker — documentation index
 
-Every change in `src/`, `infra/`, `monitor/` MUST update the relevant doc.
+Every change in `src/`, `infra/`, `services/`, `monitor/` MUST update the relevant doc (that is exactly what `docs-check.yml` and the deploy's `docs` job gate on).
 CI fails otherwise. Opt-out: `docs-not-needed` in the commit message
 (for pure refactors that don't shift behavior).
 
