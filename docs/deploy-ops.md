@@ -234,7 +234,7 @@ in the codebase was the one written for `deep_jobs` after it reached 1.6GB.
 |---|---|---|
 | `check_local_services` — GET `VISION_LOCAL_URL/health`, `ASR_LOCAL_URL/healthz` | `local:vision`, `local:asr` | api's `/healthz` stays green while either is down; the chain falls through to the cloud tier silently |
 | `check_queue_backlog` — jobs pending/running past `MONITOR_QUEUE_STUCK_MIN` (30) | `queue:backlog` | a wedged dispatcher was invisible until a client complained |
-| `check_backup_freshness` — newest `*.dump` under `MONITOR_BACKUP_DIR` younger than `MONITOR_BACKUP_MAX_AGE_H` (36h) | `backup:stale` | see below |
+| `check_backup_freshness` — newest `*.dump` under `MONITOR_BACKUP_DIR` younger than `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` | see below |
 
 Each is an alert/recover pair, so a fix clears itself; a failing check never
 stops the others.
