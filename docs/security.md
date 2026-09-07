@@ -59,7 +59,7 @@ If `X-Project-Key` leaks:
 
 ## What's NOT covered
 
-- **No rate limiting** on `/v1/jobs`/`/v1/embed` (proxy mode) per project beyond cost caps. A buggy client can hammer the broker; you'll see it in `calls_1h` on the dashboard.
+- **Rate limiting is at nginx, per project key** (2026-09-07; `infra/nginx-aib.conf`): `limit_req_zone $http_x_project_key … rate=600r/m`, burst 200, 429 on excess. Sized so job polling (~5 req/s per busy project) never trips it; only a genuine flood does. Requests without a project key (dashboard sessions, `/healthz`) are not limited — nginx skips an empty zone key — and rely on owner-only sessions and the Cloudflare IP restriction instead. There is still no rate limiting INSIDE the app, so a request that bypasses nginx (none can, from outside: `api` binds 127.0.0.1 only) is unlimited.
 - **No mTLS** between projects and broker. We rely on `X-Project-Key` over TLS to CF, then HTTP from CF to origin.
 - **No KMS** — `TOKEN_SECRET` is on disk. If someone roots the box, all keys can be decrypted.
 - **No PII redaction** in audit_log. Today we don't log message bodies — but if that changes, redact first.
