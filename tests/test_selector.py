@@ -71,8 +71,10 @@ async def test_storm_skip_applies_to_free_downgrade_but_not_paid():
     circuit.reset()
     fid = await _add_key("cerebras", "free-a")
     # A timeout storm = >= _TIMEOUT_STORM_MIN_KEYS (2) distinct cerebras keys hung.
-    circuit.note_timeout("cerebras", fid)
-    circuit.note_timeout("cerebras", fid + 999999)
+    # Storm buckets are (provider, scope) since 2026-09-07 — note under the
+    # scope the picks below ask for, as production's _penalize does.
+    circuit.note_timeout("cerebras", fid, scope="llm:chat")
+    circuit.note_timeout("cerebras", fid + 999999, scope="llm:chat")
     try:
         # downgraded free pick → storm-skipped though a healthy key exists
         assert await pick_and_reserve("cerebras", "llm:chat", require_tier="free") is None
