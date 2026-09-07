@@ -100,3 +100,16 @@ async def test_check_queue_backlog(stuck, expect_alert):
         await monitor.check_queue_backlog()
     assert alert.await_count == (1 if expect_alert else 0)
     assert recover.await_count == (0 if expect_alert else 1)
+
+
+def test_newest_dump_mtime_falls_back_to_child_dir_mtime_when_unreadable(tmp_path):
+    """REGRESSION: the dump dirs are root:verabackup 750 and the monitor is
+    unprivileged — it can list the root but not enter the date dirs, so the
+    first live tick reported "none found" and paged a false backup:stale.
+    A fresh date directory must count as a fresh backup."""
+    import os
+    d = tmp_path / "2026-09-07"
+    d.mkdir()
+    os.utime(d, (5_000, 5_000))
+    # No readable *.dump anywhere → newest child mtime is the signal.
+    assert monitor._newest_dump_mtime(str(tmp_path)) == 5_000

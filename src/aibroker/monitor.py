@@ -303,6 +303,13 @@ def backup_is_fresh(newest_mtime: float | None, now: float, max_age_h: float) ->
 
 
 def _newest_dump_mtime(root: str) -> float | None:
+    """Newest `*.dump` under `root`; if nothing inside is READABLE, the newest
+    direct child of `root` instead. The dump directories are created
+    `root:verabackup 750` by vera3's script and the monitor runs unprivileged,
+    so it can list `root` (one date-named directory per night) but not enter
+    them — the first live tick raised a false `backup:stale` on exactly that
+    (2026-09-07). A fresh date directory is as good a freshness signal as the
+    file inside it, and needs no permission we do not have."""
     newest: float | None = None
     try:
         for dirpath, _dirs, files in os.walk(root):
@@ -310,8 +317,13 @@ def _newest_dump_mtime(root: str) -> float | None:
                 if f.endswith(".dump"):
                     m = os.stat(os.path.join(dirpath, f)).st_mtime
                     newest = m if newest is None or m > newest else newest
+        if newest is None:
+            with os.scandir(root) as it:
+                for entry in it:
+                    m = entry.stat(follow_symlinks=False).st_mtime
+                    newest = m if newest is None or m > newest else newest
     except OSError:
-        return None
+        return newest
     return newest
 
 

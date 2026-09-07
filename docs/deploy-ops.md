@@ -254,6 +254,14 @@ that: the monitor mounts the dump directory read-only (`AIBROKER_BACKUP_DIR`,
 default `/var/backups/vera/aibroker/daily`) and alerts once a day while no
 dump under 36h old exists.
 
+The tree is `root:verabackup 750` and the monitor runs as uid 10001, so it
+joins the host's `verabackup` group (`group_add`, gid via `VERABACKUP_GID`,
+default 1001) — the least privilege that can read it. The very first live tick
+ran without that and paged a false `backup:stale` ("none found"); the check
+also falls back to the newest date-directory's mtime when the files inside are
+unreadable, so a permissions regression degrades to a coarser signal rather
+than a false alarm.
+
 ## Local vision (2026-08-31)
 
 `vision-local` runs **upstream `llama-server`** (`ghcr.io/ggml-org/llama.cpp:server`)
