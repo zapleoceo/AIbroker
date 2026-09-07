@@ -22,7 +22,8 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+import httpx
+from sqlalchemy import select, text, update
 
 from aibroker.config import get_settings
 from aibroker.crypto import decrypt
@@ -254,6 +255,100 @@ async def tick(sweep: int = 0) -> None:
              alive_count, cooldown_count, dead_count, len(rows))
 
 
+# ─── Stack checks beyond key liveness (2026-09-07 review) ────────────────────
+# Three blind spots the review found: api's /healthz stays green while
+# vision-local or asr-local are down (the chain just falls through to the
+# cloud tier), nothing watches the job queue, and the nightly dump is made by
+# ANOTHER project's script (vera3's vera-backup.sh) that this stack never
+# verified. Each check is keyed for notifier's alert/recover pair, so a fix
+# clears itself.
+
+_LOCAL_SERVICES = (
+    # (alert key, settings attr, health path)
+    ("local:vision", "VISION_LOCAL_URL", "/health"),
+    ("local:asr", "ASR_LOCAL_URL", "/healthz"),
+)
+# A job waiting longer than this is a wedged dispatcher, not a slow provider:
+# the chat walk itself is capped at 18 min and stale-running reclaim at 25.
+_QUEUE_STUCK_MIN = int(os.environ.get("MONITOR_QUEUE_STUCK_MIN", "30"))
+# Dumps land nightly; 36h tolerates one missed run plus the NAS pull window.
+_BACKUP_MAX_AGE_H = float(os.environ.get("MONITOR_BACKUP_MAX_AGE_H", "36"))
+
+
+async def check_local_services() -> None:
+    """Probe the self-hosted vision/ASR services. Unset URL = not deployed here."""
+    settings = get_settings()
+    for key, attr, path in _LOCAL_SERVICES:
+        base = getattr(settings, attr, "")
+        if not base:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{base}{path}")
+            ok = r.status_code == 200
+            detail = f"HTTP {r.status_code}"
+        except httpx.HTTPError as e:
+            ok, detail = False, type(e).__name__
+        if ok:
+            await recover(key, f"{key} reachable again")
+        else:
+            await alert(key, f"{key} unreachable ({detail}) — vision/ASR traffic is "
+                             "silently falling through to the cloud tier",
+                        throttle_min=60)
+
+
+def backup_is_fresh(newest_mtime: float | None, now: float, max_age_h: float) -> bool:
+    """Pure decision so it is unit-testable: a dump exists and is young enough."""
+    return newest_mtime is not None and (now - newest_mtime) <= max_age_h * 3600
+
+
+def _newest_dump_mtime(root: str) -> float | None:
+    newest: float | None = None
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for f in files:
+                if f.endswith(".dump"):
+                    m = os.stat(os.path.join(dirpath, f)).st_mtime
+                    newest = m if newest is None or m > newest else newest
+    except OSError:
+        return None
+    return newest
+
+
+async def check_backup_freshness() -> None:
+    """The dump is produced by vera3's backup script — aibroker only verifies
+    it keeps appearing. MONITOR_BACKUP_DIR unset = check disabled."""
+    root = os.environ.get("MONITOR_BACKUP_DIR", "")
+    if not root:
+        return
+    import time as _time
+    newest = _newest_dump_mtime(root)
+    if backup_is_fresh(newest, _time.time(), _BACKUP_MAX_AGE_H):
+        await recover("backup:stale", "aibroker dump is fresh again")
+    else:
+        age = "none found" if newest is None else f"{(_time.time() - newest) / 3600:.0f}h old"
+        await alert("backup:stale",
+                    f"no fresh aibroker.dump under {root} ({age}, limit {_BACKUP_MAX_AGE_H:.0f}h) — "
+                    "the nightly backup is vera3's script; check it still includes aibroker",
+                    throttle_min=24 * 60)
+
+
+async def check_queue_backlog() -> None:
+    """Alert when jobs sit pending/running past _QUEUE_STUCK_MIN — a wedged
+    dispatcher is otherwise invisible until a client complains."""
+    async with get_session() as s:
+        stuck = (await s.execute(text(
+            "SELECT count(*) FROM deep_jobs WHERE status IN ('pending', 'running') "
+            "AND created_at < now() - make_interval(mins => :m)"), {"m": _QUEUE_STUCK_MIN},
+        )).scalar() or 0
+    if stuck:
+        await alert("queue:backlog",
+                    f"{stuck} job(s) stuck pending/running for over {_QUEUE_STUCK_MIN} min",
+                    throttle_min=60)
+    else:
+        await recover("queue:backlog", "job queue drained")
+
+
 async def main() -> None:  # pragma: no cover — process entrypoint loop
     logging.basicConfig(level=getattr(logging, get_settings().LOG_LEVEL.upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -266,6 +361,11 @@ async def main() -> None:  # pragma: no cover — process entrypoint loop
                 await tick(sweep)
             except Exception as e:
                 log.exception("monitor tick failed: %s", e)
+            for check in (check_local_services, check_queue_backlog, check_backup_freshness):
+                try:
+                    await check()
+                except Exception as e:  # noqa: BLE001 — one check must not stop the others
+                    log.exception("monitor check %s failed: %s", check.__name__, e)
             sweep += 1
             await asyncio.sleep(INTERVAL_S)
     finally:

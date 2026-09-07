@@ -189,6 +189,71 @@ On success it prints the resolved `args` of `vision-local` and `asr-local`, so
 the deploy log records *which configuration* actually started — the question
 the old script left unanswerable.
 
+## Quality gates, reconciled (2026-09-07)
+
+- **ruff runs the SAME rules locally and in CI.** `pyproject.toml`'s
+  `[tool.ruff.lint]` now equals the explicit `--select/--ignore` in
+  `deploy.yml`'s quality job (`E,F,W,I,B,UP,SIM,C4,RET`, ignoring
+  `E501,E402,B008`). They had drifted in both directions — the config selected
+  `S`/`ASYNC`/`RUF` that CI never ran, CI ran `W`/`SIM`/`C4`/`RET` the config
+  never selected — so an editor showed a different verdict than the deploy
+  gate. CI stays the authority; the config is the local mirror, cross-referenced
+  in both files.
+- **Coverage floor 70% → 85%.** The 70 dated from a ~200-test suite; the suite
+  is ~800 tests at 90%, so the gate had stopped applying pressure.
+- **No more test doubles leaking into production.** `test_health_probes.py`
+  faked `httpx.Response` with `AsyncMock()`, which turns every attribute into a
+  coroutine; `dict(r.headers)` in `health_probes.py` choked on it, and a
+  `try/except` lived in production purely to tolerate the fake (its own comment
+  said so). The fake is a plain object now and the workaround is gone — along
+  with 8 of the suite's 38 warnings.
+
+## Ceilings, retention, and what the monitor watches (2026-09-07)
+
+**Every aibroker container now has a memory ceiling.** api 1024m, postgres
+1024m, monitor 256m, redis 128m, pgbouncer 128m — headroom over measured use,
+not reservations. A plain `mem_limit` is durable under the systemd cgroup
+driver (only the SWAP limit needs the slice trick used for vision-local), and
+these five deliberately keep swap: small, mostly-idle processes are what swap
+is for on a host where the vision model pins 4GB. Before this, any of them was
+an eligible victim of a host-wide OOM. `redis` and `pgbouncer` also gained
+healthchecks, so the deploy gate can assert "working", not just "running".
+
+**`usage_log` and `audit_log` have retention now** — `purge_old_logs` in
+`services/job_queue.py`, run by the dispatcher next to `purge_finished_jobs`.
+Windows (env-overridable): `USAGE_RETENTION_DAYS=120`,
+`AUDIT_CAPBLOCK_RETENTION_DAYS=14` (99.98% of audit rows were `cap_block`
+breadcrumbs, useful for weeks, weight for months), `AUDIT_RETENTION_DAYS=365`.
+Batched like the jobs sweep, so the first pass over the 1.9M-row backlog cannot
+hold a lock; it catches up over several ticks. Before this the only retention
+in the codebase was the one written for `deep_jobs` after it reached 1.6GB.
+
+**The monitor now checks three things key liveness never covered:**
+
+| check | alert key | why |
+|---|---|---|
+| `check_local_services` — GET `VISION_LOCAL_URL/health`, `ASR_LOCAL_URL/healthz` | `local:vision`, `local:asr` | api's `/healthz` stays green while either is down; the chain falls through to the cloud tier silently |
+| `check_queue_backlog` — jobs pending/running past `MONITOR_QUEUE_STUCK_MIN` (30) | `queue:backlog` | a wedged dispatcher was invisible until a client complained |
+| `check_backup_freshness` — newest `*.dump` under `MONITOR_BACKUP_DIR` younger than `MONITOR_BACKUP_MAX_AGE_H` (36h) | `backup:stale` | see below |
+
+Each is an alert/recover pair, so a fix clears itself; a failing check never
+stops the others.
+
+### Backups are made by vera3, not by this stack
+
+The nightly `pg_dump -Fc` of `aibroker-postgres` (plus a tarball of `.env`) is
+produced by **`/usr/local/bin/vera-backup.sh`** — vera3's script, root
+crontab 03:30 — into `/var/backups/vera/aibroker/daily/<date>/aibroker.dump`,
+verified against `SHA256SUMS`, pulled nightly by a Synology NAS over a
+read-only `rrsync` user, and pruned locally only once the NAS has read it.
+That is a solid chain, but aibroker did not own or verify any of it, and the
+"Disaster recovery" runbook below described a manual `pg_dump` that nobody
+runs. If vera3's script ever dropped the `backup_project aibroker` line, this
+stack would lose its backups without noticing. `check_backup_freshness` closes
+that: the monitor mounts the dump directory read-only (`AIBROKER_BACKUP_DIR`,
+default `/var/backups/vera/aibroker/daily`) and alerts once a day while no
+dump under 36h old exists.
+
 ## Local vision (2026-08-31)
 
 `vision-local` runs **upstream `llama-server`** (`ghcr.io/ggml-org/llama.cpp:server`)

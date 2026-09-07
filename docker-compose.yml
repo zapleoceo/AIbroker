@@ -18,6 +18,16 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Ceilings for the five containers that had NONE (2026-09-07 review). A
+    # plain mem_limit is durable under the systemd cgroup driver (unlike the
+    # swap limit — see vision-local); these are ceilings with headroom over
+    # measured use, not reservations, and they deliberately do NOT deny swap:
+    # small, mostly-idle Python/postgres processes are exactly what swap is
+    # for on a host where the vision model pins 4GB of RAM. Without a ceiling
+    # any of them was an eligible victim of a HOST-wide OOM — 27 kills over
+    # 02-03.09 picked llama-server, but postgres was as eligible.
+    # postgres: 90-280MiB observed, stock shared_buffers 128MB, 100 conns.
+    mem_limit: 1024m
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -45,6 +55,13 @@ services:
       MAX_PREPARED_STATEMENTS: "500"
       AUTH_TYPE: plain
       LISTEN_PORT: "6432"
+    mem_limit: 128m   # 1-2MiB observed
+    # Without this the deploy gate could only assert "running", not "working".
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U aibroker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -55,6 +72,12 @@ services:
     image: redis:7-alpine
     container_name: aibroker-redis
     command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    mem_limit: 128m   # redis caps its own data at 64mb; this covers process overhead
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -269,6 +292,9 @@ services:
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
     ports:
       - "127.0.0.1:8004:8000"
+    # 235-490MiB observed (2 uvicorn workers + the in-process job dispatcher);
+    # 2x the observed peak — a cgroup kill here restarts the API, so err wide.
+    mem_limit: 1024m
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -297,6 +323,17 @@ services:
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MONITOR_INTERVAL_S: "600"
+      # The monitor probes the self-hosted services directly (2026-09-07):
+      # api's /healthz stays green while vision-local or asr-local are down,
+      # because the chain just falls through to the cloud tier silently.
+      ASR_LOCAL_URL: ${ASR_LOCAL_URL:-http://aibroker-asr-local:8000}
+      VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
+      # Nightly dumps are made by vera3's /usr/local/bin/vera-backup.sh, not by
+      # this stack — aibroker only VERIFIES they keep appearing. Empty disables.
+      MONITOR_BACKUP_DIR: /backups
+    volumes:
+      - ${AIBROKER_BACKUP_DIR:-/var/backups/vera/aibroker/daily}:/backups:ro
+    mem_limit: 256m   # 35-90MiB observed
     command: ["python", "-m", "aibroker.monitor"]
     # No HTTP server here — the Dockerfile HEALTHCHECK curls :8000, which this
     # worker never binds, so it would report a permanently-false "unhealthy".

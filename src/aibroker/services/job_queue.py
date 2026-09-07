@@ -85,6 +85,18 @@ _JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
 # every 25 minutes, and a busy loop only makes it more frequent, never less.
 _PURGE_EVERY_TICKS = int(os.environ.get("JOB_RETENTION_EVERY_TICKS", "300"))
 
+# usage_log / audit_log had NO retention at all (2026-09-07 review) — the
+# purge above was written for deep_jobs after it hit 1.6GB, and nothing ever
+# covered the two tables written on EVERY attempt. Measured: usage_log 618MB /
+# 1.92M rows back to June; audit_log 255MB / 842k rows of which 99.98% are
+# `cap_block` — a per-attempt breadcrumb that is useful for a couple of weeks
+# and pure weight after. usage_log is billing-relevant and feeds the daily-cap
+# SQL (which only ever looks at TODAY), so it keeps a long window. Same batched
+# DELETE as deep_jobs so a first sweep over the backlog cannot hold a lock.
+_USAGE_RETENTION_DAYS = int(os.environ.get("USAGE_RETENTION_DAYS", "120"))
+_AUDIT_CAPBLOCK_RETENTION_DAYS = int(os.environ.get("AUDIT_CAPBLOCK_RETENTION_DAYS", "14"))
+_AUDIT_RETENTION_DAYS = int(os.environ.get("AUDIT_RETENTION_DAYS", "365"))
+
 
 def _backoff_s(retry_count: int) -> int:
     """Delay before a re-queued job is eligible again: 5,10,20,… capped at 300."""
@@ -302,6 +314,39 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
     return deleted
 
 
+async def purge_old_logs() -> dict[str, int]:  # pragma: no cover — Postgres-only DELETE (make_interval), integration job
+    """Retention for usage_log and audit_log — the deep_jobs sweep's twin.
+    Three windows: usage rows past _USAGE_RETENTION_DAYS, audit `cap_block`
+    rows past _AUDIT_CAPBLOCK_RETENTION_DAYS, every other audit row past
+    _AUDIT_RETENTION_DAYS. Batched like purge_finished_jobs; idempotent."""
+    sweeps = (
+        ("usage_log",
+         "DELETE FROM usage_log WHERE id IN (SELECT id FROM usage_log "
+         " WHERE created_at < now() - make_interval(days => :days) LIMIT :batch)",
+         _USAGE_RETENTION_DAYS),
+        ("audit_log:cap_block",
+         "DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log "
+         " WHERE action = 'cap_block' "
+         "   AND created_at < now() - make_interval(days => :days) LIMIT :batch)",
+         _AUDIT_CAPBLOCK_RETENTION_DAYS),
+        ("audit_log",
+         "DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log "
+         " WHERE created_at < now() - make_interval(days => :days) LIMIT :batch)",
+         _AUDIT_RETENTION_DAYS),
+    )
+    deleted: dict[str, int] = {}
+    async with get_session() as s:
+        for name, sql, days in sweeps:
+            n = (await s.execute(
+                text(sql), {"days": days, "batch": _JOB_RETENTION_BATCH},
+            )).rowcount or 0
+            if n:
+                deleted[name] = n
+    if deleted:
+        log.info("log retention: %s", deleted)
+    return deleted
+
+
 async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     """One dispatch pass: re-queue stale, claim up to `limit`, run them all to
     completion. Returns how many were claimed. Used directly by tests (awaits
@@ -414,6 +459,7 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
                 if ticks_until_purge <= 0:
                     ticks_until_purge = _PURGE_EVERY_TICKS
                     await purge_finished_jobs()
+                    await purge_old_logs()
             free = _MAX_CONCURRENCY - len(inflight)
             if free > 0:
                 for row in await _claim_batch(free):
