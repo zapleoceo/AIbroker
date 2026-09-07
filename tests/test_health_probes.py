@@ -1,6 +1,16 @@
 """Health probes — verdict classification."""
 from __future__ import annotations
 
+
+def _response(status_code: int = 200, text: str = "", headers: dict | None = None):
+    """A plain stand-in for httpx.Response. NOT AsyncMock: that made every
+    attribute a coroutine, so `dict(r.headers)` in production choked on it and
+    a defensive try/except had to live in health_probes.py purely to tolerate
+    the test double (2026-09-07 review). A real Response has plain attributes."""
+    return SimpleNamespace(status_code=status_code, text=text, headers=headers or {})
+
+
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,7 +27,7 @@ from aibroker.providers.health_probes import probe
     (402, "dead"),
 ])
 async def test_probe_status_classification(status_code, expected):
-    fake = AsyncMock()
+    fake = _response()
     fake.status_code = status_code
     fake.text = ""
     with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
@@ -29,7 +39,7 @@ async def test_probe_status_classification(status_code, expected):
 
 
 async def test_probe_dead_with_no_funds_hint():
-    fake = AsyncMock()
+    fake = _response()
     fake.status_code = 403
     fake.text = "Insufficient balance for this request"
     with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
@@ -44,7 +54,7 @@ async def test_probe_mistral_401_is_monthly_cooldown_not_dead():
     """mistral's bare 401 = monthly Vibe quota, not a revoked key — the probe
     must return 'cooldown' with a 'monthly quota' hint (key stays alive, monitor
     cools it to next month), NOT 'dead'. Other providers' 401 stays dead."""
-    fake = AsyncMock()
+    fake = _response()
     fake.status_code = 401
     fake.text = '{"detail":"Unauthorized"}'
     with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:

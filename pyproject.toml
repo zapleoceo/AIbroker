@@ -61,8 +61,13 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "RUF"]
-ignore = ["S101", "S104", "S105", "S106"]
+# MUST match the explicit --select/--ignore in .github/workflows/deploy.yml's
+# quality job — that CLI override is what actually gates production. Until
+# 2026-09-07 the two disagreed in both directions (this file selected S/ASYNC/
+# RUF that CI never ran; CI ran W/SIM/C4/RET that this file never selected),
+# so an editor or a bare `ruff check` showed a different verdict than deploy.
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RET"]
+ignore = ["E501", "E402", "B008"]
 
 [tool.mypy]
 python_version = "3.12"

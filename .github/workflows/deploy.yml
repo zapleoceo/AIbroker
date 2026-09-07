@@ -74,7 +74,7 @@ jobs:
           # (136 passed; dashboard edit added uncov'd HTML render — adjust
           # gate to current floor, raise after adding render integration test)
           # 2026-06-26: 61 → 70 after dashboard render unit tests (198 passed, 70.88%)
-          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=70
+          PYTHONPATH=src pytest -x --cov=aibroker --cov-fail-under=85
 
   # ─── 2b. Postgres integration gate ───────────────────────────────────────
   # The SQLite `test` job can't exercise Postgres-only code (FOR UPDATE SKIP
@@ -174,6 +174,8 @@ jobs:
           # B008 ignored: function-call-in-default-argument is THE idiomatic
           # FastAPI pattern (Form()/Depends()/Query() in param defaults) and
           # ruff's own docs recommend ignoring it for FastAPI projects.
+          # Keep in sync with [tool.ruff.lint] in pyproject.toml — that block is
+          # the local mirror of THIS list, which is what actually gates deploy.
           echo "$CHANGED" | xargs ruff check \
             --select E,F,W,I,B,UP,SIM,C4,RET --ignore E501,E402,B008 --statistics
 
