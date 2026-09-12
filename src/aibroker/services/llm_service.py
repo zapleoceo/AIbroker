@@ -160,17 +160,21 @@ _CHAT_WALL_DEADLINE_S = 18 * 60.0
 # (2026-07-19 review). 5 + 19 = 24 < 25.
 _DEEP_WALL_DEADLINE_S = 5 * 60.0
 
-# The gate is a FINISH-BY deadline, not a start deadline (2026-09-12). Checking
-# only "may I still START an attempt" silently assumed every call is ≤60s —
-# and self-hosted local vision is up to VISION_LOCAL_TIMEOUT_S +
-# VISION_LOCAL_QUEUE_WAIT_S + 30 = 570s (2026-08-31). A local attempt started
-# at minute 17:59 legally ran to 27:29, past the 25-min reclaim: measured
-# 9 vision jobs/day reclaimed at exactly 1500s and executed twice (the first
-# result discarded by _finish's started_at guard). So the walk now refuses to
-# start an attempt whose own call timeout would end after the finish-by
-# moment: `_now() + _call_timeout(capability, provider) > finish_by → stop`.
-# For 60s cloud calls that is the old behaviour minus one minute; for chat:deep
-# the finish-by of 5 + 19 = 24 min reproduces the start gate above exactly.
+# The gate is a FINISH-BY deadline, not a start deadline (2026-09-12).
+# PREVENTIVE — no incident: over 7 days no vision job ran past 312s, well under
+# the 25-min reclaim. But the start gate's premise ("whatever I start now ends
+# in ~60s") stopped being true when local vision's ceiling reached
+# VISION_LOCAL_TIMEOUT_S + VISION_LOCAL_QUEUE_WAIT_S + 30 = 570s: an attempt
+# started at 17:59 may legally run to 27:29, past the reclaim, and the job
+# would then be executed twice. Today that cannot happen only because exactly
+# ONE local key carries llm:vision, so the single 570s attempt is always the
+# first of the walk — a safety margin resting on a key's scope list, not on
+# anything stated. Asking instead whether the attempt can FINISH in time
+# (`_now() + _call_timeout(capability, provider) > finish_by → stop`) removes
+# that dependency: a longer timeout or a second local key can no longer create
+# a double-execution. For 60s cloud calls this is the old behaviour one minute
+# earlier; for chat:deep the finish-by of 5 + 19 = 24 min reproduces the start
+# gate above exactly.
 _DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S
 
 

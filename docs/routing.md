@@ -1825,13 +1825,30 @@ before the reclaim window.
 "may I still *start*" silently assumed every call is ≤60s. Self-hosted local
 vision is not: `_call_timeout("vision", "local")` is
 `VISION_LOCAL_TIMEOUT_S + VISION_LOCAL_QUEUE_WAIT_S + 30` = **570s**
-(2026-08-31). An attempt legally started at minute 17:59 ran to 27:29 — past
-the 25-min reclaim. Measured over 24h: 9 vision + 18 chat:fast + 5 structured
-jobs were reclaimed at exactly ~1500s wait and executed a second time (the
-first result then discarded by `_finish`'s `started_at` guard — correctness was
-never at risk, but the work and the tokens were spent twice, and the client saw
-its job sit 25 minutes before *starting*). The gate now refuses an attempt
-whose own `call_timeout` would end past the finish-by moment:
+(2026-08-31), so an attempt started at minute 17:59 may legally run to 27:29 —
+past the 25-min reclaim, and the job would then be executed twice.
+
+This change is **preventive, not an incident fix**, and an earlier draft of
+this paragraph got that wrong: it blamed the start gate for the ~1500s-wait
+reclaims visible in `deep_jobs`. Those reclaims are real and recur daily
+(2026-09-12, 24h: 12 vision + 14 chat:fast + 9 structured; 5-20/day/capability
+back to at least 09-09), but the gate cannot be their cause — `chat:fast` calls
+are capped at 60s and its walk stops at 18 min, so such a job is finished by
+minute 19 and can never reach the reclaim. Those rows sat `running` for 25
+minutes for a reason still unidentified (candidates: worker loss on deploy —
+but 09-09..09-11 had no deploys; a stalled DB await outside any timeout — eight
+`chat:fast` rows orphaned in the same second on 09-12 09:18 UTC fits a pool
+stall). **Open item, owner-visible; the reclaim itself is the safety net
+working, and `_finish`'s `started_at` guard discards the loser's result, so
+correctness was never at risk — the cost is duplicated work and a 25-minute
+delay before the job restarts.**
+
+What the finish-by gate does fix is a dependency nobody stated: today a 570s
+local attempt is always the *first* of a vision walk only because exactly ONE
+local key carries `llm:vision`. Raise a timeout or add a second vision-scoped
+local key and the old start gate would silently allow an attempt that ends past
+the reclaim. The gate now refuses an attempt whose own `call_timeout` would end
+past the finish-by moment:
 `_now() + _call_timeout(capability, provider) > finish_by → stop`. For 60s
 cloud calls that is the previous behaviour minus one minute; `chat:deep` keeps
 its exact old semantics through `_DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S +

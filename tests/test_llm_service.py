@@ -2426,10 +2426,11 @@ async def test_vision_final_retry_still_reaches_the_paid_tail(monkeypatch):
 
 
 async def test_run_chat_does_not_start_a_local_vision_attempt_it_cannot_finish(monkeypatch):
-    """2026-09-12: a local vision call is up to 570s (queue wait + model). The
-    old gate only asked "may I still START" — at minute 17:59 the walk started
-    a 9.5-minute attempt that ended at 27:29, past job_queue's 25-min reclaim;
-    9 vision jobs/day were reclaimed at exactly 1500s and executed twice."""
+    """2026-09-12 (preventive, no incident — 7 days of vision jobs peaked at
+    312s): a local vision call may take 570s (queue wait + model), so the old
+    "may I still START" gate could begin at 17:59 an attempt ending at 27:29,
+    past job_queue's 25-min reclaim, and the job would run twice. The walk must
+    refuse an attempt whose own timeout ends after the finish-by moment."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
