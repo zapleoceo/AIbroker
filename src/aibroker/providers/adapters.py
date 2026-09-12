@@ -31,7 +31,7 @@ class ProviderAdapter:
     hand (health probes) keep working."""
 
     def prepare(self, _model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         return None
 
     def normalize_json_text(
@@ -46,7 +46,7 @@ class ProviderAdapter:
 
 class _ZaiAdapter(ProviderAdapter):
     def prepare(self, _model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # GLM defaults to thinking mode and spends the WHOLE max_tokens budget
         # on hidden reasoning, returning an empty body — the same failure shape
         # DeepSeek's v4 had. Measured live 2026-08-16 on a trivial "reply ok"
@@ -73,7 +73,7 @@ _GEMINI_NO_DISABLE_PREFIXES = ("gemini-3.7", "gemini-3.8", "gemini-4")
 
 class _GeminiAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # Gemini 2.5 "thinks" against max_tokens. On JSON that truncates the
         # object mid-string; on any reply it adds latency that overran our call
         # timeout (measured Timeouts on gemini-2.5-flash chat:fast/smart, 2026-
@@ -104,7 +104,7 @@ _TOOL_ENVELOPE_KEYS = ("parameters", "arguments", "input")
 
 class _AnthropicAdapter(ProviderAdapter):
     def prepare(self, _model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # Claude does NOT honour OpenAI's response_format={"type":"json_object"}
         # (litellm silently drops the unsupported param), so with only a prompt
         # instruction Claude often replies in PLAIN TEXT and the JSON gate
@@ -244,7 +244,7 @@ _DEEPSEEK_HYBRID_PREFIXES = ("deepseek-v4", "deepseek-flash")
 
 class _DeepseekAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
         # "This response_format type is unavailable now") but accepts
         # json_object — confirmed live 2026-07-07. Downgrade so the provider
@@ -297,7 +297,7 @@ class _DeepseekAdapter(ProviderAdapter):
 
 class _CerebrasAdapter(ProviderAdapter):
     def prepare(self, _model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # Cerebras rejects strict json_schema whose array fields carry validation
         # keywords it doesn't implement ("Invalid fields for schema with types
         # ['array']: {'maxItems'}", ~194 BadRequests/45min on Stepan's chat:smart,
@@ -348,7 +348,7 @@ def _has_image_block(messages: list[dict[str, Any]]) -> bool:
 
 class _SambanovaAdapter(ProviderAdapter):
     def prepare(self, model: str, kwargs: dict[str, Any],
-                capability: str | None = None) -> None:
+                _capability: str | None = None) -> None:
         # Only requests that carry an image are rerouted; text stays on the
         # native provider, which is proven at volume (json_object AND strict
         # json_schema verified live on gemma-4-31B-it, 2026-09-12). The model
