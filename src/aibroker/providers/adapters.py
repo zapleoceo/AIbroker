@@ -324,7 +324,45 @@ class _CloudflareAdapter(ProviderAdapter):
         return None
 
 
+# litellm's native `sambanova/` provider flattens every content LIST to a plain
+# string ("SambaNova API doesn't support content as a list" — litellm/llms/
+# sambanova/chat.py, handle_messages_with_content_list_to_str_conversion). That
+# note is stale: the API takes OpenAI-style image_url blocks, and the very same
+# gemma-4-31B-it described a real receipt correctly when reached through
+# litellm's plain OpenAI-compatible client with SambaNova's base URL. Through
+# the native provider the image is silently DROPPED and the model answers
+# "please provide the image" with HTTP 200 — a non-answer the broker would have
+# delivered to every vision caller as a description. Caught 2026-09-12 by
+# driving the deployed call_llm path minutes after the vision chain gained
+# sambanova; no production job had reached it yet.
+_SAMBANOVA_OPENAI_BASE = "https://api.sambanova.ai/v1"
+
+
+def _has_image_block(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(m.get("content"), list)
+        and any(b.get("type") == "image_url" for b in m["content"] if isinstance(b, dict))
+        for m in messages
+    )
+
+
+class _SambanovaAdapter(ProviderAdapter):
+    def prepare(self, model: str, kwargs: dict[str, Any],
+                capability: str | None = None) -> None:
+        # Only requests that carry an image are rerouted; text stays on the
+        # native provider, which is proven at volume (json_object AND strict
+        # json_schema verified live on gemma-4-31B-it, 2026-09-12). The model
+        # string is the OpenAI-compat spelling of the same model; the routing
+        # name (sambanova/…) is what call_llm prices and usage_log records,
+        # because it prices by its own `model` argument, not kwargs["model"].
+        if not _has_image_block(kwargs.get("messages", [])):
+            return
+        kwargs["model"] = "openai/" + model.split("/", 1)[-1]
+        kwargs["api_base"] = _SAMBANOVA_OPENAI_BASE
+
+
 _ADAPTERS: dict[str, ProviderAdapter] = {
+    "sambanova": _SambanovaAdapter(),
     "gemini": _GeminiAdapter(),
     "anthropic": _AnthropicAdapter(),
     "deepseek": _DeepseekAdapter(),

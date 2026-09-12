@@ -420,6 +420,14 @@
 >   "prepayment credits are depleted" (owner top-up); groq/cerebras have no
 >   newer free models on our keys (llama-4-scout is gone from groq's list).
 >   Probes: `deepseek` → `deepseek-flash`, `sambanova` → `gemma-4-31B-it`.
+> - **Follow-up the same hour — `_SambanovaAdapter`.** Driving the DEPLOYED
+>   `call_llm` path with a real image showed litellm's native `sambanova/`
+>   provider flattening the content list to a string: the image never reached
+>   gemma and it answered "Пожалуйста, предоставьте изображение" with a 200
+>   (tokens_in=90). The same model through litellm's OpenAI-compatible client
+>   with `api_base=https://api.sambanova.ai/v1` described the receipt correctly
+>   (tokens_in=288). Image requests are now rerouted that way in the adapter;
+>   text/JSON stays native. No production vision job had reached sambanova yet.
 
 > **2026-08-31 (local vision leads)**: `vision` became
 > `[local, gemini, openrouter, openai]`. Self-hosted Qwen3-VL-4B on this host

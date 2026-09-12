@@ -96,6 +96,13 @@ computed and discarded:
 - **sambanova → `gemma-4-31B-it`** on chat:fast / prefilter / vision: the only
   free model there that is not 429 "high demand" (0 ok / 2087 err in 7 days
   on Llama). JSON (json_object + json_schema) and images verified live.
+  **Vision needs `_SambanovaAdapter`** (`providers/adapters.py`): litellm's
+  native `sambanova/` provider flattens content lists to strings and silently
+  drops the image (the model then answers "please provide the image" with a
+  200). Requests carrying an `image_url` block are rerouted to litellm's
+  OpenAI-compatible client with `api_base=https://api.sambanova.ai/v1`; text
+  stays on the native provider. Pricing/usage keep the `sambanova/…` name
+  because `call_llm` prices by its own `model` argument.
 - **gemini**: `vision` gets its own rotation (3.5-flash-lite / 3.5-flash /
   3.1-flash-lite); 3.5-flash joins the chat rotation. Measured N=3 images,
   N=5 JSON on the real 112k-char sales prompt.

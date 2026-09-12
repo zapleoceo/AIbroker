@@ -151,6 +151,36 @@ def test_deepseek_v4_thinking_respects_caller_extra_body():
     assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}, "x": 1}
 
 
+_IMG = [{"role": "user", "content": [
+    {"type": "text", "text": "Describe this image."},
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQ"}}]}]
+
+
+def test_sambanova_image_requests_bypass_litellms_native_provider():
+    """REGRESSION (2026-09-12, caught minutes after deploy): litellm's
+    `sambanova/` provider flattens content lists to strings, so the image never
+    reached gemma-4-31B-it and it answered "please provide the image" with a
+    200 — a non-answer the vision chain would have shipped to callers as a
+    description. Image requests must go through the OpenAI-compatible client
+    with SambaNova's base URL, where the same model describes the image."""
+    kwargs: dict = {"messages": _IMG, "api_key": "k"}
+    adapter_for("sambanova").prepare("sambanova/gemma-4-31B-it", kwargs, "vision")
+    assert kwargs["model"] == "openai/gemma-4-31B-it"
+    assert kwargs["api_base"] == "https://api.sambanova.ai/v1"
+    assert kwargs["api_key"] == "k"
+    assert kwargs["messages"] is _IMG          # content untouched, image kept
+
+
+def test_sambanova_text_requests_stay_on_the_native_provider():
+    """Text (incl. JSON) is proven on the native provider — do not reroute it.
+    A content LIST without an image is also text (litellm flattens it fine)."""
+    for msgs in ([{"role": "user", "content": "hi"}],
+                 [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]):
+        kwargs: dict = {"messages": msgs, "response_format": {"type": "json_object"}}
+        adapter_for("sambanova").prepare("sambanova/gemma-4-31B-it", kwargs, "prefilter")
+        assert "model" not in kwargs and "api_base" not in kwargs, msgs
+
+
 _BIG = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
 _SMALL = [{"role": "system", "content": "x" * 5_000}, {"role": "user", "content": "hi"}]
 
