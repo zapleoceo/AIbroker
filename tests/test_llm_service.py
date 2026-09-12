@@ -2420,3 +2420,97 @@ async def test_vision_final_retry_still_reaches_the_paid_tail(monkeypatch):
     this fake pick does not model — so assert reachability, not position."""
     walk = await _vision_walk(monkeypatch, paid_only=True)
     assert "deepseek" in walk and "openai" in walk
+
+
+# ─── finish-by gate: an attempt must END before stale-reclaim, not just START ─
+
+
+async def test_run_chat_does_not_start_a_local_vision_attempt_it_cannot_finish(monkeypatch):
+    """2026-09-12: a local vision call is up to 570s (queue wait + model). The
+    old gate only asked "may I still START" — at minute 17:59 the walk started
+    a 9.5-minute attempt that ended at 27:29, past job_queue's 25-min reclaim;
+    9 vision jobs/day were reclaimed at exactly 1500s and executed twice."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    clock = {"t": 0.0}
+    local_timeout = svc._call_timeout("vision", "local")
+    assert local_timeout > 300          # the premise: a long call, not 60s
+
+    def fake_now() -> float:
+        return clock["t"]
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)          # no key → walk moves on
+
+    monkeypatch.setattr(svc, "_now", fake_now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["local"])
+
+    # elapsed such that a 60s call would still fit but a local call would not
+    clock["t"] = svc._CHAT_WALL_DEADLINE_S - local_timeout + 1
+    # finish_by is computed at entry, so pin the clock BEFORE calling and let
+    # the gate see the same instant: entry at t0 → finish_by = t0 + 18min; we
+    # emulate "already 17+ minutes into the walk" by advancing on first pick.
+    entry = {"done": False}
+    orig_now = fake_now
+
+    def now_with_elapsed() -> float:
+        if not entry["done"]:
+            entry["done"] = True
+            return 0.0                  # entry: finish_by = 18min
+        return orig_now()               # gate: already past 18min - 570s
+
+    monkeypatch.setattr(svc, "_now", now_with_elapsed)
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="vision",
+        messages=[{"role": "user", "content": "img"}], model=None,
+        max_tokens=64, temperature=0.1, response_format=None, workflow="w",
+    )
+    assert out is None
+    assert picks == []                  # never started: it could not finish in time
+
+
+async def test_run_chat_cloud_attempt_still_starts_when_it_can_finish(monkeypatch):
+    """Same instant, a 60s cloud call fits before the finish-by moment — the
+    gate must not become stricter than the old start-deadline for short calls."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picks: list[str] = []
+    entry = {"done": False}
+
+    def now() -> float:
+        if not entry["done"]:
+            entry["done"] = True
+            return 0.0
+        return svc._CHAT_WALL_DEADLINE_S - svc._CALL_TIMEOUT_S - 1
+
+    async def fake_pick(provider, scope, **kw):
+        picks.append(provider)
+
+    monkeypatch.setattr(svc, "_now", now)
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=1, name="vera"), capability="vision",
+        messages=[{"role": "user", "content": "img"}], model=None,
+        max_tokens=64, temperature=0.1, response_format=None, workflow="w",
+    )
+    assert out is None
+    assert picks == ["gemini"]
+
+
+def test_deep_finish_by_reproduces_the_old_start_gate():
+    """5-min start gate + 19-min call == 24-min finish-by: chat:deep behaviour
+    is unchanged by the refactor, and the invariant vs the 25-min reclaim holds."""
+    import aibroker.services.job_queue as jq
+    import aibroker.services.llm_service as svc
+
+    assert svc._DEEP_FINISH_BY_S == svc._DEEP_WALL_DEADLINE_S + svc._DEEP_CALL_TIMEOUT_S
+    assert svc._DEEP_FINISH_BY_S < jq._STALE_RUNNING_S
+    assert svc._CHAT_WALL_DEADLINE_S < jq._STALE_RUNNING_S
