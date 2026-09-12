@@ -103,6 +103,12 @@ computed and discarded:
   OpenAI-compatible client with `api_base=https://api.sambanova.ai/v1`; text
   stays on the native provider. Pricing/usage keep the `sambanova/…` name
   because `call_llm` prices by its own `model` argument.
+- **`downgrade_json_schema`** (`providers/adapters.py`): the deepseek and
+  cerebras json_schema → json_object downgrade now inlines the schema as text
+  into the last user message instead of dropping it. DeepSeek refuses
+  json_object when the prompt lacks the word "json" (400, 30 in one burst on
+  the first V4.1 traffic); the inlined schema satisfies that and hands the
+  model the required keys.
 - **gemini**: `vision` gets its own rotation (3.5-flash-lite / 3.5-flash /
   3.1-flash-lite); 3.5-flash joins the chat rotation. Measured N=3 images,
   N=5 JSON on the real 112k-char sales prompt.

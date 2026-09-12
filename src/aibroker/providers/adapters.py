@@ -225,6 +225,69 @@ def is_deepseek_big_json_prompt(
     return _prompt_chars(messages) >= _DEEPSEEK_JSON_EMPTY_CHARS
 
 
+# ── json_schema → json_object downgrade, done properly ───────────────────────
+# Two providers (deepseek, cerebras) cannot take the strict json_schema
+# sub-type and are downgraded to json_object. Until 2026-09-12 the downgrade
+# simply DROPPED the schema, which had two costs measured on production:
+#   1. DeepSeek (like OpenAI) refuses json_object unless the prompt contains
+#      the word "json": 400 "Prompt must contain the word 'json' in some form
+#      to use 'response_format' of type 'json_object'". Callers who rely on
+#      json_schema alone (vera's claude_session summariser) never say "json"
+#      in the prompt, so EVERY such call to deepseek 400'd — 30 in one burst
+#      on 2026-09-12 (job 482277, 5 attempts x 6 retries on the sticky key),
+#      40 on 09-09, every one a wasted attempt before the walk moved on.
+#   2. With the schema gone the model no longer knows the required keys, so
+#      the post-hoc JSON gate had nothing to enforce and callers got shape
+#      misses.
+# The fix inlines the schema as text at the end of the LAST user message —
+# that both satisfies the "json" requirement and hands the model the shape.
+# Appending to the tail (never a new leading system message) keeps the
+# provider's prompt-cache prefix intact. Verified live on job 482277's real
+# 39k-char prompt: the 400 is gone and, given room, the answer is valid JSON
+# with every required key (6835 output tokens with the schema inlined vs 7056
+# with a bare "respond with a JSON object" — the hint does not lengthen the
+# reply). NB that caller sends max_tokens=4000, which deepseek's ~7k-token
+# summary overruns either way (finish=length) — a caller budget issue, not
+# this downgrade; gemini answers the same job within budget.
+_JSON_SCHEMA_HINT = ("\n\nRespond with a single JSON object that matches this "
+                     "JSON schema:\n")
+
+
+def _append_to_last_user_message(messages: list[dict[str, Any]], suffix: str) -> None:
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            content.append({"type": "text", "text": suffix})
+        else:
+            m["content"] = (content or "") + suffix
+        return
+    messages.append({"role": "user", "content": suffix.strip()})
+
+
+def downgrade_json_schema(kwargs: dict[str, Any]) -> None:
+    """Replace a json_schema response_format with json_object, inlining the
+    schema into the prompt so nothing is lost (see the note above). No-op for
+    any other response_format. Shared by every adapter that must downgrade."""
+    rf = kwargs.get("response_format")
+    if not rf or rf.get("type") != "json_schema":
+        return
+    schema = (rf.get("json_schema") or {}).get("schema")
+    kwargs["response_format"] = {"type": "json_object"}
+    if schema is None:
+        return
+    messages = kwargs.setdefault("messages", [])
+    kwargs["messages"] = [dict(m) if isinstance(m, dict) else m for m in messages]
+    # shallow-copied so the caller's list is never mutated (run_chat reuses
+    # the same messages for the next provider in the chain)
+    for m in kwargs["messages"]:
+        if isinstance(m.get("content"), list):
+            m["content"] = list(m["content"])
+    _append_to_last_user_message(
+        kwargs["messages"], _JSON_SCHEMA_HINT + json.dumps(schema, ensure_ascii=False))
+
+
 # 2026-09-12: the "upgrade big JSON prompts to deepseek-v4-pro" escalation
 # (deepseek_model_for_json, 2026-07-21 → 09-12) is GONE. DeepSeek retires
 # v4-pro on 2026-09-14 (requests are routed to V4.1-Flash at flash pricing),
@@ -248,11 +311,8 @@ class _DeepseekAdapter(ProviderAdapter):
         # DeepSeek disabled the strict json_schema sub-type server-side (400s
         # "This response_format type is unavailable now") but accepts
         # json_object — confirmed live 2026-07-07. Downgrade so the provider
-        # stays usable; the post-hoc JSON gate + caller validation replace the
-        # lost server-side grammar enforcement.
-        rf = kwargs.get("response_format")
-        if rf and rf.get("type") == "json_schema":
-            kwargs["response_format"] = {"type": "json_object"}
+        # stays usable, inlining the schema (see downgrade_json_schema).
+        downgrade_json_schema(kwargs)
         # v4 models default to THINKING mode; hidden reasoning_content eats the
         # max_tokens budget so short JSON replies truncate to empty (the 2026-
         # 07-10 "v4-flash regression" was this default, not the model — and
@@ -302,11 +362,9 @@ class _CerebrasAdapter(ProviderAdapter):
         # keywords it doesn't implement ("Invalid fields for schema with types
         # ['array']: {'maxItems'}", ~194 BadRequests/45min on Stepan's chat:smart,
         # 2026-07-11). It's already out of `structured` for emitting malformed
-        # JSON on schemas anyway, so drop the schema entirely — json_object keeps
-        # it usable and the post-hoc JSON gate + caller validation cover grammar.
-        rf = kwargs.get("response_format")
-        if rf and rf.get("type") == "json_schema":
-            kwargs["response_format"] = {"type": "json_object"}
+        # JSON on schemas anyway, so downgrade to json_object with the schema
+        # inlined as text (see downgrade_json_schema).
+        downgrade_json_schema(kwargs)
 
 
 # cloudflare needs its account ID embedded in the request URL — LiteLLM has no

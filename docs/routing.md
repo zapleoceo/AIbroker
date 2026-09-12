@@ -428,6 +428,21 @@
 >   with `api_base=https://api.sambanova.ai/v1` described the receipt correctly
 >   (tokens_in=288). Image requests are now rerouted that way in the adapter;
 >   text/JSON stays native. No production vision job had reached sambanova yet.
+> - **Same hour — `downgrade_json_schema`** (`providers/adapters.py`, shared
+>   by the deepseek and cerebras adapters). The first deepseek-flash traffic
+>   showed 30 BadRequests in one burst: `"Prompt must contain the word 'json'
+>   in some form to use 'response_format' of type 'json_object'"`. The
+>   json_schema → json_object downgrade had simply DROPPED the schema since
+>   2026-07-07, so any caller relying on json_schema alone (vera's
+>   `claude_session` summariser never says "json") 400'd on every deepseek
+>   attempt — 40 more on 09-09 under the old model name. The downgrade now
+>   inlines the schema as text at the end of the last user message (prompt
+>   cache prefix untouched, caller's message objects never mutated). Replayed
+>   on job 482277: 400 → valid JSON with every required key given a 12k
+>   budget; the hint does not lengthen the reply (6835 vs 7056 tokens with a
+>   bare "respond with a JSON object"). That caller's own max_tokens=4000 is
+>   overrun by deepseek's ~7k-token summary either way — a caller budget
+>   issue; gemini serves the same job within budget.
 
 > **2026-08-31 (local vision leads)**: `vision` became
 > `[local, gemini, openrouter, openai]`. Self-hosted Qwen3-VL-4B on this host

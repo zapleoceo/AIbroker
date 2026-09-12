@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from aibroker.providers.adapters import (
     ProviderAdapter,
     adapter_for,
@@ -26,6 +28,47 @@ def test_deepseek_downgrades_json_schema_to_json_object():
     triage call to deepseek was wasted. The deepseek adapter downgrades it."""
     out = _prepared("deepseek", response_format=dict(_SCHEMA))
     assert out["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "cerebras"])
+def test_json_schema_downgrade_inlines_the_schema_into_the_last_user_message(provider):
+    """REGRESSION (2026-09-12): the downgrade used to DROP the schema. DeepSeek
+    then 400'd every call whose prompt lacks the word "json" ("Prompt must
+    contain the word 'json' in some form to use 'response_format' of type
+    'json_object'") — 30 wasted attempts in one burst on vera's summariser —
+    and even when it didn't, the model no longer knew the required keys. The
+    schema now rides along as text at the END of the last user message (so
+    the provider's prompt-cache prefix is untouched), and the caller's own
+    message objects are never mutated (run_chat reuses them for the next
+    provider)."""
+    msgs = [{"role": "system", "content": "Summarise the session."},
+            {"role": "user", "content": "Here is the transcript..."}]
+    kwargs: dict = {"messages": msgs, "response_format": dict(_SCHEMA)}
+    adapter_for(provider).prepare(f"{provider}/model", kwargs)
+    assert kwargs["response_format"] == {"type": "json_object"}
+    tail = kwargs["messages"][-1]["content"]
+    assert tail.startswith("Here is the transcript...")
+    assert "JSON schema" in tail and '"ok"' in tail          # word json + shape
+    assert kwargs["messages"][0]["content"] == "Summarise the session."
+    assert msgs[1]["content"] == "Here is the transcript..."  # caller untouched
+
+
+def test_json_schema_downgrade_handles_list_content_and_no_user_turn():
+    from aibroker.providers.adapters import downgrade_json_schema
+    listy: dict = {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                   "response_format": dict(_SCHEMA)}
+    downgrade_json_schema(listy)
+    blocks = listy["messages"][0]["content"]
+    assert blocks[0] == {"type": "text", "text": "hi"} and "JSON schema" in blocks[-1]["text"]
+    system_only: dict = {"messages": [{"role": "system", "content": "x"}],
+                         "response_format": dict(_SCHEMA)}
+    downgrade_json_schema(system_only)
+    assert system_only["messages"][-1]["role"] == "user"
+    assert "JSON schema" in system_only["messages"][-1]["content"]
+    plain: dict = {"messages": [{"role": "user", "content": "hi"}],
+                   "response_format": {"type": "json_object"}}
+    downgrade_json_schema(plain)
+    assert plain["messages"][0]["content"] == "hi"           # json_object: no-op
 
 
 def test_deepseek_leaves_json_object_and_no_format_alone():
