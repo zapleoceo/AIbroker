@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     # in memory on this host, and a native-resolution probe ran past 600s
     # without ever completing while the same image at 1024px took 69s.
     VISION_LOCAL_MAX_PX: int = 1024
+    # How long a second vision request may WAIT for the one local slot before
+    # it escalates to the cloud tail (2026-09-12). llama-server runs
+    # --parallel 1; before this, concurrent requests queued INSIDE it against
+    # the 300s HTTP timeout, so the waiting one timed out (45 TimeoutErrors a
+    # day), cooled the local key, and every image behind it spilled to the
+    # rate-limited cloud pool. The slot is an in-process semaphore: waiting
+    # costs nothing, and 240s covers one worst-case document ahead of you.
+    VISION_LOCAL_QUEUE_WAIT_S: float = 240.0
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"

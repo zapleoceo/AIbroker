@@ -364,6 +364,40 @@
 > verified accepted by gemini (a live probe reached 429, not a 400); the
 > transcription *output* awaits a gemini key with capacity (paid id=16 top-up).
 
+> **2026-09-12 (vision: slow but free)** — owner request: vera's image backlog
+> (800 photos pending on her side, ~350 jobs/day) must drain on the local
+> model, "долго, но бесплатно". Four changes, all measured on the day's
+> traffic (vera vision, 24h: local 275 ok / gemini 46 / 22 jobs failed after 8
+> retries; 349 jobs for 273 distinct payloads; local 45 TimeoutError + 173
+> RuntimeError):
+>
+> - **Free walk** (`routing/chains.py:free_first_walk`,
+>   `FREE_WALK_CAPABILITIES = {vision}`): the regular walk skips
+>   `PAID_PROVIDERS`; deepseek/openai are reachable only on the job queue's
+>   final paid_only retry. A busy local slot or a dry free pool now means
+>   "retry later", never "pay now".
+> - **One local slot per process** (`_local_vision_slot`, bounded by
+>   `VISION_LOCAL_QUEUE_WAIT_S` = 240s): concurrent requests used to queue
+>   INSIDE llama-server (`--parallel 1`) against the 300s HTTP timeout, so
+>   the waiting one timed out, cooled the local key and spilled everything
+>   behind it to the rate-limited cloud. Waiting for the semaphore is free
+>   and outside the HTTP timeout; a wait past 240s is a RuntimeError (no
+>   cooldown — local is healthy, merely busy) and the walk moves on.
+>   `_call_timeout("vision","local")` grew by the same 240s.
+> - **Undecodable inline images are refused at submit** (400,
+>   `services/vision_payload.py:inline_image_problem`): an MP4 labelled
+>   `image/jpeg` by vera's ingestor walked the whole chain 8 times in 24h.
+>   vera treats a 400 as permanent and stops resubmitting.
+> - **Vision joins the response cache (24h)**: identical resubmits (after
+>   vera's 15-min poll deadline or her periodic re-queue) are answered from
+>   memory instead of burning another 150s local run.
+>
+> What this does NOT change: local throughput (~100-160s per image at 3
+> threads on a 4-core host shared with vera3/stepan2/sniffer — ~600 images a
+> day at best). The backlog drains at that rate; vera's side (`media-worker`,
+> deadline 900s, success marks, permanent-failure policy) was fixed by the
+> owner the same day and matches this behaviour.
+
 > **2026-09-12 (model refresh — DeepSeek V4.1, SambaNova gemma, gemini vision
 > rotation, mistral out)**. A live inventory of every provider's `/models` on
 > our own keys plus 7 days of `usage_log`, each move measured on the real

@@ -1,9 +1,9 @@
 """In-process exact-match response cache for deterministic capabilities.
 
-Scoped to `translate` and `prefilter`: the same short inputs recur verbatim
-and the answer for a fixed input is stable — returning a cached answer is
-correct and skips a whole LLM round-trip. NOT used for chat/*: those aren't
-deterministic, so a stale cached answer would be wrong.
+Scoped to `translate`, `prefilter` and (since 2026-09-12) `vision`: the same
+inputs recur verbatim and the answer for a fixed input is stable — returning
+a cached answer is correct and skips a whole LLM round-trip. NOT used for
+chat/*: those aren't deterministic, so a stale cached answer would be wrong.
 
 Per-process (each broker replica keeps its own copy). Volumes are low enough
 that a small LRU+TTL is proportionate — no shared store or migration needed;
@@ -26,9 +26,18 @@ _MAX_ENTRIES = 2_000
 #     short messages ('ok', 'thanks', emoji) recur heavily and the verdict is
 #     deterministic-enough at temperature 0 — but kept SHORT (10 min) so a
 #     prompt/threshold change rolls through quickly.
+#   - vision (2026-09-12): a description of the SAME bytes with the SAME
+#     prompt is stable enough, and vera resubmits identical images after its
+#     15-minute poll deadline or on its periodic re-queue — 349 jobs for 273
+#     distinct payloads in one day, ~76 local-slot runs (≈3.3h of CPU) spent
+#     re-describing pictures already described. The job-level dedup only
+#     covers in-flight duplicates inside 30 minutes; this covers finished
+#     ones for a day. Keyed on the full payload hash, so a different prompt
+#     or image is a different entry.
 _TTL_S: dict[str, int] = {
     "translate": 24 * 60 * 60,
     "prefilter": 10 * 60,
+    "vision": 24 * 60 * 60,
 }
 _CACHEABLE: frozenset[str] = frozenset(_TTL_S)
 

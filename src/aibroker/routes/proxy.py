@@ -29,6 +29,7 @@ from aibroker.services import (
 )
 from aibroker.services.deep_jobs import AUDIO_FIELD
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
+from aibroker.services.vision_payload import inline_image_problem
 
 # Capabilities the generic /v1/jobs endpoint serves — everything run_chat
 # handles, i.e. everything whose payload is chat messages. embed stays
@@ -397,9 +398,15 @@ async def jobs_submit(
             f"{sorted(_JOB_CAPABILITIES)}",
         )
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    messages = [m.model_dump(exclude_unset=True) for m in body.messages]
+    if capability == "vision" and (problem := inline_image_problem(messages)):
+        # A file no provider can decode must fail HERE, permanently — not walk
+        # the chain, retry eight times and be resubmitted by the client (see
+        # services/vision_payload.py for the 8-passes-in-24h case behind this).
+        raise HTTPException(400, problem)
     job_id = await submit_job(  # pragma: no cover
         project=ctx.project, capability=capability,
-        messages=[m.model_dump(exclude_unset=True) for m in body.messages],
+        messages=messages,
         model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
         response_format=body.response_format, workflow=body.workflow,
         extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],

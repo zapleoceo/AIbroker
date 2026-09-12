@@ -110,3 +110,18 @@ def test_cache_is_isolated_per_project():
     other = {**_KW, "project_id": 2}
     assert response_cache.get("prefilter", _MSGS, **other) is None
     assert response_cache.get("prefilter", _MSGS, **_KW) == "lead: hot"
+
+
+def test_vision_is_cacheable_for_a_day():
+    """2026-09-12: vera resubmits identical images (349 jobs / 273 distinct
+    payloads in a day); a finished description is served from memory."""
+    from aibroker.services import response_cache as rc
+    assert rc.is_cacheable("vision")
+    assert rc._TTL_S["vision"] == 24 * 60 * 60
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "describe"},
+                                          {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
+    rc.put("vision", msgs, "a receipt", model=None, max_tokens=400, temperature=0.1, project_id=2)
+    assert rc.get("vision", msgs, model=None, max_tokens=400, temperature=0.1, project_id=2) == "a receipt"
+    other = [{"role": "user", "content": [{"type": "text", "text": "describe"},
+                                           {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}}]}]
+    assert rc.get("vision", other, model=None, max_tokens=400, temperature=0.1, project_id=2) is None

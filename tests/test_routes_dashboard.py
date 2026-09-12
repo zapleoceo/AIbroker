@@ -1887,3 +1887,52 @@ def test_scope_checkboxes_without_provider_disable_nothing():
     from aibroker.routes.dashboard_scopes import _scope_checkboxes
     html = _scope_checkboxes(["llm:chat"], "allowed_scopes")
     assert "disabled" not in html and "scope-na" not in html
+
+
+# ─── delete project (2026-09-12, owner: the panel had no way to remove a client) ──
+
+
+def test_dashboard_delete_project_requires_auth():
+    r = client.post("/dashboard/projects/42/delete", follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_dashboard_delete_project_removes_row_and_audits():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ProjectRow
+
+    async def _seed():
+        async with get_session() as s:
+            s.add(ProjectRow(id=931, name="sniffer-old", project_key_hash="h",
+                             project_key_prefix="aib_prj_x", allowed_scopes=["llm:chat"]))
+
+    async def _exists():
+        async with get_session() as s:
+            return await s.get(ProjectRow, 931)
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    with patch("aibroker.routes.dashboard.audit", AsyncMock()) as fake_audit:
+        r = client.post("/dashboard/projects/931/delete",
+                        cookies=_logged_in_cookies(), follow_redirects=False)
+    assert r.status_code == 303 and "deleted" in r.headers["location"]
+    assert asyncio.get_event_loop().run_until_complete(_exists()) is None
+    assert fake_audit.await_args.kwargs["action"] == "project.delete"
+    assert fake_audit.await_args.kwargs["target"] == "sniffer-old"
+    # unknown id: honest flash, no crash
+    r = client.post("/dashboard/projects/931/delete",
+                    cookies=_logged_in_cookies(), follow_redirects=False)
+    assert r.status_code == 303 and "not+found" in r.headers["location"]
+
+
+def test_project_row_has_a_confirmed_delete_form():
+    from aibroker.db.models import ProjectRow
+    from aibroker.routes.dashboard_render import _render
+    p = ProjectRow(id=5, name="ev'il", project_key_hash="h", project_key_prefix="aib_prj_x",
+                   allowed_scopes=["llm:chat"], is_active=True)
+    body = _render(_fake_main_data(projects=[p])).body.decode()
+    assert 'action="/dashboard/projects/5/delete"' in body
+    assert "data-confirm=\"Delete project ev&#x27;il?" in body   # safe attribute, escaped
+    assert 'onsubmit="return confirm(' not in body

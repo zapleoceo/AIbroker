@@ -379,6 +379,31 @@ async def dash_edit_project(
     )
 
 
+@router.post("/dashboard/projects/{project_id}/delete")
+async def dash_delete_project(
+    project_id: int, request: Request,
+    _: OwnerSession = Depends(require_owner_session),
+) -> RedirectResponse:
+    """Hard-delete a client project (2026-09-12, owner request — the panel
+    had no way to remove a client). Its key stops authenticating at once.
+    usage_log rows keep their project_id (history and billing stay
+    auditable; the per-project drill-down 404s). deep_jobs rows go WITH the
+    project (FK ondelete=CASCADE, db/models.py): a pending job vanishes and
+    its poller gets 404; a job already mid-flight finishes into the void
+    (_execute's "project no longer exists" branch then updates 0 rows)."""
+    async with get_session() as s:
+        row = await s.get(ProjectRow, project_id)
+        if not row:
+            return RedirectResponse("/dashboard?flash=!Project+not+found", status_code=303)
+        target = row.name
+        await s.delete(row)
+    await audit(actor="dashboard", action="project.delete", target=target,
+                ip=client_ip(request))
+    return RedirectResponse(
+        f"/dashboard?flash=Project+{target}+deleted", status_code=303
+    )
+
+
 @router.post("/dashboard/projects/create", response_class=HTMLResponse)
 async def dash_create_project(
     request: Request,

@@ -726,6 +726,21 @@ def _downscale(image: bytes, max_px: int) -> bytes:
     return buf.getvalue()
 
 
+# One request at a time into llama-server, per process (2 uvicorn workers →
+# at most 2 in flight server-side, one running + one queued). Keyed by event
+# loop because an asyncio.Semaphore binds to the loop it first waits on and
+# the test-suite runs many loops; production has one loop per worker.
+_local_vision_slots: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+def _local_vision_slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _local_vision_slots.get(loop)
+    if slot is None:
+        slot = _local_vision_slots[loop] = asyncio.Semaphore(1)
+    return slot
+
+
 async def _post_local_vision(url: str, payload: dict[str, Any],
                              timeout: float) -> httpx.Response:  # pragma: no cover — thin network I/O, exercised via _describe_via_local_vision's mocked tests
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -784,6 +799,19 @@ async def _describe_via_local_vision(
         "response_format": {"type": "json_schema",
                             "json_schema": {"schema": _VISION_SCHEMA}},
     }
+    # Wait for the slot OUTSIDE the HTTP timeout: the 300s budget is for the
+    # model working on THIS image, not for the image ahead of it. A slot that
+    # stays busy past VISION_LOCAL_QUEUE_WAIT_S is a plain RuntimeError — no
+    # cooldown on the local key (it is healthy, merely busy) and the walk
+    # moves on to the free cloud pool; the job comes back to local on its
+    # next retry if the cloud is dry.
+    slot = _local_vision_slot()
+    try:
+        await asyncio.wait_for(slot.acquire(), timeout=settings.VISION_LOCAL_QUEUE_WAIT_S)
+    except TimeoutError as e:
+        raise RuntimeError(
+            f"vision-local busy: slot not free within "
+            f"{settings.VISION_LOCAL_QUEUE_WAIT_S:.0f}s — escalating") from e
     t0 = time.time()
     try:
         resp = await _post_local_vision(
@@ -793,6 +821,8 @@ async def _describe_via_local_vision(
         # so every following request would re-hit a dead endpoint with zero
         # backoff. TimeoutError cools the key instead.
         raise TimeoutError(f"vision-local unreachable: {e}") from e
+    finally:
+        slot.release()
     latency_ms = int((time.time() - t0) * 1000)
     if resp.status_code >= 500:
         raise TimeoutError(f"vision-local {resp.status_code}: {resp.text[:200]}")

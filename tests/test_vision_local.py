@@ -71,6 +71,11 @@ def test_call_timeout_is_provider_aware():
     hardware, 192s for a dense document."""
     assert _call_timeout("vision", "gemini") == 60.0
     assert _call_timeout("vision", "local") > 200.0
+    # 2026-09-12: the ceiling also covers the bounded wait for the local slot
+    # (the semaphore wait happens INSIDE call_llm).
+    s = get_settings()
+    assert _call_timeout("vision", "local") == (
+        s.VISION_LOCAL_TIMEOUT_S + s.VISION_LOCAL_QUEUE_WAIT_S + 30.0)
     # chat:deep keeps precedence over the provider rule.
     assert _call_timeout("chat:deep", "local") == 19 * 60.0
 
@@ -291,3 +296,57 @@ async def test_call_llm_routes_local_prefix_away_from_litellm(monkeypatch):
             model="local/qwen3vl", messages=_msgs(_png(40, 40)),
             api_key="unused", capability="vision")
     assert text == "кот на диване"
+
+
+# ─── one local slot per process (2026-09-12) ─────────────────────────────────
+
+
+async def test_local_vision_serialises_on_one_slot_and_escalates_when_busy(monkeypatch):
+    """llama-server runs --parallel 1. Before the slot, a second request queued
+    INSIDE the server against the 300s HTTP timeout, timed out, cooled the
+    local key and spilled every image behind it to the rate-limited cloud
+    (45 TimeoutErrors/day). Now the second caller waits in-process for up to
+    VISION_LOCAL_QUEUE_WAIT_S; past that it is a RuntimeError (no cooldown —
+    local is healthy, merely busy) and the walk moves on."""
+    import asyncio
+
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_QUEUE_WAIT_S", 0.05)
+    release = asyncio.Event()
+    inflight = {"n": 0, "max": 0}
+
+    async def slow_post(url, payload, timeout):
+        inflight["n"] += 1
+        inflight["max"] = max(inflight["max"], inflight["n"])
+        await release.wait()
+        inflight["n"] -= 1
+        return _reply({"type": "чек", "format": "text", "content": "ok"})
+
+    with patch("aibroker.providers.litellm_adapter._post_local_vision", slow_post):
+        first = asyncio.create_task(_describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1))
+        await asyncio.sleep(0.01)                      # first holds the slot
+        with pytest.raises(RuntimeError, match="busy"):
+            await _describe_via_local_vision(
+                messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
+        release.set()
+        text, _ = await first
+    assert text == "ok"
+    assert inflight["max"] == 1                        # never two in the server
+
+
+async def test_local_vision_slot_is_released_after_an_error(monkeypatch):
+    """A failed call must not leak the slot, or every later image would time
+    out on the semaphore and escalate forever."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_QUEUE_WAIT_S", 0.05)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(side_effect=httpx.ConnectError("down"))), \
+         pytest.raises(TimeoutError):
+        await _describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply({"type": "x", "format": "text", "content": "again"}))):
+        text, _ = await _describe_via_local_vision(
+            messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
+    assert text == "again"

@@ -830,3 +830,23 @@ def test_job_response_error_returns_message():
     resp = _job_response(_fake_job_row(status="error", error_message="boom"))
     assert resp.status == "error"
     assert resp.error == "boom"
+
+
+# ─── vision submit refuses undecodable inline images (2026-09-12) ────────────
+
+
+async def test_jobs_submit_vision_rejects_non_image_payload_with_400():
+    """An MP4 labelled image/jpeg walked the whole chain 8 times in a day.
+    Submit must refuse it permanently — vera's retry policy treats 400 as
+    permanent and stops resubmitting."""
+    import base64
+    plain, _ = await _make_project(["llm:vision"])
+    mp4 = base64.b64encode(b"\x00\x00\x00 ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64).decode()
+    r = client.post(
+        "/v1/jobs?capability=vision", headers={"X-Project-Key": plain},
+        json={"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + mp4}}]}]},
+    )
+    assert r.status_code == 400
+    assert "MP4" in r.json()["detail"]

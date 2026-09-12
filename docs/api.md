@@ -391,6 +391,22 @@ instead of grepping timestamps against provider/model/workflow.
 | `POST` | `/admin/keys/{id}/disable` | Soft-disable |
 | `DELETE` | `/admin/keys/{id}` | Hard delete |
 
+## Vision jobs: what is rejected at submit (2026-09-12)
+
+`POST /v1/jobs?capability=vision` validates every inline `data:` image before
+queueing (`services/vision_payload.py:inline_image_problem`): if the bytes
+cannot be decoded as an image the submit is refused with **400** and a reason
+such as `inline image #1 is an MP4/MOV video container — the declared
+image/jpeg cannot be decoded by any vision provider`. Before this, such a
+payload walked the whole provider chain, was re-queued eight times and
+resubmitted by the client — the same MP4 was processed 8 times in one day.
+Clients should treat the 400 as permanent for that file. Remote `http(s)`
+image URLs are not checked (only cloud providers fetch them).
+
+Vision results are also served from the in-process response cache for 24h:
+an identical payload (same bytes, same prompt, same params) returns the
+earlier description with `provider: "cache"` and no provider call.
+
 ## Dashboard (cookie OR X-Admin-Key)
 
 | Method | Path | Description |
@@ -402,6 +418,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
 | `POST` | `/dashboard/projects/create` | HTML form handler |
 | `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
+| `POST` | `/dashboard/projects/{id}/delete` | Hard delete a client project (confirm prompt; `dash_delete_project`, 2026-09-12). The key stops authenticating at once; usage history keeps its project_id. |
 | `GET` | `/dashboard/projects/{id}?range=1h\|4h\|12h\|24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
 | `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
 | `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |

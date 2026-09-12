@@ -500,3 +500,23 @@ def test_usable_scopes_match_chain_and_model_for_key_providers():
     # gemini is the multimodal workhorse — every lane it's chained for
     assert usable_scopes_for_provider("gemini") >= {"llm:chat", "llm:vision", "llm:audio"}
     assert usable_scopes_for_provider("nope-not-real") == frozenset()
+
+
+# ─── vision walks free providers only (2026-09-12) ───────────────────────────
+
+
+def test_free_first_walk_strips_paid_tail_for_vision_until_the_final_retry():
+    """Owner: "пусть будет долго, но бесплатно". vision is vera's bulk
+    backfill — a busy local slot or a dry free pool must mean "retry later",
+    never "pay deepseek now". The paid tail is reachable ONLY through the job
+    queue's final paid_only attempt; every other capability is untouched."""
+    from aibroker.routing.chains import FREE_WALK_CAPABILITIES, free_first_walk
+    chain = chain_for("vision")
+    walk = free_first_walk("vision", chain, paid_only=False)
+    assert not (set(walk) & KNOWN_PAID)
+    assert walk == [p for p in chain if p in KNOWN_FREE]      # order kept
+    assert free_first_walk("vision", chain, paid_only=True) == chain
+    assert has_paid_tail("vision") is True                      # final retry
+    smart = chain_for("chat:smart")
+    assert free_first_walk("chat:smart", smart, paid_only=False) == smart
+    assert {"vision"} == FREE_WALK_CAPABILITIES

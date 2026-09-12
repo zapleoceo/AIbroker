@@ -55,6 +55,7 @@ from aibroker.routing import (
     reserve_cost,
     scope_for,
 )
+from aibroker.routing.chains import free_first_walk
 from aibroker.routing.selector import (
     mark_cooldown,
     mark_dead,
@@ -198,7 +199,12 @@ def _call_timeout(capability: str, provider: str | None = None) -> float:
         # the coroutine with no provider context to log.
         from aibroker.config import get_settings
 
-        return get_settings().VISION_LOCAL_TIMEOUT_S + 30.0
+        s = get_settings()
+        # + the bounded wait for the single local slot (2026-09-12): the
+        # semaphore wait happens inside call_llm, so the wall ceiling must
+        # cover queue + model time or asyncio.wait_for would cut a healthy,
+        # merely queued request.
+        return s.VISION_LOCAL_TIMEOUT_S + s.VISION_LOCAL_QUEUE_WAIT_S + 30.0
     return _CALL_TIMEOUT_S
 
 
@@ -681,7 +687,7 @@ async def run_chat(
         )
 
     est_tokens = estimate_prompt_tokens(messages)
-    full_chain = chain_for(capability)
+    full_chain = free_first_walk(capability, chain_for(capability), paid_only=paid_only)
     if tools:
         full_chain = [provider for provider in full_chain if provider in TOOL_PROVIDERS
                       and (pinned_tool_provider is None or provider == pinned_tool_provider)]

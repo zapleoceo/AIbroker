@@ -406,7 +406,16 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
             f'<button type="submit" data-i18n data-en="save" data-ru="сохранить">save</button>'
             f'<button type="button" data-edit-toggle="p{p.id}" data-i18n '
             f'data-en="cancel" data-ru="отмена">cancel</button>'
-            f'</form></td></tr>'
+            f'</form> '
+            # delete lives in the edit row (one click to reveal, confirm on
+            # submit) — the same safe data-confirm pattern as key delete
+            f'<form class="inline" method="post" action="/dashboard/projects/{p.id}/delete"'
+            f' data-confirm="Delete project {esc(p.name)}? Its key stops working immediately;'
+            f' usage history is kept.">'
+            f'<button class="danger" type="submit" data-i18n '
+            f'data-en="delete project" data-ru="удалить проект">delete project</button>'
+            f'</form>'
+            f'</td></tr>'
         )
 
     now = datetime.now(UTC).replace(tzinfo=None)

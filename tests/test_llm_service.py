@@ -2383,3 +2383,40 @@ async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch
     # gemini was asked twice: once unfiltered (paid, cap-blocked), then free-only
     assert picked[0] == ("gemini", None)
     assert ("gemini", "free") in picked
+
+
+# ─── vision: paid providers only on the final paid_only retry (2026-09-12) ──
+
+
+async def _vision_walk(monkeypatch, *, paid_only: bool) -> list[str]:
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    picked: list[str] = []
+
+    async def fake_pick(provider, scope, **kw):
+        picked.append(provider)
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for",
+                        lambda cap: ["local", "gemini", "deepseek", "openai"])
+    await svc.run_chat(
+        project=SimpleNamespace(id=2, name="vera"), capability="vision",
+        messages=[{"role": "user", "content": "x"}], model=None, max_tokens=400,
+        temperature=0.1, response_format=None, workflow="media_vision",
+        paid_only=paid_only,
+    )
+    return picked
+
+
+async def test_vision_regular_walk_never_reaches_a_paid_provider(monkeypatch):
+    assert await _vision_walk(monkeypatch, paid_only=False) == ["local", "gemini"]
+
+
+async def test_vision_final_retry_still_reaches_the_paid_tail(monkeypatch):
+    """paid_only keeps the full chain; the free providers ahead of deepseek
+    are skipped at KEY selection (pick_and_reserve's tier predicate), which
+    this fake pick does not model — so assert reachability, not position."""
+    walk = await _vision_walk(monkeypatch, paid_only=True)
+    assert "deepseek" in walk and "openai" in walk

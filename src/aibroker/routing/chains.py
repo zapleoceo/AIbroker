@@ -318,6 +318,25 @@ def usable_scopes_for_provider(provider: str) -> frozenset[str]:
 PAID_PROVIDERS: frozenset[str] = frozenset({"deepseek", "anthropic", "openai"})
 
 
+# Capabilities whose regular walk is FREE providers only; the paid tail is
+# reachable solely through the job queue's final-retry paid_only escalation.
+# 2026-09-12 (owner: "пусть будет долго, но бесплатно"): vision is vera's
+# bulk backfill — hundreds of images a day that nobody waits on. A busy local
+# slot or a rate-limited free pool must mean "wait and retry", never "pay
+# deepseek now"; the paid tail exists so the 8th attempt still gets an
+# answer, not so the 1st one does. chat:smart/sales keep their paid anchors
+# — those are money lanes with a person waiting.
+FREE_WALK_CAPABILITIES: frozenset[str] = frozenset({"vision"})
+
+
+def free_first_walk(capability: str, chain: list[str], *, paid_only: bool) -> list[str]:
+    """`chain` minus the paid providers when `capability` is free-walk and
+    this is not the final paid_only attempt; otherwise `chain` unchanged."""
+    if paid_only or capability not in FREE_WALK_CAPABILITIES:
+        return chain
+    return [p for p in chain if p not in PAID_PROVIDERS]
+
+
 def has_paid_tail(capability: Capability) -> bool:
     """True if `capability`'s chain reaches a paid provider with a wired model —
     the only case where the job queue's final-retry paid_only escalation can do
