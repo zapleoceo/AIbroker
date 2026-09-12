@@ -225,28 +225,21 @@ def is_deepseek_big_json_prompt(
     return _prompt_chars(messages) >= _DEEPSEEK_JSON_EMPTY_CHARS
 
 
-def deepseek_model_for_json(
-    model: str | None,
-    response_format: dict[str, Any] | None,
-    messages: list[dict[str, Any]],
-) -> str | None:
-    """Which deepseek model to actually call for a (possibly JSON) request.
+# 2026-09-12: the "upgrade big JSON prompts to deepseek-v4-pro" escalation
+# (deepseek_model_for_json, 2026-07-21 → 09-12) is GONE. DeepSeek retires
+# v4-pro on 2026-09-14 (requests are routed to V4.1-Flash at flash pricing),
+# so the swap would have become a silent no-op that still BOOKED pro's 4x
+# price against the caps. And it no longer helped: on Stepan's real 112k-char
+# multi-turn JSON prompt V4.1-Flash and v4-pro both returned an all-whitespace
+# body (N=5 + N=1, both thinking modes). The free gemini rotation ahead of
+# deepseek serves that prompt 5/5 — deepseek is the fallback, not the fix.
+# is_deepseek_big_json_prompt stays: it still drives the savings-side chain
+# reorder (run_chat) and the thinking-keep condition below.
 
-    v4-flash empties json_object DETERMINISTICALLY once the prompt nears ~30k
-    chars — BOTH thinking modes (verified live on a real 51k-char Stepan reply
-    prompt: empty 4/4 with thinking, 4/4 without). The input is billed for
-    nothing and the answer only survives by falling through to the free tail.
-    v4-pro handles the same prompt (0/3 empty, valid JSON, ~4.6s no-thinking)
-    AND still hits the per-key prompt cache (cache-read priced at ~1/120th of
-    miss), so the static-catalog prefix stays cheap. So upgrade ONLY the big
-    JSON calls to pro; flash stays for everything else (3x cheaper, and it works
-    below the threshold). Caller must feed the RESULT into cost estimation so
-    the pro price is booked — see run_chat's use_model."""
-    if not model or "deepseek-v4-flash" not in model:
-        return model
-    if not is_deepseek_big_json_prompt(response_format, messages):
-        return model
-    return model.replace("deepseek-v4-flash", "deepseek-v4-pro")
+# Models that take DeepSeek's `thinking` body param. deepseek-flash (V4.1) is
+# the new name for the same hybrid family; deepseek-reasoner IS the thinking
+# mode and legacy names pre-date the param, so they are deliberately outside.
+_DEEPSEEK_HYBRID_PREFIXES = ("deepseek-v4", "deepseek-flash")
 
 
 class _DeepseekAdapter(ProviderAdapter):
@@ -287,7 +280,7 @@ class _DeepseekAdapter(ProviderAdapter):
         # Scoped to v4-*: deepseek-reasoner IS the thinking mode, and legacy
         # names pre-date the param.
         tail = model.split("/", 1)[-1]
-        if tail.startswith("deepseek-v4"):
+        if tail.startswith(_DEEPSEEK_HYBRID_PREFIXES):
             rf_now = kwargs.get("response_format") or {}
             keep_thinking = (
                 str(rf_now.get("type", "")).startswith("json")

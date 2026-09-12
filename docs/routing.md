@@ -364,6 +364,63 @@
 > verified accepted by gemini (a live probe reached 429, not a 400); the
 > transcription *output* awaits a gemini key with capacity (paid id=16 top-up).
 
+> **2026-09-12 (model refresh — DeepSeek V4.1, SambaNova gemma, gemini vision
+> rotation, mistral out)**. A live inventory of every provider's `/models` on
+> our own keys plus 7 days of `usage_log`, each move measured on the real
+> litellm path before shipping:
+>
+> - **deepseek → `deepseek-flash`** (DeepSeek-V4.1-Flash, released 09-10) on
+>   every lane, plus a NEW `vision` lane. `/models` on our keys lists only
+>   `deepseek-flash` and `deepseek-v4-pro`; `deepseek-v4-flash` is a temporary
+>   alias already served by V4.1 and **v4-pro is routed to V4.1-Flash from
+>   2026-09-14 04:00 UTC**. Half the price (off-peak $0.15/$0.60 per M vs
+>   $0.22/$0.66), 1M context, native vision. Verified live: text, json_object,
+>   an inline base64 image (747 prompt tokens for a 200 KB JPEG) and
+>   image+json_object. litellm has NO pricing entry for the new name, so
+>   `litellm_adapter` registers the off-peak rates (peak_pricing doubles them
+>   in the weekday windows — DeepSeek's own "off-peak = 50% of peak" rule).
+>   Side effect: litellm's v4-flash entry carried the PEAK rate as base, so
+>   v4-flash had been over-counted 2x around the clock.
+> - **The v4-pro big-JSON escalation is GONE** (the `run_chat` model-rewrite
+>   hook, 2026-07-21 → 09-12). Pro is retired, and on Stepan's REAL 112k-char
+>   multi-turn sales JSON (job 481469, replayed N=5 across both thinking
+>   modes) V4.1-Flash returns an all-whitespace body every time (finish=stop,
+>   29-438 tokens) — **and so does v4-pro** (N=1). gemini-3.5-flash-lite served
+>   the same job 5/5 valid in ~1.1s. Deepseek is the paid fallback on the money
+>   lanes, not the fix; the thinking-keep heuristic in `_DeepseekAdapter` is
+>   unchanged (no measurement favoured either mode) and now also matches the
+>   `deepseek-flash` name (`_DEEPSEEK_HYBRID_PREFIXES`).
+> - **Peak pricing is weekdays only.** DeepSeek's pricing page: "01:00-04:00
+>   and 06:00-10:00 UTC, Monday through Friday (all other hours are off-peak)".
+>   `DEEPSEEK_PEAK_WEEKDAYS` — Saturday/Sunday book flat.
+> - **sambanova: chat:fast/prefilter Llama-3.3-70B → `gemma-4-31B-it`, and
+>   vision added on it.** 7 days: sambanova 0 ok / 2087 errors — every Llama
+>   call 429 "currently experiencing high demand", and gpt-oss-120b,
+>   DeepSeek-V3.2 and MiniMax-M3 429 the same way. gemma-4-31B-it was the only
+>   free model that answered: valid JSON under json_object AND strict
+>   json_schema, and a correct description of a real image in 3.1s. 9 keys x
+>   20 req/day back in play. chat:smart/sales/code stay on DeepSeek-V3.2 (owner
+>   rule 2026-07-24: DeepSeek-family only on the money lanes).
+> - **gemini: vision rotation + gemini-3.5-flash.** Vision had no rotation, so
+>   every key's images hit 2.5-flash's single 20/day bucket (1351 ok / 2488
+>   errors in 7 days) while sibling buckets sat idle. Measured on 3 real
+>   images via the adapter path: 3.5-flash-lite 3/3 (1967ms), 3.5-flash 3/3
+>   (2009ms), 3.1-flash-lite 3/3 (3143ms), 3.6-flash 2/3 with a 29s call
+>   (excluded from vision — it would eat the 60s timeout), 2.5-flash 0/3
+>   (bucket exhausted). 3.5-flash also 5/5 valid JSON on the 112k sales prompt
+>   → added to the chat rotation. `MODEL_ROTATION["gemini"]["vision"]` is new.
+> - **mistral chained nowhere.** All 7 free keys answer every call with 429
+>   code 1300 and `x-ratelimit-limit-req-minute: 0` — the account's free
+>   tier is switched off, not busy (0 ok / 2174 errors in 7 days). Removed
+>   from chat:fast, chat:code, structured, prefilter, translate; the
+>   `DEFAULT_MODEL` entry stays for a one-line re-add.
+> - Not changed, for the record: zai `glm-4.6v-flash` (free vision) answered
+>   1 of 4 probes, the rest 429 "overloaded" — not a chain candidate; cohere
+>   trial keys are at their 1000 calls/month; the paid gemini key 16 429s
+>   "prepayment credits are depleted" (owner top-up); groq/cerebras have no
+>   newer free models on our keys (llama-4-scout is gone from groq's list).
+>   Probes: `deepseek` → `deepseek-flash`, `sambanova` → `gemma-4-31B-it`.
+
 > **2026-08-31 (local vision leads)**: `vision` became
 > `[local, gemini, openrouter, openai]`. Self-hosted Qwen3-VL-4B on this host
 > (compose service `vision-local`, upstream `llama-server`) now heads the chain.
@@ -570,8 +627,8 @@
 >   ~50k chars the thinking net stopped holding — v4-flash + json_object now
 >   empties even WITH thinking (verified live 4/4 empty on a real 51k-char
 >   reply prompt, both thinking modes). `run_chat` now upgrades big JSON
->   deepseek calls (json + prompt ≥ 24k chars) to v4-pro via
->   `deepseek_model_for_json`; flash stays for everything else (3× cheaper,
+>   deepseek calls (json + prompt ≥ 24k chars) to v4-pro via a model-rewrite
+>   hook in `run_chat` (REMOVED 2026-09-12, see below); flash stays for everything else (3× cheaper,
 >   works below the threshold). Chosen in `run_chat` (not the adapter) so
 >   `use_model` carries the pro model into cost estimation/booking — an
 >   adapter-side model swap would bill pro as flash. Pro still hits the
@@ -626,7 +683,7 @@
 >   `should_defer` is True — `run_chat` sets that flag when EITHER
 >   `peak_multiplier("deepseek", at) > 1.0` OR
 >   `is_deepseek_big_json_prompt(response_format, messages)` (the same
->   threshold `deepseek_model_for_json` uses for the pro escalation, factored
+>   threshold the (since-removed) pro escalation used, factored
 >   out so both decisions share one source of truth). Free gets first shot;
 >   deepseek still anchors the chain right before the paid tail, escalated to
 >   only when free genuinely fails — no reliability cost, pure savings. A
@@ -732,16 +789,16 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
-| `chat:fast` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare | `llm:chat` | **FREE-ONLY (2026-07-21, owner): no paid tail.** deepseek/anthropic/openai removed so the scarce deepseek budget is reserved for the chat:smart money lane. On fast the paid tail was ONLY ever deepseek (anthropic/openai never reached, 0 calls/7d); removing just deepseek would have shifted ~2969 calls/wk to anthropic-haiku (~6× pricier), so the whole tail is gone. fast = triage/simple followups → a saturated free pool retries (`has_paid_tail("chat:fast")` is now False, so no final-retry paid_only escalation). cloudflare = gpt-oss-120b. nvidia removed (kimi-k2.6 → 404). |
-| `chat:smart` | **deepseek** → gemini → sambanova → anthropic | `llm:chat` | **The one exception to free-first (2026-07-17, owner-approved, cap $0.50→$1):** Stepan's money lane leads with ONE strong model (deepseek v4-flash, hybrid thinking) for stable quality + warm per-account prompt cache (hit input $0.0028/M ≈ $0.0004/reply). **2026-07-21 quality prunes (owner request "keep only providers that give good answers"):** removed **mistral** (0 smart calls/7d, AuthError keys), **cohere** r7b (86% InvalidJSON), **openrouter** gemma-31b (0 ok ever), and — later — **gpt-oss-120b (cerebras/groq/cloudflare)** entirely: owner found its sales replies weak ("тупит") and those providers have nothing smarter (checked). Smart now runs only genuinely-smart models: deepseek → gemini-2.5-flash (free) → sambanova **DeepSeek-V3.2** (FREE deepseek-quality) → paid anthropic/openai. Accepted tradeoff: no free gpt-oss safety net → once deepseek's $1 cap + gemini/sambanova free quota are spent, smart hits the paid tail (higher cost) not a weak-but-free reply. gpt-oss stays PRIMARY on chat:fast.  **2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family models — `openai` (gpt-5) removed.** It was the last-resort tail and never earned its place: by the time the walk got past deepseek + free gemini/sambanova + anthropic, retrying is the honest outcome rather than reaching for the priciest model in the pool. **sambanova stays** because it qualifies on the MODEL, not the vendor — its chat:smart model IS `sambanova/DeepSeek-V3.2` on a free tier (deepseek quality at $0; it carried the lane through DeepSeek's own 2026-07-22 empty-body degradation, 111 successes at $0). Guarded by `test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models`, which checks the resolved model per provider, so re-pointing sambanova at a non-DeepSeek model fails the build instead of silently widening the lane. Paid tail is now deepseek + anthropic — `has_paid_tail` stays True and the monitor's paid-tail alert keeps working. |
+| `chat:fast` | cerebras → groq → gemini → cohere → openrouter → sambanova → zai → cloudflare | `llm:chat` | **FREE-ONLY (2026-07-21, owner): no paid tail.** deepseek/anthropic/openai removed so the scarce deepseek budget is reserved for the chat:smart money lane. On fast the paid tail was ONLY ever deepseek (anthropic/openai never reached, 0 calls/7d); removing just deepseek would have shifted ~2969 calls/wk to anthropic-haiku (~6× pricier), so the whole tail is gone. fast = triage/simple followups → a saturated free pool retries (`has_paid_tail("chat:fast")` is now False, so no final-retry paid_only escalation). cloudflare = gpt-oss-120b. nvidia removed (kimi-k2.6 → 404). |
+| `chat:smart` | **deepseek** → gemini → sambanova → anthropic | `llm:chat` | **The one exception to free-first (2026-07-17, owner-approved, cap $0.50→$1):** Stepan's money lane leads with ONE strong model (deepseek-flash since 2026-09-12 — V4.1; was v4-flash — hybrid thinking) for stable quality + warm per-account prompt cache (hit input $0.0028/M ≈ $0.0004/reply). **2026-07-21 quality prunes (owner request "keep only providers that give good answers"):** removed **mistral** (0 smart calls/7d, AuthError keys), **cohere** r7b (86% InvalidJSON), **openrouter** gemma-31b (0 ok ever), and — later — **gpt-oss-120b (cerebras/groq/cloudflare)** entirely: owner found its sales replies weak ("тупит") and those providers have nothing smarter (checked). Smart now runs only genuinely-smart models: deepseek → gemini-2.5-flash (free) → sambanova **DeepSeek-V3.2** (FREE deepseek-quality) → paid anthropic/openai. Accepted tradeoff: no free gpt-oss safety net → once deepseek's $1 cap + gemini/sambanova free quota are spent, smart hits the paid tail (higher cost) not a weak-but-free reply. gpt-oss stays PRIMARY on chat:fast.  **2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family models — `openai` (gpt-5) removed.** It was the last-resort tail and never earned its place: by the time the walk got past deepseek + free gemini/sambanova + anthropic, retrying is the honest outcome rather than reaching for the priciest model in the pool. **sambanova stays** because it qualifies on the MODEL, not the vendor — its chat:smart model IS `sambanova/DeepSeek-V3.2` on a free tier (deepseek quality at $0; it carried the lane through DeepSeek's own 2026-07-22 empty-body degradation, 111 successes at $0). Guarded by `test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models`, which checks the resolved model per provider, so re-pointing sambanova at a non-DeepSeek model fails the build instead of silently widening the lane. Paid tail is now deepseek + anthropic — `has_paid_tail` stays True and the monitor's paid-tail alert keeps working. |
 | `chat:sales` | **anthropic → gemini** → deepseek → sambanova | `llm:chat` | **Second exception to free-first (2026-07-23, owner-approved):** Stepan2's "smart LLM sales, no rigid script" lane. **anthropic claude-sonnet-5 LEADS** — the strongest model for open-ended persuasive replies — billed on its own **$5/day** key. gemini is SECOND (2026-08-26: free AND measurably better than deepseek on Stepan's real prompt — see `chains.py`); deepseek-v4-flash is the paid fallback after it; sambanova is the free tail. **openai deliberately not wired** (reserve the paid budget for Sonnet only). anthropic keeps its lead through both `deprioritize_for_json` (Sonnet is JSON-reliable, never sunk) and `deprioritize_deepseek_for_savings` (rewritten to move ONLY deepseek + the free tail that trails it — a provider AHEAD of deepseek is never touched). Prompt caching pays here: `apply_prompt_cache` marks the large stable system prefix and `_CACHE_STICKY_PROVIDERS` already pins anthropic per-project so the cache stays warm across replies. Reuses `llm:chat` scope (no key/project re-scoping); client opts in per-request via `?capability=chat:sales`. |
-| `chat:code` | cerebras → groq → openrouter → gemini → mistral → sambanova → cloudflare → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry. github removed 2026-07-10; anthropic RE-ADDED the same day (balance topped up) — the earlier "anthropic removed" here was stale. |
-| `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-v4-flash (thinking disabled) → anthropic (re-added 2026-07-10 after the top-up; `docs/providers.md` had it right, this row did not). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
+| `chat:code` | cerebras → groq → openrouter → gemini → sambanova → cloudflare → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry. github removed 2026-07-10; anthropic RE-ADDED the same day (balance topped up) — the earlier "anthropic removed" here was stale. |
+| `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-flash (V4.1 since 2026-09-12; thinking disabled) → anthropic (re-added 2026-07-10 after the top-up; `docs/providers.md` had it right, this row did not). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only** — `POST /v1/chat` returns **410 Gone** (all capabilities); use `POST /v1/jobs?capability=chat:deep` (or `/v1/deep`) + `GET /v1/jobs/{id}`. |
-| `prefilter` | cerebras → groq → gemini → mistral → cohere → openrouter → sambanova → zai → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras = gemma-4-31b (fast non-reasoning, 2026-07-10). github removed. |
-| `translate` | cerebras → mistral → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |
-| `structured` | groq → gemini → mistral → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
-| `vision` | gemini → openai | `llm:vision` | anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. openai is the paid fallback when gemini is RPM-exhausted. cloudflare tried and pulled same day 2026-07-04, see below. |
+| `prefilter` | cerebras → groq → gemini → cohere → openrouter → sambanova → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras = gemma-4-31b (fast non-reasoning, 2026-07-10). github removed. |
+| `translate` | cerebras → gemini → cohere → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |
+| `structured` | groq → gemini → cohere → openrouter → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
+| `vision` | **local** → gemini → sambanova → openrouter → deepseek → openai | `llm:vision` | **2026-09-12:** sambanova (free gemma-4-31B-it, verified on a real inline image) is a second free cloud pool after gemini; **deepseek-flash** (V4.1, native vision, ~$0.0002/image off-peak) is the paid tail — the first paid vision provider that actually holds keys (openai never had one). gemini now ROTATES vision across 2.5-flash / 3.5-flash-lite / 3.5-flash / 3.1-flash-lite (per-model free buckets). local leads since 2026-08-31. anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. cloudflare tried and pulled same day 2026-07-04, see below. |
 | `transcription` | **groq** → local → gemini → openai | `llm:audio` | **Reordered 2026-07-26 — local was chain-first since 07-18 and had to move.** Measured over 24h on this host: local **131-168 SECONDS** per transcription with **35 timeouts vs 23 successes**; groq does the same work in **753-1150 ms**, also free (~150x). local runs `WHISPER_CPU_THREADS=1` / `cpus=1.0` because the box has only 2 cores at load ~1.7 (raising it OOM'd before — see deploy-ops), so the slowness is structural. Leading with it burned up to the 180s `ASR_LOCAL_TIMEOUT_S` on EVERY request before falling through, and those fall-throughs drained groq's daily quota — after which callers got **no answer at all** (Stepan, 2026-07-26: local cooling + groq exhausted till 00:00 UTC + gemini rate-limited + **no key carries `llm:audio` for openai**, so the last resort is unreachable). local stays as the backstop for exactly the case it was added for (groq's daily quota spent), just not in front of it. An empty `local` transcript is still escalated rather than returned as a silent empty success; local output is still cleaned by a chat:fast correction pass. `/v1/transcribe` route. |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 
@@ -1281,7 +1338,7 @@ zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
 > request shape our generic embed path doesn't send; worth a dedicated
 > integration later, not blocking this fix.
 
-**Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`): DeepSeek
+**Peak/valley surcharge** (`providers/peak_pricing.py:peak_multiplier`; weekdays only since 2026-09-12 — `DEEPSEEK_PEAK_WEEKDAYS`, DeepSeek's pricing page says "Monday through Friday"): DeepSeek
 charges 2x during peak UTC hours (01:00–04:00 and 06:00–10:00) from mid-July
 2026. `estimate_llm_cost` multiplies the base price by that factor, so the
 recorded cost and every $-cap reflect the real peak bill — the same daily budget

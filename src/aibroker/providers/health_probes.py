@@ -201,7 +201,7 @@ _PROBES = {
     # on hidden reasoning (see _DeepseekAdapter).
     "deepseek": lambda k, _acc=None: ("POST", "https://api.deepseek.com/chat/completions",
                             _bearer(k),
-                            {"model": "deepseek-v4-flash",
+                            {"model": "deepseek-flash",  # V4.1, 2026-09-12
                              "messages": [{"role": "user", "content": "."}],
                              "max_tokens": 1,
                              "thinking": {"type": "disabled"}}),
@@ -240,7 +240,10 @@ _PROBES = {
     # 2026-07-04: confirmed live — 200 OK + x-ratelimit-limit-requests-day header.
     "sambanova": lambda k, _acc=None: ("POST", "https://api.sambanova.ai/v1/chat/completions",
                              _bearer(k),
-                             {"model": "Meta-Llama-3.3-70B-Instruct",
+                             # 2026-09-12: gemma-4-31B-it — the Llama pool
+                             # 429s "high demand" on every call (see
+                             # DEFAULT_MODEL); probe what we actually route to.
+                             {"model": "gemma-4-31B-it",
                               "messages": [{"role": "user", "content": "."}],
                               "max_tokens": 1}),
     # openai — probe with the cheapest current model. A revoked key 401s

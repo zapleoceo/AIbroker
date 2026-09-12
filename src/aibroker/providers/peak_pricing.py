@@ -17,6 +17,11 @@ DEEPSEEK_PEAK_FROM = date(2026, 7, 15)
 # Peak UTC hour buckets: 01:00–04:00 → {1,2,3}; 06:00–10:00 → {6,7,8,9}.
 DEEPSEEK_PEAK_HOURS_UTC = frozenset({1, 2, 3, 6, 7, 8, 9})
 DEEPSEEK_PEAK_FACTOR = 2.0
+# 2026-09-12: DeepSeek's pricing page now reads "Peak hours are 01:00 - 04:00
+# and 06:00 - 10:00 UTC, Monday through Friday (all other hours are off-peak)".
+# Saturday/Sunday are flat all day — booking 2x there would over-count the
+# bill and burn the daily caps twice as fast on weekends. Monday=0 … Friday=4.
+DEEPSEEK_PEAK_WEEKDAYS = frozenset({0, 1, 2, 3, 4})
 
 
 def peak_multiplier(provider: str, at: datetime | None = None) -> float:
@@ -29,6 +34,7 @@ def peak_multiplier(provider: str, at: datetime | None = None) -> float:
     if (
         provider == "deepseek"
         and now.date() >= DEEPSEEK_PEAK_FROM
+        and now.weekday() in DEEPSEEK_PEAK_WEEKDAYS
         and now.hour in DEEPSEEK_PEAK_HOURS_UTC
     ):
         return DEEPSEEK_PEAK_FACTOR

@@ -44,7 +44,29 @@ litellm.register_model({
         "output_cost_per_token": 0.0,
         "litellm_provider": "voyage",
         "mode": "embedding",
-    }
+    },
+    # 2026-09-12: deepseek-flash (DeepSeek-V4.1-Flash, released 2026-09-10) is
+    # absent from this litellm version's map, so without this entry every
+    # deepseek call would book $0 and blind the caps. Rates are the OFF-PEAK
+    # list prices ($0.15/M miss, $0.003/M cache hit, $0.60/M out); peak_pricing
+    # doubles them in the weekday peak windows, which is exactly DeepSeek's
+    # "off-peak = 50% of peak" rule. NB litellm's own deepseek-v4-flash entry
+    # carried the PEAK rate as base ($0.44/M), so with the multiplier on top
+    # v4-flash was over-counted 2x around the clock — this entry fixes that
+    # as a side effect of the migration. Images are tokenised at <=1024
+    # tokens each and billed as input, so no separate image price is needed.
+    "deepseek/deepseek-flash": {
+        "input_cost_per_token": 0.00000015,
+        "cache_read_input_token_cost": 0.000000003,
+        "output_cost_per_token": 0.0000006,
+        "max_input_tokens": 1_000_000,
+        "max_output_tokens": 384_000,
+        "litellm_provider": "deepseek",
+        "mode": "chat",
+        "supports_vision": True,
+        "supports_response_schema": True,
+        "supports_prompt_caching": True,
+    },
 })
 
 # Map: provider name → default model per capability. Used when the caller
@@ -137,11 +159,29 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # vs chat's $0.28/M. Prod track record: 482 Stepan calls, avg 10.4k-token
     # prompts, zero EmptyBody (vs 1590 on deepseek-chat over the same week).
     # deepseek-coder is gone → chat:code also uses v4-flash.
-    "deepseek": {"chat:fast": "deepseek/deepseek-v4-flash",
-                 "chat:smart": "deepseek/deepseek-v4-flash",
-                 "chat:sales": "deepseek/deepseek-v4-flash",
-                 "chat:edit": "deepseek/deepseek-v4-flash",
-                 "chat:code": "deepseek/deepseek-v4-flash"},
+    # 2026-09-12: → deepseek-flash (DeepSeek-V4.1-Flash, released 09-10). The
+    # /models endpoint on our keys lists ONLY deepseek-flash and deepseek-v4-pro;
+    # deepseek-v4-flash is a temporary alias already served by V4.1, and v4-pro
+    # is routed to V4.1-Flash from 2026-09-14 04:00 UTC (DeepSeek changelog).
+    # Half the price (off-peak $0.15/$0.60 vs $0.22/$0.66 per M), native
+    # vision, 1M context. Verified live on a paid key: text, json_object, an
+    # inline base64 image (747 prompt tokens for a 200 KB JPEG), and
+    # image+json_object all 200 with thinking disabled. Measured on Stepan's
+    # REAL 112k-char multi-turn sales JSON (N=5 across both thinking modes):
+    # V4.1-Flash returns an all-whitespace body every time (finish=stop,
+    # 29-438 tokens) — and so does v4-pro — while gemini-3.5-flash-lite is
+    # 5/5 valid. So deepseek stays the paid FALLBACK behind gemini on the money
+    # lanes (unchanged since 08-26); the v4-pro "big JSON" escalation is gone
+    # because pro fails the same way and is being retired anyway.
+    "deepseek": {"chat:fast": "deepseek/deepseek-flash",
+                 "chat:smart": "deepseek/deepseek-flash",
+                 "chat:sales": "deepseek/deepseek-flash",
+                 "chat:edit": "deepseek/deepseek-flash",
+                 "chat:code": "deepseek/deepseek-flash",
+                 # Paid vision tail (~$0.0002/image off-peak). Vision ran 8%
+                 # success for 14 days on free quota alone; this is the first
+                 # paid vision provider that actually has keys (openai has 0).
+                 "vision": "deepseek/deepseek-flash"},
     # 2026-07-16: openai/gpt-oss-120b:free DELISTED by OpenRouter (404
     # NotFoundError, 48 errs/75min — same fate as llama-3.2-vision earlier).
     # All chat lanes moved to google/gemma-4-31b-it:free: verified live on our
@@ -222,11 +262,26 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # a FREE deepseek-quality node (rate-limited free quota, walks over when dry).
     # fast/prefilter stay on the faster Llama-3.3-70B (V3.2 is slower; fast lane
     # doesn't need deepseek depth). MiniMax-M2.7 exists but is payment-gated for us.
-    "sambanova": {"chat:fast": "sambanova/Meta-Llama-3.3-70B-Instruct",
+    # 2026-09-12: chat:fast/prefilter Llama-3.3-70B → gemma-4-31B-it, and
+    # vision added on the same model. usage_log over 7 days: sambanova 0 ok /
+    # 2087 errors — every Llama call 429 "Meta-Llama-3.3-70B-Instruct-8k is
+    # currently experiencing high demand", and live probes got the SAME
+    # oversubscription 429 from gpt-oss-120b, DeepSeek-V3.2 and MiniMax-M3.
+    # gemma-4-31B-it was the only free model that answered: 200 in 1.5s on
+    # plain text, valid JSON under BOTH json_object and strict json_schema
+    # (litellm confirms response_format is a supported param here), and a
+    # correct one-sentence description of a real inline base64 image in 3.1s.
+    # That turns 9 idle keys x 20 req/day back into ~180 free calls/day, and
+    # gives vision a second free cloud pool. chat:smart/sales/code stay on
+    # DeepSeek-V3.2 by the owner's 2026-07-24 rule (only gemini/anthropic/
+    # DeepSeek-family models on the money lanes) — it currently 429s too, and
+    # falls through harmlessly.
+    "sambanova": {"chat:fast": "sambanova/gemma-4-31B-it",
                   "chat:smart": "sambanova/DeepSeek-V3.2",
                   "chat:sales": "sambanova/DeepSeek-V3.2",
                   "chat:code": "sambanova/DeepSeek-V3.2",
-                  "prefilter": "sambanova/Meta-Llama-3.3-70B-Instruct"},
+                  "prefilter": "sambanova/gemma-4-31B-it",
+                  "vision": "sambanova/gemma-4-31B-it"},
     # 2026-07-10: GitHub Models REMOVED entirely. Its free tier is tiny (~150
     # req/day on 1 key) and its reset window doesn't align with UTC midnight, so
     # the one key sat exhausted — 155 attempts / 0 success / all 429 on the last
@@ -315,13 +370,34 @@ def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] 
 #     gemini-flash-latest       1/5 - ServiceUnavailable
 #     gemini-3.7-flash          3/5 - ServiceUnavailable (still stabilising)
 #     gemini-3-flash-preview    4/5 - ServiceUnavailable, and a 6.4s median
+#
+# 2026-09-12: gemini-3.5-flash ADDED to the chat rotation and a VISION rotation
+# introduced. Vision had no rotation at all, so every key's vision traffic
+# hammered gemini-2.5-flash's single 20/day bucket (7 days: 1351 ok / 2488
+# errors, almost all RateLimit) while the other flash buckets on the same key
+# sat idle. Measured through the real litellm path (adapter-prepared kwargs)
+# on 3 real inline images x each model, and gemini-3.5-flash on Stepan's real
+# 112k-char sales JSON (N=5, json_object):
+#     vision: 3.5-flash-lite 3/3 median 1967ms   3.5-flash 3/3 2009ms
+#             3.1-flash-lite 3/3 3143ms          3.6-flash 2/3 (one 29s call)
+#             2.5-flash 0/3 — its bucket was already exhausted on every key
+#     JSON:   3.5-flash 5/5 valid, median 2021ms (control 3.5-flash-lite 5/5)
+# 3.6-flash is EXCLUDED from vision (the 29s outlier would eat the 60s cloud
+# vision timeout) but stays in chat, where it was measured fine on 08-26.
+# gemma-4-31b-it on the Gemini API 500'd on the image — not included.
+_GEMINI_CHAT_ROTATION = ("gemini/gemini-3.5-flash-lite",
+                         "gemini/gemini-3.6-flash",
+                         "gemini/gemini-3.1-flash-lite",
+                         "gemini/gemini-3.5-flash")
+_GEMINI_VISION_ROTATION = ("gemini/gemini-3.5-flash-lite",
+                           "gemini/gemini-3.5-flash",
+                           "gemini/gemini-3.1-flash-lite")
 MODEL_ROTATION: dict[str, dict[str, tuple[str, ...]]] = {
     "gemini": {
-        cap: ("gemini/gemini-3.5-flash-lite",
-              "gemini/gemini-3.6-flash",
-              "gemini/gemini-3.1-flash-lite")
-        for cap in ("chat:fast", "chat:smart", "chat:sales", "chat:code",
-                    "chat:edit", "structured", "prefilter", "translate")
+        **dict.fromkeys(("chat:fast", "chat:smart", "chat:sales", "chat:code",
+                         "chat:edit", "structured", "prefilter", "translate"),
+                        _GEMINI_CHAT_ROTATION),
+        "vision": _GEMINI_VISION_ROTATION,
     },
 }
 

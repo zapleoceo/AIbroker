@@ -428,7 +428,7 @@ async def _capture_deepseek_model(monkeypatch, messages, response_format):
     monkeypatch.setattr(svc, "_record_json_miss",
                         lambda **kw: _wrap(svc._Flow.NEXT_PROVIDER))
     monkeypatch.setattr(svc, "model_for",
-                        lambda p, c: "deepseek/deepseek-v4-flash")
+                        lambda p, c: "deepseek/deepseek-flash")
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
 
     await svc.run_chat(
@@ -443,19 +443,22 @@ async def _wrap(flow):
     return flow, None
 
 
-async def test_run_chat_upgrades_deepseek_to_pro_for_big_json(monkeypatch):
+async def test_run_chat_never_rewrites_the_deepseek_model(monkeypatch):
+    """2026-09-12: run_chat used to swap deepseek-v4-flash for v4-pro on big
+    JSON prompts (2026-07-21 → 09-12). DeepSeek retires v4-pro on 09-14 (routed
+    to V4.1-Flash at flash pricing) and on Stepan's real 112k-char prompt pro
+    emptied exactly like flash, so the swap would only have booked a 4x price
+    for the same answer. The resolved model must now reach call_llm untouched
+    for every prompt shape — big JSON included."""
     big = [{"role": "system", "content": "x" * 25_000}, {"role": "user", "content": "hi"}]
-    seen = await _capture_deepseek_model(monkeypatch, big, {"type": "json_object"})
-    assert seen == ["deepseek/deepseek-v4-pro"]
-
-
-async def test_run_chat_keeps_deepseek_flash_for_small_or_plain(monkeypatch):
+    assert await _capture_deepseek_model(
+        monkeypatch, big, {"type": "json_object"}) == ["deepseek/deepseek-flash"]
     small = [{"role": "user", "content": "halo"}]
     assert await _capture_deepseek_model(
-        monkeypatch, small, {"type": "json_object"}) == ["deepseek/deepseek-v4-flash"]
+        monkeypatch, small, {"type": "json_object"}) == ["deepseek/deepseek-flash"]
     big_plain = [{"role": "system", "content": "x" * 25_000}]
     assert await _capture_deepseek_model(
-        monkeypatch, big_plain, None) == ["deepseek/deepseek-v4-flash"]
+        monkeypatch, big_plain, None) == ["deepseek/deepseek-flash"]
 
 
 # ─── deepseek savings-side chain reorder (peak hours / big JSON) ────────────

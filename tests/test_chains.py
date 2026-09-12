@@ -145,8 +145,8 @@ def test_chat_fast_is_free_only():
 
 def test_vision_only_vision_providers():
     chain = chain_for("vision")
-    # Cerebras / groq / DS don't do vision
-    forbidden = {"cerebras", "groq", "deepseek", "voyage"}
+    # Cerebras / groq don't do vision (deepseek does since V4.1-Flash, 2026-09-12)
+    forbidden = {"cerebras", "groq", "voyage", "mistral", "cohere", "zai"}
     assert not (set(chain) & forbidden)
 
 
@@ -177,7 +177,32 @@ def test_vision_leads_with_local():
     timeout before falling through. No such free-and-fast option exists here."""
     chain = chain_for("vision")
     assert chain[0] == "local"
-    assert chain[1:] == ["gemini", "openrouter", "openai"]
+    assert chain[1:] == ["gemini", "sambanova", "openrouter", "deepseek", "openai"]
+
+
+def test_vision_free_pools_precede_the_paid_tail():
+    """2026-09-12: sambanova (free gemma-4-31B-it) joins the free cloud pool
+    after gemini; deepseek-flash (native vision, paid, ~$0.0002/image) becomes
+    the FIRST paid provider that actually holds keys — openai never had a
+    vision key, so the old "paid fallback" was a no-op. Free-first must hold:
+    every free provider ahead of every paid one, and has_paid_tail flips on
+    so the job queue's final-retry paid_only escalation can reach it."""
+    chain = chain_for("vision")
+    last_free = max(chain.index(p) for p in chain if p in KNOWN_FREE)
+    first_paid = min(chain.index(p) for p in chain if p in KNOWN_PAID)
+    assert last_free < first_paid
+    assert chain.index("sambanova") < chain.index("deepseek")
+    assert has_paid_tail("vision") is True
+
+
+def test_mistral_is_chained_nowhere():
+    """2026-09-12: every mistral free key answers 429 code 1300 with
+    `x-ratelimit-limit-req-minute: 0` — the account's free tier is switched
+    OFF, not busy (7 days: 0 ok / 2174 errors). A dead provider in five chains
+    is pure wasted latency and attempt budget, so it is chained nowhere until
+    the owner re-activates La Plateforme. The DEFAULT_MODEL entry stays."""
+    for capability, chain in CAPABILITY_CHAINS.items():
+        assert "mistral" not in chain, capability
 
 
 def test_vision_has_free_openrouter_fallback():

@@ -25,6 +25,19 @@ def test_deepseek_offpeak_hours_flat(hour):
     assert peak_multiplier("deepseek", _dt(hour)) == 1.0
 
 
+@pytest.mark.parametrize("day", [18, 19])   # 2026-07-18 Sat, 07-19 Sun
+def test_weekend_is_flat_even_in_peak_hours(day):
+    """2026-09-12: DeepSeek's pricing page reads "01:00-04:00 and 06:00-10:00
+    UTC, Monday through Friday (all other hours are off-peak)". Booking 2x on a
+    Saturday would over-count the bill and burn the daily caps twice as fast."""
+    assert peak_multiplier("deepseek", _dt(2, day=day)) == 1.0
+    assert peak_multiplier("deepseek", _dt(7, day=day)) == 1.0
+
+
+def test_friday_peak_still_doubles():
+    assert peak_multiplier("deepseek", _dt(2, day=17)) == 2.0   # 2026-07-17 Fri
+
+
 def test_dormant_before_start_date():
     """Before mid-July the surcharge doesn't exist yet — always flat."""
     before = DEEPSEEK_PEAK_FROM - timedelta(days=1)

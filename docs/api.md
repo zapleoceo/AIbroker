@@ -104,7 +104,7 @@ production and was reverted. If you want the reasoning instead of the JSON
 guarantee, simply omit `response_format` on this lane.
 
 `translate` routes to small fast non-reasoning models first
-(mistral-small → gemini-flash → cohere-r7b → groq), tuned for the "translate,
+(cerebras gemma-4 → gemini-flash → cohere-r7b → groq), tuned for the "translate,
 don't answer" task under a tight client timeout. Identical `translate` and
 `prefilter` requests are served from an in-process exact-match response
 cache (`services/response_cache.py`) — repeated inputs skip the LLM

@@ -71,18 +71,36 @@ computed and discarded:
 | local (self-hosted, this host) | — | — | — | — | **Qwen3-VL-4B Q4_K_M via llama.cpp — leads the vision chain** (also faster-whisper for transcription, not in this table) | — |
 | **cerebras** | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
 | **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — | — |
-| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | — |
-| **deepseek** | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | deepseek-v4-flash | — | — |
+| **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash (+ rotation 3.5-flash-lite / 3.5-flash / 3.1-flash-lite, 2026-09-12) | — |
+| **deepseek** | deepseek-flash | deepseek-flash | deepseek-flash | deepseek-flash | deepseek-flash (paid tail, 2026-09-12) | — |
 | **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | **claude-sonnet-5** | claude-sonnet-5 | claude-sonnet-5 | — |
 | **openai** | gpt-5-mini | gpt-5 | — | gpt-5 | gpt-5-mini | — |
-| **mistral** | mistral-small-latest | mistral-large-latest | — | codestral-latest | — | — |
+| **mistral** (chained nowhere since 2026-09-12 — free tier at 0 RPM) | mistral-small-latest | mistral-large-latest | — | codestral-latest | — | — |
 | **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | — | command-r7b-12-2024 | — | embed-english-v3.0 |
-| **sambanova** | Meta-Llama-3.3-70B-Instruct | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | — | — |
+| **sambanova** | gemma-4-31B-it | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | gemma-4-31B-it | — |
 | **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
 | **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — | — |
 | **zai** | glm-4.7-flash | — | — | — | — | — |
 | **voyage** | — | — | — | — | — | voyage-4 |
+
+2026-09-12 — model refresh from a live `/models` inventory on our own keys
+(details and every measurement in `docs/routing.md`, "2026-09-12"):
+
+- **deepseek → `deepseek-flash`** (DeepSeek-V4.1-Flash, 09-10): the only flash
+  model DeepSeek lists on our keys; v4-pro is retired 09-14. Half the price,
+  native vision — deepseek is now the paid tail of `vision`. Pricing is
+  registered in `litellm_adapter` (litellm's map lacks the name) at the
+  off-peak rate; peak pricing is now weekdays only. The v4-pro big-JSON
+  escalation is removed (pro empties the same way on the real prompt).
+- **sambanova → `gemma-4-31B-it`** on chat:fast / prefilter / vision: the only
+  free model there that is not 429 "high demand" (0 ok / 2087 err in 7 days
+  on Llama). JSON (json_object + json_schema) and images verified live.
+- **gemini**: `vision` gets its own rotation (3.5-flash-lite / 3.5-flash /
+  3.1-flash-lite); 3.5-flash joins the chat rotation. Measured N=3 images,
+  N=5 JSON on the real 112k-char sales prompt.
+- **mistral** is chained nowhere: every free key returns
+  `x-ratelimit-limit-req-minute: 0` (tier switched off). Re-add is one line.
 
 2026-08-16 — two model moves, both driven by live probes rather than release
 notes, and one non-move:

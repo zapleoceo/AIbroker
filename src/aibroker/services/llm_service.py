@@ -19,7 +19,7 @@ from aibroker.crypto import decrypt
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers import call_llm
-from aibroker.providers.adapters import deepseek_model_for_json, is_deepseek_big_json_prompt
+from aibroker.providers.adapters import is_deepseek_big_json_prompt
 from aibroker.providers.context_limits import (
     MIN_LEARNABLE_CEILING,
     estimate_prompt_tokens,
@@ -695,7 +695,7 @@ async def run_chat(
     # though gemini/sambanova already serve the same JSON for $0 — fine most
     # of the time, but not during deepseek's own peak-pricing hours (2x, see
     # peak_pricing.py) or on a big-JSON prompt that would otherwise force the
-    # pricier v4-pro escalation (deepseek_model_for_json). 2026-07-22: v4-pro
+    # deepseek empty-body failure mode (see adapters.py). 2026-07-22: v4-pro
     # was 92.6% of stepan2's whole daily spend, and 63.8% of that day's
     # deepseek cost landed in its own peak hours (fewer calls than off-peak,
     # yet more cost) — free providers already validated on the same big
@@ -780,13 +780,6 @@ async def run_chat(
                 use_model = pool[(rotation_base + attempt_in_provider) % len(pool)]
             if not use_model:
                 break  # provider can't serve this capability → next provider
-            if provider == "deepseek":
-                # Big JSON prompts empty deepseek-v4-flash's json_object body
-                # (DeepSeek bug) → upgrade to v4-pro so the call yields valid
-                # JSON. Done HERE (not in the adapter) so use_model carries the
-                # real model into cost estimation/booking — an adapter-side swap
-                # would bill pro as flash. No-op below the size/JSON threshold.
-                use_model = deepseek_model_for_json(use_model, response_format, messages)
             flow, outcome = await _run_attempt(
                 key=key, project=project, provider=provider, use_model=use_model,
                 capability=capability, messages=messages, model=model,

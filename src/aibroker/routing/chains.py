@@ -34,9 +34,18 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # the moment the first 5 free providers were saturated, even though 3+
     # more free providers (all confirmed live) were still untried further
     # down the chain. Explicit choice: slow-but-free beats fast-but-paid.
+    # 2026-09-12: mistral REMOVED from every chain it was in (chat:fast,
+    # chat:code, structured, prefilter, translate). All 7 free keys answer
+    # every call with 429 code 1300 "Rate limit exceeded" and the response
+    # header `x-ratelimit-limit-req-minute: 0` — the account's free tier has a
+    # ZERO requests-per-minute allowance, i.e. it is switched off, not busy.
+    # 7 days of usage_log: 0 ok / 2174 errors, ~150ms of dead latency each,
+    # and 5 wasted attempts per JSON walk. DEFAULT_MODEL keeps its entry
+    # ("known but not chained", like cloudflare vision) so re-adding is a
+    # one-line change once the owner re-activates La Plateforme's free tier.
     "chat:fast": [
         "cerebras", "groq", "gemini",
-        "mistral", "cohere",
+        "cohere",
         "openrouter",
         "sambanova", "zai",
         # 2026-07-07: cloudflare (gpt-oss-120b) — confirmed live with the
@@ -138,7 +147,6 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     ],
     "chat:code": [
         "cerebras", "groq", "openrouter", "gemini",
-        "mistral",
         "sambanova",
         "cloudflare",
         # 2026-07-10: anthropic re-added (balance topped up).
@@ -172,7 +180,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # zai prefilter attempt was a guaranteed billed-but-unusable InvalidJSON.
     "prefilter": [
         "cerebras", "groq", "gemini",
-        "mistral", "cohere",
+        "cohere",
         "openrouter",
         "sambanova",
         "cloudflare",
@@ -187,7 +195,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # (unlike cerebras gpt-oss, which was excluded here for its ~16s think time)
     # at cerebras speed, free. Translate is low-volume so cerebras' 5 RPM is fine.
     "translate": [
-        "cerebras", "mistral", "gemini", "cohere", "groq",
+        "cerebras", "gemini", "cohere", "groq",
     ],
     # 2026-07-01: cerebras dropped. Its gpt-oss returns HTTP-200 but malformed
     # JSON on structured requests (~4.6k/wk InvalidJSON) — every one wasted a
@@ -195,7 +203,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # so it stays.
     "structured": [
         "groq", "gemini",
-        "mistral", "cohere",
+        "cohere",
         "openrouter",
         # 2026-07-10: anthropic re-added (balance topped up).
         "anthropic", "openai",
@@ -228,7 +236,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # (162 images arrive in one hour, ~3x what one serialized worker clears)
     # and for anything local can't take, e.g. an image passed by remote URL
     # rather than inline base64.
-    "vision": ["local", "gemini", "openrouter", "openai"],
+    # 2026-09-12: sambanova (free gemma-4-31B-it, 9 keys x 20/day, verified on
+    # a real inline image) slotted after gemini as a second free cloud pool,
+    # and deepseek (deepseek-flash, native vision, ~$0.0002/image off-peak)
+    # added as the paid tail AHEAD of openai — openai has never had a vision
+    # key here, so until now the "paid fallback" was a no-op and the chain
+    # ended at openrouter's 50/day account cap. Order stays free-first;
+    # deepseek spends from the same per-key daily caps as chat.
+    "vision": ["local", "gemini", "sambanova", "openrouter", "deepseek", "openai"],
     # 2026-07-18: "local" (self-hosted faster-whisper on this host) was put
     # FIRST — free, private, no external rate limit, so a request never waits on
     # groq's daily Whisper quota. 2026-07-26: MOVED BEHIND groq. On this box it
@@ -392,8 +407,8 @@ def deprioritize_deepseek_for_savings(chain: list[str], *, should_defer: bool) -
     """Sink deepseek behind any FREE provider that already follows it in
     `chain`, when `should_defer` is True — the caller decides why (deepseek's
     own DeepSeek-announced peak-hour 2x surcharge, see providers/peak_pricing.
-    py, and/or a big-JSON prompt that would otherwise force the pricier v4-pro
-    escalation, see providers/adapters.deepseek_model_for_json). Only
+    py, and/or a big-JSON prompt of the size that empties DeepSeek's body, see
+    providers/adapters.is_deepseek_big_json_prompt). Only
     `chat:smart` puts deepseek at the HEAD of the chain (its cache-warm-anchor
     design, 2026-07-17) — every other chain already positions deepseek after
     its free tier, so this is a no-op there by construction (checked via "does

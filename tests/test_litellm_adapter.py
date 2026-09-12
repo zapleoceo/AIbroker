@@ -248,16 +248,51 @@ def test_default_model_has_voyage_embedding():
     assert "embedding" in DEFAULT_MODEL["voyage"]
 
 
-def test_deepseek_is_on_v4_flash_everywhere():
+def test_deepseek_is_on_v41_flash_everywhere():
     """2026-07-17: deepseek-chat is deprecated 2026-07-24 — every deepseek slot
     moves to v4-flash. Safe ONLY because _DeepseekAdapter disables thinking on
     v4-* (the 07-10 regression was the thinking DEFAULT eating max_tokens, not
     the model; confirmed live: valid JSON at max_tokens=120 with the knob).
     This test + test_deepseek_v4_disables_thinking guard both halves — moving
-    the model without the knob resurrects the ~49% InvalidJSON storm."""
+    the model without the knob resurrects the ~49% InvalidJSON storm.
+    2026-09-12: the slot is now `deepseek-flash` (V4.1-Flash; the only flash
+    model DeepSeek's /models lists on our keys, v4-flash is a temporary alias)
+    and it gained a vision lane. The thinking guard for the new name is
+    test_deepseek_flash_v41_is_treated_as_the_same_hybrid_family."""
     for cap, model in DEFAULT_MODEL["deepseek"].items():
-        assert model == "deepseek/deepseek-v4-flash", cap
+        assert model == "deepseek/deepseek-flash", cap
+    assert "vision" in DEFAULT_MODEL["deepseek"]
     assert "deepseek-chat" not in str(DEFAULT_MODEL["deepseek"])
+    assert "v4-pro" not in str(DEFAULT_MODEL["deepseek"])
+
+
+def test_deepseek_flash_is_priced_off_peak_base():
+    """deepseek-flash is missing from litellm's map on this version; without
+    our register_model entry every call would book $0 and blind the caps. The
+    registered base must be the OFF-PEAK list price, because peak_pricing
+    multiplies by 2 in the weekday peak windows (DeepSeek: off-peak = 50% of
+    peak) — a peak-rate base would double-count, as litellm's own v4-flash
+    entry did."""
+    from datetime import UTC, datetime
+    off = estimate_llm_cost("deepseek/deepseek-flash", 1_000_000, 1_000_000,
+                            at=datetime(2026, 9, 14, 12, 0, tzinfo=UTC))  # Monday noon
+    assert off == pytest.approx(0.15 + 0.60)
+    peak = estimate_llm_cost("deepseek/deepseek-flash", 1_000_000, 1_000_000,
+                             at=datetime(2026, 9, 14, 2, 0, tzinfo=UTC))   # Monday 02:00
+    assert peak == pytest.approx(2 * off)
+
+
+def test_gemini_rotations_are_measured_sets():
+    """2026-09-12: vision got its own rotation (the primary 2.5-flash bucket
+    was exhausted on every key while 3 sibling buckets sat idle) and
+    3.5-flash joined chat. 3.6-flash is deliberately NOT in vision — one of
+    three measured calls took 29s against a 60s cloud vision timeout."""
+    from aibroker.providers.litellm_adapter import rotation_for
+    assert set(rotation_for("gemini", "vision")) == {
+        "gemini/gemini-3.5-flash-lite", "gemini/gemini-3.5-flash",
+        "gemini/gemini-3.1-flash-lite"}
+    assert "gemini/gemini-3.5-flash" in rotation_for("gemini", "chat:smart")
+    assert model_for("gemini", "vision") not in rotation_for("gemini", "vision")
 
 
 def test_gemini_smart_is_flash_not_starved_pro():

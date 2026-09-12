@@ -6,7 +6,6 @@ import json
 from aibroker.providers.adapters import (
     ProviderAdapter,
     adapter_for,
-    deepseek_model_for_json,
     is_deepseek_big_json_prompt,
 )
 
@@ -46,6 +45,24 @@ def test_deepseek_v4_disables_thinking():
     kwargs = {}
     adapter_for("deepseek").prepare("deepseek/deepseek-v4-pro", kwargs)
     assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_flash_v41_is_treated_as_the_same_hybrid_family():
+    """2026-09-12: DeepSeek-V4.1-Flash ships under the NEW name deepseek-flash
+    (no "v4" in it). It is the same hybrid thinking-by-default family, so the
+    thinking knob must apply — a prefix check on "deepseek-v4" alone would have
+    silently re-enabled thinking on every call after the rename and brought
+    back the 2026-07-10 empty-JSON regression. Both the disable path and the
+    thinking-keep path must match the v4 behaviour exactly."""
+    kwargs: dict = {}
+    adapter_for("deepseek").prepare("deepseek/deepseek-flash", kwargs)
+    assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    keep: dict = {"messages": [{"role": "system", "content": "x" * 25_000},
+                               {"role": "user", "content": "hi"}],
+                  "max_tokens": 2000, "response_format": {"type": "json_object"}}
+    adapter_for("deepseek").prepare("deepseek/deepseek-flash", keep)
+    assert "extra_body" not in keep          # thinking kept, like v4-flash
+    assert keep["max_tokens"] == 3000        # headroom raised, like v4-flash
 
 
 def _v4_kwargs(*, sys_chars: int, rf_type: str | None, mt: int) -> dict:
@@ -155,48 +172,27 @@ def test_deepseek_gray_zone_prompts_count_as_big():
     measured and flash actually empties well below 24k. Live Stepan traffic:
     median prompt 23515 chars with 11/30 sitting in the 16k-24k band, all
     landing on flash and emptying (~27 consecutive empties at tokens_in
-    7036-7084). Anything at/above the verified-good 16k point must now route
-    to pro, so this band can't silently regress back onto flash."""
+    7036-7084). Anything at/above the verified-good 16k point must count as
+    big (it drives the savings-side reorder and the thinking-keep path), so
+    this band can't silently regress. (The v4-pro escalation this once also
+    gated was removed 2026-09-12 — pro is retired 09-14 and measured no
+    better on V4.1.)"""
     for size in (16_000, 20_000, 23_500):
         msgs = [{"role": "system", "content": "x" * size}]
         assert is_deepseek_big_json_prompt({"type": "json_object"}, msgs) is True, size
-        assert deepseek_model_for_json(
-            "deepseek/deepseek-v4-flash", {"type": "json_object"}, msgs
-        ) == "deepseek/deepseek-v4-pro", size
     # just under the verified-good point still rides cheap flash
     just_under = [{"role": "system", "content": "x" * 15_999}]
     assert is_deepseek_big_json_prompt({"type": "json_object"}, just_under) is False
 
 
-def test_deepseek_model_upgrades_big_json_to_pro():
-    """Big JSON prompt empties v4-flash's json_object body (DeepSeek bug); v4-pro
-    handles it. The picker upgrades ONLY that case so cost is booked as pro."""
-    assert deepseek_model_for_json(
-        "deepseek/deepseek-v4-flash", {"type": "json_object"}, _BIG
-    ) == "deepseek/deepseek-v4-pro"
-    assert deepseek_model_for_json(
-        "deepseek/deepseek-v4-flash", dict(_SCHEMA), _BIG
-    ) == "deepseek/deepseek-v4-pro"
-
-
-def test_deepseek_model_keeps_flash_when_upgrade_unwarranted():
-    # small JSON prompt → flash works, stays cheap
-    assert deepseek_model_for_json(
-        "deepseek/deepseek-v4-flash", {"type": "json_object"}, _SMALL
-    ) == "deepseek/deepseek-v4-flash"
-    # big but NOT json → no empty-body bug, stays flash
-    assert deepseek_model_for_json(
-        "deepseek/deepseek-v4-flash", None, _BIG
-    ) == "deepseek/deepseek-v4-flash"
-    # already pinned to a non-flash model → untouched
-    assert deepseek_model_for_json(
-        "deepseek/deepseek-v4-pro", {"type": "json_object"}, _BIG
-    ) == "deepseek/deepseek-v4-pro"
-    # non-deepseek / unset model → returned as-is
-    assert deepseek_model_for_json(
-        "gemini/gemini-2.5-flash", {"type": "json_object"}, _BIG
-    ) == "gemini/gemini-2.5-flash"
-    assert deepseek_model_for_json(None, {"type": "json_object"}, _BIG) is None
+def test_no_deepseek_model_rewrite_survives():
+    """2026-09-12: the v4-pro escalation is gone — nothing in adapters may
+    rewrite a deepseek model name any more. DeepSeek routes v4-pro to
+    V4.1-Flash from 09-14, so a rewrite would have booked pro's 4x price for
+    a flash answer; and on the real 112k-char prompt pro emptied just like
+    flash. Guard against it quietly coming back under the old name."""
+    import aibroker.providers.adapters as adapters
+    assert not hasattr(adapters, "deepseek_model_for_json")
 
 
 def test_cerebras_downgrades_json_schema_to_json_object():
