@@ -1821,6 +1821,22 @@ starting each new attempt — never mid-call (policy: no aborted calls) — and 
 it `run_chat` stops starting attempts and returns `None`, so the job settles
 before the reclaim window.
 
+**It is a FINISH-BY deadline, not a start deadline (2026-09-12).** Asking only
+"may I still *start*" silently assumed every call is ≤60s. Self-hosted local
+vision is not: `_call_timeout("vision", "local")` is
+`VISION_LOCAL_TIMEOUT_S + VISION_LOCAL_QUEUE_WAIT_S + 30` = **570s**
+(2026-08-31). An attempt legally started at minute 17:59 ran to 27:29 — past
+the 25-min reclaim. Measured over 24h: 9 vision + 18 chat:fast + 5 structured
+jobs were reclaimed at exactly ~1500s wait and executed a second time (the
+first result then discarded by `_finish`'s `started_at` guard — correctness was
+never at risk, but the work and the tokens were spent twice, and the client saw
+its job sit 25 minutes before *starting*). The gate now refuses an attempt
+whose own `call_timeout` would end past the finish-by moment:
+`_now() + _call_timeout(capability, provider) > finish_by → stop`. For 60s
+cloud calls that is the previous behaviour minus one minute; `chat:deep` keeps
+its exact old semantics through `_DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S +
+_DEEP_CALL_TIMEOUT_S` (5 + 19 = 24min &lt; 25).
+
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 
 `run_embed` used to be a stark outlier vs `run_chat`/`run_transcribe`: **one**

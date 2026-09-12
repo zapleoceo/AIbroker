@@ -155,13 +155,23 @@ _CHAT_WALL_DEADLINE_S = 18 * 60.0
 # (~19min), so it can't share the 18-min budget — but it was previously EXEMPT
 # from any deadline, and _attempt_budget lets it try up to 5 nvidia keys. Two
 # hung keys = ~38min > the 25-min stale window → the row got reclaimed and
-# double-executed (double nvidia spend). The invariant is
-# `_DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S < _STALE_RUNNING_S`: once we're
-# past this many seconds we stop STARTING new attempts, so the last in-flight
-# call (≤19min) still finishes before the 25-min reclaim. Fast key-rotation in
-# the first few minutes stays allowed; only stacking multiple 19-min timeouts
-# is prevented (2026-07-19 review). 5 + 19 = 24 < 25.
+# double-executed (double nvidia spend). Fast key-rotation in the first few
+# minutes stays allowed; only stacking multiple 19-min timeouts is prevented
+# (2026-07-19 review). 5 + 19 = 24 < 25.
 _DEEP_WALL_DEADLINE_S = 5 * 60.0
+
+# The gate is a FINISH-BY deadline, not a start deadline (2026-09-12). Checking
+# only "may I still START an attempt" silently assumed every call is ≤60s —
+# and self-hosted local vision is up to VISION_LOCAL_TIMEOUT_S +
+# VISION_LOCAL_QUEUE_WAIT_S + 30 = 570s (2026-08-31). A local attempt started
+# at minute 17:59 legally ran to 27:29, past the 25-min reclaim: measured
+# 9 vision jobs/day reclaimed at exactly 1500s and executed twice (the first
+# result discarded by _finish's started_at guard). So the walk now refuses to
+# start an attempt whose own call timeout would end after the finish-by
+# moment: `_now() + _call_timeout(capability, provider) > finish_by → stop`.
+# For 60s cloud calls that is the old behaviour minus one minute; for chat:deep
+# the finish-by of 5 + 19 = 24 min reproduces the start gate above exactly.
+_DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S
 
 
 def _now() -> float:
@@ -734,8 +744,8 @@ async def run_chat(
     # chat:deep gets a SHORTER start-deadline (its single call is ~19min, so it
     # must stop starting attempts early enough that the last one still lands
     # under the 25-min reclaim — see _DEEP_WALL_DEADLINE_S).
-    wall_deadline = _now() + (
-        _DEEP_WALL_DEADLINE_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
+    finish_by = _now() + (
+        _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
     attempts = 0
     for provider in chain:
         empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
@@ -752,11 +762,13 @@ async def run_chat(
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)
                 return None
-            if wall_deadline is not None and _now() >= wall_deadline:
-                log.warning("chat:%s hit the %ds wall-clock deadline mid-walk — "
-                            "stop starting attempts so the job finishes before "
-                            "stale-reclaim (no double-execution)",
-                            capability, int(_CHAT_WALL_DEADLINE_S))
+            call_timeout = _call_timeout(capability, provider)
+            if _now() + call_timeout > finish_by:
+                log.warning("chat:%s — a %ds %s attempt would end past the "
+                            "finish-by deadline mid-walk; stop starting attempts "
+                            "so the job finishes before stale-reclaim "
+                            "(no double-execution)",
+                            capability, int(call_timeout), provider)
                 return None
             key = await pick_and_reserve(provider, scope=scope,
                                           require_tier=require_tier,
@@ -792,7 +804,7 @@ async def run_chat(
                 max_tokens=max_tokens, temperature=temperature,
                 response_format=response_format, workflow=workflow,
                 est_tokens=est_tokens,
-                call_timeout=_call_timeout(capability, provider),
+                call_timeout=call_timeout,
                 tools=tools, tool_choice=tool_choice,
             )
             if flow is _Flow.SUCCESS:
