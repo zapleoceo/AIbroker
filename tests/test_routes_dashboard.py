@@ -1936,3 +1936,35 @@ def test_project_row_has_a_confirmed_delete_form():
     assert 'action="/dashboard/projects/5/delete"' in body
     assert "data-confirm=\"Delete project ev&#x27;il?" in body   # safe attribute, escaped
     assert 'onsubmit="return confirm(' not in body
+
+
+# ─── logs page: the exact model, routing name in the tooltip (2026-09-13) ────
+
+
+def test_recent_calls_show_the_served_model_with_the_routed_name_in_the_tooltip():
+    """Owner request 2026-09-13: the logs page said `deepseek` /
+    `deepseek/deepseek-flash` and never which model actually ran. It now shows
+    the exact model when we know it, keeping the routing name (what the chain
+    and the pricing are keyed on) in the tooltip. A row without a served model
+    — every row older than migration 011 — renders exactly as before."""
+    from collections import namedtuple
+    from datetime import UTC, datetime
+
+    from aibroker.routes.dashboard_render import _render_project_detail
+
+    R = namedtuple("R", "id created_at provider model model_served capability "
+                        "tokens_in tokens_out cost_usd latency_ms status "
+                        "http_status error_kind")
+    d = _fake_proj_detail()
+    d["recent"] = [
+        R(2, datetime(2026, 9, 13, 1, 0, 0, tzinfo=UTC), "deepseek",
+          "deepseek/deepseek-flash", "DeepSeek-V4.1-Flash", "chat:sales",
+          10, 5, 0.01, 900, "ok", 200, None),
+        R(1, datetime(2026, 9, 13, 0, 59, 0, tzinfo=UTC), "local",
+          "local/qwen3vl", None, "vision", 700, 40, 0.0, 120000, "ok", 200, None),
+    ]
+    body = _render_project_detail(d).body.decode()
+    assert "DeepSeek-V4.1-Flash" in body                        # exact model shown
+    assert 'title="routed as deepseek/deepseek-flash"' in body   # routing name kept
+    assert "local/qwen3vl" in body                               # no served → as before
+    assert 'title="routed as local/qwen3vl"' not in body

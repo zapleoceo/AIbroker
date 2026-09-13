@@ -350,3 +350,38 @@ async def test_local_vision_slot_is_released_after_an_error(monkeypatch):
         text, _ = await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
     assert text == "again"
+
+
+# ─── the exact model that answered (2026-09-13) ──────────────────────────────
+
+
+async def test_local_vision_reports_the_gguf_llama_server_loaded(monkeypatch):
+    """`local/qwen3vl` is a routing label this broker invented. The owner asked
+    the logs to name the model that actually ran, so the meta carries what
+    llama-server says it loaded — and it follows a model swap with no code
+    change."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    reply = _reply({"type": "чек", "format": "text", "content": "ok"})
+    reply.json = lambda: {
+        "choices": [{"message": {"content": '{"type":"чек","format":"text","content":"ok"}'}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        "model": "/models/qwen3-vl-4b-Q4_K_M.gguf",
+    }
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=reply)):
+        _text, meta = await _describe_via_local_vision(
+            messages=_msgs(_png(20, 20)), max_tokens=64, temperature=0.1)
+    assert meta["model"] == "local/qwen3vl"          # routing name unchanged
+    assert meta["model_served"] == "qwen3-vl-4b-Q4_K_M"
+
+
+async def test_local_vision_without_a_model_field_reports_nothing(monkeypatch):
+    """An older llama-server that omits `model` must not break the call — the
+    log simply keeps showing the routing name."""
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
+    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+                AsyncMock(return_value=_reply({"type": "x", "format": "text",
+                                                "content": "ok"}))):
+        _text, meta = await _describe_via_local_vision(
+            messages=_msgs(_png(20, 20)), max_tokens=64, temperature=0.1)
+    assert meta["model_served"] is None

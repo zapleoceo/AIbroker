@@ -156,6 +156,42 @@ every call) — all its chat lanes + vision moved to
 `google/gemma-4-31b-it:free` (instruct non-reasoning, JSON-safe at low
 `max_tokens`, 262k ctx, verified live on our keys).
 
+## Which model actually answered (2026-09-13)
+
+`usage_log.model`, the dashboard's model column and the client's `model` field
+all carried the **routing** name — `deepseek/deepseek-flash`, `local/qwen3vl`.
+That is the right key for pricing and for every by-model aggregate, but the
+owner could not tell from it which model ran, and sometimes it is not even
+true:
+
+- `deepseek-flash` is a family name. DeepSeek serves the retired aliases
+  `deepseek-v4-flash` and (from 2026-09-14) `deepseek-v4-pro` with
+  **DeepSeek-V4.1-Flash**, so a row saying `v4-pro` after that date names a
+  model that did not run.
+- `local/qwen3vl` is a label this broker invented for routing; it never leaves
+  the process. The real model is whichever gguf llama-server has loaded.
+
+`providers/model_identity.py:served_model(routed, reported)` answers "what
+exactly served this call?" from two sources, in order of authority:
+
+1. a **curated identity** for a routing name whose exact release we verified
+   (today: the two DeepSeek aliases → `DeepSeek-V4.1-Flash`). Entries are added
+   only with dated evidence — a stale mapping here would put a falsehood in the
+   log, so `deepseek-v4-pro` is deliberately absent: it was a different model
+   before 09-14 and V4.1-Flash after, and one entry would mislabel one side.
+2. the name the **provider itself reported**, when it says more than the
+   routing name did. llama-server returns the gguf path (`/models/
+   qwen3-vl-4b-Q4_K_M.gguf` → `qwen3-vl-4b-Q4_K_M`), which means a model swap
+   shows up in the log with no code change. Measured 2026-09-13: every cloud
+   provider simply echoes the name we asked for, and their routing name is
+   already the exact model id — an echo is dropped rather than duplicated.
+
+Unknown → `None`, and every caller falls back to the routing name, i.e. exactly
+what it showed before. The value is stored per call in `usage_log.model_served`
+(migration 011) so history stays truthful even if an alias is later re-pointed,
+returned to clients as `model_served`, and shown in the logs table with the
+routing name in the tooltip.
+
 ## Adding a new provider
 
 1. Verify LiteLLM supports it (`pip install litellm` then

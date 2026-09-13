@@ -378,6 +378,13 @@ class ChatOutcome:
     request_id: int
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # The EXACT model that answered, when it says more than `model` (the
+    # routing name) does — `DeepSeek-V4.1-Flash` behind
+    # `deepseek/deepseek-flash`, the loaded gguf behind `local/qwen3vl`. None
+    # when the routing name is already the exact model id (most cloud models),
+    # so a client that only reads `model` sees no change.
+    # See providers/model_identity.py.
+    model_served: str | None = None
     # Vision extras (2026-08-31). Populated only by the self-hosted `local`
     # provider, which classifies the image on the same grammar-constrained pass
     # that answers the caller. None everywhere else — `text` keeps its meaning
@@ -600,7 +607,8 @@ async def _run_attempt(
 
     request_id = await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
-        provider=provider, model=use_model, capability=capability,
+        provider=provider, model=use_model,
+        model_served=meta.get("model_served"), capability=capability,
         workflow=workflow, tokens_in=meta["tokens_in"],
         tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
         cache_read_tokens=meta.get("cache_read_tokens", 0),
@@ -618,6 +626,7 @@ async def _run_attempt(
     await note_affinity_shared(project.id, provider, key.id)
     return _Flow.SUCCESS, ChatOutcome(
         text=text, provider=provider, model=meta["model"],
+        model_served=meta.get("model_served"),
         tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
         cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
         key_label=key.label, request_id=request_id,
@@ -875,6 +884,12 @@ class EmbedOutcome:
     latency_ms: int
     key_label: str
     request_id: int
+    # The EXACT model that answered, when it says more than `model` (the
+    # routing name) does — `DeepSeek-V4.1-Flash` behind `deepseek/deepseek-flash`,
+    # the loaded gguf behind `local/qwen3vl`. None when the routing name is
+    # already the exact model id (most cloud models). See
+    # providers/model_identity.py.
+    model_served: str | None = None
 
 
 
@@ -997,13 +1012,15 @@ async def run_embed(
             await release_cost(api_key=key, estimated_cost=estimated_cost)
         request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability="embedding",
+            provider=provider, model=use_model,
+            model_served=meta.get("model_served"), capability="embedding",
             workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=0,
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             status="ok", error_kind=None, http_status=200,
         )
         await note_affinity_shared(project.id, provider, key.id)
         return EmbedOutcome(
+            model_served=meta.get("model_served"),
             embeddings=vectors, provider=provider, model=use_model,
             tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
             latency_ms=meta["latency_ms"], key_label=key.label,
@@ -1023,6 +1040,12 @@ class TranscribeOutcome:
     latency_ms: int
     key_label: str
     request_id: int
+    # The EXACT model that answered, when it says more than `model` (the
+    # routing name) does — `DeepSeek-V4.1-Flash` behind `deepseek/deepseek-flash`,
+    # the loaded gguf behind `local/qwen3vl`. None when the routing name is
+    # already the exact model id (most cloud models). See
+    # providers/model_identity.py.
+    model_served: str | None = None
 
 
 class TranscribeFailed(Exception):
@@ -1173,7 +1196,8 @@ async def run_transcribe(
                 )
             request_id = await record_usage(
                 api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model, capability="transcription",
+                provider=provider, model=use_model,
+                model_served=meta.get("model_served"), capability="transcription",
                 workflow=workflow, tokens_in=0, tokens_out=0,
                 cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
                 status="ok", error_kind=None, http_status=200,
@@ -1181,6 +1205,7 @@ async def run_transcribe(
             await note_affinity_shared(project.id, provider, key.id)
             return TranscribeOutcome(
                 text=text, provider=provider, model=use_model,
+                model_served=meta.get("model_served"),
                 cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
                 key_label=key.label, request_id=request_id,
             )

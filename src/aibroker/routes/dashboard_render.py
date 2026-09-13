@@ -981,6 +981,20 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'<table><tbody>{lat_rows}</tbody></table></div>'
     ) if sum(lat_counts) else ""
 
+    def _model_cell(r) -> str:
+        """The model column. Shows the EXACT model that answered when we know
+        it (`DeepSeek-V4.1-Flash`, the loaded gguf) — owner request 2026-09-13,
+        because the routing name alone (`deepseek/deepseek-flash`,
+        `local/qwen3vl`) does not say which model actually ran. The routing
+        name stays in the tooltip: it is what the chain and the pricing are
+        keyed on. Rows older than migration 011 have no served model and render
+        exactly as before."""
+        routed = r.model or "—"
+        served = getattr(r, "model_served", None)
+        title = f' title="routed as {esc(routed)}"' if served else ""
+        return (f'<td style="color:#888;font-size:11px"{title}>'
+                f'{esc((served or routed)[:40])}</td>')
+
     # tr.data-row marker is required by the sortable-table JS in _dash_html.
     # data-sort on the time column uses iso8601 so lexical sort works.
     # data-row-id is usage_log.id — the same request_id returned to the API
@@ -993,7 +1007,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         f'style="color:#888;font-size:11px">'
         f'{_ts_span(r.created_at, "mdhms")}</td>'
         f'<td>{_provider_with_key(r.provider, getattr(r, "key_label", None))}</td>'
-        f'<td style="color:#888;font-size:11px">{esc((r.model or "—")[:32])}</td>'
+        f'{_model_cell(r)}'
         f'<td><span class="pill">{esc(r.capability or "—")}</span></td>'
         f'<td class="num" data-sort="{r.tokens_in + r.tokens_out}">'
         f'{r.tokens_in}/{r.tokens_out}</td>'

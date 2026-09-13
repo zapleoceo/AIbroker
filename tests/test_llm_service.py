@@ -2515,3 +2515,56 @@ def test_deep_finish_by_reproduces_the_old_start_gate():
     assert svc._DEEP_FINISH_BY_S == svc._DEEP_WALL_DEADLINE_S + svc._DEEP_CALL_TIMEOUT_S
     assert svc._DEEP_FINISH_BY_S < jq._STALE_RUNNING_S
     assert svc._CHAT_WALL_DEADLINE_S < jq._STALE_RUNNING_S
+
+
+# ─── the exact model reaches usage_log and the caller (2026-09-13) ───────────
+
+
+async def test_run_chat_records_and_returns_the_served_model(monkeypatch):
+    """Owner request: the log must name the model that actually answered, and
+    the client must get it too. `model` keeps the routing name (it prices the
+    call and keys every by-model aggregate); `model_served` carries the exact
+    one, or None when the routing name is already exact."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+
+    recorded: dict = {}
+
+    async def fake_pick(provider, scope, **kw):
+        return SimpleNamespace(id=7, label="k", tier="free", provider=provider,
+                                token_encrypted="enc", account_id=None,
+                                daily_cost_cap_usd=None)
+
+    async def fake_call_llm(**kw):
+        return "hi", {"model": kw["model"], "model_served": "DeepSeek-V4.1-Flash",
+                      "tokens_in": 3, "tokens_out": 1, "cost_usd": 0.0,
+                      "latency_ms": 12}
+
+    async def fake_record_usage(**kw):
+        recorded.update(kw)
+        return 4242
+
+    async def _n(**kw):
+        return None
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "reserve_cost", _n)
+    monkeypatch.setattr(svc, "release_cost", _n)
+    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
+    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr(svc, "note_affinity_shared", lambda *a, **k: _n())
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "deepseek/deepseek-flash")
+
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=4, name="stepan2"), capability="chat:sales",
+        messages=[{"role": "user", "content": "halo"}], model=None,
+        max_tokens=64, temperature=0.2, response_format=None, workflow="w",
+    )
+    assert out is not None
+    assert out.model == "deepseek/deepseek-flash"        # routing name kept
+    assert out.model_served == "DeepSeek-V4.1-Flash"     # exact model returned
+    assert recorded["model"] == "deepseek/deepseek-flash"
+    assert recorded["model_served"] == "DeepSeek-V4.1-Flash"

@@ -315,7 +315,8 @@ async def _gather_project_detail(project_id: int, hours: int) -> dict[str, Any] 
             "GROUP BY b ORDER BY b"
         ), bind_)).all()
         recent = (await s.execute(text(
-            "SELECT u.id, u.created_at, u.provider, u.model, u.capability, "
+            "SELECT u.id, u.created_at, u.provider, u.model, u.model_served, "
+            "       u.capability, "
             "       u.tokens_in, u.tokens_out, u.cost_usd, u.latency_ms, u.status, "
             "       u.http_status, u.error_kind, k.label AS key_label "
             "FROM usage_log u LEFT JOIN api_keys k ON k.id = u.api_key_id "

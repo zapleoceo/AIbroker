@@ -132,6 +132,7 @@ class EmbedResponse(BaseModel):
     embeddings: list[list[float]]
     provider: str
     model: str
+    model_served: str | None = None
     tokens_in: int
     cost_usd: float
     latency_ms: int
@@ -189,6 +190,7 @@ async def embed_endpoint(
         )
     return EmbedResponse(
         embeddings=outcome.embeddings, provider=outcome.provider, model=outcome.model,
+        model_served=outcome.model_served,
         tokens_in=outcome.tokens_in, cost_usd=outcome.cost_usd,
         latency_ms=outcome.latency_ms, key_label=outcome.key_label,
         request_id=outcome.request_id,
@@ -199,6 +201,7 @@ class TranscribeResponse(BaseModel):
     text: str
     provider: str
     model: str
+    model_served: str | None = None
     cost_usd: float
     latency_ms: int
     key_label: str
@@ -245,6 +248,7 @@ async def transcribe_endpoint(
         )
     return TranscribeResponse(
         text=outcome.text, provider=outcome.provider, model=outcome.model,
+        model_served=outcome.model_served,
         cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
         key_label=outcome.key_label, request_id=outcome.request_id,
     )
@@ -276,6 +280,14 @@ class DeepJobResponse(BaseModel):
     text: str | None = None
     provider: str | None = None
     model: str | None = None
+    model_served: str | None = Field(
+        None,
+        description="the EXACT model that answered, when it says more than "
+                    "`model` (the routing name) does — e.g. DeepSeek-V4.1-Flash "
+                    "behind deepseek/deepseek-flash, or the loaded gguf behind "
+                    "local/qwen3vl. Null when the routing name is already the "
+                    "exact model id.",
+    )
     tokens_in: int | None = None
     tokens_out: int | None = None
     cost_usd: float | None = None
@@ -344,6 +356,7 @@ def _job_response(row: Any) -> DeepJobResponse:
     return DeepJobResponse(
         job_id=row.id, status="done", text=row.result_text,
         provider=meta.get("provider"), model=meta.get("model"),
+        model_served=meta.get("model_served"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),

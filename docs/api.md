@@ -391,6 +391,22 @@ instead of grepping timestamps against provider/model/workflow.
 | `POST` | `/admin/keys/{id}/disable` | Soft-disable |
 | `DELETE` | `/admin/keys/{id}` | Hard delete |
 
+## `model` vs `model_served` (2026-09-13)
+
+Every response that names a model carries two fields:
+
+| field | what it is |
+|---|---|
+| `model` | the **routing** name the broker asked for — `deepseek/deepseek-flash`, `local/qwen3vl`. Prices the call, keys the dashboard's by-model aggregates, stable. |
+| `model_served` | the **exact** model that answered, when that says more: `DeepSeek-V4.1-Flash` behind the DeepSeek family alias, the loaded gguf behind `local/qwen3vl`. `null` when the routing name is already the exact model id (most cloud models), so a client reading only `model` sees no change. |
+
+Present on `GET /v1/jobs/{id}` / `GET /v1/deep/{id}` (done jobs), `POST
+/v1/embed` and `POST /v1/transcribe`. Derived by
+`providers/model_identity.py:served_model` and stored per call in
+`usage_log.model_served` (migration 011) — see `docs/providers.md` for why an
+alias is not always the model that ran. The dashboard's "Recent 50 calls"
+shows `model_served` when present, with the routing name in the cell tooltip.
+
 ## Vision jobs: what is rejected at submit (2026-09-12)
 
 `POST /v1/jobs?capability=vision` validates every inline `data:` image before

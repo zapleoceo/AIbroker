@@ -19,6 +19,7 @@ import litellm
 
 from aibroker.config import get_settings
 from aibroker.providers.adapters import adapter_for
+from aibroker.providers.model_identity import served_model
 from aibroker.providers.peak_pricing import peak_multiplier
 
 log = logging.getLogger(__name__)
@@ -852,7 +853,11 @@ async def _describe_via_local_vision(
                         len(text))
             text = ""
     meta = {
-        "model": "local/qwen3vl", "tokens_in": usage.get("prompt_tokens", 0) or 0,
+        "model": "local/qwen3vl",
+        # llama-server names the gguf it loaded — the only place the REAL local
+        # model is knowable, and it follows a model swap without a code change.
+        "model_served": served_model("local/qwen3vl", body.get("model")),
+        "tokens_in": usage.get("prompt_tokens", 0) or 0,
         "tokens_out": usage.get("completion_tokens", 0) or 0,
         # Self-hosted: free by construction. Set directly rather than through
         # estimate_llm_cost, which would log an "unpriced model" warning.
@@ -861,6 +866,15 @@ async def _describe_via_local_vision(
         "vision_type": vtype, "vision_format": vformat,
     }
     return text, meta
+
+
+def _reported_model(resp: Any) -> str | None:
+    """The model name a provider put in its own response (`.model` on a
+    LiteLLM object, `["model"]` on a raw dict). Feeds served_model, which
+    drops it when it merely echoes the routing name — see
+    providers/model_identity.py."""
+    value = resp.get("model") if isinstance(resp, dict) else getattr(resp, "model", None)
+    return value if isinstance(value, str) else None
 
 
 async def call_llm(
@@ -971,6 +985,7 @@ async def call_llm(
 
     meta = {
         "model": model,
+        "model_served": served_model(model, _reported_model(resp)),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_usd": cost,
@@ -1013,6 +1028,7 @@ async def embed(
         tokens_in = getattr(usage, "prompt_tokens", 0)
     meta = {
         "model": model,
+        "model_served": served_model(model, _reported_model(resp)),
         "tokens_in": tokens_in,
         "tokens_out": 0,
         "cost_usd": estimate_llm_cost(model, tokens_in, 0),
@@ -1068,6 +1084,7 @@ async def _transcribe_via_chat(
     tokens_out = getattr(usage, "completion_tokens", 0) or 0
     meta = {
         "model": model,
+        "model_served": served_model(model, _reported_model(resp)),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         # Unlike Whisper (per-second, billed elsewhere), chat transcription bills
@@ -1114,7 +1131,9 @@ async def _transcribe_via_local_asr(*, audio: bytes) -> tuple[str, dict[str, Any
         raise RuntimeError(f"asr-local {resp.status_code}: {resp.text[:200]}")
     data = resp.json()
     meta = {
-        "model": "local/whisper", "tokens_in": 0, "tokens_out": 0,
+        "model": "local/whisper",
+        "model_served": served_model("local/whisper", data.get("model")),
+        "tokens_in": 0, "tokens_out": 0,
         "cost_usd": 0.0, "latency_ms": latency_ms,
     }
     return (data.get("text") or "").strip(), meta
@@ -1151,6 +1170,7 @@ async def transcribe(
     audio_s = float(duration) if duration else _estimate_audio_seconds(len(audio))
     meta = {
         "model": model,
+        "model_served": served_model(model, _reported_model(resp)),
         "tokens_in": 0,
         "tokens_out": 0,
         "cost_usd": whisper_cost(model, audio_s),

@@ -860,3 +860,51 @@ def test_gemini_rotation_never_uses_a_latest_alias():
     for cap, models in MODEL_ROTATION["gemini"].items():
         for m in models:
             assert not m.endswith("-latest"), (cap, m)
+
+
+# ─── the exact model that answered, on the cloud path (2026-09-13) ───────────
+
+
+def _chat_resp(model_reported):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"),
+                                 finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        model=model_reported,
+    )
+
+
+async def test_call_llm_reports_deepseek_v41_for_the_family_alias():
+    """The owner's case: a DeepSeek call logged as `deepseek/deepseek-flash`
+    never said which model ran. DeepSeek echoes the alias in `response.model`
+    (measured 2026-09-13), so the curated identity is what names it."""
+    async def fake(**_kw):
+        return _chat_resp("deepseek-flash")
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion", side_effect=fake):
+        _text, meta = await call_llm(
+            model="deepseek/deepseek-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k")
+    assert meta["model"] == "deepseek/deepseek-flash"        # routing name kept
+    assert meta["model_served"] == "DeepSeek-V4.1-Flash"
+
+
+async def test_call_llm_echoing_provider_adds_no_served_model():
+    """gemini/groq/etc. echo the requested id, which is already exact — the
+    log keeps showing the routing name and nothing is duplicated."""
+    async def fake(**_kw):
+        return _chat_resp("gemini-2.5-flash")
+
+    with patch("aibroker.providers.litellm_adapter.litellm.acompletion", side_effect=fake):
+        _text, meta = await call_llm(
+            model="gemini/gemini-2.5-flash",
+            messages=[{"role": "user", "content": "x"}], api_key="k")
+    assert meta["model_served"] is None
+
+
+def test_reported_model_reads_objects_and_dicts_and_ignores_junk():
+    from aibroker.providers.litellm_adapter import _reported_model
+    assert _reported_model(SimpleNamespace(model="m1")) == "m1"
+    assert _reported_model({"model": "m2"}) == "m2"
+    assert _reported_model(SimpleNamespace()) is None
+    assert _reported_model({"model": 42}) is None          # not a string

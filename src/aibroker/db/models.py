@@ -138,6 +138,10 @@ class UsageLogRow(Base):
     )
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str | None] = mapped_column(String(100))
+    # The exact model that ANSWERED, when it is more than `model` (the routing
+    # name) says — see providers/model_identity.py. NULL when the routing name
+    # is already the exact model id, and on every row predating migration 011.
+    model_served: Mapped[str | None] = mapped_column(String(120))
     capability: Mapped[str | None] = mapped_column(String(30))
     workflow: Mapped[str | None] = mapped_column(String(50))
     tokens_in: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

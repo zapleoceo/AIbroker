@@ -268,6 +268,10 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         row.id, status="done", result_text=outcome.text,
         result_meta={
             "provider": outcome.provider, "model": outcome.model,
+            # The exact model that answered, when it is more than the routing
+            # name says (providers/model_identity.py). Clients read it as
+            # `model_served`; None keeps the old shape for everything else.
+            "model_served": getattr(outcome, "model_served", None),
             "tokens_in": getattr(outcome, "tokens_in", 0),
             "tokens_out": getattr(outcome, "tokens_out", 0),
             "cost_usd": outcome.cost_usd, "latency_ms": outcome.latency_ms,

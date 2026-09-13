@@ -6,17 +6,21 @@ to advance the LRU.
 """
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.db.resilience import retry_terminal_write
 from aibroker.routing import circuit, shared_state
+
+log = logging.getLogger(__name__)
 
 # Free provider soft-skipped when this many of its keys are in timeout-cooldown
 # — the whole pool is degraded, so fail the chain over cheaply rather than send
@@ -399,6 +403,30 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
     return ""
 
 
+def _insert_sql(*, with_model_served: bool) -> str:
+    """The usage_log INSERT, with or without the migration-011 column."""
+    cols = "api_key_id, project_id, lease_id, provider, model, capability, workflow, "
+    vals = ":k, :p, :l, :pr, :m, :c, :w, "
+    if with_model_served:
+        cols = cols.replace("model, capability", "model, model_served, capability")
+        vals = vals.replace(":m, :c", ":m, :ms, :c")
+    return (
+        f"INSERT INTO usage_log ({cols}"
+        " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
+        " cost_usd, latency_ms, status, error_kind, http_status) "
+        f"VALUES ({vals}:ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
+        "RETURNING id"
+    )
+
+
+# Flips False the first time an INSERT hits a missing usage_log.model_served
+# (code deployed before migration 011). The row still HAS to be written — it
+# feeds the daily cost caps — so the insert is retried without the column and
+# the miss is warned about once. Same degradation shape as deep_jobs'
+# payload_hash (services/deep_jobs.py).
+_model_served_available = True
+
+
 @retry_terminal_write
 async def record_usage(
     *,
@@ -407,6 +435,7 @@ async def record_usage(
     lease_id: str | None,
     provider: str,
     model: str | None,
+    model_served: str | None = None,
     capability: str | None,
     workflow: str | None,
     tokens_in: int,
@@ -432,20 +461,12 @@ async def record_usage(
     logs / this dashboard's project detail table."""
     params = {
         "k": api_key_id, "p": project_id, "l": lease_id, "pr": provider,
-        "m": model, "c": capability, "w": workflow,
+        "m": model, "ms": model_served, "c": capability, "w": workflow,
         "ti": tokens_in, "to": tokens_out,
         "cr": cache_read_tokens, "cw": cache_write_tokens,
         "co": cost_usd, "lm": latency_ms,
         "s": status, "e": error_kind, "h": http_status,
     }
-    insert_sql = (
-        "INSERT INTO usage_log "
-        "(api_key_id, project_id, lease_id, provider, model, capability, workflow, "
-        " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
-        " cost_usd, latency_ms, status, error_kind, http_status) "
-        "VALUES (:k, :p, :l, :pr, :m, :c, :w, :ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
-        "RETURNING id"
-    )
     recover_sql = _recover_set_sql(status, error_kind)
     update_sql = (
         "UPDATE api_keys AS k "
@@ -456,22 +477,41 @@ async def record_usage(
         f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
         "WHERE k.id = :k"
     )
-    async with get_session() as s:
-        if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
-            # One round-trip: data-modifying CTE folds the INSERT and the
-            # counter UPDATE into a single statement (2026-07-16). record_usage
-            # runs once per attempt at 60-100k picks/day — the second statement
-            # was half this hot path's DB chatter.
-            usage_id = (await s.execute(
-                text(f"WITH ins AS ({insert_sql}), "
-                     f"upd AS ({update_sql} RETURNING 1) "
-                     "SELECT id FROM ins"),
-                params,
-            )).scalar_one()
-        else:
-            # SQLite (test gate) allows only SELECT in a WITH clause — a
-            # data-modifying CTE is a syntax error there. Same statements,
-            # same session/transaction, just two round-trips.
-            usage_id = (await s.execute(text(insert_sql), params)).scalar_one()
-            await s.execute(text(update_sql), params)
-    return int(usage_id)
+    async def _write(with_model_served: bool) -> int:
+        insert_sql = _insert_sql(with_model_served=with_model_served)
+        p = params if with_model_served else {k: v for k, v in params.items() if k != "ms"}
+        async with get_session() as s:
+            if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
+                # One round-trip: data-modifying CTE folds the INSERT and the
+                # counter UPDATE into a single statement (2026-07-16).
+                # record_usage runs once per attempt at 60-100k picks/day — the
+                # second statement was half this hot path's DB chatter.
+                usage_id = (await s.execute(
+                    text(f"WITH ins AS ({insert_sql}), "
+                         f"upd AS ({update_sql} RETURNING 1) "
+                         "SELECT id FROM ins"),
+                    p,
+                )).scalar_one()
+            else:
+                # SQLite (test gate) allows only SELECT in a WITH clause — a
+                # data-modifying CTE is a syntax error there. Same statements,
+                # same session/transaction, just two round-trips.
+                usage_id = (await s.execute(text(insert_sql), p)).scalar_one()
+                await s.execute(text(update_sql), p)
+        return int(usage_id)
+
+    global _model_served_available
+    if not _model_served_available:
+        return await _write(with_model_served=False)
+    try:
+        return await _write(with_model_served=True)
+    except (ProgrammingError, OperationalError) as e:
+        # Migration 011 not applied. This row funds the daily cost caps, so it
+        # must still be written — drop the column and warn once.
+        _model_served_available = False
+        log.warning(
+            "usage_log.model_served missing (%s) — recording without the exact "
+            "served model; apply infra/sql/migrations/"
+            "011_usage_log_model_served.sql (stays off until process restart)", e,
+        )
+        return await _write(with_model_served=False)
