@@ -290,6 +290,14 @@ decision about one `state` in a single call, it is billed once for the input.
 - `503` — no paid key carries `llm:decision`; `502` — every key failed; an
   HTTP `402` from the provider cools the key as out-of-money.
 
+**Code path.** Route `decisions_endpoint` (`DecisionRequest` → `DecisionResponse`)
+→ `validate_questions` (a malformed question raises `DecisionRequestInvalid` → 422,
+before any key is touched) → `run_decision` in `llm_service` (key pick, cap
+reservation sized by `estimate_tokens`, rotation; all keys failing raises
+`DecisionFailed` → 502) → adapter `decide` in `providers/decisions.py`, which
+raises `DecisionHTTPError` carrying the provider body on non-2xx. Success
+returns a `DecisionOutcome` (answers, cost, latency, key label).
+
 ### Vision (`?capability=vision`)
 
 Submitted through the generic async job endpoints
