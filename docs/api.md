@@ -56,6 +56,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
+| `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 
 ### Chat is async-only (2026-07-10)
 
@@ -237,6 +238,58 @@ rotates keys within it. If you need a specific fallback provider, call
 `/v1/embed?provider=cohere` yourself and re-embed the affected batch — don't
 mix vectors from two providers in one index.
 
+### `/v1/decisions` — typed decisions (2026-09-23)
+
+A **decision model** does not write text. It takes `state` (the text to judge)
+and named, typed `questions`, and returns one typed answer per question with
+calibrated probabilities. Served by TypeSafe **Jev** (`typesafe/jev-1.13`) on
+OpenRouter's dedicated `/api/alpha/decisions` endpoint — the model refuses
+`/chat/completions` outright, which is why this is not a `/v1/jobs` capability.
+
+```json
+POST /v1/decisions
+{"state": "Help! My payouts have been failing for 3 days.",
+ "workflow": "triage",
+ "questions": {
+   "urgent":  {"type": "noul",   "instructions": "Is this urgent?",
+               "criteria": {"true": "time-sensitive", "false": "not urgent"}},
+   "project": {"type": "choice", "instructions": "Which project?",
+               "criteria": {"itstep": "the academy", "veranda": "the bar"}},
+   "weight":  {"type": "score",  "instructions": "How important?",
+               "criteria": ["noise", "low", "high"]}}}
+```
+
+```json
+{"answers": {
+   "urgent":  {"type": "noul", "noul": 0.95},
+   "project": {"type": "choice", "choice": "itstep",
+               "probabilities": {"itstep": 0.81, "veranda": 0.19}, "confidence": 0.7},
+   "weight":  {"type": "score", "score": 1.8, "probabilities": {"0": 0.05, "1": 0.1, "2": 0.85},
+               "confidence": 0.8}},
+ "provider": "openrouter", "model": "openrouter/typesafe/jev-1.13",
+ "model_served": "typesafe/jev-1.13-20260917",
+ "tokens_in": 307, "tokens_out": 23, "cost_usd": 0.0000129,
+ "latency_ms": 350, "key_label": "gemma4", "request_id": 512700}
+```
+
+Question shapes are checked **before** a key is used and a bad one returns
+`422`: `noul` criteria must be exactly `true`/`false`, `choice` takes 1–255
+options, `score` 2–10 ordered levels. Up to 64 questions per call — send every
+decision about one `state` in a single call, it is billed once for the input.
+
+- **Paid keys only.** The lane rotates OpenRouter keys with `tier='paid'` and
+  scope `llm:decision`. A `$0` free-tier key is *not* refused by this model
+  (measured: 200 OK, cost booked) — paid-only is a routing choice, so the
+  spend lands on the account holding the prepaid credit and its spend limit.
+- **Caps apply.** The reservation is priced at jev's own $0.042/M input rate
+  (LiteLLM has no price for it and would reserve $0, letting a project run
+  past its daily cap).
+- **Price.** $0.042 per million input tokens, $0 output. Measured on 120 real
+  Vera triage events: median 0.36 s, p90 0.46 s, ~$0.000055 per event with
+  four questions.
+- `503` — no paid key carries `llm:decision`; `502` — every key failed; an
+  HTTP `402` from the provider cools the key as out-of-money.
+
 ### Vision (`?capability=vision`)
 
 Submitted through the generic async job endpoints
@@ -379,6 +432,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/deep` | `llm:deep` |
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |
+| `/v1/decisions` | `llm:decision` |
 
 ## Admin (X-Admin-Key required)
 

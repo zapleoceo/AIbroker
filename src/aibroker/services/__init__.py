@@ -7,12 +7,15 @@ from aibroker.services.deep_jobs import (
 from aibroker.services.llm_service import (
     BUDGET_EXHAUSTED,
     ChatOutcome,
+    DecisionFailed,
+    DecisionOutcome,
     EmbedFailed,
     EmbedOutcome,
     TranscribeFailed,
     TranscribeOutcome,
     classify_provider_error,
     run_chat,
+    run_decision,
     run_embed,
     run_transcribe,
 )
@@ -20,6 +23,8 @@ from aibroker.services.llm_service import (
 __all__ = [
     "BUDGET_EXHAUSTED",
     "ChatOutcome",
+    "DecisionFailed",
+    "DecisionOutcome",
     "EmbedFailed",
     "EmbedOutcome",
     "TranscribeFailed",
@@ -28,6 +33,7 @@ __all__ = [
     "get_job",
     "next_poll_after_s",
     "run_chat",
+    "run_decision",
     "run_embed",
     "run_transcribe",
     "submit_deep_job",

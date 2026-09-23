@@ -16,12 +16,15 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from pydantic import BaseModel, Field, model_validator
 
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
 from aibroker.routing import scope_for
 from aibroker.services import (
+    DecisionFailed,
     EmbedFailed,
     TranscribeFailed,
     get_job,
     next_poll_after_s,
+    run_decision,
     run_embed,
     run_transcribe,
     submit_deep_job,
@@ -143,6 +146,30 @@ class EmbedResponse(BaseModel):
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
+class DecisionRequest(BaseModel):
+    # The text to judge. 32k-token model context; the cap here is in chars and
+    # generous — the provider rejects past-context input itself.
+    state: str = Field(min_length=1, max_length=120_000)
+    # {name: {"type": "choice"|"score"|"noul", "instructions": ..., "criteria": ...}}
+    # — shapes validated in providers/decisions.validate_questions.
+    questions: dict[str, dict[str, Any]] = Field(min_length=1, max_length=64)
+    model: str | None = None
+    workflow: str | None = None
+
+
+class DecisionResponse(BaseModel):
+    answers: dict[str, Any]
+    provider: str
+    model: str
+    model_served: str | None = None
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+    request_id: int = Field(description="usage_log.id for this call.")
+
+
 def _require_capability_scope(ctx: ProjectCtx, scope: str) -> None:
     if not ctx.has_scope(scope):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"project lacks scope: {scope}")
@@ -192,6 +219,42 @@ async def embed_endpoint(
         embeddings=outcome.embeddings, provider=outcome.provider, model=outcome.model,
         model_served=outcome.model_served,
         tokens_in=outcome.tokens_in, cost_usd=outcome.cost_usd,
+        latency_ms=outcome.latency_ms, key_label=outcome.key_label,
+        request_id=outcome.request_id,
+    )
+
+
+@router.post("/decisions", response_model=DecisionResponse)
+async def decisions_endpoint(
+    body: DecisionRequest,
+    ctx: ProjectCtx = Depends(require_project),
+) -> DecisionResponse:
+    """Typed decisions (choice / score / yes-no) — synchronous, like /v1/embed.
+
+    Sync on purpose: a decision answers in ~0.4s (p90 0.46s measured on 120
+    real calls), so there is no held-connection problem that /v1/jobs exists
+    to solve for multi-second chat completions."""
+    _require_capability_scope(ctx, scope_for("decision"))
+    try:
+        validate_questions(body.questions)
+    except DecisionRequestInvalid as e:
+        raise HTTPException(422, str(e)) from e
+    try:
+        outcome = await run_decision(
+            project=ctx.project, state=body.state, questions=body.questions,
+            model=body.model, workflow=body.workflow,
+        )
+    except DecisionFailed as e:
+        raise HTTPException(502, f"decision failed: {e}") from e
+    if outcome is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="no paid openrouter key carries llm:decision",
+        )
+    return DecisionResponse(
+        answers=outcome.answers, provider=outcome.provider, model=outcome.model,
+        model_served=outcome.model_served, tokens_in=outcome.tokens_in,
+        tokens_out=outcome.tokens_out, cost_usd=outcome.cost_usd,
         latency_ms=outcome.latency_ms, key_label=outcome.key_label,
         request_id=outcome.request_id,
     )

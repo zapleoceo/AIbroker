@@ -23,6 +23,7 @@ Capability = Literal[
     "embedding",
     "prefilter",
     "translate",
+    "decision",
 ]
 
 
@@ -263,6 +264,14 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "transcription": ["groq", "local", "gemini", "openai"],
     # voyage stays primary; cohere as fallback for embed when voyage is down.
     "embedding": ["voyage", "cohere"],
+    # 2026-09-23: typed decisions (TypeSafe Jev) — a choice/score/yes-no
+    # answer with calibrated probabilities, not generated text. OpenRouter
+    # is the only host. Served on PAID keys only (run_decision passes
+    # require_tier="paid"): the spend must land on the account that holds the
+    # prepaid credit and its spend limit. NB a $0 free-tier key is NOT refused
+    # (measured 2026-09-23: 200 OK, cost booked) — so this is a routing
+    # choice, not a workaround for errors. See providers/decisions.py.
+    "decision": ["openrouter"],
 }
 
 
@@ -290,6 +299,9 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "vision": "llm:vision",
     "transcription": "llm:audio",
     "embedding": "llm:embed",
+    # Its own scope, not llm:chat: the lane is paid and a project must
+    # opt in explicitly — holding llm:chat must not silently grant it.
+    "decision": "llm:decision",
 }
 
 

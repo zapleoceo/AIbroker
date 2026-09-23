@@ -26,6 +26,11 @@ from aibroker.providers.context_limits import (
     fits_context,
     is_too_large_error,
 )
+from aibroker.providers.decisions import (
+    JEV_INPUT_USD_PER_TOKEN,
+    decide,
+    estimate_tokens,
+)
 from aibroker.providers.litellm_adapter import (
     embed,
     estimate_llm_cost,
@@ -1029,6 +1034,105 @@ async def run_embed(
     if not any_key_seen:
         return None
     raise EmbedFailed(str(last_exc) if last_exc else "all keys failed")
+
+
+@dataclass
+class DecisionOutcome:
+    answers: dict[str, Any]
+    provider: str
+    model: str
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+    request_id: int
+    model_served: str | None = None
+
+
+class DecisionFailed(Exception):
+    """Every paid decisions key failed — route maps this to HTTP 502."""
+
+
+async def run_decision(
+    *,
+    project: ProjectRow,
+    state: str,
+    questions: dict[str, Any],
+    model: str | None,
+    workflow: str | None,
+) -> DecisionOutcome | None:
+    """Typed decisions via OpenRouter, rotating PAID keys only.
+
+    None → no paid key carries llm:decision (503); DecisionFailed → every key
+    tried and failed (502). Paid-only so the spend lands on the account that
+    holds the prepaid credit and its spend limit. The free OpenRouter keys are
+    NOT refused by this model (measured 2026-09-23: a $0 free-tier key got
+    200 OK with a cost booked), and how those accounts settle it is unverified
+    — routing billed traffic onto them would spread it where no limit is set.
+
+    Same reserve → call → book shape as run_embed, so the project and global
+    daily caps are enforced here exactly as on the chat path. The reservation
+    is sized from our own per-token price — LiteLLM has no entry for this
+    model and would reserve $0, letting a project spend past its cap.
+    """
+    provider = "openrouter"
+    capability = "decision"
+    use_model = model or model_for(provider, capability) or "openrouter/typesafe/jev-1.13"
+    estimated_cost = estimate_tokens(state, questions) * JEV_INPUT_USD_PER_TOKEN
+    any_key_seen = False
+    last_exc: Exception | None = None
+    for _ in range(_max_keys(provider)):
+        key = await pick_and_reserve(provider, scope=scope_for(capability),
+                                      require_tier="paid", project_id=project.id)
+        if key is None:
+            break
+        any_key_seen = True
+        try:
+            await _reserve_or_block(
+                key=key, project=project, provider=provider, model=use_model,
+                capability=capability, workflow=workflow, estimated_cost=estimated_cost)
+        except _CapBlocked as e:
+            last_exc = e
+            if e.fatal:
+                raise DecisionFailed(str(e)) from e
+            continue
+        plain = decrypt(key.token_encrypted)
+        try:
+            answers, meta = await decide(model=use_model, state=state,
+                                         questions=questions, api_key=plain)
+            meta["cost_usd"] = _billed_cost(key, meta)
+        except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+            await release_cost(api_key=key, estimated_cost=estimated_cost)
+            last_exc = e
+            await _handle_attempt_failure(
+                key=key, project=project, provider=provider,
+                model=use_model, capability=capability, workflow=workflow, exc=e,
+            )
+            log.warning("provider %s key %s decision failed, trying next key: %s",
+                        provider, key.label, e)
+            continue
+        await release_cost(api_key=key, estimated_cost=estimated_cost)
+        request_id = await record_usage(
+            api_key_id=key.id, project_id=project.id, lease_id=None,
+            provider=provider, model=use_model,
+            model_served=meta.get("model_served"), capability=capability,
+            workflow=workflow, tokens_in=meta["tokens_in"],
+            tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
+            latency_ms=meta["latency_ms"], status="ok", error_kind=None,
+            http_status=200,
+        )
+        await note_affinity_shared(project.id, provider, key.id)
+        return DecisionOutcome(
+            answers=answers, provider=provider, model=use_model,
+            tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
+            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+            key_label=key.label, request_id=request_id,
+            model_served=meta.get("model_served"),
+        )
+    if not any_key_seen:
+        return None
+    raise DecisionFailed(str(last_exc) if last_exc else "all keys failed")
 
 
 @dataclass

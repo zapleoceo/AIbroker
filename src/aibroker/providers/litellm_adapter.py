@@ -193,7 +193,10 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                    "chat:code": "openrouter/google/gemma-4-31b-it:free",
                    "prefilter": "openrouter/google/gemma-4-31b-it:free",
                    "structured": "openrouter/google/gemma-4-31b-it:free",
-                   "vision": "openrouter/google/gemma-4-31b-it:free"},
+                   "vision": "openrouter/google/gemma-4-31b-it:free",
+                   # Not a LiteLLM route: providers/decisions.py calls
+                   # /api/alpha/decisions directly and strips the prefix.
+                   "decision": "openrouter/typesafe/jev-1.13"},
     # 2026-07-02: chat:smart/chat:code/vision/chat:edit bumped sonnet-4-6 →
     # sonnet-5 (near-Opus coding/agentic quality at Sonnet cost; same $3/$15
     # sticker, $2/$10 intro through 2026-08-31). chat:edit also bumped off
