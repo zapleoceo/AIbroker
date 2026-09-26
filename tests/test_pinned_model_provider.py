@@ -84,10 +84,14 @@ async def test_pinned_provider_outside_the_chain_ends_in_503(monkeypatch):
     assert out is None
 
 
-@pytest.mark.parametrize("model", ["openrouter/google/gemma-4-31b-it:free", None])
-async def test_pin_is_compatible_with_the_tools_filter(monkeypatch, model):
-    """The tools filter narrows to TOOL_PROVIDERS on top of the pin; neither
-    may resurrect a provider the other excluded."""
+@pytest.mark.parametrize("model", ["gemini/gemini-2.5-flash", None])
+async def test_pin_and_the_tools_filter_compose(monkeypatch, model):
+    """Both filters apply and neither resurrects what the other excluded: the
+    tools filter narrows to TOOL_PROVIDERS, the pin to the owning provider.
+    (A native tool call keeps the stricter rule of tool_model_provider, which
+    accepts only a TOOL_PROVIDERS-qualified model — openrouter is not one, so
+    an openrouter pin plus tools is rejected before any walk; see
+    test_openrouter_pin_with_tools_is_refused.)"""
     import aibroker.services.llm_service as svc
     from aibroker.services.tool_contract import TOOL_PROVIDERS
 
@@ -106,5 +110,28 @@ async def test_pin_is_compatible_with_the_tools_filter(monkeypatch, model):
                                                  "parameters": {"type": "object"}}}],
     )
     assert set(picked) <= TOOL_PROVIDERS
+    assert "groq" not in picked and "openrouter" not in picked
     if model:
-        assert picked in ([], ["openrouter"])
+        assert picked == ["gemini"]
+
+
+async def test_openrouter_pin_with_tools_is_refused(monkeypatch):
+    """Unchanged pre-existing rule, pinned down here because the new pin filter
+    sits next to it: a NATIVE TOOL call may only name a TOOL_PROVIDERS model,
+    and tool_model_provider raises for anything else rather than cross-route."""
+    import aibroker.services.llm_service as svc
+
+    async def fake_pick(provider, scope, **kw):
+        raise AssertionError("must not reach key selection")
+
+    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini", "openrouter"])
+    with pytest.raises(ValueError, match="qualified by an enabled provider"):
+        await svc.run_chat(
+            project=SimpleNamespace(id=8, name="SIN_HRM"), capability="chat:fast",
+            messages=[{"role": "user", "content": "hi"}],
+            model="openrouter/typesafe/jev-router",
+            max_tokens=64, temperature=0.2, response_format=None, workflow="w",
+            tools=[{"type": "function", "function": {"name": "f", "description": "d",
+                                                     "parameters": {"type": "object"}}}],
+        )
