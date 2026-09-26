@@ -1097,8 +1097,15 @@ groq/gemini/cohere key. That 401 is classified `auth`, and `_penalize` answers
 `auth` with `mark_dead` — one client request pinning an OpenRouter model could
 have killed every healthy key ahead of openrouter in the chain (~20 on
 `chat:fast`) before the walk reached the right one. Found 2026-09-26 while
-answering how to call an OpenRouter router model through the broker; never
-triggered in production (no client has pinned a qualified model).
+answering how to call an OpenRouter router model through the broker. **It had
+already fired once**, ~40 minutes before the fix went live: at 2026-09-26
+07:12 UTC a SIN_HRM test job pinned `openrouter/openai/gpt-5.6-luna` and 19
+keys were marked dead in two seconds (4 groq, 7 sambanova, 7 zai, 1 gemini —
+OpenRouter answered each with 401 "Missing Authentication"). The monitor's
+probe revived all 19 on its next ticks; chat:fast logged a burst of 69 errors
+in 07:10-07:20 and vera lost 10 `structured` jobs in the window. The first
+version of this paragraph said the bug had never triggered — that was wrong,
+the audit log (`action='key.dead'`) showed it.
 
 `chains.provider_of_model` now resolves the owning provider and `run_chat`
 keeps the walk inside it:
