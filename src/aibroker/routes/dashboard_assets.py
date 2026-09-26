@@ -188,11 +188,27 @@ tr.edit-row input, tr.edit-row select { min-width:90px; }
 .brk-card-split .brk-section + .brk-section {
   margin-top:12px; padding-top:12px; border-top:1px solid #2a2d34;
 }
-/* Sparkline cell: a percentage width is a *preference*, and because the svg
-   carries no intrinsic width the column has no minimum — so it yields space to
-   the label/number columns rather than pushing the histogram past the tile
-   edge. table-layout stays auto so the text columns keep sizing to content. */
-.brk-card td.sp { width:34%; min-width:36px; padding-right:0; }
+.brk-card td.sp { min-width:36px; padding-right:0; }
+/* Breakdown cards whose label column holds arbitrary client strings (workflow
+   and model names) use a FIXED table layout and truncate the label with an
+   ellipsis; the full name is in the cell's title tooltip (2026-09-26, owner
+   request after `sinhrm.candidate_screening` pushed the workflow sparklines
+   past the tile edge at a 311px card). Under the old auto layout the sparkline
+   column did yield, but a monospace label cannot wrap, so the table's minimum
+   width grew with the longest name and the table overflowed the card instead.
+   Fixed layout makes the label take only what the other columns leave; the
+   count/cost/hit widths are sized for their longest realistic value
+   ("12345", "$0.0000", "100%"). Verified in-browser at 900-1400px viewports:
+   every table inside its card's content box, no number clipped. */
+.brk-card-split table, .brk-card-models table { width:100%; table-layout:fixed; }
+.brk-card-split td.k, .brk-card-models td.k {
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.brk-card-split td:nth-child(2), .brk-card-models td:nth-child(2) { width:5ch; }
+.brk-card-split td:nth-child(3) { width:8ch; }
+.brk-card-split td.sp { width:24%; }
+.brk-card-models td:nth-child(3) { width:4.5ch; }
+.brk-card-models td:nth-child(4) { width:8ch; }
 .spark { display:block; width:100%; height:20px; vertical-align:middle; }
 .range-pills { display:inline-flex; gap:6px; margin-left:10px; vertical-align:middle; }
 .range-pills a { font-size:11px; padding:3px 9px; border-radius:4px;

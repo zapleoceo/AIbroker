@@ -909,10 +909,11 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
 
     def _bd_card(title_en: str, title_ru: str, rows: list[tuple],
                   fmt_row, total_label_en: str = "total",
-                  total_label_ru: str = "итого", total: tuple | None = None) -> str:
+                  total_label_ru: str = "итого", total: tuple | None = None,
+                  cls: str = "") -> str:
         section = _bd_section(title_en, title_ru, rows, fmt_row,
                                total_label_en, total_label_ru, total)
-        return f'<div class="brk-card">{section}</div>'
+        return f'<div class="brk-card{" " + cls if cls else ""}">{section}</div>'
 
     prov_card = _bd_card("By provider", "По провайдерам", list(d["by_provider"]),
         lambda r: f'<tr><td class="k">{esc(r.provider)}</td>'
@@ -932,13 +933,13 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     cap_wf_card = (
         '<div class="brk-card brk-card-split">'
         + _bd_section("By capability", "По способностям", list(d["by_capability"]),
-            lambda r: f'<tr><td class="k">{esc(r.cap)}</td>'
+            lambda r: f'<tr><td class="k" title="{esc(r.cap)}">{esc(r.cap)}</td>'
                       f'<td class="num">{r.n}</td>'
                       f'<td class="num">{_cost_span(float(r.spend))}</td>'
                       f'<td class="sp">{_sparkline_svg(cap_spark.get(r.cap, _empty_spark))}</td></tr>',
             colspan=4)
         + _bd_section("By workflow", "По workflow", list(d["by_workflow"]),
-            lambda r: f'<tr><td class="k">{esc(r.wf)}</td>'
+            lambda r: f'<tr><td class="k" title="{esc(r.wf)}">{esc(r.wf)}</td>'
                       f'<td class="num">{r.n}</td>'
                       f'<td class="num">{_cost_span(float(r.spend))}</td>'
                       f'<td class="sp">{_sparkline_svg(wf_spark.get(r.wf, _empty_spark))}</td></tr>',
@@ -958,10 +959,12 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         return f'<td class="num">{100 * cache_r / tin:.0f}%</td>'
 
     model_card = _bd_card("Top models", "Топ моделей", list(d["by_model"]),
-        lambda r: f'<tr><td class="k" style="font-size:11px">{esc(r.model or "")}</td>'
+        lambda r: f'<tr><td class="k" style="font-size:11px" '
+                  f'title="{esc(r.model or "")}">{esc(r.model or "")}</td>'
                   f'<td class="num">{r.n}</td>'
                   f'{_hit_cell(r)}'
-                  f'<td class="num">{_cost_span(float(r.spend))}</td></tr>')
+                  f'<td class="num">{_cost_span(float(r.spend))}</td></tr>',
+        cls="brk-card-models")
 
     # Latency histogram: count of calls per latency bucket (same period), bars
     # scaled to the busiest bucket. Reuses the cap-bar/fill quota-bar styling.

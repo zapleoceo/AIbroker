@@ -513,6 +513,7 @@ earlier description with `provider: "cache"` and no provider call.
 | `POST` | `/dashboard/projects/create` | HTML form handler |
 | `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
 | `POST` | `/dashboard/projects/{id}/delete` | Hard delete a client project (confirm prompt; `dash_delete_project`, 2026-09-12). The key stops authenticating at once; usage history keeps its project_id. |
+| — | project page breakdown cards | Long workflow and model names are truncated with an ellipsis; hover shows the full name (2026-09-26 — `sinhrm.candidate_screening` pushed the workflow sparklines past the tile edge). Fixed table layout in `.brk-card-split` / `.brk-card-models`. |
 | `GET` | `/dashboard/projects/{id}?range=1h\|4h\|12h\|24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
 | `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
 | `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |
