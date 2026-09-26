@@ -1087,6 +1087,35 @@ returns the scope the **project** must hold and the **key** must carry.
 > provider per the JSON quality gate — now demoted behind the JSON-reliable
 > providers on any JSON-format request instead of being tried first.
 
+## A pinned model stays on its own provider (2026-09-26)
+
+`model` in the request body overrides the chain's default model. It does NOT
+choose the key — `run_chat` walks the capability's chain as always and hands
+the pinned string to whichever provider it picks. LiteLLM then routes by the
+model's OWN prefix, so `model="openrouter/…"` went to OpenRouter carrying a
+groq/gemini/cohere key. That 401 is classified `auth`, and `_penalize` answers
+`auth` with `mark_dead` — one client request pinning an OpenRouter model could
+have killed every healthy key ahead of openrouter in the chain (~20 on
+`chat:fast`) before the walk reached the right one. Found 2026-09-26 while
+answering how to call an OpenRouter router model through the broker; never
+triggered in production (no client has pinned a qualified model).
+
+`chains.provider_of_model` now resolves the owning provider and `run_chat`
+keeps the walk inside it:
+
+| `model` in the request | effect |
+|---|---|
+| absent | normal walk, each provider's default model + rotation |
+| `gemini-2.5-flash` (bare) | normal walk, that model on every provider tried — unchanged |
+| `gemini/gemini-3.5-flash` | walk restricted to gemini |
+| `openrouter/typesafe/jev-router` | walk restricted to openrouter |
+| `anthropic/…` on a chain without anthropic | empty chain → honest 503, nothing sent |
+
+The prefix counts as a provider only when it is a key of `DEFAULT_MODEL`, so an
+unknown prefix (`myorg/whatever`) is still treated as a bare model name rather
+than emptying the chain. Native tool calls keep their stricter rule
+(`tool_contract.tool_model_provider` raises for anything it cannot qualify).
+
 ## Scopes & the reserved lane
 
 A key's `scopes` (JSONB array) gate which capabilities it can serve; the selector

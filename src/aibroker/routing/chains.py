@@ -341,6 +341,36 @@ PAID_PROVIDERS: frozenset[str] = frozenset({"deepseek", "anthropic", "openai"})
 FREE_WALK_CAPABILITIES: frozenset[str] = frozenset({"vision"})
 
 
+def provider_of_model(model: str | None) -> str | None:
+    """The provider a caller-pinned model belongs to, or None when the model
+    carries no provider prefix we know.
+
+    SAFETY, not convenience (2026-09-26). A pinned model does NOT pin the key:
+    `run_chat` walks the capability's chain as usual and hands the pinned string
+    to whichever provider it picks. LiteLLM then routes by the model's OWN
+    prefix, so `model="openrouter/…"` reached OpenRouter carrying a groq or
+    gemini key — a 401, which `_penalize` classifies as `auth` and answers with
+    `mark_dead`. One client request pinning an openrouter model could therefore
+    kill every healthy groq/gemini/cohere key ahead of openrouter in the chain
+    (~20 keys on the chat:fast chain) before the walk ever reached the right
+    one. Callers pin models legitimately (a specific gemini version, an
+    OpenRouter router model), so the fix is to keep the walk inside the owning
+    provider instead of forbidding the pin.
+
+    Deliberately NOT reusing tool_contract.tool_model_provider: that one raises
+    for anything it cannot qualify because a native tool call must never
+    cross-route. Here an unqualified string is normal — a bare model name
+    ("gemini-2.5-flash") means "this model on whatever provider the chain
+    picks", which is how pinning behaved before this existed."""
+    if not model:
+        return None
+    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+    provider, separator, name = model.partition("/")
+    if separator and name.strip() and provider in DEFAULT_MODEL:
+        return provider
+    return None
+
+
 def free_first_walk(capability: str, chain: list[str], *, paid_only: bool) -> list[str]:
     """`chain` minus the paid providers when `capability` is free-walk and
     this is not the final paid_only attempt; otherwise `chain` unchanged."""

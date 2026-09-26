@@ -469,6 +469,22 @@ Present on `GET /v1/jobs/{id}` / `GET /v1/deep/{id}` (done jobs), `POST
 alias is not always the model that ran. The dashboard's "Recent 50 calls"
 shows `model_served` when present, with the routing name in the cell tooltip.
 
+## Pinning a model (2026-09-26)
+
+`model` in the body of `POST /v1/jobs` (and `/v1/deep`) overrides the default
+model of the chain. Qualify it with the provider — `"model":
+"openrouter/typesafe/jev-router"` — and the walk is restricted to that
+provider; a bare name (`"gemini-2.5-flash"`) is applied to whichever provider
+the chain reaches, as before. A qualified model whose provider does not serve
+the capability returns **503** without sending anything (see
+`docs/routing.md`, "A pinned model stays on its own provider"). The provider
+still needs a key with the capability's scope, and the project still needs the
+scope — pinning grants nothing.
+
+The model actually used comes back in `model` (what was asked for) and, when it
+says more, in `model_served` — e.g. an OpenRouter router model reports the model
+it picked per request.
+
 ## Vision jobs: what is rejected at submit (2026-09-12)
 
 `POST /v1/jobs?capability=vision` validates every inline `data:` image before

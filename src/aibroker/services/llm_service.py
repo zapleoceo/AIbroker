@@ -60,7 +60,7 @@ from aibroker.routing import (
     reserve_cost,
     scope_for,
 )
-from aibroker.routing.chains import free_first_walk
+from aibroker.routing.chains import free_first_walk, provider_of_model
 from aibroker.routing.selector import (
     mark_cooldown,
     mark_dead,
@@ -716,6 +716,18 @@ async def run_chat(
 
     est_tokens = estimate_prompt_tokens(messages)
     full_chain = free_first_walk(capability, chain_for(capability), paid_only=paid_only)
+    # A model pinned as `provider/name` may only be tried on THAT provider —
+    # otherwise LiteLLM routes by the model's prefix while carrying another
+    # provider's key, and the resulting 401 marks that healthy key dead
+    # (see chains.provider_of_model). An empty result is honest: the pinned
+    # provider does not serve this capability, so the walk ends in a 503
+    # instead of sending the request somewhere it cannot work.
+    if (pinned_provider := provider_of_model(model)) is not None:
+        full_chain = [p for p in full_chain if p == pinned_provider]
+        if not full_chain:
+            log.warning("chat:%s pinned model %s belongs to provider %s, which "
+                        "does not serve this capability — 503", capability, model,
+                        pinned_provider)
     if tools:
         full_chain = [provider for provider in full_chain if provider in TOOL_PROVIDERS
                       and (pinned_tool_provider is None or provider == pinned_tool_provider)]
