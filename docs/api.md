@@ -145,8 +145,8 @@ LiteLLM forwards both shapes to vision-capable models (gemini → openai). Pass
 images as base64 data URLs — anthropic was removed from the vision chain because
 it 400s on fetch-gated image URLs.
 
-A completed chat `JobResponse` carries `cache_read_tokens` / `cache_write_tokens` (0 unless
-the call routed through anthropic and hit its prompt cache — see
+A completed chat `JobResponse` carries `cache_read_tokens` from the saved job result
+(`null` for older jobs without the field; 0 when the provider reported no cache read — see
 [providers.md](providers.md#prompt-caching-2026-07-01-wired-end-to-end-2026-07-02))
 and `request_id` (the `usage_log` row id — match your own logs against the
 broker's).
@@ -177,7 +177,8 @@ POST /v1/jobs?capability=chat:smart
 GET /v1/jobs/123
   → 200 {"job_id":123,"status":"pending","poll_after_s":2}      # keep polling
   → 200 {"job_id":123,"status":"done","text":"…","provider":…,  # done
-         "tokens_in":…,"tokens_out":…,"cost_usd":…,"request_id":…}
+         "tokens_in":…,"tokens_out":…,"cache_read_tokens":…,
+         "cost_usd":…,"request_id":…}
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
 

@@ -353,6 +353,7 @@ class DeepJobResponse(BaseModel):
     )
     tokens_in: int | None = None
     tokens_out: int | None = None
+    cache_read_tokens: int | None = None
     cost_usd: float | None = None
     latency_ms: int | None = None
     key_label: str | None = None
@@ -421,6 +422,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         provider=meta.get("provider"), model=meta.get("model"),
         model_served=meta.get("model_served"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
+        cache_read_tokens=meta.get("cache_read_tokens"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),
         vision_type=meta.get("vision_type"),

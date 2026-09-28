@@ -825,6 +825,13 @@ def test_job_response_done_returns_result():
     assert resp.provider == "cerebras"
 
 
+def test_job_response_done_returns_cache_read_tokens():
+    from aibroker.routes.proxy import _job_response
+    row = _fake_job_row(status="done", result_meta={"cache_read_tokens": 512})
+    resp = _job_response(row)
+    assert resp.model_dump()["cache_read_tokens"] == 512
+
+
 def test_job_response_error_returns_message():
     from aibroker.routes.proxy import _job_response
     resp = _job_response(_fake_job_row(status="error", error_message="boom"))
