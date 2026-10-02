@@ -47,8 +47,8 @@ _HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {favicon}
 <title>AIbroker — one API key, every LLM provider · free-first routing, cost guard, self-hosted</title>
-<meta name="description" content="Self-hosted LLM key broker. One API for Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage. Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
-<meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Mistral Cohere OpenRouter DeepSeek Anthropic Voyage">
+<meta name="description" content="Self-hosted LLM key broker. One API across 14 providers (Cerebras, Groq, Gemini, DeepSeek, Anthropic, OpenAI, Voyage and more, plus a self-hosted local one). Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
+<meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Cohere OpenRouter DeepSeek Anthropic Voyage">
 <meta name="author" content="zapleoceo">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://aib.zapleo.com/">
@@ -60,7 +60,7 @@ _HTML = """<!doctype html>
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aib.zapleo.com/">
 <meta property="og:title" content="AIbroker — one API key, every LLM provider">
-<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 15 providers, cost caps, health monitoring. Self-host on any VPS.">
+<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 14 providers, cost caps, health monitoring. Self-host on any VPS.">
 <meta property="og:site_name" content="AIbroker">
 <meta property="og:locale" content="en_US">
 <meta property="og:locale:alternate" content="ru_RU">
@@ -68,7 +68,7 @@ _HTML = """<!doctype html>
 <!-- Twitter / X card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="AIbroker — one API key, every LLM provider">
-<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 15 providers · cost guard · encrypted keys.">
+<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 14 providers · cost guard · encrypted keys.">
 
 <!-- Schema.org structured data — picked up by Google rich-results AND by
      LLM crawlers (Perplexity, ChatGPT browse, Claude search). Two graphs:
@@ -83,14 +83,14 @@ _HTML = """<!doctype html>
       "url": "https://aib.zapleo.com/",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux / Docker",
-      "description": "Self-hosted LLM key broker. Routes calls across Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage, SambaNova, GitHub Models, NVIDIA NIM, Cloudflare Workers AI and Z.ai — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
+      "description": "Self-hosted LLM key broker. Routes calls across Cerebras, Groq, Gemini, Cohere, OpenRouter, DeepSeek, Anthropic, OpenAI, Voyage, SambaNova, NVIDIA NIM, Cloudflare Workers AI and Z.ai, plus a self-hosted local provider (vision, transcription fallback) — free tiers first, paid fallback. Per-key, per-project and global cost caps. Automatic health probing and adaptive cooldowns. Encrypted token storage. Self-hosted on any VPS.",
       "softwareVersion": "{version}",
       "license": "Proprietary — all rights reserved. Source visible on GitHub, not licensed for reuse.",
       "offers": {{"@type": "Offer", "price": "0", "priceCurrency": "USD"}},
       "codeRepository": "https://github.com/zapleoceo/AIbroker",
       "programmingLanguage": "Python",
       "featureList": [
-        "Free-tier-first routing across 15 LLM providers",
+        "Free-tier-first routing across 14 LLM providers",
         "Adaptive per-provider cooldowns with exponential backoff and jitter",
         "Per-key, per-project and global daily cost caps",
         "Atomic SELECT FOR UPDATE SKIP LOCKED key selection",
@@ -110,7 +110,7 @@ _HTML = """<!doctype html>
           "name": "Does AIbroker store my prompts?",
           "acceptedAnswer": {{
             "@type": "Answer",
-            "text": "No. Only metadata is logged (provider, model, capability, tokens, cost, latency, status). Message bodies pass through and are forgotten."
+            "text": "Request bodies are not logged: only metadata is (provider, model, capability, tokens, cost, latency, status). Async jobs (POST /v1/jobs, /v1/deep, /v1/transcribe/jobs) do keep their request and result in the job queue so you can poll them; those payloads are purged after 7 days."
           }}
         }},
         {{
@@ -126,7 +126,7 @@ _HTML = """<!doctype html>
           "name": "How is the dashboard secured?",
           "acceptedAnswer": {{
             "@type": "Answer",
-            "text": "Telegram Login Widget signs in only OWNER_TELEGRAM_ID. Session cookie is HMAC-signed. An X-Admin-Key header is the fallback for ops scripts."
+            "text": "The Telegram Login Widget signs in only the owner's Telegram account. The session cookie is HMAC-signed. An X-Admin-Key header is the fallback for ops scripts."
           }}
         }},
         {{
@@ -134,7 +134,7 @@ _HTML = """<!doctype html>
           "name": "Can I rotate provider tokens?",
           "acceptedAnswer": {{
             "@type": "Answer",
-            "text": "Yes. Add a new key via dashboard or POST /admin/keys, then disable the old one. Active leases finish; new ones use the new key."
+            "text": "Yes. Add a new key via dashboard or POST /admin/keys, then disable the old one (POST /admin/keys/{{id}}/disable) or delete it (DELETE /admin/keys/{{id}}). New requests pick up the new key at once."
           }}
         }}
       ]
@@ -146,7 +146,7 @@ _HTML = """<!doctype html>
 <style>
 :root {{
   --bg:#0b0d11; --panel:#13161c; --panel2:#191d25; --line:#262a33;
-  --text:#e6e8ec; --muted:#8b929f; --dim:#5a6171;
+  --text:#e6e8ec; --muted:#8b929f; --dim:#7d8494;
   --accent:#4dabf7; --accent-soft:rgba(77,171,247,.12);
   --good:#51cf66; --warn:#ffd43b; --bad:#ff6b6b;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -314,6 +314,17 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
 </style>
 </head>
 <body>
+<noscript>
+  <div style="background:#13161c;border-bottom:1px solid #262a33;padding:16px 24px;color:#e6e8ec;font-size:14px;line-height:1.6">
+    <strong>AIbroker</strong> is a self-hosted LLM key broker: one project key, free-tier-first routing
+    across 14 providers, cost caps, async chat jobs (POST /v1/jobs, poll GET /v1/jobs/{{id}}), and sync
+    embeddings / transcription / decisions. This page's text is filled in by JavaScript, so enable it
+    for the full page. Meanwhile:
+    <a href="/docs">/docs</a> &middot; <a href="/openapi.json">/openapi.json</a> &middot;
+    <a href="/llms.txt">/llms.txt</a> &middot; <a href="/v1/health">/v1/health</a> &middot;
+    <a href="https://github.com/zapleoceo/AIbroker">GitHub</a>
+  </div>
+</noscript>
 
 <header>
   <div class="container nav">
@@ -359,10 +370,10 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
          data-en="★ Star on GitHub" data-ru="★ Star на GitHub"></a>
     </div>
     <div class="hero-stats">
-      <div class="stat"><div class="num">10</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
-      <div class="stat"><div class="num">2</div><div class="lbl" data-i18n="hero.s2" data-en="Modes" data-ru="Режима"></div></div>
+      <div class="stat"><div class="num">14</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
+      <div class="stat"><div class="num">7</div><div class="lbl" data-i18n="hero.s2" data-en="Scopes" data-ru="Scope-ов"></div></div>
       <div class="stat"><div class="num">~$0</div><div class="lbl" data-i18n="hero.s3" data-en="Avg cost / call" data-ru="Средн. стоим. вызова"></div></div>
-      <div class="stat"><div class="num">100%</div><div class="lbl" data-i18n="hero.s4" data-en="Open source" data-ru="Открытый код"></div></div>
+      <div class="stat"><div class="num" style="font-size:22px;line-height:42px">Visible</div><div class="lbl" data-i18n="hero.s4" data-en="Source-available" data-ru="Source-available (код виден)"></div></div>
     </div>
   </div>
 </section>
@@ -405,15 +416,15 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
   <div class="container">
     <div class="eyebrow" data-i18n="how.eyebrow" data-en="How it works" data-ru="Как это работает"></div>
     <h2 data-i18n="how.title"
-        data-en="Two modes. Both behind the same project key."
-        data-ru="Два режима. Оба за одним проектным ключом."></h2>
+        data-en="Async jobs and sync endpoints. One project key."
+        data-ru="Асинхронные задачи и синхронные эндпоинты. Один проектный ключ."></h2>
     <p class="section-intro" data-i18n="how.intro"
-       data-en="Proxy mode keeps provider tokens inside the broker — your project never sees them. Vending mode hands a short-lived lease to your code when you need direct provider access."
-       data-ru="Proxy-режим держит токены провайдеров внутри брокера — ваш проект их не видит. Vending-режим выдаёт короткоживущую аренду, когда нужен прямой доступ к провайдеру."></p>
+       data-en="The broker keeps provider tokens inside — your project never sees them. Chat and other slow work run as async jobs you poll; fast calls answer inline."
+       data-ru="Брокер держит токены провайдеров внутри — ваш проект их не видит. Чат и другая медленная работа идут асинхронными задачами, которые вы опрашиваете; быстрые вызовы отвечают сразу."></p>
     <div class="modes">
       <div class="mode">
         <div class="mode-head">
-          <h3>Proxy</h3>
+          <h3 data-i18n="how.async.h" data-en="Async jobs" data-ru="Асинхронные задачи"></h3>
           <span class="mode-tag" data-i18n="how.proxy.tag" data-en="Recommended" data-ru="Рекомендуется"></span>
         </div>
         <p data-i18n="how.proxy.desc"
@@ -421,6 +432,7 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
            data-ru="Чат асинхронный: POST /v1/jobs — отправить, GET /v1/jobs/{{id}} — забрать результат. Брокер ротирует ключи до ответа, без удержания соединения и таймаутов. Эмбеддинги синхронно на /v1/embed. Ваш код не касается креденшелов провайдера."></p>
         <pre><code>curl -X POST "https://aib.zapleo.com/v1/jobs?capability=chat:fast" \\
   -H "X-Project-Key: aib_prj_..." \\
+  -H "Content-Type: application/json" \\
   -d '{{ "messages": [{{"role":"user","content":"hi"}}] }}'
 # → {{"job_id": 123, "poll_url": "/v1/jobs/123"}}
 curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></pre>
@@ -431,10 +443,11 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
           <span class="mode-tag" data-i18n="how.embed.tag" data-en="Fast" data-ru="Быстрые"></span>
         </div>
         <p data-i18n="how.embed.desc"
-           data-en="Embeddings and transcription answer inline — they finish in seconds and never hit proxy timeouts. Same key rotation and cost metering as chat."
-           data-ru="Эмбеддинги и транскрипция отвечают сразу — они укладываются в секунды и не упираются в таймауты прокси. Та же ротация ключей и учёт стоимости, что и в чате."></p>
+           data-en="Embeddings (and typed decisions) answer inline in seconds. Transcription is synchronous too, but the self-hosted whisper fallback can take minutes, so send longer audio to POST /v1/transcribe/jobs and poll GET /v1/jobs/{{id}}. Same key rotation and cost metering as chat."
+           data-ru="Эмбеддинги (и типизированные решения) отвечают сразу, за секунды. Транскрипция тоже синхронная, но self-hosted whisper-фолбэк может работать минуты, поэтому длинное аудио отправляйте в POST /v1/transcribe/jobs и опрашивайте GET /v1/jobs/{{id}}. Та же ротация ключей и учёт стоимости, что и в чате."></p>
         <pre><code>curl -X POST https://aib.zapleo.com/v1/embed \\
   -H "X-Project-Key: aib_prj_..." \\
+  -H "Content-Type: application/json" \\
   -d '{{ "texts": ["hello world"] }}'</code></pre>
       </div>
     </div>
@@ -456,8 +469,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">01</div>
         <h3 data-i18n="f1.t" data-en="Free-first routing" data-ru="Free-first маршрутизация"></h3>
         <p data-i18n="f1.d"
-           data-en="Per-capability chains try free tiers first (chat:fast is free-only). The money lanes are the deliberate exception: chat:smart leads with DeepSeek and chat:sales with Claude Sonnet, each on its own daily cap, falling back to the free pool."
-           data-ru="Цепочки по способностям сначала пробуют free-тарифы (chat:fast — только бесплатные). Денежные линии — осознанное исключение: chat:smart ведёт DeepSeek, chat:sales — Claude Sonnet, каждая со своим дневным капом и откатом в free-пул."></p>
+           data-en="Per-capability chains try free tiers first (chat:fast is free-only). The money lanes are the deliberate exception: chat:smart tries free Gemini first and keeps DeepSeek as the paid fallback; chat:sales leads with Claude Sonnet. Each money lane has its own daily cap."
+           data-ru="Цепочки по способностям сначала пробуют free-тарифы (chat:fast — только бесплатные). Денежные линии — осознанное исключение: chat:smart сначала пробует бесплатный Gemini, а DeepSeek остаётся платным запасным; chat:sales ведёт Claude Sonnet. У каждой денежной линии свой дневной кап."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">02</div>
@@ -477,22 +490,22 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">04</div>
         <h3 data-i18n="f4.t" data-en="At-rest encryption" data-ru="Шифрование на диске"></h3>
         <p data-i18n="f4.d"
-           data-en="Provider tokens stored Fernet-encrypted in Postgres with TOKEN_SECRET (rotatable). Dashboard never displays full tokens."
-           data-ru="Токены провайдеров хранятся в Postgres под Fernet с TOKEN_SECRET (ротируемым). Панель не показывает полные токены."></p>
+           data-en="Provider tokens stored Fernet-encrypted in Postgres. Dashboard never displays full tokens."
+           data-ru="Токены провайдеров хранятся в Postgres под Fernet. Панель не показывает полные токены."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">05</div>
         <h3 data-i18n="f5.t" data-en="Atomic key selection" data-ru="Атомарный выбор ключа"></h3>
         <p data-i18n="f5.d"
-           data-en="SELECT FOR UPDATE SKIP LOCKED — no two requests get the same lease. Round-robin among healthy keys."
-           data-ru="SELECT FOR UPDATE SKIP LOCKED — два запроса не получат одну аренду. Round-robin среди здоровых ключей."></p>
+           data-en="SELECT FOR UPDATE SKIP LOCKED — no two requests get the same key. Round-robin among healthy keys."
+           data-ru="SELECT FOR UPDATE SKIP LOCKED — два запроса не получат один и тот же ключ. Round-robin среди здоровых ключей."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">06</div>
         <h3 data-i18n="f6.t" data-en="Scope-gated projects" data-ru="Scope-проекты"></h3>
         <p data-i18n="f6.d"
-           data-en="Each project key carries allowed_scopes (llm:chat, llm:embed, llm:vision). Wrong scope → 403, no provider call."
-           data-ru="Каждый ключ проекта имеет allowed_scopes (llm:chat, llm:embed, llm:vision). Не тот scope → 403, провайдер не дёргается."></p>
+           data-en="Each project key carries allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision). Wrong scope → 403, no provider call."
+           data-ru="Каждый ключ проекта имеет allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision). Не тот scope → 403, провайдер не дёргается."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">07</div>
@@ -526,8 +539,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">11</div>
         <h3 data-i18n="f11.t" data-en="Prompt caching" data-ru="Кэш промптов"></h3>
         <p data-i18n="f11.d"
-           data-en="Stable system prefixes are cached (Anthropic explicit, DeepSeek/Gemini automatic) at ~0.1x read cost; cache tokens are metered per call. Repeated translate phrases skip the model entirely."
-           data-ru="Стабильные system-префиксы кэшируются (Anthropic явно, DeepSeek/Gemini автоматически) по ~0.1x цены чтения; кэш-токены учитываются на вызов. Повторяющиеся translate-фразы вообще минуют модель."></p>
+           data-en="Stable system prefixes are cached (Anthropic explicit, DeepSeek/Gemini automatic); cache reads cost ~0.1x on Anthropic and ~0.02x on DeepSeek; cache tokens are metered per call. Repeated translate phrases skip the model entirely."
+           data-ru="Стабильные system-префиксы кэшируются (Anthropic явно, DeepSeek/Gemini автоматически); чтение из кэша стоит ~0.1x у Anthropic и ~0.02x у DeepSeek; кэш-токены учитываются на вызов. Повторяющиеся translate-фразы вообще минуют модель."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">12</div>
@@ -545,8 +558,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
   <div class="container">
     <div class="eyebrow" data-i18n="prov.eyebrow" data-en="Providers" data-ru="Провайдеры"></div>
     <h2 data-i18n="prov.title"
-        data-en="Fifteen providers. Add more in one row of code."
-        data-ru="Пятнадцать провайдеров. Добавить ещё — одна строка кода."></h2>
+        data-en="Fourteen providers. Add more in one row of code."
+        data-ru="Четырнадцать провайдеров. Добавить ещё — одна строка кода."></h2>
     <p class="section-intro" data-i18n="prov.intro"
        data-en="Built on LiteLLM, so any of its 100+ providers can be plugged in. The free-first chain is configurable per capability."
        data-ru="Построено на LiteLLM — можно подключить любой из его 100+ провайдеров. Free-first цепочка настраивается на каждую способность."></p>
@@ -554,7 +567,6 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div class="prov">cerebras <span class="badge">free</span></div>
       <div class="prov">groq <span class="badge">free</span></div>
       <div class="prov">gemini <span class="badge">free</span></div>
-      <div class="prov">mistral <span class="badge">free</span></div>
       <div class="prov">cohere <span class="badge">free</span></div>
       <div class="prov">openrouter <span class="badge">free</span></div>
       <div class="prov">voyage <span class="badge">free</span></div>
@@ -565,6 +577,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div class="prov">deepseek <span class="badge paid">paid</span></div>
       <div class="prov">anthropic <span class="badge paid">paid</span></div>
       <div class="prov">openai <span class="badge paid">paid</span></div>
+      <div class="prov">local <span class="badge" data-i18n data-en="self-hosted" data-ru="свой сервер">self-hosted</span></div>
     </div>
   </div>
 </section>
@@ -574,8 +587,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
   <div class="container">
     <div class="eyebrow" data-i18n="api.eyebrow" data-en="API" data-ru="API"></div>
     <h2 data-i18n="api.title"
-        data-en="Three endpoint groups. Per-group auth."
-        data-ru="Три группы эндпоинтов. Своя авторизация на каждую."></h2>
+        data-en="Four endpoint groups. Per-group auth."
+        data-ru="Четыре группы эндпоинтов. Своя авторизация на каждую."></h2>
 
     <div class="api-grid">
       <div class="api-block">
@@ -585,6 +598,11 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
           <div class="ep"><span class="verb get">GET</span><span class="path">/v1/jobs/{{id}}</span><span class="note">poll</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/embed</span><span class="note">sync</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/v1/transcribe</span><span class="note">sync</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/transcribe/jobs</span><span class="note">async</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/decisions</span><span class="note">sync</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/deep</span><span class="note">chat:deep · async</span></div>
+          <div class="ep"><span class="verb get">GET</span><span class="path">/v1/deep/{{id}}</span><span class="note">poll</span></div>
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/chat</span><span class="note">410 Gone</span></div>
         </div>
       </div>
       <div class="api-block">
@@ -595,6 +613,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
           <div class="ep"><span class="verb">GET</span><span class="path">/admin/keys</span><span class="note">list</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/admin/keys</span><span class="note">create</span></div>
           <div class="ep"><span class="verb post">POST</span><span class="path">/admin/keys/{{id}}/disable</span><span class="note">disable</span></div>
+          <div class="ep"><span class="verb">DEL</span><span class="path">/admin/keys/{{id}}</span><span class="note">delete</span></div>
         </div>
       </div>
       <div class="api-block">
@@ -677,8 +696,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div>
         <h3 data-i18n="faq.q1" data-en="Does AIbroker store my prompts?" data-ru="Хранит ли AIbroker мои промпты?"></h3>
         <p style="color:var(--muted);font-size:14px" data-i18n="faq.a1"
-           data-en="No. Only metadata is logged: provider, model, capability, tokens, cost, latency, status. Message bodies pass through and are forgotten."
-           data-ru="Нет. Логируются только метаданные: провайдер, модель, способность, токены, стоимость, латентность, статус. Тела сообщений проходят насквозь и забываются."></p>
+           data-en="Request bodies are not logged: only metadata is (provider, model, capability, tokens, cost, latency, status). Async jobs keep their request and result in the job queue so you can poll them; those payloads are purged after 7 days."
+           data-ru="Тела запросов не логируются: пишутся только метаданные (провайдер, модель, способность, токены, стоимость, латентность, статус). Асинхронные задачи хранят запрос и результат в очереди, чтобы вы могли их опросить; эти данные удаляются через 7 дней."></p>
 
         <h3 data-i18n="faq.q2" data-en="What happens if all keys for a provider fail?" data-ru="Что если все ключи провайдера упали?"></h3>
         <p style="color:var(--muted);font-size:14px" data-i18n="faq.a2"
@@ -688,13 +707,13 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div>
         <h3 data-i18n="faq.q3" data-en="How is the dashboard secured?" data-ru="Как защищена панель?"></h3>
         <p style="color:var(--muted);font-size:14px" data-i18n="faq.a3"
-           data-en="Telegram Login Widget signs in only OWNER_TELEGRAM_ID. Session cookie is HMAC-signed. X-Admin-Key fallback for ops scripts."
-           data-ru="Telegram Login Widget пускает только OWNER_TELEGRAM_ID. Кука сессии подписана HMAC. X-Admin-Key как fallback для ops-скриптов."></p>
+           data-en="The Telegram Login Widget signs in only the owner's Telegram account. The session cookie is HMAC-signed. An X-Admin-Key header is the fallback for ops scripts."
+           data-ru="Telegram Login Widget пускает только Telegram-аккаунт владельца. Кука сессии подписана HMAC. Заголовок X-Admin-Key — fallback для ops-скриптов."></p>
 
         <h3 data-i18n="faq.q4" data-en="Can I rotate provider tokens?" data-ru="Можно ли ротировать токены провайдеров?"></h3>
         <p style="color:var(--muted);font-size:14px" data-i18n="faq.a4"
-           data-en="Yes. Add a new key via dashboard or POST /admin/keys, then disable the old one. Active leases finish; new ones use the new key."
-           data-ru="Да. Добавьте новый ключ через панель или POST /admin/keys, потом отключите старый. Активные аренды завершатся; новые пойдут на новый ключ."></p>
+           data-en="Yes. Add a new key via dashboard or POST /admin/keys, then disable or delete the old one. New requests pick up the new key at once."
+           data-ru="Да. Добавьте новый ключ через панель или POST /admin/keys, потом отключите или удалите старый. Новые запросы сразу пойдут на новый ключ."></p>
       </div>
     </div>
   </div>
@@ -748,7 +767,10 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
   const KEY = "aib_lang";
   const params = new URLSearchParams(location.search);
   const fromQuery = params.get("lang");
-  const fromStore = localStorage.getItem(KEY);
+  // Storage can throw (Safari private mode, blocked site data); an uncaught
+  // throw here aborts the script and leaves the JS-filled page blank (2026-10-02).
+  let fromStore = null;
+  try {{ fromStore = localStorage.getItem(KEY); }} catch (e) {{}}
   let lang = (fromQuery === "ru" || fromQuery === "en") ? fromQuery
             : (fromStore === "ru" || fromStore === "en") ? fromStore
             : "en";
@@ -762,7 +784,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
     document.querySelectorAll(".lang-toggle button").forEach(b => {{
       b.classList.toggle("active", b.dataset.lang === l);
     }});
-    localStorage.setItem(KEY, l);
+    try {{ localStorage.setItem(KEY, l); }} catch (e) {{}}
   }}
 
   document.querySelectorAll(".lang-toggle button").forEach(b => {{
@@ -776,7 +798,9 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
 </body></html>"""
 
 
-@router.get("/", response_class=HTMLResponse)
+# HEAD / answered 405 (2026-10-02) — uptime checkers and link unfurlers probe
+# with HEAD; FastAPI does not derive it from a GET route.
+@router.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def landing() -> HTMLResponse:
     """Public landing — bilingual EN/RU, default EN."""
     return HTMLResponse(_HTML.format(version=__version__, favicon=FAVICON_LINKS))
@@ -842,9 +866,10 @@ _SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 _LLMS_TXT = """# AIbroker
 
 > Self-hosted centralized LLM key broker. One API endpoint routes calls across
-> 15 LLM providers (Cerebras, Groq, Gemini, Mistral, Cohere, OpenRouter,
-> DeepSeek, Anthropic, OpenAI, Voyage, SambaNova, GitHub Models, NVIDIA NIM,
-> Cloudflare Workers AI, Z.ai) with free-tier-first ordering, paid fallback,
+> 14 LLM providers (Cerebras, Groq, Gemini, Cohere, OpenRouter, DeepSeek,
+> Anthropic, OpenAI, Voyage, SambaNova, NVIDIA NIM, Cloudflare Workers AI,
+> Z.ai, plus a self-hosted `local` provider for vision and a transcription
+> fallback) with free-tier-first ordering, paid fallback,
 > per-key and per-project cost caps, automatic health probing, and
 > Fernet-encrypted token storage at rest. Self-host on any VPS.
 
@@ -852,22 +877,25 @@ _LLMS_TXT = """# AIbroker
 
 - **Proxy mode**: the broker calls the provider with its own stored key and
   returns the response — clients never see provider credentials.
+- **Privacy**: request bodies are not logged (metadata only). Async job
+  payloads (`/v1/jobs`, `/v1/deep`, `/v1/transcribe/jobs`) are stored in the job
+  queue so they can be polled and are purged after 7 days.
 - **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
   `chat:sales`, `chat:code`, `chat:edit`, `chat:deep`, `prefilter`,
   `structured`, `translate`, `vision`, `transcription`, `embedding`. Each maps
   to an ordered provider chain and a required scope. Most chains are
-  free-first; `chat:smart` (DeepSeek-led) and `chat:sales` (Claude Sonnet-led)
-  are deliberate exceptions where answer quality outranks price, each bounded
-  by its own daily cap and still falling back to the free pool. `chat:sales`
+  free-first; `chat:smart` (free Gemini first, DeepSeek as the paid fallback)
+  and `chat:sales` (Claude Sonnet-led) are the money lanes where answer quality
+  outranks price, each bounded by its own daily cap. `chat:sales`
   additionally keeps Sonnet's reasoning on — it does not force JSON through
   tool-use, because on that model the two are mutually exclusive. `chat:deep`
   is a dedicated long-context/reasoning lane (1M-token context, no latency
   guarantee) gated behind its own scope so it never competes with live chat
   traffic.
 - **Scopes**: every project key carries a list of allowed scopes
-  (`llm:chat`, `llm:embed`, `llm:vision`, `llm:edit`, `llm:deep`, `llm:audio`).
-  Mismatch → HTTP 403.
-- **Adaptive cooldown**: per-provider base wait (Gemini 60s, Mistral 10s,
+  (`llm:chat`, `llm:edit`, `llm:deep`, `llm:vision`, `llm:audio`, `llm:embed`,
+  `llm:decision`). Mismatch → HTTP 403.
+- **Adaptive cooldown**: per-provider base wait (Gemini 60s,
   OpenRouter 5min, etc.) with exponential backoff per consecutive 429.
 - **Reserved lane**: a key marked `is_reserve=true` is picked last in its
   group — the safety net behind the shared pool.
@@ -882,10 +910,15 @@ _LLMS_TXT = """# AIbroker
 - `POST /v1/jobs?capability=...` — submit a chat job, returns a `job_id` (needs `X-Project-Key`)
 - `GET /v1/jobs/{id}` — poll for the job result
 - `POST /v1/embed?provider=voyage` — proxy mode embed
+- `POST /v1/decisions` — typed decisions (choice / score / yes-no), synchronous
 - `POST /v1/deep` + `GET /v1/deep/{job_id}` — async job API for
   `capability=chat:deep` (long-context/reasoning; latency observed up to
   ~8 min, past Cloudflare/nginx proxy timeouts — submit, then poll)
-- `POST /v1/transcribe` — proxy mode audio → text
+- `POST /v1/transcribe` — proxy mode audio → text (synchronous; the self-hosted
+  whisper fallback can take minutes — use `POST /v1/transcribe/jobs`, then poll
+  `GET /v1/jobs/{id}`)
+- `POST /v1/chat` — removed, returns 410 Gone (use `/v1/jobs`)
+- `DELETE /admin/keys/{id}` — admin API (`X-Admin-Key`), alongside `POST /admin/keys`
 
 ## Code
 

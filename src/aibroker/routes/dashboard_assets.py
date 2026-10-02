@@ -16,7 +16,8 @@ import hashlib
 _NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
 
 _LOGIN_HTML = """<!doctype html><html><head>
-<meta charset="utf-8"><title>AIbroker — login</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIbroker — login</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
 <style>
@@ -101,6 +102,15 @@ th, td { padding:8px 12px; text-align:left; border-bottom:1px solid #2a2d34; fon
 th { background:#0f1115; color:#888; text-transform:uppercase; font-size:11px; font-weight:500; }
 td.mono, code { font-family:ui-monospace, monospace; color:#4dabf7; font-size:12px; }
 .ok { color:#4caf50; } .bad { color:#f44336; } .warn { color:#ffd84a; }
+/* owner-disabled key: grey, not the green of a live one (2026-10-02) */
+.off { color:#8a8f99; }
+/* logout is a POST form (a GET link could be fired cross-site) styled like the nav links */
+nav form.inline { margin:0; }
+.linkbtn { background:none; border:none; padding:0; margin-left:14px; color:#4dabf7;
+           font:inherit; font-size:13px; cursor:pointer; }
+/* recent-calls model column: ellipsis instead of a hard 40-char slice; full name in the title */
+.recent-table td.model-cell { max-width:260px; overflow:hidden; text-overflow:ellipsis;
+                              white-space:nowrap; }
 /* Cost column: dim free $0.0000 rows, brighten rows that actually spent money. */
 .cost-zero { color:#565b66; } .cost-pos { color:#f0f2f5; font-weight:600; }
 /* Per-key scope pills: every known scope shown; enabled bright, disabled dim —

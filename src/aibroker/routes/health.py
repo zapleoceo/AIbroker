@@ -5,11 +5,12 @@ from datetime import UTC, datetime
 from html import escape as esc
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 
 from aibroker import __version__
+from aibroker.auth_session import require_owner_session
 from aibroker.db import get_session
 from aibroker.routes.landing import FAVICON_LINKS
 
@@ -53,6 +54,34 @@ async def _fetch_provider_health() -> list[dict[str, Any]]:  # pragma: no cover
     ]
 
 
+def _is_privileged(request: Request) -> bool:
+    """True for a valid X-Admin-Key or owner session cookie (same check as the
+    dashboard). RuntimeError = SESSION_SECRET unset with a cookie present."""
+    try:
+        require_owner_session(request)
+    except (HTTPException, RuntimeError):
+        return False
+    return True
+
+
+def _aggregate_health(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-provider rows into ONE row — what an anonymous caller gets.
+
+    2026-10-02 review: the public endpoint listed which providers the broker
+    holds keys for and how many are dead/cooling, i.e. a map of where to push
+    to exhaust the free pool. Uptime checks only need "is anything alive", so
+    anonymous callers get totals; the per-provider rows need admin/owner auth.
+    The top-level `providers` key is kept (one row, provider "all") so existing
+    consumers keep parsing."""
+    return [{
+        "provider": "all",
+        "alive": sum(p["alive"] for p in providers),
+        "cooldown": sum(p["cooldown"] for p in providers),
+        "dead": sum(p["dead"] for p in providers),
+        "total": sum(p["total"] for p in providers),
+    }]
+
+
 # Reused verbatim from landing.py's lang-toggle (no {}-interpolation needed on
 # this block, so it's a plain string — no .format()/f-string brace escaping).
 _LANG_TOGGLE_JS = """
@@ -61,7 +90,8 @@ _LANG_TOGGLE_JS = """
   const KEY = "aib_lang";
   const params = new URLSearchParams(location.search);
   const fromQuery = params.get("lang");
-  const fromStore = localStorage.getItem(KEY);
+  let fromStore = null;
+  try { fromStore = localStorage.getItem(KEY); } catch (e) {}
   let lang = (fromQuery === "ru" || fromQuery === "en") ? fromQuery
             : (fromStore === "ru" || fromStore === "en") ? fromStore
             : "en";
@@ -74,7 +104,7 @@ _LANG_TOGGLE_JS = """
     document.querySelectorAll(".lang-toggle button").forEach(b => {
       b.classList.toggle("active", b.dataset.lang === l);
     });
-    localStorage.setItem(KEY, l);
+    try { localStorage.setItem(KEY, l); } catch (e) {}
   }
   document.querySelectorAll(".lang-toggle button").forEach(b => {
     b.addEventListener("click", () => apply(b.dataset.lang));
@@ -87,7 +117,7 @@ _LANG_TOGGLE_JS = """
 _HEALTH_CSS = """
 :root {
   --bg:#0b0d11; --panel:#13161c; --panel2:#191d25; --line:#262a33;
-  --text:#e6e8ec; --muted:#8b929f; --dim:#5a6171;
+  --text:#e6e8ec; --muted:#8b929f; --dim:#7d8494;
   --accent:#4dabf7; --accent-soft:rgba(77,171,247,.12);
   --good:#51cf66; --warn:#ffd43b; --bad:#ff6b6b;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -223,7 +253,8 @@ def _render_health_html(providers: list[dict[str, Any]]) -> HTMLResponse:
 
 @router.get("/v1/health")
 async def health_summary(request: Request) -> Response:  # pragma: no cover
-    """Per-provider alive/dead/cooldown counts.
+    """Alive/dead/cooldown counts — per provider for an admin key / owner
+    session, a single aggregate row (provider "all") for anonymous callers.
 
     Content-negotiated: a browser (Accept: text/html, e.g. clicking the
     dashboard nav link) gets a colored status page; anything else (curl,
@@ -238,6 +269,9 @@ async def health_summary(request: Request) -> Response:  # pragma: no cover
     content-negotiation branch and both render paths are separately unit-
     tested SQLite-safe via _render_health_html/_health_provider_card."""
     providers = await _fetch_provider_health()
+    detail = _is_privileged(request)
+    if not detail:
+        providers = _aggregate_health(providers)
     if "text/html" in request.headers.get("accept", ""):
         return _render_health_html(providers)
-    return JSONResponse({"providers": providers}, headers=_NO_STORE)
+    return JSONResponse({"providers": providers, "detail": detail}, headers=_NO_STORE)

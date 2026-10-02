@@ -17,9 +17,13 @@ from aibroker.auth import (
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
+from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.telemetry import audit
 
-router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
+# include_in_schema=False (2026-10-02): keeps the public /openapi.json to the
+# client API; the admin endpoints are documented on the landing page / docs/api.md.
+router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)],
+                   include_in_schema=False)
 
 
 # ─── Projects ───────────────────────────────────────────────────────────────
@@ -144,6 +148,10 @@ class ApiKeyOut(BaseModel):
 
 @router.post("/keys", response_model=ApiKeyOut)
 async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
+    # Only min/max length was checked, so any string became a provider name and
+    # was later rendered into the dashboard (2026-10-02 review).
+    if body.provider not in DEFAULT_MODEL:
+        raise HTTPException(400, f"unknown provider; known: {', '.join(sorted(DEFAULT_MODEL))}")
     async with get_session() as s:
         existing = (
             await s.execute(

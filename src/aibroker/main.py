@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 
 from aibroker import __version__
 from aibroker.config import get_settings
@@ -63,6 +63,30 @@ app = FastAPI(
     lifespan=lifespan,
     redoc_url=None,  # Swagger UI at /docs is enough
 )
+
+# 2026-10-02 review: no response carried any security header, so the dashboard
+# could be framed (clickjacking the key-delete forms) and /login MIME-sniffed.
+# Deliberately NO script-src/style-src: the pages use inline <script>/<style>
+# and the Telegram login widget loads from telegram.org. HSTS without
+# includeSubDomains/preload — only this host is known to be https-only.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Strict-Transport-Security": "max-age=31536000",
+}
+
+
+@app.middleware("http")
+async def _security_headers(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)   # never override a route's own
+    return response
+
 
 app.include_router(landing.router)
 app.include_router(health.router)

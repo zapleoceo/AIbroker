@@ -69,8 +69,8 @@ def test_landing_links_to_dashboard_and_login():
 
 def test_landing_lists_providers():
     r = client.get("/")
-    for p in ["cerebras", "groq", "gemini", "mistral", "cohere",
-               "openrouter", "voyage", "deepseek", "anthropic", "openai"]:
+    for p in ["cerebras", "groq", "gemini", "cohere",
+               "openrouter", "voyage", "deepseek", "anthropic", "openai", "local"]:
         assert p in r.text
 
 
@@ -226,3 +226,137 @@ def test_landing_shows_version():
     from aibroker import __version__
     r = client.get("/")
     assert f"v{__version__}" in r.text
+
+
+# ─── 2026-10-02 site review: landing copy matches the code ──────────────────
+
+
+def _page_and_llms() -> tuple[str, str]:
+    return client.get("/").text, client.get("/llms.txt").text
+
+
+def test_landing_license_stat_is_source_available_not_open_source():
+    """L1: the hero said '100% Open source' while JSON-LD/llms.txt say proprietary."""
+    page, _ = _page_and_llms()
+    assert 'data-en="Source-available"' in page
+    assert "Open source" not in page and "Открытый код" not in page
+
+
+def test_landing_privacy_answer_admits_async_job_payloads_are_kept():
+    """L2: bodies of async jobs sit in deep_jobs until the retention purge."""
+    page, llms = _page_and_llms()
+    assert "forgotten" not in page and "забываются" not in page
+    assert "purged after 7 days" in page and "purged after 7 days" in llms
+    assert "через 7 дней" in page
+
+
+def test_landing_has_no_vending_mode():
+    """L3: vending/leases were removed 2026-07-12."""
+    page, llms = _page_and_llms()
+    assert "vending" not in page.lower() and "vending" not in llms.lower()
+    assert "Two modes" not in page
+    assert "Active leases" not in page
+    assert "Async jobs and sync endpoints" in page
+
+
+def test_landing_provider_count_is_consistent_with_tiles():
+    """L4/L5: one count everywhere; no GitHub Models; no Mistral; `local` shown."""
+    import re
+    page, llms = _page_and_llms()
+    tiles = re.findall(r'<div class="prov">', page)
+    assert len(tiles) == 14
+    assert "Fourteen" in page and "14 providers" in page
+    assert "Fifteen" not in page and "15 providers" not in page
+    assert "15 LLM providers" not in page and "15 LLM providers" not in llms
+    for text in (page, llms):
+        assert "GitHub Models" not in text
+        assert "mistral" not in text.lower()
+    assert '<div class="prov">local ' in page
+
+
+def test_landing_chat_smart_is_free_gemini_first_with_deepseek_fallback():
+    """L6: chat:smart = gemini -> deepseek -> sambanova -> anthropic."""
+    page, llms = _page_and_llms()
+    assert "leads with DeepSeek" not in page and "DeepSeek-led" not in llms
+    assert "free Gemini first" in page and "free Gemini first" in llms
+    from aibroker.routing.chains import CAPABILITY_CHAINS
+    assert CAPABILITY_CHAINS["chat:smart"][:2] == ["gemini", "deepseek"]
+
+
+def test_landing_transcription_is_not_promised_instant():
+    """L7: the self-hosted whisper fallback takes minutes (131-168s observed)."""
+    page, _ = _page_and_llms()
+    assert "never hit proxy timeouts" not in page
+    assert "/v1/transcribe/jobs" in page
+
+
+def test_landing_api_section_lists_every_client_endpoint_and_scope():
+    """L8: heading said three groups but showed four; several endpoints/scopes missing."""
+    page, llms = _page_and_llms()
+    assert "Four endpoint groups" in page and "Three endpoint groups" not in page
+    for path in ("/v1/decisions", "/v1/deep", "/v1/deep/{id}", "/v1/transcribe/jobs",
+                 "/admin/keys/{id}"):
+        assert path in page, path
+    assert "410 Gone" in page
+    for scope in ("llm:edit", "llm:deep", "llm:audio", "llm:decision"):
+        assert scope in page and scope in llms, scope
+    assert "/v1/decisions" in llms and "410 Gone" in llms
+
+
+def test_landing_curl_examples_send_a_json_content_type():
+    """L9: curl -d defaults to form-encoding; FastAPI answers 422 without the header."""
+    page, _ = _page_and_llms()
+    assert page.count('-H "Content-Type: application/json"') >= 2
+
+
+def test_landing_cache_discount_claims_are_per_provider_and_no_rotatable_secret():
+    """L10: DeepSeek cache reads are ~0.02x ($0.003 vs $0.15 per M), not ~0.1x."""
+    page, _ = _page_and_llms()
+    assert "~0.02x on DeepSeek" in page and "~0.1x on Anthropic" in page
+    assert "rotatable" not in page and "ротируемым" not in page
+
+
+def test_landing_does_not_leak_internal_env_var_names():
+    """L11: OWNER_TELEGRAM_ID / TOKEN_SECRET are deployment internals."""
+    page, llms = _page_and_llms()
+    for text in (page, llms):
+        assert "OWNER_TELEGRAM_ID" not in text
+        assert "TOKEN_SECRET" not in text
+        assert "JOB_RETENTION_DAYS" not in text
+    assert "X-Admin-Key" in page
+
+
+def test_landing_survives_blocked_storage_and_has_noscript_summary():
+    """L12: an uncaught localStorage throw aborted the script -> blank page."""
+    page = client.get("/").text
+    assert "<noscript>" in page
+    assert "/docs" in page.split("<noscript>")[1].split("</noscript>")[0]
+    assert "try { fromStore = localStorage.getItem(KEY); } catch (e) {}" in page
+    assert "try { localStorage.setItem(KEY, l); } catch (e) {}" in page
+    # no bare storage call is left outside a try
+    assert page.count("localStorage.") == 2
+
+
+def test_landing_accepts_head():
+    """L13: HEAD / was 405 (uptime checkers, link unfurlers)."""
+    r = client.head("/")
+    assert r.status_code == 200
+
+
+def _contrast(fg: str, bg: str) -> float:
+    def lum(h: str) -> float:
+        h = h.lstrip("#")
+        c = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_landing_dim_text_meets_wcag_aa_on_the_page_background():
+    """L13: --dim was #5a6171 = 3.13:1 on #0b0d11; #7d8494 is 5.19:1."""
+    import re
+    page = client.get("/").text
+    dim = re.search(r"--dim:(#[0-9a-f]{6});", page).group(1)
+    assert _contrast(dim, "#0b0d11") >= 4.5
+    assert _contrast("#5a6171", "#0b0d11") < 4.5   # the helper discriminates

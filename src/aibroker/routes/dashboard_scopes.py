@@ -5,6 +5,9 @@ live in their own leaf module to keep those two from importing each other.
 """
 from __future__ import annotations
 
+from html import escape as esc
+
+from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 
 # Derived from the capability table (2026-07-16) — the old hand-copied tuple
@@ -12,6 +15,13 @@ from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 # dashboard (that's how llm:audio went missing for Stepan2 voice, 2026-07-11).
 # dict.fromkeys keeps first-appearance order, so llm:chat renders first.
 _KNOWN_SCOPES = tuple(dict.fromkeys(CAPABILITY_SCOPE.values()))
+
+
+def _is_known_provider(provider: str) -> bool:
+    """Provider must be one the adapter has a model table for — the create
+    endpoints took any string, which then reached the scope-checkbox title
+    attribute unescaped (2026-10-02 review)."""
+    return provider in DEFAULT_MODEL
 
 
 def _validate_scope_list(scopes: list[str]) -> list[str] | None:
@@ -45,7 +55,7 @@ def _scope_checkboxes(
     out = []
     for s in _KNOWN_SCOPES:
         na = usable is not None and s not in usable
-        title = f' title="{provider} cannot serve {s}"' if na else ""
+        title = f' title="{esc(provider or "")} cannot serve {esc(s)}"' if na else ""
         out.append(
             f'<label class="scope-cb{" scope-na" if na else ""}"{title}>'
             f'<input type="checkbox" name="{name}" value="{s}"'

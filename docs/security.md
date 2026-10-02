@@ -63,3 +63,13 @@ If `X-Project-Key` leaks:
 - **No mTLS** between projects and broker. We rely on `X-Project-Key` over TLS to CF, then HTTP from CF to origin.
 - **No KMS** — `TOKEN_SECRET` is on disk. If someone roots the box, all keys can be decrypted.
 - **No PII redaction** in audit_log. Today we don't log message bodies — but if that changes, redact first.
+
+## Site review hardening (2026-10-02)
+
+- **Security headers** on every response (`main._security_headers`, middleware; a header a route already set is kept): `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, `Strict-Transport-Security: max-age=31536000`. The CSP is deliberately `frame-ancestors` only — the pages use inline `<script>`/`<style>` and the Telegram login widget, so no `script-src`/`style-src`. HSTS carries no `includeSubDomains`/`preload`.
+- **`GET /v1/health`** is still public with the same top-level `providers` key, but an anonymous caller gets ONE aggregate row (`provider: "all"`, summed alive/cooldown/dead/total) plus `detail: false`; per-provider rows need a valid `X-Admin-Key` or owner session (`health._is_privileged`, `health._aggregate_health`). The per-provider split was a map of which free pools to exhaust.
+- **`/openapi.json`** stays public but no longer lists `/dashboard/*`, `/admin/*`, `/login`, `/logout`, `/api/tg_login` (`include_in_schema=False` on the dashboard and admin routers).
+- **Provider validation:** `POST /admin/keys` answers 400 and `POST /dashboard/keys/create` flashes an error for a provider outside `DEFAULT_MODEL`; the dashboard also refuses to add a key for a provider that is in no routing chain (mistral today). The scope-checkbox tooltip now HTML-escapes the provider.
+- **Dashboard forms:** cost caps parse through `dashboard._parse_cost_cap` (blank = none; junk, negative, `nan`, `inf` -> flash instead of a 500 or a cap that never trips); flash redirects are percent-encoded (`dashboard._flash_url`); key labels and project names are capped at 100 characters (`_MAX_NAME_LEN`). `GET /logout` (`dashboard.logout_get`) no longer logs out — it redirects to `/dashboard`; the nav button POSTs `/logout`.
+- **Editing a key whose provider is in no chain** keeps its stored scopes (all of its scope boxes are disabled, so the form submits none).
+- **Privacy wording** on the landing page: request bodies are not logged, but async job payloads (`/v1/jobs`, `/v1/deep`, `/v1/transcribe/jobs`) are stored in `deep_jobs` and purged after `JOB_RETENTION_DAYS` (default 7).

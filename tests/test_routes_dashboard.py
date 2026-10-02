@@ -534,12 +534,27 @@ def test_fetch_type_sparklines_splits_ok_and_error_by_bucket():
 
 
 def test_logout_clears_cookie():
-    r = client.get("/logout", cookies=_logged_in_cookies(), follow_redirects=False)
+    """Logout is POST-only since 2026-10-02 (a GET could be fired cross-site)."""
+    r = client.post("/logout", cookies=_logged_in_cookies(), follow_redirects=False)
     assert r.status_code == 303
     assert "/login" in r.headers["location"]
     # Cookie cleared via Set-Cookie: ... Max-Age=0
     cookies = r.headers.get("set-cookie", "")
     assert COOKIE_NAME in cookies
+
+
+def test_logout_get_does_not_log_out():
+    r = client.get("/logout", cookies=_logged_in_cookies(), follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/dashboard"
+    assert COOKIE_NAME not in r.headers.get("set-cookie", "")
+
+
+def test_dashboard_nav_logout_is_a_post_form():
+    from aibroker.routes.dashboard_render import _dash_html
+    html = _dash_html(body="x")
+    assert 'method="post" action="/logout"' in html
+    assert 'href="/logout"' not in html
 
 
 # ─── Form handlers (require auth — verify the gate) ─────────────────────────
@@ -1040,7 +1055,10 @@ def test_main_render_with_empty_db():
     # all-time pill active by default
     assert 'range-reset active' in body
     # All-time label rendered (EN literal in default-EN paint)
-    assert "Spend (all time)" in body
+    # 2026-10-02: usage_log is purged past USAGE_RETENTION_DAYS, so "all time"
+    # says so (imported, not hard-coded).
+    from aibroker.services.job_queue import _USAGE_RETENTION_DAYS
+    assert f"Spend (all time ({_USAGE_RETENTION_DAYS} d retention))" in body
     # provider summary line
     assert "cerebras" in body and "gemini" in body
     # tables exist with headers
@@ -1968,3 +1986,246 @@ def test_recent_calls_show_the_served_model_with_the_routed_name_in_the_tooltip(
     assert 'title="routed as deepseek/deepseek-flash"' in body   # routing name kept
     assert "local/qwen3vl" in body                               # no served → as before
     assert 'title="routed as local/qwen3vl"' not in body
+
+
+# ─── 2026-10-02 site review: dashboard hardening ────────────────────────────
+
+
+def test_scope_checkboxes_escape_the_provider_in_the_tooltip():
+    """S16: `provider` is operator/API-supplied; it reached title="..." raw."""
+    from aibroker.routes.dashboard_scopes import _scope_checkboxes
+    html = _scope_checkboxes(["llm:chat"], provider='"><script>alert(1)</script>')
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html and "&quot;" in html
+
+
+def test_is_known_provider_uses_the_adapter_table():
+    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+    from aibroker.routes.dashboard_scopes import _is_known_provider
+    assert all(_is_known_provider(p) for p in DEFAULT_MODEL)
+    assert not _is_known_provider("evil<script>")
+
+
+def test_dashboard_create_key_rejects_unknown_provider():
+    r = client.post(
+        "/dashboard/keys/create", cookies=_logged_in_cookies(),
+        data={"provider": '"><script>x', "label": "y", "token": "tok-12345678",
+              "scopes": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Unknown+provider" in r.headers["location"]
+
+
+def test_dashboard_create_key_refuses_provider_in_no_chain():
+    """S20: mistral is in no chain (2026-09-12) — such a key can never be
+    picked and its scope boxes are all disabled, so refuse adding it."""
+    r = client.post(
+        "/dashboard/keys/create", cookies=_logged_in_cookies(),
+        data={"provider": "mistral", "label": "y", "token": "tok-12345678",
+              "scopes": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "no+routing+chain" in r.headers["location"]
+
+
+@pytest.mark.parametrize("bad", ["abc", "nan", "inf", "-inf", "-1", "1e999"])
+def test_parse_cost_cap_rejects_junk_nonfinite_and_negative(bad):
+    from aibroker.routes.dashboard import _parse_cost_cap
+    with pytest.raises(ValueError):
+        _parse_cost_cap(bad)
+
+
+def test_parse_cost_cap_accepts_blank_zero_and_decimals():
+    from aibroker.routes.dashboard import _parse_cost_cap
+    assert _parse_cost_cap("") is None
+    assert _parse_cost_cap("   ") is None
+    assert _parse_cost_cap("0") == 0.0
+    assert _parse_cost_cap(" 1.25 ") == 1.25
+
+
+@pytest.mark.parametrize("path,data", [
+    ("/dashboard/keys/99999/edit", {"label": "x", "tier": "free", "scopes": "llm:chat"}),
+    ("/dashboard/projects/99999/edit", {"name": "x", "allowed_scopes": "llm:chat"}),
+    ("/dashboard/keys/create", {"provider": "cerebras", "label": "x",
+                                "token": "tok-12345678", "scopes": "llm:chat"}),
+    ("/dashboard/projects/create", {"name": "x", "allowed_scopes": "llm:chat"}),
+])
+def test_dashboard_forms_flash_on_bad_cost_cap_instead_of_500(path, data):
+    for bad in ("abc", "nan"):
+        r = client.post(path, cookies=_logged_in_cookies(),
+                        data={**data, "daily_cost_cap_usd": bad}, follow_redirects=False)
+        assert r.status_code == 303, (path, bad)
+        assert "Bad+cost+cap" in r.headers["location"]
+
+
+def test_flash_url_percent_encodes_names():
+    """S18: raw names broke the query string (`&`, `#`, `%`) and could inject params."""
+    from aibroker.routes.dashboard import _flash_url
+    assert _flash_url("Key a&b#c/d updated") == "/dashboard?flash=Key+a%26b%23c%2Fd+updated"
+    assert _flash_url("!Bad") == "/dashboard?flash=%21Bad"
+
+
+@pytest.mark.parametrize("path,data,msg", [
+    ("/dashboard/keys/99999/edit", {"tier": "free", "scopes": "llm:chat"}, "Label+too+long"),
+    ("/dashboard/projects/99999/edit", {"allowed_scopes": "llm:chat"}, "Name+too+long"),
+    ("/dashboard/projects/create", {"allowed_scopes": "llm:chat"}, "Name+too+long"),
+])
+def test_dashboard_forms_cap_name_and_label_at_100_chars(path, data, msg):
+    field = "label" if "keys" in path else "name"
+    r = client.post(path, cookies=_logged_in_cookies(),
+                    data={**data, field: "x" * 101}, follow_redirects=False)
+    assert r.status_code == 303
+    assert msg in r.headers["location"]
+
+
+def test_dashboard_create_key_caps_label_at_100_chars():
+    r = client.post(
+        "/dashboard/keys/create", cookies=_logged_in_cookies(),
+        data={"provider": "cerebras", "label": "x" * 101, "token": "tok-12345678",
+              "scopes": "llm:chat"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "Label+too+long" in r.headers["location"]
+
+
+class _FakeSession:
+    """Just enough AsyncSession for the edit-key handler's get()."""
+    def __init__(self, row):
+        self.row = row
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, model, key):
+        return self.row
+
+
+def _edit_key_with_row(monkeypatch, row, data):
+    import aibroker.routes.dashboard as dash
+
+    async def no_audit(**kw):
+        return None
+    monkeypatch.setattr(dash, "get_session", lambda: _FakeSession(row))
+    monkeypatch.setattr(dash, "audit", no_audit)
+    return client.post(f"/dashboard/keys/{row.id}/edit", cookies=_logged_in_cookies(),
+                       data=data, follow_redirects=False)
+
+
+def test_edit_key_of_a_provider_in_no_chain_keeps_its_scopes(monkeypatch):
+    """S20: every scope box is disabled for such a key (disabled boxes are not
+    submitted), so saving used to fail 'Bad or empty scope' and the key was
+    un-editable. It now keeps what it has."""
+    from aibroker.db.models import ApiKeyRow
+    row = ApiKeyRow(id=5, provider="mistral", label="m", tier="free",
+                    scopes=["llm:chat", "llm:edit"], token_encrypted="x",
+                    is_active=True, is_alive=True)
+    r = _edit_key_with_row(monkeypatch, row, {"label": "m2", "tier": "paid"})
+    assert r.status_code == 303
+    assert "updated" in r.headers["location"] and "Bad" not in r.headers["location"]
+    assert row.scopes == ["llm:chat", "llm:edit"]
+    assert row.label == "m2" and row.tier == "paid"
+
+
+def test_edit_key_of_a_chained_provider_still_requires_a_scope(monkeypatch):
+    from aibroker.db.models import ApiKeyRow
+    row = ApiKeyRow(id=6, provider="cerebras", label="c", tier="free",
+                    scopes=["llm:chat"], token_encrypted="x",
+                    is_active=True, is_alive=True)
+    r = _edit_key_with_row(monkeypatch, row, {"label": "c", "tier": "free"})
+    assert r.status_code == 303
+    assert "Bad+or+empty+scope" in r.headers["location"]
+    assert row.scopes == ["llm:chat"]
+
+
+def _key(**kw):
+    from aibroker.db.models import ApiKeyRow
+    base = {"id": 1, "provider": "cerebras", "label": "t", "tier": "free",
+            "scopes": ["llm:chat"], "token_encrypted": "x",
+            "is_active": True, "is_alive": True}
+    base.update(kw)
+    return ApiKeyRow(**base)
+
+
+def test_disabled_key_renders_disabled_not_alive():
+    """S19: 14 owner-disabled keys in prod rendered green 'alive'."""
+    from aibroker.routes.dashboard_assets import _DASHBOARD_CSS
+    from aibroker.routes.dashboard_render import _render
+    body = _render(_fake_main_data(keys=[_key(is_active=False)])).body.decode()
+    assert 'data-en="disabled" data-ru="отключён"' in body
+    assert '<span class="off"' in body
+    assert 'data-en="alive"' not in body
+    assert ".off {" in _DASHBOARD_CSS
+
+
+def test_keys_footer_counts_only_active_alive_keys():
+    from aibroker.routes.dashboard_render import _render
+    keys = [_key(id=1), _key(id=2, label="b", is_active=False),
+            _key(id=3, label="c", is_alive=False)]
+    body = _render(_fake_main_data(keys=keys)).body.decode()
+    assert 'data-en="1 alive"' in body            # only key 1
+    assert "/ 3</td>" in body                     # denominator stays the total
+
+
+def _proj(pid=1, name="stepan"):
+    from aibroker.db.models import ProjectRow
+    return ProjectRow(id=pid, name=name, project_key_prefix="aib_prj_xy",
+                      project_key_hash="h", allowed_scopes=["llm:chat"],
+                      daily_cost_cap_usd=None, is_active=True, owner_email=None, notes="")
+
+
+def test_projects_total_shows_unattributed_spend():
+    """S21: the Spend card counts project_id NULL rows; the table did not
+    (prod: 18,500 rows / $1.7166)."""
+    from aibroker.routes.dashboard_render import _render
+    body = _render(_fake_main_data(
+        projects=[_proj()], proj_spend={1: 0.5}, range_spend=0.7)).body.decode()
+    assert "(unattributed)" in body
+    assert "$0.2000" in body                      # 0.7 - 0.5
+    totals = body.split("<tfoot>")[1].split("</tfoot>")[0]   # projects table footer
+    assert "$0.7000" in totals                    # TOTAL now reconciles with the card
+
+
+def test_projects_total_has_no_unattributed_line_when_it_reconciles():
+    from aibroker.routes.dashboard_render import _render
+    body = _render(_fake_main_data(
+        projects=[_proj()], proj_spend={1: 0.5}, range_spend=0.5)).body.decode()
+    assert "(unattributed)" not in body
+
+
+def test_dashboard_and_login_pages_have_a_viewport_meta():
+    from aibroker.routes.dashboard_render import _dash_html
+    meta = '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    assert meta in _dash_html(body="x")
+    assert meta in client.get("/login").text
+
+
+def test_main_dashboard_wide_tables_scroll_horizontally():
+    from aibroker.routes.dashboard_render import _render
+    body = _render(_fake_main_data(projects=[_proj()], keys=[_key()])).body.decode()
+    assert body.count('<div style="overflow-x:auto"><table') == 2
+    assert body.count("</table></div>") == 2
+
+
+def test_recent_calls_model_cell_is_not_hard_sliced():
+    """S25: [:40] cut long model names with no way to read the rest."""
+    from collections import namedtuple
+    from datetime import UTC, datetime
+
+    from aibroker.routes.dashboard_assets import _DASHBOARD_CSS
+    from aibroker.routes.dashboard_render import _render_project_detail
+
+    long_model = "openrouter/" + "m" * 70
+    R = namedtuple("R", "id created_at provider model capability tokens_in "
+                        "tokens_out cost_usd latency_ms status http_status error_kind")
+    d = _fake_proj_detail()
+    d["recent"] = [R(1, datetime(2026, 10, 2, 1, 0, 0, tzinfo=UTC), "openrouter",
+                     long_model, "chat:fast", 1, 1, 0.0, 10, "ok", 200, None)]
+    body = _render_project_detail(d).body.decode()
+    assert f'class="model-cell" style="color:#888;font-size:11px" title="{long_model}">{long_model}</td>' in body
+    assert "td.model-cell" in _DASHBOARD_CSS and "text-overflow:ellipsis" in _DASHBOARD_CSS

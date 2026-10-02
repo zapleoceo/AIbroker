@@ -155,3 +155,65 @@ def test_openapi_json_served():
 def test_unknown_path_returns_404():
     r = client.get("/this/path/does/not/exist")
     assert r.status_code == 404
+
+
+# ─── S14: /v1/health — aggregate for anonymous callers (2026-10-02) ─────────
+
+_FAKE_PROVIDERS = [
+    {"provider": "cerebras", "alive": 3, "cooldown": 1, "dead": 0, "total": 4},
+    {"provider": "gemini", "alive": 2, "cooldown": 0, "dead": 1, "total": 3},
+]
+
+
+@pytest.fixture
+def fake_health(monkeypatch):
+    async def fetch():
+        return [dict(p) for p in _FAKE_PROVIDERS]
+    monkeypatch.setattr("aibroker.routes.health._fetch_provider_health", fetch)
+
+
+def test_v1_health_anonymous_json_is_aggregate_only(fake_health):
+    r = client.get("/v1/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["providers"] == [
+        {"provider": "all", "alive": 5, "cooldown": 1, "dead": 1, "total": 7}
+    ]
+    assert data["detail"] is False
+    assert "cerebras" not in r.text and "gemini" not in r.text
+
+
+def test_v1_health_anonymous_html_is_aggregate_only(fake_health):
+    r = client.get("/v1/health", headers={"Accept": "text/html"})
+    assert r.status_code == 200
+    assert "Provider health" in r.text
+    assert "cerebras" not in r.text and "gemini" not in r.text
+
+
+def test_v1_health_with_admin_key_has_per_provider_detail(fake_health):
+    from aibroker.config import get_settings
+    r = client.get("/v1/health", headers={"X-Admin-Key": get_settings().ADMIN_KEY})
+    data = r.json()
+    assert [p["provider"] for p in data["providers"]] == ["cerebras", "gemini"]
+    assert data["detail"] is True
+
+
+def test_v1_health_with_wrong_admin_key_stays_aggregate(fake_health):
+    r = client.get("/v1/health", headers={"X-Admin-Key": "nope"})
+    assert r.json()["providers"][0]["provider"] == "all"
+
+
+def test_v1_health_with_owner_session_has_per_provider_detail(fake_health):
+    from aibroker.auth_session import COOKIE_NAME, issue_session_cookie
+    from aibroker.config import get_settings
+    cookie, _ = issue_session_cookie(get_settings().OWNER_TELEGRAM_ID or 169510539)
+    r = client.get("/v1/health", cookies={COOKIE_NAME: cookie})
+    assert [p["provider"] for p in r.json()["providers"]] == ["cerebras", "gemini"]
+
+
+def test_aggregate_health_sums_every_column():
+    from aibroker.routes.health import _aggregate_health
+    assert _aggregate_health(_FAKE_PROVIDERS) == [
+        {"provider": "all", "alive": 5, "cooldown": 1, "dead": 1, "total": 7}
+    ]
+    assert _aggregate_health([])[0]["total"] == 0

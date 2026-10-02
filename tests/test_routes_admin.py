@@ -146,3 +146,14 @@ def test_disable_nonexistent_key_404():
 def test_delete_nonexistent_key_404():
     r = client.delete("/admin/keys/99999", headers=_admin_headers())
     assert r.status_code == 404
+
+
+def test_create_key_rejects_unknown_provider():
+    """S16: any 2-50 char string used to become a provider name (then rendered
+    into the dashboard). Validated against DEFAULT_MODEL, before any DB work."""
+    bad = {"provider": '"><script>x</script>', "label": "y",
+           "token": "long-enough-token-here"}
+    r = client.post("/admin/keys", headers=_admin_headers(), json=bad)
+    assert r.status_code == 400
+    assert "unknown provider" in r.json()["detail"]
+    assert "cerebras" in r.json()["detail"]

@@ -21,6 +21,7 @@ from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUC
 from aibroker.routes.dashboard_scopes import _KNOWN_SCOPES, _scope_checkboxes
 from aibroker.routes.dashboard_time import UTC_TZ, today_in
 from aibroker.routing.chains import usable_scopes_for_provider
+from aibroker.services.job_queue import _USAGE_RETENTION_DAYS
 
 # ─── Provider catalogue (drives add-key form dropdown) ──────────────────────
 
@@ -71,7 +72,8 @@ def _provider_meta_json() -> str:
 
 def _dash_html(*, body: str, flash: str = "") -> str:
     return f"""<!doctype html><html><head>
-<meta charset="utf-8"><title>AIbroker</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIbroker</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="alternate icon" href="/favicon.ico">
 <link rel="stylesheet" href="/dashboard/assets.css?v={ASSETS_VERSION}">
@@ -87,7 +89,7 @@ def _dash_html(*, body: str, flash: str = "") -> str:
     </span>
     <a href="/v1/health">/v1/health</a>
     <a href="/docs">/docs</a>
-    <a href="/logout" data-i18n data-en="logout" data-ru="выйти">logout</a>
+    <form class="inline" method="post" action="/logout"><button type="submit" class="linkbtn" data-i18n data-en="logout" data-ru="выйти">logout</button></form>
   </span>
 </nav>
 
@@ -285,8 +287,10 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
     dt_str = dt.isoformat() if dt else ""
     all_time = df is None and dt is None
     if all_time:
-        range_label_en = "all time"
-        range_label_ru = "за всё время"
+        # usage_log is purged past _USAGE_RETENTION_DAYS (job_queue), so "all
+        # time" is really the retained window — say so (2026-10-02 review).
+        range_label_en = f"all time ({_USAGE_RETENTION_DAYS} d retention)"
+        range_label_ru = f"за всё время (хранение {_USAGE_RETENTION_DAYS} дн.)"
     elif df == dt:
         range_label_en = f"on {df_str}"
         range_label_ru = f"за {df_str}"
@@ -419,6 +423,19 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
         )
 
     now = datetime.now(UTC).replace(tzinfo=None)
+    # The Spend card sums every usage_log row, including project_id NULL (calls
+    # with no project) and rows of since-deleted projects, but the table lists
+    # only live projects — prod showed 18,500 rows / $1.7166 the table did not
+    # account for (2026-10-02). Surface the remainder so TOTAL == the card.
+    unattributed = max(0.0, float(data.get("range_spend", 0) or 0) - projects_total_spend)
+    if unattributed < 0.00005:
+        unattributed = 0.0
+    unattributed_row = (
+        '<tr><td colspan="6" class="k" title="usage with no project or a deleted project" '
+        'data-i18n data-en="(unattributed)" data-ru="(без проекта)">(unattributed)</td>'
+        f'<td class="num">${unattributed:.4f}</td><td colspan="2"></td></tr>'
+    ) if unattributed else ""
+    projects_total_spend += unattributed
     rows_keys = ""
     keys_total_used = 0
     keys_total_spent = 0.0
@@ -431,7 +448,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
         if k.daily_cost_cap_usd is not None:
             keys_total_cap += float(k.daily_cost_cap_usd)
         keys_total_errs += k.error_count or 0
-        if k.is_alive and not (k.cooldown_until and k.cooldown_until > now):
+        if k.is_active and k.is_alive and not (k.cooldown_until and k.cooldown_until > now):
             keys_alive += 1
         in_cd = k.cooldown_until and k.cooldown_until > now
         # A key that's is_alive=False only because its BALANCE ran out isn't a
@@ -451,19 +468,24 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
                 or ((k.daily_limit or 0) > 0 and (k.daily_used or 0) >= k.daily_limit)
             )
         )
+        # An owner-disabled key is skipped by the selector whatever is_alive says;
+        # it used to render green "alive" (14 such keys in prod, 2026-10-02).
         status_label = (
-            "capped" if day_capped
+            "disabled" if not k.is_active
+            else "capped" if day_capped
             else "alive" if (k.is_alive and not in_cd)
             else "cooldown" if in_cd
             else "no_credits" if no_credits
             else "dead"
         )
         status_class = {"alive": "ok", "capped": "warn", "cooldown": "warn",
-                        "no_credits": "warn", "dead": "bad"}[status_label]
+                        "no_credits": "warn", "dead": "bad", "disabled": "off"}[status_label]
         status_en = {"alive": "alive", "capped": "day cap", "cooldown": "cooldown",
-                     "no_credits": "no credits", "dead": "dead"}[status_label]
+                     "no_credits": "no credits", "dead": "dead",
+                     "disabled": "disabled"}[status_label]
         status_ru = {"alive": "жив", "capped": "лимит дня", "cooldown": "пауза",
-                     "no_credits": "нет средств", "dead": "мёртв"}[status_label]
+                     "no_credits": "нет средств", "dead": "мёртв",
+                     "disabled": "отключён"}[status_label]
         # Reason + (for cooldown) when it ends — 2026-07-05: status used to be
         # just "мёртв"/"пауза" with no way to tell "no money" from "rate
         # limited" apart, or when a cooldown actually ends. last_error is set
@@ -719,7 +741,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
 
     <h2 data-i18n data-en="Projects" data-ru="Проекты">Projects</h2>
     {add_project_form}
-    <table><thead><tr>
+    <div style="overflow-x:auto"><table><thead><tr>
       <th>#</th>
       <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
       <th class="sortable" data-i18n data-en="name" data-ru="имя">name</th>
@@ -731,18 +753,18 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
       <th class="sortable" data-i18n data-en="key prefix" data-ru="префикс ключа">key prefix</th>
       <th data-i18n data-en="actions" data-ru="действия">actions</th>
     </tr></thead><tbody>{rows_projects}</tbody>
-    <tfoot><tr>
+    <tfoot>{unattributed_row}<tr>
       <td colspan="4" class="k" data-i18n data-en="TOTAL" data-ru="ИТОГО">TOTAL</td>
       <td>{len(data['projects'])}</td>
       <td class="num">${projects_total_cap:.2f}</td>
       <td class="num">${projects_total_spend:.4f}</td>
       <td colspan="2"></td>
     </tr></tfoot>
-    </table>
+    </table></div>
 
     <h2 data-i18n data-en="API keys" data-ru="API-ключи">API keys</h2>
     {add_key_form}
-    <table><thead><tr>
+    <div style="overflow-x:auto"><table><thead><tr>
       <th>#</th>
       <th class="sortable" data-type="num" data-i18n data-en="id" data-ru="id">id</th>
       <th class="sortable" data-i18n data-en="provider" data-ru="провайдер">provider</th>
@@ -764,7 +786,7 @@ def _render(data: dict[str, Any], *, tz: ZoneInfo = UTC_TZ, flash: str = "",
       <td class="num">{keys_total_errs}</td>
       <td></td>
     </tr></tfoot>
-    </table>
+    </table></div>
     """
     return HTMLResponse(_dash_html(body=body, flash=flash), headers=_NO_STORE)
 
@@ -994,9 +1016,12 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
         exactly as before."""
         routed = r.model or "—"
         served = getattr(r, "model_served", None)
-        title = f' title="routed as {esc(routed)}"' if served else ""
-        return (f'<td style="color:#888;font-size:11px"{title}>'
-                f'{esc((served or routed)[:40])}</td>')
+        # Was a hard [:40] slice that cut names mid-word with no way to read the
+        # rest; now the full name is always in a tooltip and CSS ellipsises it,
+        # like the 2026-09-26 breakdown-card fix (2026-10-02).
+        title = f' title="routed as {esc(routed)}"' if served else f' title="{esc(routed)}"'
+        return (f'<td class="model-cell" style="color:#888;font-size:11px"{title}>'
+                f'{esc(served or routed)}</td>')
 
     # tr.data-row marker is required by the sortable-table JS in _dash_html.
     # data-sort on the time column uses iso8601 so lexical sort works.
@@ -1048,7 +1073,7 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
     </div>
 
     <h2 data-i18n data-en="Recent 50 calls" data-ru="Последние 50 вызовов">Recent 50 calls</h2>
-    <table class="recent-table"><thead><tr>
+    <div style="overflow-x:auto"><table class="recent-table"><thead><tr>
       <th class="sortable" data-type="num"
           title="usage_log.id — the same request_id returned in the API response"
           data-i18n data-en="req id" data-ru="req id">req id</th>
@@ -1061,6 +1086,6 @@ def _render_project_detail(d: dict[str, Any]) -> HTMLResponse:
       <th class="sortable" data-type="num">ms</th>
       <th class="sortable">status</th>
       <th>http / err</th>
-    </tr></thead><tbody>{recent_rows}</tbody></table>
+    </tr></thead><tbody>{recent_rows}</tbody></table></div>
     """
     return HTMLResponse(_dash_html(body=body), headers=_NO_STORE)

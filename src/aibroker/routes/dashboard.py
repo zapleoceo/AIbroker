@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import contextlib
+import math
 from html import escape as esc
 from typing import Annotated
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -39,12 +41,17 @@ from aibroker.routes.dashboard_render import (
     _render_project_detail,
 )
 from aibroker.routes.dashboard_scopes import (
+    _is_known_provider,
     _validate_scope_list,
 )
 from aibroker.routes.dashboard_time import client_tz
+from aibroker.routing.chains import usable_scopes_for_provider
 from aibroker.telemetry import audit
 
-router = APIRouter(tags=["dashboard"])
+# include_in_schema=False (2026-10-02): /openapi.json is public (the landing
+# page links it) and was advertising every owner-only route, form field
+# included. The client API stays in the schema.
+router = APIRouter(tags=["dashboard"], include_in_schema=False)
 
 
 # ─── Login ──────────────────────────────────────────────────────────────────
@@ -85,6 +92,14 @@ async def tg_login_callback(request: Request) -> RedirectResponse:
 
 
 @router.get("/logout")
+async def logout_get() -> RedirectResponse:
+    """GET must not log out (2026-10-02): any page could embed <img src=/logout>
+    and sign the owner out. The nav button POSTs; a stray GET just lands on the
+    dashboard."""
+    return RedirectResponse("/dashboard", status_code=303)
+
+
+@router.post("/logout")
 async def logout() -> RedirectResponse:
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie(COOKIE_NAME, path="/")
@@ -159,6 +174,29 @@ async def dashboard_project_detail(
 # ─── Form handlers ──────────────────────────────────────────────────────────
 
 
+_MAX_NAME_LEN = 100  # api_keys.label / projects.name display + the admin API's max_length
+
+
+def _flash_url(msg: str) -> str:
+    """Redirect to the dashboard with `msg` URL-encoded. Names were interpolated
+    raw, so a label with `&`/`#`/`%` truncated or corrupted the flash and could
+    inject extra query parameters (2026-10-02 review). `!` prefix = error."""
+    return "/dashboard?flash=" + quote_plus(msg)
+
+
+def _parse_cost_cap(v: str) -> float | None:
+    """Blank -> None (no cap). Junk, negative, nan and inf raise ValueError:
+    float() accepted "nan"/"inf" (a NaN cap never trips `>=`, i.e. no cap at all)
+    and a bare float("abc") was an unhandled 500 (2026-10-02 review)."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    cap = float(v)
+    if not math.isfinite(cap) or cap < 0:
+        raise ValueError("cap must be a finite number >= 0")
+    return cap
+
+
 def _positive_int_or_none(v: str) -> int | None:
     """Parse an optional positive-int form field. Blank/garbage/≤0 → None
     (no manual override on that axis). Used by both add- and edit-key forms."""
@@ -200,10 +238,22 @@ async def dash_create_key(
     account_id: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
+    if not _is_known_provider(provider):
+        return RedirectResponse(_flash_url("!Unknown provider"), status_code=303)
+    if not usable_scopes_for_provider(provider):
+        # In no routing chain (mistral since 2026-09-12): the key could never be
+        # picked, and its scope boxes are all disabled, so it could not be edited.
+        return RedirectResponse(
+            _flash_url(f"!{provider} is in no routing chain, key not added"), status_code=303)
+    if len(label) > _MAX_NAME_LEN:
+        return RedirectResponse(_flash_url("!Label too long (max 100)"), status_code=303)
     scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
-    cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    try:
+        cap = _parse_cost_cap(daily_cost_cap_usd)
+    except ValueError:
+        return RedirectResponse(_flash_url("!Bad cost cap"), status_code=303)
     account_id_val = account_id.strip() or None  # pragma: no cover
     # Parsing is unit-tested via _apply_manual_limits / _positive_int_or_none;
     # the DB-write glue below only runs on Postgres (SQLite can't autoincrement
@@ -254,9 +304,7 @@ async def dash_create_key(
     if new_id is not None:
         with contextlib.suppress(Exception):
             await discover_and_store(new_id, provider, token)
-    return RedirectResponse(
-        f"/dashboard?flash=Key+{provider}/{label}+{verb}", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Key {provider}/{label} {verb}"), status_code=303)
 
 
 @router.post("/dashboard/keys/{key_id}/disable")
@@ -275,9 +323,7 @@ async def dash_toggle_key(
         state = "enabled" if row.is_active else "disabled"
     await audit(actor="dashboard", action=f"key.{state}", target=f"id={key_id}",
                 ip=client_ip(request))
-    return RedirectResponse(
-        f"/dashboard?flash=Key+id={key_id}+{state}", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Key id={key_id} {state}"), status_code=303)
 
 
 @router.post("/dashboard/keys/{key_id}/delete")
@@ -292,9 +338,7 @@ async def dash_delete_key(
         target = f"{row.provider}/{row.label}"
         await s.delete(row)
     await audit(actor="dashboard", action="key.delete", target=target, ip=client_ip(request))
-    return RedirectResponse(
-        f"/dashboard?flash=Key+{target}+deleted", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Key {target} deleted"), status_code=303)
 
 
 @router.post("/dashboard/keys/{key_id}/edit")
@@ -316,15 +360,30 @@ async def dash_edit_key(
 ) -> RedirectResponse:
     if tier not in ("free", "paid", "trial"):
         return RedirectResponse("/dashboard?flash=!Bad+tier", status_code=303)
+    if len(label) > _MAX_NAME_LEN:
+        return RedirectResponse(_flash_url("!Label too long (max 100)"), status_code=303)
     scope_list = _validate_scope_list(scopes or [])
     if scope_list is None:
-        return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
-    cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+        # A key whose provider is in no chain has every scope box disabled (a
+        # disabled box is not submitted), so an empty list is expected there
+        # and the key keeps its scopes (below). Anything else is a bad form.
+        async with get_session() as s:
+            probe = await s.get(ApiKeyRow, key_id)
+        if probe is None or usable_scopes_for_provider(probe.provider):
+            return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
+    try:
+        cap_v = _parse_cost_cap(daily_cost_cap_usd)
+    except ValueError:
+        return RedirectResponse(_flash_url("!Bad cost cap"), status_code=303)
 
     async with get_session() as s:
         row = await s.get(ApiKeyRow, key_id)
         if not row:
             return RedirectResponse("/dashboard?flash=!Key+not+found", status_code=303)
+        if not usable_scopes_for_provider(row.provider):
+            scope_list = list(row.scopes or [])   # nothing editable: keep as stored
+        elif scope_list is None:
+            return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
         row.label = label
         row.tier = tier
         row.scopes = scope_list
@@ -345,9 +404,7 @@ async def dash_edit_key(
                           "manual_tok_in": row.manual_tok_in_limit,
                           "manual_tok_out": row.manual_tok_out_limit},
                 ip=client_ip(request))
-    return RedirectResponse(
-        f"/dashboard?flash=Key+{target}+updated", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Key {target} updated"), status_code=303)
 
 
 @router.post("/dashboard/projects/{project_id}/edit")
@@ -360,10 +417,15 @@ async def dash_edit_project(
     owner_email: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
+    if len(name) > _MAX_NAME_LEN:
+        return RedirectResponse(_flash_url("!Name too long (max 100)"), status_code=303)
     scopes = _validate_scope_list(allowed_scopes or [])
     if scopes is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
-    cap_v = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
+    try:
+        cap_v = _parse_cost_cap(daily_cost_cap_usd)
+    except ValueError:
+        return RedirectResponse(_flash_url("!Bad cost cap"), status_code=303)
     async with get_session() as s:
         row = await s.get(ProjectRow, project_id)
         if not row:
@@ -374,9 +436,7 @@ async def dash_edit_project(
         row.owner_email = owner_email or None
     await audit(actor="dashboard", action="project.edit", target=name,
                 metadata={"scopes": scopes, "cap": cap_v}, ip=client_ip(request))
-    return RedirectResponse(
-        f"/dashboard?flash=Project+{name}+updated", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Project {name} updated"), status_code=303)
 
 
 @router.post("/dashboard/projects/{project_id}/delete")
@@ -399,9 +459,7 @@ async def dash_delete_project(
         await s.delete(row)
     await audit(actor="dashboard", action="project.delete", target=target,
                 ip=client_ip(request))
-    return RedirectResponse(
-        f"/dashboard?flash=Project+{target}+deleted", status_code=303
-    )
+    return RedirectResponse(_flash_url(f"Project {target} deleted"), status_code=303)
 
 
 @router.post("/dashboard/projects/create", response_class=HTMLResponse)
@@ -413,13 +471,18 @@ async def dash_create_project(
     daily_cost_cap_usd: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> HTMLResponse:
+    if len(name) > _MAX_NAME_LEN:
+        return RedirectResponse(_flash_url("!Name too long (max 100)"), status_code=303)
     scopes = _validate_scope_list(allowed_scopes or ["llm:chat", "llm:embed"])
     if scopes is None:
         return RedirectResponse("/dashboard?flash=!Bad+or+empty+scope", status_code=303)
+    try:
+        cap = _parse_cost_cap(daily_cost_cap_usd)
+    except ValueError:
+        return RedirectResponse(_flash_url("!Bad cost cap"), status_code=303)
     from aibroker.auth import generate_project_key, hash_project_key
     plain = generate_project_key()
     h = hash_project_key(plain)
-    cap = float(daily_cost_cap_usd) if daily_cost_cap_usd.strip() else None
     async with get_session() as s:
         row = ProjectRow(
             name=name, owner_email=owner_email or None,
