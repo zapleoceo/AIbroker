@@ -22,7 +22,7 @@ def _admin_headers():
 
 
 def test_admin_routes_require_key():
-    for path, body in [
+    for path, _body in [
         ("/admin/projects", {}),
         ("/admin/keys", {}),
     ]:
