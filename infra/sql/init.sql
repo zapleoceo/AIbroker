@@ -86,7 +86,10 @@ CREATE TABLE IF NOT EXISTS usage_log (
   status VARCHAR(20) NOT NULL,                -- ok|rate_limit|auth_fail|error
   error_kind VARCHAR(80),
   http_status INT,
-  created_at TIMESTAMP NOT NULL DEFAULT now()
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  -- migration 011 (2026-10-02: was missing here, so a fresh DB broke the
+  -- dashboard project drill-down that SELECTs u.model_served)
+  model_served VARCHAR(120)
 );
 CREATE INDEX IF NOT EXISTS ix_usage_project_date ON usage_log(project_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_usage_key_date ON usage_log(api_key_id, created_at);

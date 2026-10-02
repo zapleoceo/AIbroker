@@ -44,10 +44,23 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # and 5 wasted attempts per JSON walk. DEFAULT_MODEL keeps its entry
     # ("known but not chained", like cloudflare vision) so re-adding is a
     # one-line change once the owner re-activates La Plateforme's free tier.
+    # 2026-10-02: cohere REMOVED from chat:fast, structured, prefilter and
+    # translate (kept in `embedding`, where it is voyage's fallback). Cohere
+    # command-r7b-12-2024, 7d of usage_log: chat:fast 1 ok / 66 err
+    # (APIConnectionError 49 - the trial keys sit at their 1000 calls/month
+    # cap - InvalidJSON 17); structured 9 ok / 1136 err (InvalidJSON 802,
+    # APIConnectionError 334). 30d: chat:fast 12 / 509, structured 38 / 2422.
+    # prefilter/translate had no cohere rows at all. DEFAULT_MODEL["cohere"]
+    # keeps its entries ("known but not chained", like mistral) so re-adding
+    # is a one-line change once the keys are paid.
+    # 2026-10-02: openrouter REMOVED from chat:fast and structured (kept in
+    # vision, chat:code, decision). google/gemma-4-31b-it:free, 7d: chat:fast
+    # 0 ok / 101 err (all 429), structured 0 / 1744 (RateLimit 1739).
+    # OpenRouter caps :free models at 50 req/day per ACCOUNT (1000/day only
+    # after >= $10 lifetime purchases, openrouter.ai/docs), so 7 keys never had
+    # the volume - extra keys on one account add no quota.
     "chat:fast": [
         "cerebras", "groq", "gemini",
-        "cohere",
-        "openrouter",
         "sambanova", "zai",
         # 2026-07-07: cloudflare (gpt-oss-120b) — confirmed live with the
         # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
@@ -179,9 +192,13 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # 2026-07-16: zai removed — prefilter requests are ALWAYS JSON and zai has
     # zero response_format support (see JSON_INCAPABLE_PROVIDERS), so every
     # zai prefilter attempt was a guaranteed billed-but-unusable InvalidJSON.
+    # 2026-10-02: cerebras removed from prefilter AND translate - its only
+    # model for those lanes, gemma-4-31b, was deleted by Cerebras on
+    # 2026-09-03 (their deprecations page), and all 14 cerebras keys are
+    # inactive anyway (the free tier became a 30-day $5 trial). cohere removed
+    # too (see the 2026-10-02 note at the top of this table).
     "prefilter": [
-        "cerebras", "groq", "gemini",
-        "cohere",
+        "groq", "gemini",
         "openrouter",
         "sambanova",
         "cloudflare",
@@ -196,7 +213,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # (unlike cerebras gpt-oss, which was excluded here for its ~16s think time)
     # at cerebras speed, free. Translate is low-volume so cerebras' 5 RPM is fine.
     "translate": [
-        "cerebras", "gemini", "cohere", "groq",
+        "gemini", "groq",
     ],
     # 2026-07-01: cerebras dropped. Its gpt-oss returns HTTP-200 but malformed
     # JSON on structured requests (~4.6k/wk InvalidJSON) — every one wasted a
@@ -204,8 +221,6 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # so it stays.
     "structured": [
         "groq", "gemini",
-        "cohere",
-        "openrouter",
         # 2026-07-10: anthropic re-added (balance topped up).
         "anthropic", "openai",
     ],

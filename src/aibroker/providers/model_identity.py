@@ -8,9 +8,9 @@ ran, and the owner cannot tell which from the log (2026-09-13):
   - `deepseek-flash` is a family name. DeepSeek serves it with
     DeepSeek-V4.1-Flash today; the previous names `deepseek-v4-flash` and
     `deepseek-v4-flash-vision-exp` are retired aliases that DeepSeek now also
-    answers with V4.1-Flash (changelog 2026-09-10), and `deepseek-v4-pro`
-    joins them on 2026-09-14. A log row saying "deepseek-v4-pro" after that
-    date names a model that did not run.
+    answers with V4.1-Flash (changelog 2026-09-10). (2026-10-02 correction:
+    `deepseek-v4-pro` is NOT one of them - it is still a separate model at its
+    own price; we simply no longer route to it.)
   - `local/qwen3vl` is OUR label, invented for routing; it never leaves the
     broker. The real model is whatever gguf llama-server has loaded.
 
@@ -42,9 +42,10 @@ import posixpath
 #   "are still accepted, but requests are served by the DeepSeek-V4.1-Flash
 #   model". Kept here so the 68 history rows under that name read truthfully.
 #
-# deepseek-v4-pro is deliberately ABSENT: it was a genuinely different model
-# until 2026-09-14 04:00 UTC and V4.1-Flash after it, so a single entry would
-# mislabel one side. It is no longer routed to (see DEFAULT_MODEL), and its
+# deepseek-v4-pro is deliberately ABSENT: it is a genuinely different model
+# (2026-10-02: an earlier note said it became V4.1-Flash on 2026-09-14; DeepSeek
+# still sells it separately), so mapping it to V4.1-Flash would mislabel its
+# history rows. It is no longer routed to (see DEFAULT_MODEL), and its
 # history rows keep showing the routing name.
 MODEL_IDENTITY: dict[str, str] = {
     "deepseek/deepseek-flash": "DeepSeek-V4.1-Flash",

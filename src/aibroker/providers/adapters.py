@@ -289,10 +289,10 @@ def downgrade_json_schema(kwargs: dict[str, Any]) -> None:
 
 
 # 2026-09-12: the "upgrade big JSON prompts to deepseek-v4-pro" escalation
-# (deepseek_model_for_json, 2026-07-21 → 09-12) is GONE. DeepSeek retires
-# v4-pro on 2026-09-14 (requests are routed to V4.1-Flash at flash pricing),
-# so the swap would have become a silent no-op that still BOOKED pro's 4x
-# price against the caps. And it no longer helped: on Stepan's real 112k-char
+# (deepseek_model_for_json, 2026-07-21 → 09-12) is GONE. v4-pro is a
+# separate, pricier DeepSeek model (own price list; 2026-10-02 correction: it is
+# NOT retired or routed to V4.1-Flash - only the old flash aliases are), so the
+# swap spent pro's ~4x price against the caps for nothing. And it never helped: on Stepan's real 112k-char
 # multi-turn JSON prompt V4.1-Flash and v4-pro both returned an all-whitespace
 # body (N=5 + N=1, both thinking modes). The free gemini rotation ahead of
 # deepseek serves that prompt 5/5 — deepseek is the fallback, not the fix.

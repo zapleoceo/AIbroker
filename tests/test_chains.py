@@ -520,3 +520,32 @@ def test_free_first_walk_strips_paid_tail_for_vision_until_the_final_retry():
     smart = chain_for("chat:smart")
     assert free_first_walk("chat:smart", smart, paid_only=False) == smart
     assert {"vision"} == FREE_WALK_CAPABILITIES
+
+
+def test_dead_providers_pruned_2026_10_02():
+    """2026-10-02 (usage_log, 7d): cohere command-r7b was 1 ok / 66 err on
+    chat:fast and 9 / 1136 on structured (trial keys at the 1000 calls/month
+    cap + InvalidJSON); openrouter's :free gemma was 0 ok / 101 and 0 / 1744
+    (all 429 - 50 req/day per ACCOUNT). Neither may drift back into a lane they
+    cannot serve. cohere stays on embedding; openrouter on vision/chat:code."""
+    for cap in ("chat:fast", "structured", "prefilter", "translate"):
+        assert "cohere" not in chain_for(cap), cap
+    for cap in ("chat:fast", "structured"):
+        assert "openrouter" not in chain_for(cap), cap
+    assert "cohere" in chain_for("embedding")
+    assert "openrouter" in chain_for("vision")
+    assert "openrouter" in chain_for("chat:code")
+
+
+def test_cerebras_gemma_lanes_removed_2026_10_02():
+    """Cerebras deleted gemma-4-31b on 2026-09-03; it must not be chained or
+    configured for prefilter/translate. gpt-oss lanes stay."""
+    from aibroker.providers.litellm_adapter import DEFAULT_MODEL, model_for
+
+    for cap in ("prefilter", "translate"):
+        assert "cerebras" not in chain_for(cap), cap
+        assert model_for("cerebras", cap) is None, cap
+    assert not any("gemma-4-31b" in m for m in DEFAULT_MODEL["cerebras"].values())
+    assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
+    # re-adding cohere is one line: its models stay configured
+    assert model_for("cohere", "structured") == "cohere/command-r7b-12-2024"

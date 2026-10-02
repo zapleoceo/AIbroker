@@ -85,8 +85,10 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # like gpt-oss (content=None at low max_tokens), no gain over what we have.
     # chat:* stay on gpt-oss-120b (proven at volume).
     "cerebras": {"chat:fast": f"cerebras/{_OSS}", "chat:smart": f"cerebras/{_OSS}",
-                 "chat:code": f"cerebras/{_OSS}", "prefilter": "cerebras/gemma-4-31b",
-                 "structured": f"cerebras/{_OSS}", "translate": "cerebras/gemma-4-31b"},
+                 "chat:code": f"cerebras/{_OSS}",
+                 # 2026-10-02: prefilter/translate (cerebras/gemma-4-31b) entries
+                 # removed - Cerebras deleted gemma-4-31b on 2026-09-03.
+                 "structured": f"cerebras/{_OSS}"},
     "groq": {"chat:fast": f"groq/openai/{_OSS}", "chat:smart": f"groq/openai/{_OSS}",
              "chat:code": f"groq/openai/{_OSS}", "prefilter": f"groq/openai/{_OSS}",
              "structured": f"groq/openai/{_OSS}",
@@ -162,18 +164,21 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
     # deepseek-coder is gone → chat:code also uses v4-flash.
     # 2026-09-12: → deepseek-flash (DeepSeek-V4.1-Flash, released 09-10). The
     # /models endpoint on our keys lists ONLY deepseek-flash and deepseek-v4-pro;
-    # deepseek-v4-flash is a temporary alias already served by V4.1, and v4-pro
-    # is routed to V4.1-Flash from 2026-09-14 04:00 UTC (DeepSeek changelog).
+    # deepseek-v4-flash is a temporary alias already served by V4.1. (2026-10-02
+    # correction: an earlier note here claimed v4-pro is routed to V4.1-Flash
+    # from 2026-09-14 - wrong. deepseek-v4-pro is still sold as a SEPARATE model
+    # at its own price, api-docs.deepseek.com pricing; only the OLD flash aliases
+    # deepseek-v4-flash / deepseek-v4-flash-vision-exp route to V4.1-Flash.)
     # Half the price (off-peak $0.15/$0.60 vs $0.22/$0.66 per M), native
     # vision, 1M context. Verified live on a paid key: text, json_object, an
     # inline base64 image (747 prompt tokens for a 200 KB JPEG), and
     # image+json_object all 200 with thinking disabled. Measured on Stepan's
     # REAL 112k-char multi-turn sales JSON (N=5 across both thinking modes):
     # V4.1-Flash returns an all-whitespace body every time (finish=stop,
-    # 29-438 tokens) — and so does v4-pro — while gemini-3.5-flash-lite is
+    # 29-438 tokens) — and so did v4-pro when tried — while gemini-3.5-flash-lite is
     # 5/5 valid. So deepseek stays the paid FALLBACK behind gemini on the money
     # lanes (unchanged since 08-26); the v4-pro "big JSON" escalation is gone
-    # because pro fails the same way and is being retired anyway.
+    # because pro failed the same way and costs several times more.
     "deepseek": {"chat:fast": "deepseek/deepseek-flash",
                  "chat:smart": "deepseek/deepseek-flash",
                  "chat:sales": "deepseek/deepseek-flash",
