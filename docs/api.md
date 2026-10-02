@@ -311,9 +311,11 @@ decision about one `state` in a single call, it is billed once for the input.
   $0, same endpoint and response shape). The fallback is never reserved against a
   cap (it costs $0, so a spent cap such as a `$0/day` project cap must not refuse
   it); whatever `usage.cost` it reports is still booked. `model` in the response
-  names the model that actually answered. Why only a fallback: on 42 real Vera
-  events (checked 2026-10-02/03) against the owner's reference triage Mercury
-  agreed less than Jev — project 66% vs 71%, needs_action 73% vs 85%. A request
+  names the model that actually answered. Why only a fallback: measured
+  2026-10-03 in series on real Vera events against her own triage (42 events x3
+  runs + 42 fresh events, mean of 4 runs), Mercury vs Jev: project 69% vs 66%,
+  needs_action 76% vs 80%, importance exact 30% vs 53% (both 95-98% within one
+  level). Mercury is deterministic; Jev varies between identical calls. A request
   that pins `model` gets no fallback. If the fallback fails too, the key is
   skipped and the next one is tried; all failing is `502`.
 - `503` — no paid key carries `llm:decision`; `502` — every key failed; an

@@ -35,10 +35,16 @@ JEV_INPUT_USD_PER_TOKEN = 0.042 / 1_000_000
 
 # FREE fallback, owner decision 2026-10-03 ("делай запасным"). Inception Mercury
 # Decide answers the same endpoint with the same request/response shape, costs
-# $0 (usage.cost = 0; served as inception/mercury-decide-20260930). Live-checked
-# 2026-10-02/03 on 42 real Vera events against the owner's reference triage:
-# project 66% vs Jev 71%, needs_action 73% vs Jev 85% — measurably weaker, so
-# it is only ever the fallback after a Jev failure or a cap block, never primary.
+# $0 (usage.cost = 0; served as inception/mercury-decide-20260930). Measured
+# 2026-10-03 in series against the owner's reference triage (Vera's stored
+# labels): sample A of 42 real events run 3x + a fresh sample B of 42, mean of
+# the 4 runs, Mercury vs Jev: project 69% vs 66% (Jev itself ranged 55-88%),
+# needs_action 76% vs 80%, importance exact 30% vs 53% (both 95-98% within one
+# level). Mercury is deterministic (same answer in 3 runs: 41-42 of 42); Jev
+# changed its project answer on 5 of 42 identical calls. 0 errors for both.
+# Clearly weaker on importance, so it is only the fallback after a Jev failure
+# or a cap block, never the primary. (A first single run on 2026-10-02 showed a
+# wider gap — 42 calls per model are too few to rank them on one pass.)
 DECISION_FALLBACK_MODEL = "openrouter/inception/mercury-decide:free"
 
 _QUESTION_TYPES = frozenset({"choice", "score", "noul"})
