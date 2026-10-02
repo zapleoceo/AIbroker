@@ -201,8 +201,10 @@ async def test_rotates_to_the_next_paid_key_on_failure(monkeypatch):
         return {"u": {"noul": 0.1}}, {"tokens_in": 5, "tokens_out": 1, "cost_usd": 2e-7,
                                      "latency_ms": 200, "model_served": None}
     _wire(monkeypatch, picks=[_paid_key(1), _paid_key(2)], decide=flaky)
+    # Pinned: since 2026-10-03 an unpinned failure is answered by the free
+    # fallback on the SAME key first; this test is about rotating the primary.
     out = await svc.run_decision(project=SimpleNamespace(id=1, name="vera"),
-                                 state="s", questions={"u": NOUL}, model=None, workflow=None)
+                                 state="s", questions={"u": NOUL}, model=_JEV, workflow=None)
     assert out.key_label == "paid2"
 
 
@@ -230,8 +232,114 @@ async def test_spent_project_cap_stops_before_the_provider_is_called(monkeypatch
     _wire(monkeypatch, picks=[_paid_key()], decide=provider, reserve=blocked)
     with pytest.raises(svc.DecisionFailed, match="budget cap"):
         await svc.run_decision(project=SimpleNamespace(id=1, name="vera"),
-                               state="s", questions={"u": NOUL}, model=None, workflow=None)
+                               state="s", questions={"u": NOUL}, model="openrouter/typesafe/jev-1.13", workflow=None)
     provider.assert_not_awaited()
+
+
+# ─── fallback model ──────────────────────────────────────────────────────
+
+_JEV = "openrouter/typesafe/jev-1.13"
+_FB = dec.DECISION_FALLBACK_MODEL
+_ANS = {"u": {"noul": 0.7}}
+
+
+def _meta(cost=0.0, served=None):
+    return {"tokens_in": 10, "tokens_out": 2, "cost_usd": cost,
+            "latency_ms": 100, "model_served": served}
+
+
+def _decide_by_model(jev_exc=None, fb_exc=None):
+    seen: list[str] = []
+
+    async def fake(*, model, **kw):
+        seen.append(model)
+        if model == _FB:
+            if fb_exc:
+                raise fb_exc
+            return _ANS, _meta(0.0, "inception/mercury-decide-20260930")
+        if jev_exc:
+            raise jev_exc
+        return _ANS, _meta(1e-6, "jev")
+    return fake, seen
+
+
+_PROJ = SimpleNamespace(id=1, name="vera")
+
+
+async def test_fallback_not_called_when_jev_succeeds(monkeypatch):
+    fake, seen = _decide_by_model()
+    _wire(monkeypatch, picks=[_paid_key()], decide=fake)
+    out = await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                                 model=None, workflow=None)
+    assert seen == [_JEV] and out.model == _JEV
+
+
+async def test_jev_failure_falls_back_on_the_same_key(monkeypatch):
+    fake, seen = _decide_by_model(jev_exc=dec.DecisionHTTPError("HTTP 402: out of credits"))
+    record = AsyncMock(return_value=77)
+    calls = _wire(monkeypatch, picks=[_paid_key(1), _paid_key(2)], decide=fake, record=record)
+    out = await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                                 model=None, workflow=None)
+    assert seen == [_JEV, _FB]
+    assert len(calls["pick"]) == 1  # the fallback reuses the held key
+    assert out.model == _FB and out.cost_usd == 0.0 and out.key_label == "paid1"
+    assert out.model_served == "inception/mercury-decide-20260930"
+    # one error row for Jev, one ok row for the fallback
+    assert svc._record_error.await_count == 1
+    assert svc._record_error.await_args.kwargs["model"] == _JEV
+    assert record.await_args.kwargs["model"] == _FB
+    assert record.await_args.kwargs["status"] == "ok"
+    assert svc._penalize.await_count == 1  # Jev's failure only
+
+
+async def test_fatal_cap_block_still_gets_a_free_answer(monkeypatch):
+    fake, seen = _decide_by_model()
+    reserve = AsyncMock(side_effect=svc._CapBlocked(fatal=True))
+    _wire(monkeypatch, picks=[_paid_key()], decide=fake, reserve=reserve)
+    out = await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                                 model=None, workflow=None)
+    assert seen == [_FB] and out.model == _FB
+    assert reserve.await_count == 1  # Jev only; the $0 fallback is never reserved
+    assert reserve.await_args.kwargs["model"] == _JEV
+
+
+async def test_jev_and_fallback_both_failing_raises_decision_failed(monkeypatch):
+    fake, seen = _decide_by_model(jev_exc=RuntimeError("jev boom"),
+                                  fb_exc=RuntimeError("mercury boom"))
+    _wire(monkeypatch, picks=[_paid_key(1), _paid_key(2)], decide=fake)
+    with pytest.raises(svc.DecisionFailed, match="mercury boom"):
+        await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                               model=None, workflow=None)
+    assert seen == [_JEV, _FB, _JEV, _FB]
+    # Jev row + fallback row per key; the key is penalised once per key, not twice
+    assert svc._record_error.await_count == 4
+    assert svc._penalize.await_count == 2
+
+
+async def test_fallback_failure_never_penalises_the_decision_key(monkeypatch):
+    """Jev cap-blocked, then the free fallback hits ITS own limit (20 RPM).
+    The key must not be cooled for that: it is the only decision key, and its
+    paid quota for Jev has nothing to do with Mercury's free one. Only a usage
+    row is booked; the fatal cap still surfaces as DecisionFailed."""
+    fake, seen = _decide_by_model(fb_exc=RuntimeError("429 rate limit"))
+    reserve = AsyncMock(side_effect=svc._CapBlocked(fatal=True))
+    _wire(monkeypatch, picks=[_paid_key()], decide=fake, reserve=reserve)
+    with pytest.raises(svc.DecisionFailed):
+        await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                               model=None, workflow=None)
+    assert seen == [_FB]
+    assert svc._penalize.await_count == 0
+    assert svc._record_error.await_count == 1
+    assert svc._record_error.await_args.kwargs["model"] == _FB
+
+
+async def test_pinned_model_never_falls_back(monkeypatch):
+    fake, seen = _decide_by_model(jev_exc=RuntimeError("boom"))
+    _wire(monkeypatch, picks=[_paid_key()], decide=fake)
+    with pytest.raises(svc.DecisionFailed, match="boom"):
+        await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
+                               model=_JEV, workflow=None)
+    assert seen == [_JEV]
 
 
 # ─── route ───────────────────────────────────────────────────────────────

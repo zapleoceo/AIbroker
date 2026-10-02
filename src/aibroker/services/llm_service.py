@@ -27,6 +27,7 @@ from aibroker.providers.context_limits import (
     is_too_large_error,
 )
 from aibroker.providers.decisions import (
+    DECISION_FALLBACK_MODEL,
     JEV_INPUT_USD_PER_TOKEN,
     decide,
     estimate_tokens,
@@ -1087,10 +1088,17 @@ async def run_decision(
     daily caps are enforced here exactly as on the chat path. The reservation
     is sized from our own per-token price — LiteLLM has no entry for this
     model and would reserve $0, letting a project spend past its cap.
+
+    Fallback (2026-10-03): when the caller did not pin `model` and the primary
+    attempt on a key fails (provider error or a cap block), the free
+    DECISION_FALLBACK_MODEL is tried on that same key, unreserved ($0). A
+    pinned model never falls back.
     """
     provider = "openrouter"
     capability = "decision"
     use_model = model or model_for(provider, capability) or "openrouter/typesafe/jev-1.13"
+    # A caller-pinned model is honoured as-is: no silent swap to another model.
+    use_fallback = model is None and use_model != DECISION_FALLBACK_MODEL
     estimated_cost = estimate_tokens(state, questions) * JEV_INPUT_USD_PER_TOKEN
     any_key_seen = False
     last_exc: Exception | None = None
@@ -1100,34 +1108,69 @@ async def run_decision(
         if key is None:
             break
         any_key_seen = True
+        plain = decrypt(key.token_encrypted)
+        primary_exc: Exception | None = None
         try:
             await _reserve_or_block(
                 key=key, project=project, provider=provider, model=use_model,
                 capability=capability, workflow=workflow, estimated_cost=estimated_cost)
         except _CapBlocked as e:
-            last_exc = e
-            if e.fatal:
-                raise DecisionFailed(str(e)) from e
-            continue
-        plain = decrypt(key.token_encrypted)
-        try:
-            answers, meta = await decide(model=use_model, state=state,
-                                         questions=questions, api_key=plain)
-            meta["cost_usd"] = _billed_cost(key, meta)
-        except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-            await release_cost(api_key=key, estimated_cost=estimated_cost)
-            last_exc = e
-            await _handle_attempt_failure(
-                key=key, project=project, provider=provider,
-                model=use_model, capability=capability, workflow=workflow, exc=e,
-            )
-            log.warning("provider %s key %s decision failed, trying next key: %s",
-                        provider, key.label, e)
-            continue
-        await release_cost(api_key=key, estimated_cost=estimated_cost)
+            primary_exc = e
+        else:
+            try:
+                answers, meta = await decide(model=use_model, state=state,
+                                             questions=questions, api_key=plain)
+                meta["cost_usd"] = _billed_cost(key, meta)
+                served_model = use_model
+            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+                await release_cost(api_key=key, estimated_cost=estimated_cost)
+                primary_exc = e
+                await _handle_attempt_failure(
+                    key=key, project=project, provider=provider,
+                    model=use_model, capability=capability, workflow=workflow, exc=e,
+                )
+                log.warning("provider %s key %s decision failed, trying next key: %s",
+                            provider, key.label, e)
+            else:
+                await release_cost(api_key=key, estimated_cost=estimated_cost)
+        if primary_exc is not None:
+            last_exc = primary_exc
+            fallback_ok = False
+            if use_fallback:
+                # Same key: we already hold it, and after a failure above it may
+                # be cooled in the DB so pick_and_reserve would not return it.
+                # $0 by construction, so NO _reserve_or_block — a spent cap must
+                # not refuse a free call. Whatever cost the response reports is
+                # still booked below.
+                try:
+                    answers, meta = await decide(model=DECISION_FALLBACK_MODEL,
+                                                 state=state, questions=questions,
+                                                 api_key=plain)
+                    meta["cost_usd"] = _billed_cost(key, meta)
+                    served_model = DECISION_FALLBACK_MODEL
+                    fallback_ok = True
+                    log.warning("provider %s key %s: %s unavailable (%s), answered by %s",
+                                provider, key.label, use_model, primary_exc,
+                                DECISION_FALLBACK_MODEL)
+                except Exception as e:  # noqa: BLE001 — record, then next key
+                    last_exc = e
+                    # Book the row, never penalise the key for the FALLBACK's
+                    # failure: Mercury's free quota (20 RPM) is separate from
+                    # Jev's, and this is the only decision key — cooling it for a
+                    # free-model 429 would also lock out the paid primary.
+                    await _record_error(
+                        key=key, project=project, provider=provider,
+                        model=DECISION_FALLBACK_MODEL, capability=capability,
+                        workflow=workflow, exc=e)
+                    log.warning("provider %s key %s fallback decision failed: %s",
+                                provider, key.label, e)
+            if not fallback_ok:
+                if isinstance(primary_exc, _CapBlocked) and primary_exc.fatal:
+                    raise DecisionFailed(str(primary_exc)) from primary_exc
+                continue
         request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model,
+            provider=provider, model=served_model,
             model_served=meta.get("model_served"), capability=capability,
             workflow=workflow, tokens_in=meta["tokens_in"],
             tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
@@ -1136,7 +1179,7 @@ async def run_decision(
         )
         await note_affinity_shared(project.id, provider, key.id)
         return DecisionOutcome(
-            answers=answers, provider=provider, model=use_model,
+            answers=answers, provider=provider, model=served_model,
             tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
             key_label=key.label, request_id=request_id,

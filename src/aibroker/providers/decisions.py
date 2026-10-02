@@ -33,6 +33,14 @@ _TIMEOUT_S = 20.0
 # bypassed; this keeps the reservation honest.
 JEV_INPUT_USD_PER_TOKEN = 0.042 / 1_000_000
 
+# FREE fallback, owner decision 2026-10-03 ("делай запасным"). Inception Mercury
+# Decide answers the same endpoint with the same request/response shape, costs
+# $0 (usage.cost = 0; served as inception/mercury-decide-20260930). Live-checked
+# 2026-10-02/03 on 42 real Vera events against the owner's reference triage:
+# project 66% vs Jev 71%, needs_action 73% vs Jev 85% — measurably weaker, so
+# it is only ever the fallback after a Jev failure or a cap block, never primary.
+DECISION_FALLBACK_MODEL = "openrouter/inception/mercury-decide:free"
+
 _QUESTION_TYPES = frozenset({"choice", "score", "noul"})
 
 

@@ -304,6 +304,18 @@ decision about one `state` in a single call, it is billed once for the input.
 - **Price.** $0.042 per million input tokens, $0 output. Measured on 120 real
   Vera triage events: median 0.36 s, p90 0.46 s, ~$0.000055 per event with
   four questions.
+- **Free fallback (2026-10-03).** Jev is always the primary. If the caller did
+  not pin `model` and Jev fails on a key (provider error, or the project/global/key
+  cap blocks the reservation), `run_decision` immediately retries on the SAME
+  key with Inception **Mercury Decide** (`openrouter/inception/mercury-decide:free`,
+  $0, same endpoint and response shape). The fallback is never reserved against a
+  cap (it costs $0, so a spent cap such as a `$0/day` project cap must not refuse
+  it); whatever `usage.cost` it reports is still booked. `model` in the response
+  names the model that actually answered. Why only a fallback: on 42 real Vera
+  events (checked 2026-10-02/03) against the owner's reference triage Mercury
+  agreed less than Jev — project 66% vs 71%, needs_action 73% vs 85%. A request
+  that pins `model` gets no fallback. If the fallback fails too, the key is
+  skipped and the next one is tried; all failing is `502`.
 - `503` — no paid key carries `llm:decision`; `502` — every key failed; an
   HTTP `402` from the provider cools the key as out-of-money.
 
