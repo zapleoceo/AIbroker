@@ -37,9 +37,17 @@ route through this broker and does not see anthropic.
 
 ## Prompt caching (2026-07-01, wired end-to-end 2026-07-02)
 
-`apply_prompt_cache(model, messages)` marks the first system message with
-`cache_control: {ephemeral}` for providers with **explicit** prompt caching
-(currently anthropic). A byte-stable system prefix is then billed as a cache
+`apply_prompt_cache(model, messages)` places `cache_control` breakpoints for
+providers with **explicit** prompt caching (currently anthropic): up to
+`_MAX_CACHE_MARKS` (4) at once, and in practice two kinds — one on the end of
+the leading system run (code marks each leading system message, so a stable
+persona followed by a variable per-lead block still gets a breakpoint at the
+stable/variable boundary) and a rolling one on the end of the conversation so
+far, which caches the growing history incrementally. Every breakpoint is
+`ephemeral` with `ttl: "1h"` (`_CACHE_TTL`; the default 5-minute entry went cold
+between turns). Anthropic bills the 1-hour write at a higher rate than
+LiteLLM's price map knows, so `_extended_ttl_write_premium` adds that premium to
+the recorded cost. A byte-stable prefix is then billed as a cache
 read (~0.1× input cost) after the first write. The marker is harmless when the
 prefix varies or is under the provider's minimum cacheable size (silently not
 cached). **deepseek** caches automatically server-side (no param); **gemini**
@@ -69,16 +77,16 @@ computed and discarded:
 | Provider | chat:fast | chat:smart | chat:sales | chat:code | vision | embedding |
 |---|---|---|---|---|---|---|
 | local (self-hosted, this host) | — | — | — | — | **Qwen3-VL-4B Q4_K_M via llama.cpp — leads the vision chain** (also faster-whisper for transcription, not in this table) | — |
-| **cerebras** | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
-| **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | — | — | — |
+| **cerebras** (keys inactive; no `prefilter`/`translate` since 2026-10-02) | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
+| **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | openai/gpt-oss-120b | — | — |
 | **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash (+ rotation 3.5-flash-lite / 3.5-flash / 3.1-flash-lite, 2026-09-12) | — |
 | **deepseek** | deepseek-flash | deepseek-flash | deepseek-flash | deepseek-flash | deepseek-flash (paid tail, 2026-09-12) | — |
-| **openrouter** | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
+| **openrouter** (not in `chat:fast`/`structured` chains since 2026-10-02) | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | **claude-sonnet-5** | claude-sonnet-5 | claude-sonnet-5 | — |
 | **openai** | gpt-5-mini | gpt-5 | — | gpt-5 | gpt-5-mini | — |
 | **mistral** (chained nowhere since 2026-09-12 — free tier at 0 RPM) | mistral-small-latest | mistral-large-latest | — | codestral-latest | — | — |
-| **cohere** | command-r7b-12-2024 | command-r7b-12-2024 | — | command-r7b-12-2024 | — | embed-english-v3.0 |
-| **sambanova** | gemma-4-31B-it | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | gemma-4-31B-it | — |
+| **cohere** (chained only for `embedding` since 2026-10-02; the chat models are known but not chained) | command-r7b-12-2024 | command-r7b-12-2024 | — | command-r7b-12-2024 | — | embed-english-v3.0 |
+| **sambanova** (all 9 keys deleted 2026-10-02 — revoked by SambaNova, `401 invalid_api_key` since 2026-09-28; still chained, holds no keys) | gemma-4-31B-it | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | gemma-4-31B-it | — |
 | **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
 | **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — | — |
 | **zai** | glm-4.7-flash | — | — | — | — | — |
@@ -226,7 +234,7 @@ Verdicts:
 | Verdict | Trigger | Action |
 |---|---|---|
 | `alive` | 2xx | `is_alive=true`, `error_count=0`, clear Telegram alert |
-| `cooldown` | 429 | `cooldown_until = now + 5min` (also `is_alive=true` — a 429 proves the credential works) |
+| `cooldown` | 429 | `cooldown_until` per the provider's signal or the adaptive backoff, probe default 5 min (also `is_alive=true` — a 429 proves the credential works) |
 | `dead` | 401/403, "insufficient balance", "payment required" | `is_alive=false`, alert TG |
 | `neterr` | TCP/TLS failure | no-op, retried next tick |
 | `skip` | unprobeable key (no probe configured, or a cloudflare key missing its `account_id`) | no-op — key state left exactly as real traffic set it |

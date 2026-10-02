@@ -30,7 +30,11 @@ created_at  — server time
 (The `vend` action disappeared with vending mode, removed 2026-07-12 —
 old `vend` rows remain in the table as history.)
 
-`audit_log` is append-only. There is no UPDATE or DELETE in code.
+`audit_log` rows are never updated. They are deleted only by retention:
+`purge_old_logs` (`services/job_queue.py`) drops `cap_block` rows after 14 days
+(`AUDIT_CAPBLOCK_RETENTION_DAYS`) and every other row after 365 days
+(`AUDIT_RETENTION_DAYS`); `usage_log` rows go after 120 days
+(`USAGE_RETENTION_DAYS`).
 
 ## Key leak response runbook
 
@@ -52,7 +56,10 @@ If `X-Project-Key` leaks:
 
 1. `POST /admin/projects` to create a replacement project with the same scopes.
 2. Update the client app's `BROKER_PROJECT_KEY` env, redeploy.
-3. The old project's `is_active` set to `false` (no API endpoint yet — use psql).
+3. Revoke the old key: dashboard → the old project → **Delete** (the key stops
+   authenticating at once; usage history keeps its `project_id`), or, to keep
+   the project row and its history attached, `UPDATE projects SET
+   is_active=false WHERE name='…'` in psql.
 4. Review `usage_log` rows for the leaked project (`project_id` +
    `created_at`) for suspicious activity — every proxied call is logged
    there.

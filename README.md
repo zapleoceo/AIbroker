@@ -9,11 +9,10 @@ production-ready from day one.
 - Authenticates client projects (Vera, Stepan, future) via per-project keys
 - Selects the best available key for each request (LRU + cost/cooldown aware)
 - Health-monitors keys (auto cooldown on 429, mark dead on 401/403)
-- Two operating modes:
-  - **Proxy mode** — broker calls the provider with its key, returns response.
-    Used for LLM (chat/embeddings) via [LiteLLM](https://litellm.ai) SDK.
-  - **Vending mode** — broker hands out a key with a short lease, client
-    calls provider directly, reports usage back. Used for arbitrary APIs.
+- **Proxy mode only** — the broker calls the provider with its own key and
+  returns the response. LLM calls (chat, embeddings, transcription, vision)
+  go through the [LiteLLM](https://litellm.ai) SDK. (Key vending, where the
+  client got a leased key, was removed 2026-07-12.)
 - Per-project daily/monthly cost caps + global cap
 - Full audit log (who, what, when, how much)
 - Telegram alerts on key death, cap breach, monitor failures
@@ -27,22 +26,23 @@ production-ready from day one.
            ▼
 ┌──────────────────────────────────────────────────────┐
 │ aibroker-api (FastAPI)                               │
-│   POST /v1/proxy/{provider}/* …  → LiteLLM(.acompletion) │
-│   POST /v1/key, /v1/usage, /v1/release  (vending)    │
-│   GET  /v1/health, /admin, /dashboard                │
+│   POST /v1/jobs (+ GET /v1/jobs/{id}), /v1/deep,     │
+│        /v1/embed, /v1/transcribe(/jobs), /v1/decisions│
+│        → routing chain → LiteLLM                     │
+│   GET  /v1/health, /healthz, /admin, /dashboard      │
 └──────────┬───────────────────────────────────────────┘
            │
            ▼
 ┌─── aibroker-postgres ─────────────────────┐
 │ projects, api_keys, leases, usage_log,    │
-│ audit_log                                 │
+│ audit_log, deep_jobs, …                   │
 └───────────────────────────────────────────┘
            ▲
            │
-┌──── aibroker-monitor (cron) ─────────────┐
-│ pings each key every 10 min → marks dead │
-│ pushes Telegram alerts                   │
-└───────────────────────────────────────────┘
+┌──── aibroker-monitor (src/aibroker/monitor.py) ──┐
+│ pings each key periodically → marks dead         │
+│ pushes Telegram alerts                           │
+└───────────────────────────────────────────────────┘
 ```
 
 ## Quick start (dev)
@@ -63,7 +63,15 @@ docker exec -it aibroker-api python -m aibroker.scripts.bootstrap \
 
 ## Production deploy
 
-`git push origin master` → GH Actions → rsync to Hetzner → `docker compose up -d`.
+`git push origin master` → GitHub Actions (`docs`, `test`, `integration`,
+`quality` gates) → SSH forced-command `aibroker-deploy`
+(`infra/aibroker-deploy.sh`): `git fetch` + `reset --hard`, `docker compose
+build` / `up -d`, a drift gate (exit 12) and an all-services health gate of up
+to 180 s (exit 11). No rsync. Details in [docs/deploy-ops.md](docs/deploy-ops.md).
+
+Client endpoints: `/v1/jobs` (+ `GET /v1/jobs/{id}`), `/v1/deep`, `/v1/embed`,
+`/v1/transcribe`, `/v1/transcribe/jobs`, `/v1/decisions`. Sync `/v1/chat`
+returns 410.
 
 Domain: `https://aib.zapleo.com` (Cloudflare → nginx → broker on :8004).
 
@@ -75,10 +83,12 @@ AIbroker/
 ├── docker-compose.yml
 ├── .env.example
 ├── pyproject.toml
-├── alembic.ini
 ├── infra/
 │   ├── nginx-aib.conf          # /etc/nginx/sites-enabled/aib
-│   └── sql/init.sql            # schema bootstrap (idempotent)
+│   ├── aibroker-deploy.sh      # forced-command deploy wrapper
+│   └── sql/
+│       ├── init.sql            # first-boot bootstrap (mirrors every migration)
+│       └── migrations/         # hand-written NNN_*.sql, applied with psql
 ├── src/aibroker/
 │   ├── main.py                 # FastAPI app + lifespan
 │   ├── config.py               # settings (pydantic-settings)
@@ -87,13 +97,13 @@ AIbroker/
 │   │   ├── engine.py           # async engine + sessionmaker
 │   │   └── models.py           # SQLAlchemy ORM
 │   ├── crypto.py               # Fernet at-rest encryption
+│   ├── monitor.py              # aibroker-monitor: key health checks + alerts
 │   ├── routing/
 │   │   ├── selector.py         # LRU + cap-aware token picker
 │   │   ├── chains.py           # capability → provider order
 │   │   └── cost_guard.py       # daily/monthly cap enforcement
 │   ├── routes/
-│   │   ├── proxy.py            # /v1/jobs, /v1/embed, /v1/transcribe, /v1/deep, /v1/chat (410)
-│   │   ├── vending.py          # /v1/key, /v1/usage, /v1/release
+│   │   ├── proxy.py            # /v1/jobs, /v1/embed, /v1/transcribe, /v1/deep, /v1/decisions, /v1/chat (410)
 │   │   ├── admin.py            # /admin/projects, /admin/keys
 │   │   ├── health.py           # /healthz, /v1/health
 │   │   ├── dashboard.py        # /dashboard (routes)
@@ -108,24 +118,22 @@ AIbroker/
 │   ├── telemetry/
 │   │   ├── notifier.py         # Telegram alerts
 │   │   └── audit.py            # audit_log writer
+│   ├── services/               # llm_service, job_queue, deep_jobs, …
 │   └── scripts/
-│       ├── bootstrap.py        # create admin project
-│       └── migrate_from_vera.py  # one-shot copy from vera.tokens
-├── migrations/                 # alembic
-│   ├── env.py
-│   └── versions/
+│       └── bootstrap.py        # create admin project
+├── services/
+│   └── asr-local/              # local ASR container
+├── migrations/README.md        # how schema changes are applied
 ├── tests/
 │   ├── conftest.py
 │   ├── test_auth.py
 │   ├── test_selector.py
 │   ├── test_cost_guard.py
-│   └── test_proxy_e2e.py
-├── monitor/                    # separate container — cron health checker
-│   ├── Dockerfile
-│   └── monitor.py
+│   └── test_init_sql_mirrors_migrations.py
 └── .github/workflows/
-    ├── test.yml
-    └── deploy.yml
+    ├── ci.yml
+    ├── deploy.yml
+    └── docs-check.yml
 ```
 
 ## License

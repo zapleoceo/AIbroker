@@ -70,7 +70,7 @@ Indexed on `(project_id, leased_at)` (migration 007).
 
 ### `usage_log`
 
-Append-only billing + analytics.
+Billing + analytics; rows are never updated, only deleted by retention (120 days).
 
 | Column | Notes |
 |---|---|
@@ -78,11 +78,12 @@ Append-only billing + analytics.
 | `project_id` | FK, NULL after project delete |
 | `lease_id` | FK, historical (vending mode, removed 2026-07-12) |
 | `provider` | Denormalized for fast queries |
-| `model` | Actual model name from LiteLLM |
+| `model` | The **routing** name the broker asked for (e.g. `deepseek/deepseek-flash`, `local/qwen3vl`); prices the call and keys the by-model aggregates. The exact model that answered is in `model_served` |
+| `model_served` | Exact served model id (migration 011), nullable — `NULL` when the routing name already is the exact id. Derived by `providers/model_identity.py:served_model`; see [api.md](api.md#model-vs-model_served-2026-09-13) |
 | `capability` | `chat:fast`, `chat:smart`, ... |
 | `workflow` | Optional caller-provided tag (e.g. `triage`, `search`) |
 | `tokens_in` / `tokens_out` | From provider response |
-| `cache_read_tokens` / `cache_write_tokens` | Prompt-cache subset of `tokens_in` (migration 006). Anthropic populates both via explicit `cache_control` marks (`providers/litellm_adapter.py:apply_prompt_cache`); deepseek/cerebras/zai report automatic server-side cache reads (`prompt_tokens_details.cached_tokens` — write stays 0). Surfaced on the project-detail dashboard as the "Cache hit" KPI and a per-model hit-rate column (the health signal for the deepseek-first `chat:smart` lane). |
+| `cache_read_tokens` / `cache_write_tokens` | Prompt-cache subset of `tokens_in` (migration 006). Anthropic populates both via explicit `cache_control` marks (`providers/litellm_adapter.py:apply_prompt_cache`); deepseek/cerebras/zai report automatic server-side cache reads (`prompt_tokens_details.cached_tokens` — write stays 0). Surfaced on the project-detail dashboard as the "Cache hit" KPI and a per-model hit-rate column (the health signal for the deepseek-backed lanes). |
 | `cost_usd` | LiteLLM-computed; cache-aware (a cache read prices at ~0.1x, a cache write at its real premium rate) |
 | `latency_ms` | End-to-end |
 | `status` | `ok` / `rate_limit` / `auth_fail` / `error` |
@@ -97,7 +98,7 @@ since none of them lead with `created_at`.
 
 ### `audit_log`
 
-Append-only admin trail.
+Admin trail; rows are never updated, only deleted by retention (14 days for `cap_block`, 365 for the rest).
 
 | Column | Notes |
 |---|---|
@@ -107,7 +108,7 @@ Append-only admin trail.
 | `metadata` | JSONB |
 | `ip` | best-effort, from `X-Forwarded-For` or `client.host` |
 
-Never mutated, never deleted. Manually prune older than 1 year if it ever matters.
+Rows are never updated. Retention (`purge_old_logs`, `services/job_queue.py`) deletes `cap_block` rows after 14 days and every other row after 365 days; `usage_log` rows are deleted after 120 days.
 
 ### `deep_jobs`
 

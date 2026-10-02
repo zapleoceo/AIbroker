@@ -1,9 +1,8 @@
-# Alembic migrations
+# Schema migrations
 
-Schema bootstrap is in `infra/sql/init.sql` (runs on first postgres start).
-Use this directory for future schema changes once we go past v0.1.
+There is no Alembic. Schema changes are hand-written SQL files in
+`infra/sql/migrations/NNN_*.sql`, applied by hand with `psql`.
 
-```bash
-alembic revision --autogenerate -m "description"
-alembic upgrade head
-```
+`infra/sql/init.sql` is the first-boot bootstrap (runs on the first postgres
+start) and must mirror every migration, so a fresh database equals a migrated
+one. `tests/test_init_sql_mirrors_migrations.py` enforces this.

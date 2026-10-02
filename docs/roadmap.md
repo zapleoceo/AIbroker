@@ -18,7 +18,7 @@
 | Маршрут | `routing/chains.py` (204) | capability → порядок провайдеров | ✅ single source |
 | Выбор ключа | `routing/selector.py` (278) | атомарный LRU/random pick, reserve | ✅ гонки закрыты |
 | Cooldown | `routing/cooldown.py` (215) | адаптивный backoff по сигналу провайдера | ✅ |
-| Cost guard | `routing/cost_guard.py` (181) | admission по $-cap | ⚠️ минует embed |
+| Cost guard | `routing/cost_guard.py` (181) | admission по $-cap | ✅ embed/transcribe/decisions тоже резервируют (2026-09-07) |
 | Провайдеры | `providers/litellm_adapter.py` (450) | call_llm/embed/transcribe | ⚠️ растёт if-провайдер |
 | Async | `services/deep_jobs.py` (161) | submit+poll (ТОЛЬКО chat:deep) | ✅ готовый паттерн |
 | Мониторинг | `monitor.py` (131) | реоживление dead/cooldown ключей | ✅ |
@@ -28,7 +28,7 @@
 
 ### 2.1 Гарантия ответа не выполняется (главное)
 `run_chat` сдаётся когда:
-- пройден `_MAX_ATTEMPTS_ABS = 60`, ИЛИ
+- пройден `_MAX_ATTEMPTS_ABS = 100` (было 60 на 2026-07-10), ИЛИ
 - цепочка пройдена один раз с `_max_keys(provider)` попытками на провайдера (3–5).
 
 **Проблема**: запрос может отдать 503, пока живые ключи ещё не тронуты.
@@ -54,7 +54,7 @@ cloudflare `api_base`, deepseek json_schema→json_object, gemini `reasoning_eff
 Паттерн submit+poll (`deep_jobs.py` + таблица `deep_jobs`) хорош, но привязан к одной capability. Нужен общий слой для всех типов запросов.
 
 ### 2.7 Cost guard минует embed-путь
-`run_embed` не зовёт `reserve_cost`. Безвредно пока embed бесплатный (voyage-4), но $-cap там не работает.
+~~`run_embed` не зовёт `reserve_cost`.~~ ✅ Закрыто 2026-09-07: `run_embed`, `run_transcribe` и `run_decision` резервируют через `_reserve_or_block`, проектный и глобальный cap действуют.
 
 ### 2.8 `dashboard.py` — монолит 1835 LOC
 HTML-рендер + роуты + бизнес-логика в одном файле. Модульность/тестируемость.
@@ -194,7 +194,7 @@ ModelHandler(provider, model):
 - ✅ chat:deep — единственная async-only capability; `/v1/deep` + `/v1/deep/{id}` оставлены как обратно-совместимые алиасы.
 - ✅ **Очередь-диспетчер (`services/job_queue.py`, миграция 009)**: submit теперь ТОЛЬКО кладёт `pending`-строку; фоновый `dispatcher_loop` (по одному на uvicorn-воркер, координация через `FOR UPDATE SKIP LOCKED`) забирает и разгребает очередь с ограниченной конкуренцией (`drain_once` — одна волна). Даёт ровно то, что просил Дима 2026-07-10:
   - **Переживает рестарт воркера (деплой)**: job в `running` за окном `_STALE_RUNNING_S` реквеуится следующим воркером — запрос не теряется, только задерживается.
-  - **Backpressure**: не более `JOB_MAX_CONCURRENCY` (дефолт 8) на воркер; остальное ждёт в очереди.
+  - **Backpressure**: не более `JOB_MAX_CONCURRENCY` (дефолт 24) на воркер; остальное ждёт в очереди.
   - **Ретрай при нехватке ёмкости**: если `run_chat` вернул None (весь пул в кулдауне) — реквеуится с экспо-backoff до `JOB_MAX_RETRIES`, потом error. «Разгребаем очередь постепенно.»
 - ✅ Тесты: `test_job_queue.py` (backoff, claim→done, no-provider→requeue, max-retries→error, stale-running→requeue) + submit+poll chat:fast/deep через реальный диспетчер.
 - ✅ SQL всех трёх запросов диспетчера провалидирован на реальном прод-Postgres (транзакция + ROLLBACK) до деплоя.
@@ -299,8 +299,8 @@ ModelHandler(provider, model):
 - **Авто-детект дрейфа моделей**: monitor мог бы периодически проверять каждую
   сконфигурированную (provider, model) реальным вызовом и помечать пропавшие,
   как сейчас помечает ключи (§2.3).
-- **$-cap на embed** (§2.7): включить при появлении платного embed-провайдера или
-  при переводе voyage-ключа в `tier=paid`.
+- ~~**$-cap на embed** (§2.7)~~ ✅ DONE 2026-09-07: embed/transcribe/decisions
+  резервируют через `_reserve_or_block`.
 - **routing.md changelog split** (§2.9).
 
 ## 7. Риски и принципы безопасности

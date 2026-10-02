@@ -855,26 +855,34 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | Capability | Chain (left→right) | Scope | Notes |
 |---|---|---|---|
 | `chat:fast` | cerebras → groq → gemini → sambanova → zai → cloudflare | `llm:chat` | **FREE-ONLY (2026-07-21, owner): no paid tail.** deepseek/anthropic/openai removed so the scarce deepseek budget is reserved for the chat:smart money lane. On fast the paid tail was ONLY ever deepseek (anthropic/openai never reached, 0 calls/7d); removing just deepseek would have shifted ~2969 calls/wk to anthropic-haiku (~6× pricier), so the whole tail is gone. fast = triage/simple followups → a saturated free pool retries (`has_paid_tail("chat:fast")` is now False, so no final-retry paid_only escalation). cloudflare = gpt-oss-120b. nvidia removed (kimi-k2.6 → 404). |
-| `chat:smart` | **deepseek** → gemini → sambanova → anthropic | `llm:chat` | **The one exception to free-first (2026-07-17, owner-approved, cap $0.50→$1):** Stepan's money lane leads with ONE strong model (deepseek-flash since 2026-09-12 — V4.1; was v4-flash — hybrid thinking) for stable quality + warm per-account prompt cache (hit input $0.0028/M ≈ $0.0004/reply). **2026-07-21 quality prunes (owner request "keep only providers that give good answers"):** removed **mistral** (0 smart calls/7d, AuthError keys), **cohere** r7b (86% InvalidJSON), **openrouter** gemma-31b (0 ok ever), and — later — **gpt-oss-120b (cerebras/groq/cloudflare)** entirely: owner found its sales replies weak ("тупит") and those providers have nothing smarter (checked). Smart now runs only genuinely-smart models: deepseek → gemini-2.5-flash (free) → sambanova **DeepSeek-V3.2** (FREE deepseek-quality) → paid anthropic/openai. Accepted tradeoff: no free gpt-oss safety net → once deepseek's $1 cap + gemini/sambanova free quota are spent, smart hits the paid tail (higher cost) not a weak-but-free reply. gpt-oss stays PRIMARY on chat:fast.  **2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family models — `openai` (gpt-5) removed.** It was the last-resort tail and never earned its place: by the time the walk got past deepseek + free gemini/sambanova + anthropic, retrying is the honest outcome rather than reaching for the priciest model in the pool. **sambanova stays** because it qualifies on the MODEL, not the vendor — its chat:smart model IS `sambanova/DeepSeek-V3.2` on a free tier (deepseek quality at $0; it carried the lane through DeepSeek's own 2026-07-22 empty-body degradation, 111 successes at $0). Guarded by `test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models`, which checks the resolved model per provider, so re-pointing sambanova at a non-DeepSeek model fails the build instead of silently widening the lane. Paid tail is now deepseek + anthropic — `has_paid_tail` stays True and the monitor's paid-tail alert keeps working. |
+| `chat:smart` | **gemini** → deepseek → sambanova → anthropic | `llm:chat` | **Current order (since 2026-08-26): gemini leads, deepseek is the paid fallback behind it.** Measured on Stepan's real 135k-char sales prompt (N=8): gemini-3.1-flash-lite 8/8 valid JSON, median 1.4 s, free; deepseek-v4-flash 6/8, median 18 s, 2 of 8 cut off at `finish_reason=length`. openai was removed 2026-07-24. **History — 2026-07-17 (owner-approved, cap $0.50→$1):** deepseek had been moved to the head as the one exception to free-first — Stepan's money lane led with ONE strong model (deepseek-flash since 2026-09-12 — V4.1; was v4-flash — hybrid thinking) for stable quality + warm per-account prompt cache (hit input $0.0028/M ≈ $0.0004/reply). The rest of this cell is the dated history of the 2026-07-21/24 prunes. **2026-07-21 quality prunes (owner request "keep only providers that give good answers"):** removed **mistral** (0 smart calls/7d, AuthError keys), **cohere** r7b (86% InvalidJSON), **openrouter** gemma-31b (0 ok ever), and — later — **gpt-oss-120b (cerebras/groq/cloudflare)** entirely: owner found its sales replies weak ("тупит") and those providers have nothing smarter (checked). On 2026-07-21 smart ran only genuinely-smart models: deepseek → gemini-2.5-flash (free) → sambanova **DeepSeek-V3.2** (FREE deepseek-quality) → paid anthropic/openai (since reordered and openai dropped, see above). Accepted tradeoff: no free gpt-oss safety net → once deepseek's $1 cap + gemini/sambanova free quota are spent, smart hits the paid tail (higher cost) not a weak-but-free reply. gpt-oss stays PRIMARY on chat:fast.  **2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family models — `openai` (gpt-5) removed.** It was the last-resort tail and never earned its place: by the time the walk got past deepseek + free gemini/sambanova + anthropic, retrying is the honest outcome rather than reaching for the priciest model in the pool. **sambanova stays** because it qualifies on the MODEL, not the vendor — its chat:smart model IS `sambanova/DeepSeek-V3.2` on a free tier (deepseek quality at $0; it carried the lane through DeepSeek's own 2026-07-22 empty-body degradation, 111 successes at $0). Guarded by `test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models`, which checks the resolved model per provider, so re-pointing sambanova at a non-DeepSeek model fails the build instead of silently widening the lane. Paid tail is now deepseek + anthropic — `has_paid_tail` stays True and the monitor's paid-tail alert keeps working. |
 | `chat:sales` | **anthropic → gemini** → deepseek → sambanova | `llm:chat` | **Second exception to free-first (2026-07-23, owner-approved):** Stepan2's "smart LLM sales, no rigid script" lane. **anthropic claude-sonnet-5 LEADS** — the strongest model for open-ended persuasive replies — billed on its own **$5/day** key. gemini is SECOND (2026-08-26: free AND measurably better than deepseek on Stepan's real prompt — see `chains.py`); deepseek-v4-flash is the paid fallback after it; sambanova is the free tail. **openai deliberately not wired** (reserve the paid budget for Sonnet only). anthropic keeps its lead through both `deprioritize_for_json` (Sonnet is JSON-reliable, never sunk) and `deprioritize_deepseek_for_savings` (rewritten to move ONLY deepseek + the free tail that trails it — a provider AHEAD of deepseek is never touched). Prompt caching pays here: `apply_prompt_cache` marks the large stable system prefix and `_CACHE_STICKY_PROVIDERS` already pins anthropic per-project so the cache stays warm across replies. Reuses `llm:chat` scope (no key/project re-scoping); client opts in per-request via `?capability=chat:sales`. |
-| `chat:code` | cerebras → groq → openrouter → gemini → sambanova → cloudflare → anthropic → deepseek → openai | `llm:chat` | Strict free-first; Codestral via mistral when other free chains are dry. github removed 2026-07-10; anthropic RE-ADDED the same day (balance topped up) — the earlier "anthropic removed" here was stale. |
+| `chat:code` | cerebras → groq → openrouter → gemini → sambanova → cloudflare → anthropic → deepseek → openai | `llm:chat` | Strict free-first. mistral removed 2026-09-12 (its free tier answers every call with a zero rate limit); github removed 2026-07-10; anthropic RE-ADDED the same day (balance topped up) — the earlier "anthropic removed" here was stale. |
 | `chat:edit` | **gemini → deepseek → anthropic** | `llm:edit` | Coach editor (Stepan). JSON-reliable only: gemini (free, thinking disabled) → deepseek-flash (V4.1 since 2026-09-12; thinking disabled) → anthropic (re-added 2026-07-10 after the top-up; `docs/providers.md` had it right, this row did not). mistral/cohere/cerebras/groq/openrouter excluded — malformed JSON breaks Coach. |
 | `chat:deep` | **nvidia** (nemotron-3-ultra-550b-a55b) | `llm:deep` | Long-context/reasoning lane, 1M-token context. No latency guarantee — single-provider, no fallback. **Async-only** — `POST /v1/chat` returns **410 Gone** (all capabilities); use `POST /v1/jobs?capability=chat:deep` (or `/v1/deep`) + `GET /v1/jobs/{id}`. |
-| `prefilter` | groq → gemini → openrouter → sambanova → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras = gemma-4-31b (fast non-reasoning, 2026-07-10). github removed. |
-| `translate` | gemini → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. cerebras = gemma-4-31b (2026-07-10, fast non-reasoning — added first); mistral-small / gemini-flash / cohere-r7b follow (~0.3-2s). cerebras/groq gpt-oss "thinks" ~16s so it's NOT used here (gemma is). Reuses `llm:chat` keys but hits models the chat chains reach last. |
-| `structured` | groq → gemini → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk). groq (same base model) stays. |
+| `prefilter` | groq → gemini → openrouter → sambanova → cloudflare | `llm:chat` | No paid; cheap pre-filter. cerebras removed 2026-10-02 (Cerebras deleted gemma-4-31b on 2026-09-03); cohere no longer chained; github removed. |
+| `translate` | gemini → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. Now **gemini → groq** — cerebras (gemma-4-31b deleted by Cerebras 2026-09-03), mistral (2026-09-12) and cohere (2026-10-02) were all removed. Reuses `llm:chat` keys but hits models the chat chains reach last. |
+| `structured` | groq → gemini → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk); cohere and openrouter dropped 2026-10-02. Only gemini and openai grammar-constrain JSON; groq is in `JSON_UNRELIABLE_PROVIDERS` (2026-09-07), so on JSON requests it is walked after gemini. |
 | `vision` | **local** → gemini → sambanova → openrouter → deepseek → openai | `llm:vision` | **2026-09-12:** sambanova (free gemma-4-31B-it, verified on a real inline image) is a second free cloud pool after gemini; **deepseek-flash** (V4.1, native vision, ~$0.0002/image off-peak) is the paid tail — the first paid vision provider that actually holds keys (openai never had one). gemini now ROTATES vision across 2.5-flash / 3.5-flash-lite / 3.5-flash / 3.1-flash-lite (per-model free buckets). local leads since 2026-08-31. anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. cloudflare tried and pulled same day 2026-07-04, see below. |
 | `transcription` | **groq** → local → gemini → openai | `llm:audio` | **Reordered 2026-07-26 — local was chain-first since 07-18 and had to move.** Measured over 24h on this host: local **131-168 SECONDS** per transcription with **35 timeouts vs 23 successes**; groq does the same work in **753-1150 ms**, also free (~150x). local runs `WHISPER_CPU_THREADS=1` / `cpus=1.0` because the box has only 2 cores at load ~1.7 (raising it OOM'd before — see deploy-ops), so the slowness is structural. Leading with it burned up to the 180s `ASR_LOCAL_TIMEOUT_S` on EVERY request before falling through, and those fall-throughs drained groq's daily quota — after which callers got **no answer at all** (Stepan, 2026-07-26: local cooling + groq exhausted till 00:00 UTC + gemini rate-limited + **no key carries `llm:audio` for openai**, so the last resort is unreachable). local stays as the backstop for exactly the case it was added for (groq's daily quota spent), just not in front of it. An empty `local` transcript is still escalated rather than returned as a silent empty success; local output is still cleaned by a chat:fast correction pass. `/v1/transcribe` route. |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
+| `decision` | openrouter | `llm:decision` | Typed decision model (TypeSafe Jev) — **paid openrouter keys only**, `POST /v1/decisions` (not a `/v1/jobs` capability; see `docs/api.md`). `run_decision` reserves against the project and global caps. |
 
 `chain_for(cap)` raises `ValueError` on an unknown capability; the proxy rejects
 unknown capabilities with HTTP 400 via `is_known_capability`. `scope_for(cap)`
 returns the scope the **project** must hold and the **key** must carry.
 
-> **Removed providers.** `sambanova`, `nvidia`, `mistral` were in the chains but
-> had no `DEFAULT_MODEL`, so `model_for` returned `None` and they were silently
-> skipped — the chains lied about their breadth. They're now out. Re-add only
-> with (a) a verified `DEFAULT_MODEL`, (b) a health probe, (c) a prod key test.
+> **Provider roster history.** Before 2026-07-04, `sambanova`, `nvidia` and
+> `mistral` were in the chains but had no `DEFAULT_MODEL`, so `model_for`
+> returned `None` and they were silently skipped — the chains lied about their
+> breadth — and they were taken out. Re-add only with (a) a verified
+> `DEFAULT_MODEL`, (b) a health probe, (c) a prod key test. Later removals:
+> github 2026-07-10; mistral 2026-09-12 (free tier at a zero rate limit);
+> cerebras keys are inactive (it stays in `chat:fast`/`chat:code` but was
+> dropped from `prefilter`/`translate`); cohere and openrouter left
+> `chat:fast`/`structured` on 2026-10-02 (cohere now serves embedding only).
+> sambanova's keys were all revoked by SambaNova and deleted 2026-10-02; the
+> provider stays chained but holds no keys.
 >
 > **sambanova re-added (2026-07-04).** All three criteria met: a real key
 > (`api.sambanova.ai/v1/chat/completions`) returned 200 with `sambanova/Meta-
@@ -1124,7 +1132,7 @@ keeps the walk inside it:
 | `gemini-2.5-flash` (bare) | normal walk, that model on every provider tried — unchanged |
 | `gemini/gemini-3.5-flash` | walk restricted to gemini |
 | `openrouter/typesafe/jev-router` | walk restricted to openrouter |
-| `anthropic/…` on a chain without anthropic | empty chain → honest 503, nothing sent |
+| `anthropic/…` on a chain without anthropic | empty chain → nothing is sent to any provider; `/v1/jobs` still answers `202` and the job ends `status=error` (`no provider available … gave up after N retries`), not a 503 |
 
 The prefix counts as a provider only when it is a key of `DEFAULT_MODEL`, so an
 unknown prefix (`myorg/whatever`) is still treated as a bare model name rather
@@ -1202,7 +1210,10 @@ not a general LiteLLM classification failure.
 
 ## Adaptive cooldown (2026-06-26)
 
-The 429 cooldown is no longer a flat 5 min. `routing/cooldown.py` exposes:
+The 429 cooldown is not a flat 5 min: it is provider-signal first (retry-after
+hint, then UTC midnight/hour/month for quota messages — see "Cooldown
+resolution" above) and falls back to the per-provider adaptive backoff below.
+`routing/cooldown.py` (`COOLDOWN_BASE_S`) exposes:
 
 | Provider | Base cooldown | Why |
 |---|---|---|
@@ -1213,6 +1224,10 @@ The 429 cooldown is no longer a flat 5 min. `routing/cooldown.py` exposes:
 | `deepseek` | 30s | paid, fast quotas |
 | `anthropic`, `openai` | 120s | paid, conservative |
 | `openrouter` | 300s | `:free` overload can last minutes |
+| `nvidia` | 300s | one-time credits + invisible quota |
+| `sambanova`, `cloudflare` | 120s | tiny/invisible daily budget |
+| `zai` | 60s | no visible quota |
+| `local` | 30s | single-worker self-hosted service: a timeout means the lock was busy, not a dead credential |
 | _(unknown)_ | 300s | safe default |
 
 Exponential backoff: each consecutive 429 on the same key within a 1h
@@ -1239,9 +1254,7 @@ timestamp most-authoritative-first:
    per-hour rate.
 4. **otherwise** → adaptive per-provider backoff (table above).
 
-`services/llm_service.py` calls it on every rate-limit error. Vending mode
-honours the client's `retry_after_s` instead — the client knows its provider
-best.
+`services/llm_service.py` calls it on every rate-limit error.
 
 ## Selector — fair, anti-fingerprint ordering
 
@@ -1327,8 +1340,8 @@ final cost on top — so a key ends up debited by exactly the real cost, the
 estimate only ever counting toward the cap for the few hundred ms the call is
 actually in flight. This used to be advertised on the landing page
 ("Reservation pattern: estimate before, settle after") without actually being
-implemented that way — `check_caps` was called with a hardcoded
-`estimated_cost=0.0`, so the per-key check was really just "is the counter,
+implemented that way — the earlier check-only guard (replaced by `reserve_cost`)
+was called with a hardcoded `estimated_cost=0.0`, so the per-key check was really just "is the counter,
 loaded earlier in the request, already over cap" — a plain Python comparison
 against a possibly-stale object, race-prone under concurrent requests against
 the same key. The per-key branch is now a single atomic
@@ -1339,18 +1352,15 @@ passing. Per-project/global checks are unchanged (live/cached SUM) — a
 smaller, accepted residual race remains there, a secondary backstop behind the
 now-atomic, tighter per-key cap.
 
-**Known limitation — embed/transcribe are per-key-cap-only.** `reserve_cost`
-(with its project + global tiers) is called only from `run_chat`. `run_embed`
-and `run_transcribe` gate spend solely through `pick_and_reserve`'s per-key
-`daily_cost_cap_usd` predicate — so a project or global daily cap is NOT
-enforced on the embedding/transcription lanes, and the per-key check on them is
-a (non-atomic) read filter, not the atomic reserve. This is safe while every
-embed key is free voyage-4 ($0) and Whisper is booked at $0; it becomes a real
-gap the moment a PAID embed key (the documented voyage-exhaustion → `tier=paid`
-path) or paid chat-transcription runs at volume. A paid key on these lanes must
-therefore be relied on only for its own per-key cap, never for project/global
-capping, until `reserve_cost` is threaded through them (needs an embed/audio
-cost estimator, which doesn't exist yet). 2026-07-19 review.
+**Embed, transcribe and decisions reserve too (2026-09-07).** `run_embed`,
+`run_transcribe` and `run_decision` all call `_reserve_or_block` (a thin
+wrapper over `reserve_cost`, plus the `cap_block` audit row and a `CapBlock`
+usage row) before each provider call, so the project and global daily caps
+apply on these lanes exactly as on chat — until then `reserve_cost` had a
+single caller in the chat path and a paid embed or whisper key was gated only
+by its own per-key cap. Whisper is priced per audio minute
+(`estimate_transcription_cost` before the call, `whisper_cost` after). Free
+keys still cost $0 and are exempt inside `reserve_cost`.
 
 **Daily counters that never reset (2026-07-03, found while fixing the above).**
 `api_keys.daily_used`/`daily_cost_used_usd` were never actually reset day to
@@ -1566,7 +1576,7 @@ and `_penalize` cools failed ones, so each retry gets a different key.
 provider-call attempts for one request = `_attempt_budget(chain)` = the SUM of
 every provider's key allowance across the actual chain ("try every key we have
 before giving up"), bounded by an absolute runaway backstop `_MAX_ATTEMPTS_ABS`
-(60). This guarantees the paid tail (deepseek/anthropic/openai) is reached
+(100; it was 60 until 2026-07-10, when chat:fast's key sum reached 61). This guarantees the paid tail (deepseek/anthropic/openai) is reached
 before a 503 — a saturated provider yields no key and costs 0 attempts, so the
 chain falls through to the tail fast. The old flat `12` predated the chains
 growing to 14 providers: during the 2026-07-07 incident (cerebras+groq daily
@@ -1634,18 +1644,18 @@ the chain.
 
 **JSON-reliable ordering (2026-07-02).** When `response_format` asks for JSON,
 `run_chat` runs the chain through `deprioritize_for_json` first, pushing
-`JSON_UNRELIABLE_PROVIDERS` (cerebras/cohere/openrouter — their gpt-oss /
-command-r7b mangle JSON at volume) to the back so the reliable providers lead.
-Cuts InvalidJSON at the source instead of after a wasted call. groq stays
-reliable (grammar-constrained JSON at volume); nothing is dropped, so a JSON
-request still reaches every provider.
+`JSON_UNRELIABLE_PROVIDERS` (cerebras, cohere, openrouter and — since
+2026-09-07 — groq, whose JSON mode rejects our schema server-side) to the back
+so the reliable providers lead. Cuts InvalidJSON at the source instead of
+after a wasted call. Nothing is dropped (except zai, which cannot do JSON at
+all), so a JSON request still reaches every other provider.
 
 Per key:
 
 1. `pick_and_reserve` (None → no more keys for this provider → next provider).
-2. `check_caps` (CostGuardError → audit → next provider; caps are project/global).
+2. `reserve_cost` (CostGuardError → audit → next provider; caps are per-key/project/global; `release_cost` undoes the reservation when the attempt resolves).
 3. `call_llm`. Exceptions are classified by `classify_provider_error`:
-   - rate-limit / 429 → `mark_cooldown` 5 min, **try next key**.
+   - rate-limit / 429 → `cooldown_until`: the provider's retry-after hint, else UTC midnight for a daily quota, else the per-provider adaptive backoff (`routing/cooldown.py`); **try next key**.
    - 401/403/auth → `mark_dead`, **try next key**.
    - other → log, **try next key**.
 4. **JSON quality gate:** when the request asked for JSON (`response_format`
@@ -1920,26 +1930,21 @@ exactly what the client specified; only the key rotates.
 `EmbedFailed` (all keys exhausted) → HTTP 502, same as before — now it means
 "the whole provider is actually down", not "one key blipped once".
 
-**`run_embed` intentionally does NOT reserve against the cost guard.** Unlike
-`run_chat` (which calls `reserve_cost`/`release_cost` around each attempt),
-the embed path books real cost only *after* the fact via `record_usage`, with
-no pre-call cap admission. This was harmless while embeddings were free
-(voyage-3 was the only embed provider and, once on voyage-4, genuinely $0
-under the 200M/mo free allocation — `_billed_cost` returns $0 for its
-free-tier key). It IS a gap to remember if a paid embed provider is ever
-added or a voyage key is flipped to `tier='paid'`: embed spend would then be
-uncapped by the project/global $-guard. Documented here as a deliberate,
-known limitation rather than an oversight.
+**`run_embed` reserves against the cost guard (since 2026-09-07).** Until
+then the embed path booked real cost only after the fact via `record_usage`,
+which was harmless while every embed key was free voyage ($0) and left project
+and global caps blind to a paid embed key. It now calls `_reserve_or_block`
+before each attempt, like `run_chat`.
 
 **Prefer native structured output over the gate.** The JSON gate is a
 post-hoc safety net. The *root-cause* fix is for the caller to send a full
 `response_format={"type":"json_schema","json_schema":{…,"strict":true}}`
-instead of a bare `json_object`: providers that support it (gemini, openai,
-groq) then grammar-constrain generation, so the model *cannot* emit invalid
-JSON and the gate never fires. The broker forwards the schema byte-for-byte
-(`call_llm`) — it can't invent one, so this win depends on the client sending
-it. cerebras/cohere don't grammar-constrain, which is why they're in
-`JSON_UNRELIABLE_PROVIDERS` and deprioritized for JSON either way.
+instead of a bare `json_object`: only gemini and openai grammar-constrain
+generation, so with them the model *should not* emit invalid JSON and the gate
+rarely fires. The broker forwards the schema byte-for-byte (`call_llm`) — it
+can't invent one, so this win depends on the client sending it. groq,
+cerebras, cohere and openrouter don't grammar-constrain, which is why they're
+in `JSON_UNRELIABLE_PROVIDERS` and deprioritized for JSON either way.
 
 > **json_schema → json_object downgrade for deepseek (2026-07-07).** DeepSeek
 > disabled the strict `{"type":"json_schema"}` sub-type server-side: a

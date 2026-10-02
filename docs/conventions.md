@@ -116,7 +116,7 @@ split.
 - One test file per source module: `test_<module>.py`.
 - Fixtures in `tests/conftest.py`.
 - In-memory SQLite for unit tests; mark DB-dependent tests with `@pytest.mark.asyncio`.
-- Aim for >70% line coverage on `src/aibroker/` (current gate 70%, stair-step — never drops).
+- Aim for >85% line coverage on `src/aibroker/` (current gate 85%, stair-step — never drops).
 - Integration tests for routes use FastAPI `TestClient`.
 
 ## Pre-commit hooks

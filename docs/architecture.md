@@ -59,9 +59,10 @@ dead/cooldown keys of those providers are still probed (reviving is worth
 one call).
 
 **Paid-tail alert (2026-07-12).** After the probe pass, `tick()` runs
-`_check_paid_tail`: for each capability in `_PAID_TAIL_CAPS` (`chat:fast`,
-`chat:smart` — the chains whose paid tail is the guaranteed-answer anchor,
-see `test_chains.py`'s paid-tail invariant) it checks whether ANY provider in
+`_check_paid_tail`: for each capability in `_PAID_TAIL_CAPS` — derived by
+`_paid_led_capabilities()` as the chains whose HEAD is a paid provider
+(currently only `chat:sales`; every free-first lane is excluded on purpose) —
+it checks whether ANY provider in
 `chain_for(cap)` still has at least one usable paid key — `is_active`,
 `is_alive`, not in cooldown, correctly scoped, and not over its daily cost
 cap (same freshness rule as `FRESH_DAILY_COST_SQL`). If none is left, the
@@ -92,8 +93,8 @@ Client never sees the API key. (Sync `POST /v1/chat` was removed 2026-07-10 —
 `POST /v1/key` used to hand out plaintext provider tokens under a short lease
 for providers the broker "didn't know the wire format" of. LiteLLM covers every
 provider we run, the endpoint had zero production callers, and its body was an
-untested plaintext-token-exfiltration surface — deleted (routes/vending.py,
-its tests, `VENDING_RATE_LIMIT_PER_MINUTE`). The `leases` table and
+untested plaintext-token-exfiltration surface — deleted (the vending route
+module, its tests, `VENDING_RATE_LIMIT_PER_MINUTE`). The `leases` table and
 `usage_log.lease_id` column stay in the DB as historical data — no destructive
 migration.
 
@@ -145,8 +146,9 @@ claimed chat job:
      provider-side prompt cache warm (see **Selector** in
      [routing.md](routing.md), 2026-07-12). Touches `last_used_at` in the
      same TX.
-   - `cost_guard.check_caps` validates per-key + per-project + global daily caps.
-     The worst-case cost is RESERVED before the call and released after. A
+   - `cost_guard.reserve_cost` validates per-key + per-project + global daily
+     caps. The worst-case cost is RESERVED before the call and released after
+     (`release_cost`). A
      successful call books its real cost; a **timeout** books the reserved
      ESTIMATE (not $0) — the provider generated and billed a response we never
      received, so the daily cost cap must see that spend or it stays blind and
@@ -155,7 +157,9 @@ claimed chat job:
      rejects (429/auth/503) cost nothing and stay free.
    - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
      **adapter** first (see below).
-   - `classify_provider_error`: 429 → cooldown 5 min; 401/403 → mark dead.
+   - `classify_provider_error`: 429 → cooldown (provider-signal first: the
+     retry-after hint, then UTC midnight for daily quotas, then per-provider
+     adaptive backoff — `routing/cooldown.py`); 401/403 → mark dead.
    - JSON quality gate: a JSON request whose body doesn't parse is billed but
      treated as a failure → next provider.
    - On success → `selector.record_usage` writes usage_log + bumps counters.
@@ -370,8 +374,9 @@ re-downloading and re-parsing identical markup. Split into
 `_DASHBOARD_CSS`/`_DASHBOARD_JS`, served from `GET /dashboard/assets.css`
 and `GET /dashboard/assets.js` — both public (no user data in them) and
 long-cached (`Cache-Control: public, max-age=31536000, immutable`),
-versioned via `?v={__version__}` in `_dash_html` so a deploy naturally
-busts the cache. The HTML document itself still `<link>`s/`<script src>`s
+versioned via `?v={ASSETS_VERSION}` (a sha256 of the CSS+JS content,
+`routes/dashboard_assets.py`) in `_dash_html`, so the URL changes exactly when
+the content does. The HTML document itself still `<link>`s/`<script src>`s
 these and stays `no-store`.
 
 ### Add-key form is provider-driven

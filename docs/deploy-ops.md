@@ -2,14 +2,20 @@
 
 ## Auto-deploy
 
-Push to `master` → `.github/workflows/deploy.yml` runs **four jobs**:
+Push to `master` → `.github/workflows/deploy.yml` runs **five jobs** (`docs`,
+`test`, `integration`, `quality`, `deploy`):
 
 1. **`docs` job** — any file under `src/`, `infra/`, `services/`, or
    `monitor/` changed must be matched by a `docs/` change. Opt-out per
    commit: literal `docs-not-needed`.
-2. **`test` job** — `pytest`, must pass. Repo-wide coverage gate **70%**
-   on `aibroker` package (stair-step; never drops).
-3. **`quality` job** — strict static analysis on the diff:
+2. **`test` job** — `pytest` on in-memory SQLite, must pass. Repo-wide
+   coverage gate **85%** on the `aibroker` package (raised from 70% on
+   2026-09-07; stair-step, never drops).
+3. **`integration` job** — the full suite again against a real `postgres:16`
+   service container (`aibroker_test` database, health-checked with
+   `pg_isready`), so the Postgres-only paths that SQLite skips — selector,
+   reserved lane, `SKIP LOCKED` job queue, cost guard — run for real.
+4. **`quality` job** — strict static analysis on the diff:
    - **Ruff** with `E,F,W,I,B,UP,SIM,C4,RET` (simplify, comprehensions,
      unreachable-after-return). E501/E402 ignored (no formatter; tests
      set env before import). Diff-only: legacy code is grandfathered,
@@ -17,17 +23,19 @@ Push to `master` → `.github/workflows/deploy.yml` runs **four jobs**:
    - **Vulture** `--min-confidence 80` on changed files — surfaces dead
      funcs/classes ruff's F401/F841 doesn't see.
    - **Diff-cover** — every changed line ≥75% covered by tests in this
-     push (separate from the 70% repo gate). Catches "new function
+     push (separate from the 85% repo gate). Catches "new function
      without a test".
    - **Docs name-sync** — extract every public def/class from the diff
      (skip `_private`, `test_*`). **Added** symbols must appear in
      `docs/*.md`; **removed** symbols must NOT remain there. Opt-out:
      `docs-not-needed`.
-4. **`deploy` job** — `needs: [docs, test, quality]`. SSH to
+5. **`deploy` job** — `needs: [docs, test, integration, quality]`. SSH to
    `aib.zapleo.com`; key on the server is wired to
    `command="/usr/local/bin/aibroker-deploy"` in `authorized_keys`.
-   Wrapper does `git pull → docker compose build → up -d → poll
-   healthz for up to 60s`.
+   The wrapper (`infra/aibroker-deploy.sh`) does `git fetch` +
+   `reset --hard origin/master` → `docker compose build` → `up -d
+   --remove-orphans` → drift gate (exit 12) → health gate on every service,
+   up to 180s (exit 11). See "Deploy entrypoint" below.
 
 ### What this guarantees
 
@@ -36,9 +44,10 @@ the actual diff, no dead code in the touched files, no syntax/import
 issues, every public name documented, no orphan refs to removed code.
 If any gate fails, deploy is blocked.
 
-If any step fails, Telegram alert goes to `OWNER_TELEGRAM_ID` from
-`@aibzapleo_bot`. A separate `docs-check.yml` workflow runs the docs gate
-on every push (including feature branches) so PRs see the verdict early.
+If the deploy fails, a Telegram alert goes to `OWNER_TELEGRAM_ID` from the bot
+behind the `TELEGRAM_BOT_TOKEN_VERA` GitHub secret (the Vera bot, not
+`@aibzapleo_bot`). `ci.yml` (unit + Postgres integration) and `docs-check.yml` (the docs gate)
+run on every push (including feature branches) so PRs see the verdict early.
 
 ## Restricted SSH key
 
@@ -116,8 +125,8 @@ Tune per environment with `JOB_RETENTION_DAYS` / `JOB_RETENTION_BATCH` /
 
 ## Schema migrations
 
-Applied via `psql` directly against the running container — no Alembic in
-production. Every file in `infra/sql/migrations/` is idempotent
+Applied via `psql` directly against the running container — there is no
+Alembic. Every file in `infra/sql/migrations/` is idempotent
 (`IF NOT EXISTS`), so re-running is safe:
 
 ```
@@ -128,7 +137,8 @@ docker exec -i aibroker-postgres psql -U aibroker aibroker \
 
 Apply a migration BEFORE merging the code that depends on it (the deploy
 pipeline ships code only). `infra/sql/init.sql` mirrors every migration for
-fresh-DB bootstrap. Migration 010 (2026-07-16) adds `deep_jobs.payload_hash`
+fresh-DB bootstrap (enforced by `tests/test_init_sql_mirrors_migrations.py`;
+it now includes migration 011, `usage_log.model_served`). Migration 010 (2026-07-16) adds `deep_jobs.payload_hash`
 plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
@@ -181,8 +191,9 @@ deployed. Verified both ways: silent on a clean state, and it catches a
 container stopped out from under compose. Exit 12.
 
 **Health gate, every service.** Waits up to 180s for all of them, not just
-`api`. Services without a healthcheck (monitor, redis, pgbouncer) only have to
-be `running`; the rest must be `healthy`. On failure it dumps `compose ps` plus
+`api`. Only `monitor` has its healthcheck disabled, so it only has to be
+`running`; postgres, pgbouncer, redis, asr-local, vision-local and api
+must be `healthy`. On failure it dumps `compose ps` plus
 the last 30 log lines of each offending service. Exit 11.
 
 On success it prints the resolved `args` of `vision-local` and `asr-local`, so
@@ -217,7 +228,7 @@ driver (only the SWAP limit needs the slice trick used for vision-local), and
 these five deliberately keep swap: small, mostly-idle processes are what swap
 is for on a host where the vision model pins 4GB. Before this, any of them was
 an eligible victim of a host-wide OOM. `redis` and `pgbouncer` also gained
-healthchecks, so the deploy gate can assert "working", not just "running".
+healthchecks (so only `monitor` is still checked as merely `running`).
 
 **`usage_log` and `audit_log` have retention now** — `purge_old_logs` in
 `services/job_queue.py`, run by the dispatcher next to `purge_finished_jobs`.
@@ -268,7 +279,8 @@ than a false alarm.
 serving **Qwen3-VL-4B-Instruct Q4_K_M** on CPU. Container
 `aibroker-vision-local`; `api` reaches it at `VISION_LOCAL_URL` (default
 `http://aibroker-vision-local:8080`). Unset or unreachable degrades safely to
-`gemini -> openrouter -> openai`.
+`gemini -> sambanova -> openrouter` (free) `-> deepseek -> openai` (paid, final
+job-queue retry only).
 
 **Why it exists.** Vision was running an 8% success rate: over 14 days, 1762 ok
 against ~20000 errors (12102 `CapBlock`, 3828 gemini `RateLimitError`, 4053
@@ -681,6 +693,9 @@ docker compose up -d
 | `HETZNER_PORT` | non-standard SSH port — same, secret-only |
 | `HETZNER_SSH_KEY` | the restricted private key (`aibroker_gh_deploy`) |
 
+| `TELEGRAM_BOT_TOKEN_VERA` | optional — the bot behind it sends the deploy-failure alerts |
+| `OWNER_TELEGRAM_ID` | optional, chat the failure alert goes to |
+
 > **Why the host/port are not written here (2026-07-24):** this repository is
 > PUBLIC. The origin sits behind Cloudflare, so publishing the origin IP undoes
 > that protection entirely — anyone can then reach nginx directly
@@ -690,8 +705,6 @@ docker compose up -d
 > treated as permanently public (git history keeps them) — the durable fix is
 > the firewall: allow :80 only from Cloudflare's published ranges, so a direct
 > origin request is dropped even by someone who knows the IP.
-| `TELEGRAM_BOT_TOKEN_VERA` | optional, for failure alerts |
-| `OWNER_TELEGRAM_ID` | optional, for failure alerts |
 
 ## Rotating keys
 
@@ -705,13 +718,18 @@ docker compose up -d
 ## Health snapshot
 
 - `https://aib.zapleo.com/healthz` — liveness
-- `https://aib.zapleo.com/v1/health` — per-provider alive/cooldown/dead
+- `https://aib.zapleo.com/v1/health` — alive/cooldown/dead: one aggregate row for anonymous callers, per-provider rows with `X-Admin-Key` or the owner session
 - Logs: `docker compose logs -f api` on the server.
 
 ## Disaster recovery
 
-The Postgres volume (`aibroker_pgdata`) is the only persistent state.
-Take a daily snapshot:
+The Postgres volume (`aibroker_pgdata`) is the only persistent state. Backups
+are made by vera3, not by this stack (see "Backups are made by vera3" above):
+the nightly `pg_dump -Fc` lands in
+`/var/backups/vera/aibroker/daily/<date>/aibroker.dump`, produced by vera3's
+`vera-backup.sh`. Restore from the newest verified dump of that tree.
+
+A manual dump is only an optional pre-migration snapshot:
 ```
 ssh hetzner-root "docker exec aibroker-postgres pg_dump -U aibroker aibroker | gzip > /var/backups/aibroker-$(date +%F).sql.gz"
 ```

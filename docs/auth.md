@@ -30,7 +30,8 @@ Three independent layers of access. None overlap.
 - On success → `aib_session` cookie with payload `<user_id>.<exp>.<hmac>`
   where `hmac = HMAC-SHA256(SESSION_SECRET, "<user_id>.<exp>")`.
 - TTL: 30 days. `httponly`, `secure`, `samesite=lax`, `path=/`.
-- `GET /logout` deletes the cookie.
+- `POST /logout` deletes the cookie and redirects to `/login`. `GET /logout`
+  does not log out (2026-10-02) — it just redirects to `/dashboard`.
 
 ## Scopes
 

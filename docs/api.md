@@ -5,7 +5,8 @@ Native agent tool calls: see [native tools contract](native-tools.md) for option
 
 Base URL (production): `https://aib.zapleo.com`
 
-OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
+OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs). Dashboard, admin and
+login routes are excluded from the public `/openapi.json` (2026-10-02).
 
 ## Public (no auth)
 
@@ -18,10 +19,12 @@ OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs)
 | `GET` | `/favicon.svg` | Brand favicon (hub-and-spokes, brand colours). Cache 24h. |
 | `GET` | `/favicon.ico` | Same SVG served at the legacy default path — keeps dev consoles 404-free. |
 | `GET` | `/healthz` | `{ok: true, service, ts}` — liveness probe |
-| `GET` | `/v1/health` | Per-provider alive/cooldown/dead/total counts — content-negotiated (see below) |
+| `GET` | `/v1/health` | alive/cooldown/dead/total counts — one aggregate row for anonymous callers, per-provider rows with `X-Admin-Key` or the owner session; content-negotiated (see below) |
 | `GET` | `/login` | Telegram Login Widget for `/dashboard` |
 | `GET` | `/api/tg_login` | TG widget callback — sets HMAC cookie, redirects to `/dashboard` |
-| `GET` | `/logout` | Clears session cookie |
+| `POST` | `/logout` | Clears session cookie, redirects to `/login` |
+| `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
+| `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
 
 ### `/v1/health` — content negotiation (2026-07-11)
 
@@ -29,13 +32,19 @@ Same public endpoint, two representations, chosen by `Accept`:
 
 - No `Accept` header, `Accept: */*`, or any non-HTML accept (curl, scripts,
   uptime monitors — matches the TestClient default) → the original
-  `{"providers": [{"provider", "alive", "cooldown", "dead", "total"}, …]}`
-  JSON, unchanged. This is the documented, stable machine-readable contract —
-  anything already polling it keeps working with zero code change.
+  `{"providers": [{"provider", "alive", "cooldown", "dead", "total"}, …],
+  "detail": bool}` JSON. Same row shape as ever; `detail` was added 2026-10-02.
 - `Accept: text/html` (a browser, e.g. clicking the dashboard nav link) →
   a small bilingual EN/RU status page: a stacked green/alive · yellow/cooldown
-  · red/dead bar per provider, plus top-line totals. No auth, no spend/usage
-  data (this endpoint never carried that) — safe to stay public.
+  · red/dead bar per provider, plus top-line totals. No spend/usage
+  data (this endpoint never carried that); anonymous callers see the aggregate
+  row only.
+
+**Anonymous vs privileged (2026-10-02).** An anonymous caller gets ONE
+aggregate row (`"provider": "all"`) and `"detail": false` — the public
+endpoint no longer lists which providers the broker uses or how many keys each
+holds. Per-provider rows (`"detail": true`) need `X-Admin-Key` or the owner
+dashboard session. Both the JSON and the HTML representation follow this rule.
 
 `routes/health.py`: `_fetch_provider_health()` is the single data fetch both
 representations render from; `_render_health_html()` / `_health_provider_card()`
@@ -86,16 +95,19 @@ inherits the queue's retries, backpressure and restart-survival.
 The audio is base64'd into the job payload (the queue stores JSONB and cannot
 hold raw bytes) and is **cleared the moment the job reaches a terminal state**,
 so voice notes never accumulate in the database or the nightly backup. The 25 MB
-Whisper ceiling is enforced before queueing.
+Whisper ceiling is enforced before queueing; transport limits are under
+"Request body limits" below.
 
 ### Capabilities (for `/v1/jobs`)
 
 `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
-`chat:deep`, `prefilter`, `structured`, `translate`, `vision`.
+`chat:deep`, `prefilter`, `structured`, `translate`, `vision`. (`transcription`
+goes through `/v1/transcribe/jobs`, `embedding` through `/v1/embed`, `decision`
+through `/v1/decisions`.)
 
 `chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
-Claude Sonnet leads the chain on its own daily cap, then DeepSeek, then the
-free tier. Uses the ordinary `llm:chat` scope. Like every other lane it FORCES
+Claude Sonnet leads the chain on its own daily cap (chain: anthropic → gemini →
+deepseek → sambanova). Uses the ordinary `llm:chat` scope. Like every other lane it FORCES
 JSON when you send `response_format` (Claude has no native `json_object` mode,
 so the broker upgrades it to a permissive `json_schema` served via tool-use,
 and unwraps LiteLLM's tool envelope for you). A brief 2026-07-26 experiment
@@ -105,7 +117,8 @@ production and was reverted. If you want the reasoning instead of the JSON
 guarantee, simply omit `response_format` on this lane.
 
 `translate` routes to small fast non-reasoning models first
-(cerebras gemma-4 → gemini-flash → cohere-r7b → groq), tuned for the "translate,
+(gemini-flash → groq; cerebras, mistral and cohere were removed from this
+chain), tuned for the "translate,
 don't answer" task under a tight client timeout. Identical `translate` and
 `prefilter` requests are served from an in-process exact-match response
 cache (`services/response_cache.py`) — repeated inputs skip the LLM
@@ -131,17 +144,19 @@ idle.
 
 **For structured/JSON output, send a full `json_schema`, not a bare
 `json_object`.** With `response_format={"type":"json_schema","json_schema":
-{"name":…, "strict":true, "schema":{…}}}` the schema-capable providers (gemini,
-openai, groq) grammar-constrain generation, so the model **cannot** return
+{"name":…, "strict":true, "schema":{…}}}` only gemini and openai
+grammar-constrain generation, so with them the model **should not** return
 invalid JSON — this is the root-cause fix for the `InvalidJSON` failures, far
 better than the broker's post-hoc JSON validation. The broker forwards the
-schema unchanged; providers that don't support it (cerebras/cohere) are
-automatically deprioritized for JSON requests.
+schema unchanged; providers that don't enforce it (groq, cerebras, cohere,
+openrouter — `JSON_UNRELIABLE_PROVIDERS`) are deprioritized for JSON requests
+(still tried, but after the reliable ones).
 
 `vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
 may be a plain string **or** a list of blocks, e.g.
 `[{"type":"text","text":"что на фото?"}, {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,…"}}]`.
-LiteLLM forwards both shapes to vision-capable models (gemini → openai). Pass
+LiteLLM forwards both shapes to vision-capable models (see the vision chain
+below). Pass
 images as base64 data URLs — anthropic was removed from the vision chain because
 it 400s on fetch-gated image URLs.
 
@@ -157,9 +172,9 @@ Same request body as `/v1/chat` (incl. `response_format`), but the broker
 **never holds the connection**: it returns `202` with a `job_id` immediately,
 runs the call in the background, and you **poll** `GET /v1/jobs/{job_id}` until
 `status` is `done` or `error`. Available for every chat capability
-(`chat:fast`/`smart`/`code`/`edit`/`deep`, `structured`, `prefilter`,
-`translate`, `vision`) — `embedding`/`transcription` stay sync-only (fast, no
-held-connection problem to solve).
+(`chat:fast`/`smart`/`sales`/`code`/`edit`/`deep`, `structured`, `prefilter`,
+`translate`, `vision`) — `embedding` stays sync-only (fast, no held-connection
+problem to solve); transcription has its own `POST /v1/transcribe/jobs`.
 
 **Why migrate off sync `/v1/chat` onto this:** a synchronous call is bounded by
 your client read timeout and the broker's own nginx/Cloudflare read timeout
@@ -175,14 +190,14 @@ POST /v1/jobs?capability=chat:smart
          "poll_url": "/v1/jobs/123", "poll_after_s": 2}
 
 GET /v1/jobs/123
-  → 200 {"job_id":123,"status":"pending","poll_after_s":2}      # keep polling
+  → 200 {"job_id":123,"status":"pending","poll_after_s":5}      # keep polling
   → 200 {"job_id":123,"status":"done","text":"…","provider":…,  # done
          "tokens_in":…,"tokens_out":…,"cache_read_tokens":…,
          "cost_usd":…,"request_id":…}
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
 
-**Caps apply to `/v1/embed` and `/v1/transcribe` too (2026-09-07).** Until
+**Caps apply to `/v1/embed`, `/v1/transcribe` and `/v1/decisions` too (2026-09-07).** Until
 then the cost guard had exactly one caller — the chat path — so a project could
 spend past its daily cap through embeddings or transcription, and a PAID
 whisper key was always booked at $0.00 (its own cap was decorative). Both
@@ -214,8 +229,9 @@ Best-effort, not a uniqueness constraint (two truly simultaneous identical
 submits can still both insert). Client contract: resubmitting is harmless —
 you'll get back the in-flight `job_id`; just poll it.
 
-`poll_after_s` is the broker's suggested wait before the next poll (widens for
-long jobs). A job belongs to exactly one project — polling someone else's
+`poll_after_s` is the broker's suggested wait before the next poll: 2 only in
+the submit response, then 5 s for a job under 30 s old, 10 s under 2 min, 20 s
+after that (`next_poll_after_s`). A job belongs to exactly one project — polling someone else's
 `job_id` is a `404`. Poll is a pure read; the dispatcher owns the lifecycle —
 a job whose worker died mid-run sits in `running` past the stale window and is
 re-queued by the next tick (so a deploy delays answers, never drops them), and
@@ -307,8 +323,10 @@ message whose `content` is a block list —
 `[{"type":"text",...},{"type":"image_url","image_url":{"url":...}}]`, i.e. an
 image plus a prompt.
 
-Chain: `local` (self-hosted Qwen3-VL, see below) → `gemini` → `openrouter` →
-`openai`.
+Chain: `local` (self-hosted Qwen3-VL, see below) → `gemini` → `sambanova` →
+`openrouter` → `deepseek` → `openai`. The regular walk is **free-only**
+(`free_first_walk`, `FREE_WALK_CAPABILITIES`): the paid providers (`deepseek`,
+`openai`) are tried only on the job queue's final retry (`paid_only`).
 
 #### `local` — self-hosted Qwen3-VL-4B (2026-08-31)
 
@@ -347,23 +365,24 @@ Both are classified on the *same single pass* that answers the caller's prompt
 (a second pass would double the CPU cost of an already ~69s call). A client
 reading only `text` is unaffected.
 
-Timeout is `VISION_LOCAL_TIMEOUT_S` (300s), not the 60s every other provider
-gets: one image measured 69s and a dense document 192s on this hardware, so the
+Timeout is `VISION_LOCAL_TIMEOUT_S` (300 s per HTTP call), not the 60s every
+other provider gets; the whole attempt, including the wait for the single local
+slot (`VISION_LOCAL_QUEUE_WAIT_S`), is bounded at 570 s: one image measured 69s and a dense document 192s on this hardware, so the
 flat ceiling would abort every call, cool the key, and fall through to the
 rate-limited cloud providers — burning CPU for nothing.
 
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
-`?workflow=` query tag. Chain: `local` (self-hosted faster-whisper, see
-below) → `groq` whisper-large-v3-turbo (free) → `gemini` (chat-based audio,
-separate quota) → `openai` whisper-1. Returns
+`?workflow=` query tag. Chain: `groq` whisper-large-v3-turbo (free) → `local`
+(self-hosted faster-whisper, a backstop — slow on this host, see below) →
+`gemini` (chat-based audio, separate quota) → `openai` whisper-1. Returns
 `{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
 
 #### `local` — self-hosted faster-whisper (2026-07-18, moved in-repo)
 
-Chain-first, always tried before any external provider — free, private, no
-external rate limit. Backed by this repo's own `services/asr-local`
+Second in the chain, after groq — a free, private backstop with no external
+rate limit, but slow on this host (minutes for long audio). Backed by this repo's own `services/asr-local`
 (`faster-whisper small`, int8, CPU, `beam_size=5`) — its own
 `docker-compose.yml` service (`aibroker-asr-local`), on the same compose
 network as `api`, no cross-project dependency. (2026-07-18 history: this originally lived in
@@ -477,14 +496,24 @@ model of the chain. Qualify it with the provider — `"model":
 "openrouter/typesafe/jev-router"` — and the walk is restricted to that
 provider; a bare name (`"gemini-2.5-flash"`) is applied to whichever provider
 the chain reaches, as before. A qualified model whose provider does not serve
-the capability returns **503** without sending anything (see
-`docs/routing.md`, "A pinned model stays on its own provider"). The provider
+the capability is **not** a 503: `/v1/jobs` answers `202`, nothing is sent to
+any provider, and the job ends `status=error` (`no provider available … gave
+up after N retries`) — see `docs/routing.md`, "A pinned model stays on its own
+provider". The provider
 still needs a key with the capability's scope, and the project still needs the
 scope — pinning grants nothing.
 
 The model actually used comes back in `model` (what was asked for) and, when it
 says more, in `model_served` — e.g. an OpenRouter router model reports the model
 it picked per request.
+
+## Request body limits (2026-10-02)
+
+nginx (`infra/nginx-aib.conf`) allows 4 MB by default, 26 MB on
+`/v1/transcribe*` and 28 MB on `/v1/jobs`. Application limits behind it: 25 MB
+audio (`_MAX_AUDIO_BYTES`) and 20 MB per decoded image (`_MAX_IMAGE_BYTES`).
+Over the nginx limit the caller gets `413` from nginx before the app sees the
+request.
 
 ## Vision jobs: what is rejected at submit (2026-09-12)
 
@@ -511,10 +540,9 @@ earlier description with `provider: "cache"` and no provider call.
 | `POST` | `/dashboard/keys/{id}/edit` | HTML form: rename, change tier/scope/cap, rotate token |
 | `POST` | `/dashboard/keys/{id}/disable` | Toggle active |
 | `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
-| `POST` | `/dashboard/projects/create` | HTML form handler |
+| `POST` | `/dashboard/projects/create` | HTML form handler — shows the one-time key in the flash |
 | `POST` | `/dashboard/projects/{id}/edit` | HTML form: rename, change scopes/cap/email |
 | `POST` | `/dashboard/projects/{id}/delete` | Hard delete a client project (confirm prompt; `dash_delete_project`, 2026-09-12). The key stops authenticating at once; usage history keeps its project_id. |
 | — | project page breakdown cards | Long workflow and model names are truncated with an ellipsis; hover shows the full name (2026-09-26 — `sinhrm.candidate_screening` pushed the workflow sparklines past the tile edge). Fixed table layout in `.brk-card-split` / `.brk-card-models`. |
 | `GET` | `/dashboard/projects/{id}?range=1h\|4h\|12h\|24h\|7d\|30d` | Drill-down — per-project KPI cards, breakdown by provider/capability/model/status, last 50 calls. Range pill swaps the window. |
-| `POST` | `/dashboard/keys/{id}/delete` | Confirmed delete |
-| `POST` | `/dashboard/projects/create` | Form — shows one-time key in flash |
+
