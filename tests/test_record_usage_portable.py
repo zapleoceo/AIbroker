@@ -84,3 +84,73 @@ async def test_record_usage_error_keeps_failure_state():
         row = await s.get(ApiKeyRow, kid)
     assert row.last_error == "rate limit"
     assert row.cooldown_until is not None
+
+
+# ─── model_served degradation flag (2026-10-03 review) ───────────────────────
+
+
+def test_is_missing_model_served_only_for_undefined_column():
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    from aibroker.routing.selector import _is_missing_model_served
+
+    class _Orig(Exception):
+        def __init__(self, msg, sqlstate=None):
+            super().__init__(msg)
+            self.sqlstate = sqlstate
+
+    undefined = ProgrammingError("stmt", {}, _Orig('column "model_served" does not exist', "42703"))
+    blip = OperationalError("stmt", {}, _Orig("connection was closed", "08006"))
+    deadlock = OperationalError("stmt", {}, _Orig("deadlock detected", "40P01"))
+    sqlite_missing = OperationalError("stmt", {}, Exception("table usage_log has no column named model_served"))
+    sqlite_other = OperationalError("stmt", {}, Exception("database is locked"))
+    assert _is_missing_model_served(undefined)
+    assert not _is_missing_model_served(blip)
+    assert not _is_missing_model_served(deadlock)
+    assert not _is_missing_model_served(sqlite_other)
+    # SQLite has no SQLSTATE: its INSERT error text names the column.
+    assert _is_missing_model_served(OperationalError(
+        "stmt", {}, Exception("no such column: model_served")))
+    assert _is_missing_model_served(sqlite_missing)
+
+
+async def test_transient_error_does_not_disable_model_served_for_the_process(monkeypatch):
+    """REGRESSION (2026-10-03): ANY ProgrammingError/OperationalError flipped
+    _model_served_available=False until restart, silently dropping the exact
+    served model from every later row after one network blip."""
+    from sqlalchemy.exc import OperationalError
+
+    from aibroker.routing import selector
+
+    monkeypatch.setattr(selector, "_model_served_available", True)
+    calls = {"n": 0}
+    real_get_session = selector.get_session
+
+    def flaky_get_session():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OperationalError("stmt", {}, Exception("server closed the connection unexpectedly"))
+        return real_get_session()
+
+    monkeypatch.setattr(selector, "get_session", flaky_get_session)
+    monkeypatch.setattr("aibroker.db.resilience._BASE_DELAY_S", 0.0)
+    kid = await _add_key()
+    usage_id = await _record(kid, model_served="exact-model")
+    assert selector._model_served_available is True   # blip did not flip it
+    async with get_session() as s:
+        row = await s.get(UsageLogRow, usage_id)
+    assert row.model_served == "exact-model"
+
+
+async def test_missing_column_still_degrades_and_writes_the_row(monkeypatch):
+    from sqlalchemy import text
+
+    from aibroker.routing import selector
+
+    monkeypatch.setattr(selector, "_model_served_available", True)
+    async with get_session() as s:
+        await s.execute(text("ALTER TABLE usage_log DROP COLUMN model_served"))
+    kid = await _add_key()
+    usage_id = await _record(kid, model_served="x")
+    assert isinstance(usage_id, int)
+    assert selector._model_served_available is False

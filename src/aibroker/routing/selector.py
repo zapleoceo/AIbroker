@@ -444,6 +444,26 @@ def _insert_sql(*, with_model_served: bool) -> str:
 _model_served_available = True
 
 
+_UNDEFINED_COLUMN_SQLSTATE = "42703"
+
+
+def _is_missing_model_served(exc: BaseException) -> bool:
+    """True only for "usage_log.model_served does not exist". Postgres reports
+    SQLSTATE 42703 (undefined_column); SQLAlchemy exposes it as `orig.sqlstate`/
+    `pgcode` (or on the asyncpg error in `__cause__`). SQLite has no SQLSTATE,
+    so there the "no such column" text is the only signal. Everything else
+    (connection loss, lock timeout, a different missing column) is transient or
+    a different bug and must not flip the process-lifetime flag."""
+    orig = getattr(exc, "orig", None) or exc
+    for src in (orig, getattr(orig, "__cause__", None)):
+        code = getattr(src, "sqlstate", None) or getattr(src, "pgcode", None)
+        if code:
+            return code == _UNDEFINED_COLUMN_SQLSTATE
+    msg = str(orig).lower()
+    return "model_served" in msg and any(
+        s in msg for s in ("no such column", "undefined column", "has no column named"))
+
+
 @retry_terminal_write
 async def record_usage(
     *,
@@ -523,6 +543,11 @@ async def record_usage(
     try:
         return await _write(with_model_served=True)
     except (ProgrammingError, OperationalError) as e:
+        if not _is_missing_model_served(e):
+            # A transient blip (dropped connection, deadlock, statement timeout)
+            # must NOT permanently disable the column for the process lifetime —
+            # let it reach retry_terminal_write's backoff instead.
+            raise
         # Migration 011 not applied. This row funds the daily cost caps, so it
         # must still be written — drop the column and warn once.
         _model_served_available = False
