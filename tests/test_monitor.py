@@ -287,7 +287,7 @@ async def test_tick_threads_account_id_to_probe_all():
         ))
     with patch("aibroker.monitor.probe_all", AsyncMock(return_value={})) as pa:
         await tick()
-    entries = {(kid, prov, acc) for kid, prov, _plain, acc in pa.await_args.args[0]}
+    entries = {(kid, prov, acc) for kid, prov, _plain, acc, *_ in pa.await_args.args[0]}
     assert (90051, "cloudflare", "acct-42") in entries
 
 

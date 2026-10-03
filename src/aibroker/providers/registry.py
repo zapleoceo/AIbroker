@@ -93,6 +93,9 @@ class ProviderSpec:
     name: str
     adapter: ProviderAdapter = field(default_factory=ProviderAdapter)
     probe: ProbeSpec | None = None
+    # 1-token GENERATION used instead of `probe` for paid / billing-dead keys when
+    # `probe` is a free list endpoint (a list 200s for a key with no credits).
+    billing_probe: ProbeSpec | None = None
     quota: Quota = field(default_factory=Quota)
     cooldown_base_s: int = DEFAULT_COOLDOWN_S
     json_reliability: JsonReliability = "reliable"

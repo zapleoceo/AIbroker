@@ -79,6 +79,11 @@ register(build_provider(
     # generation; paid ones keep a 1-token generation (a list 200s for a billing-dead key).
     probe=ProbeSpec("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
                     auth="gemini_key"),
+    billing_probe=ProbeSpec(
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash-lite:generateContent",
+        {"contents": [{"parts": [{"text": "ping"}]}],
+         "generationConfig": {"maxOutputTokens": 1}}, auth="gemini"),
     defaults={"chat:fast": "gemini/gemini-2.5-flash", "chat:smart": "gemini/gemini-2.5-flash",
               "chat:sales": "gemini/gemini-2.5-flash", "chat:code": "gemini/gemini-2.5-flash",
               "chat:edit": "gemini/gemini-2.5-flash", "structured": "gemini/gemini-2.5-flash",
@@ -139,6 +144,8 @@ register(build_provider(
     quota_headers="openai",
     quota=Quota(req_per_day=200, doc="https://openrouter.ai/docs/api-reference/limits"),
     probe=ProbeSpec("https://openrouter.ai/api/v1/auth/key"),
+    billing_probe=_chat_probe("https://openrouter.ai/api/v1/chat/completions",
+                              "openai/gpt-4o-mini"),
     defaults={"chat:fast": "openrouter/google/gemma-4-31b-it:free",
               "chat:smart": "openrouter/google/gemma-4-31b-it:free",
               "chat:code": "openrouter/google/gemma-4-31b-it:free",
@@ -163,6 +170,7 @@ register(build_provider(
     quota_headers="openai",               # bare 401 = monthly plan exhaustion (not a revoked key)
     quota=Quota(doc="https://docs.mistral.ai/deployment/laplateforme/tier/"),
     probe=ProbeSpec("https://api.mistral.ai/v1/models"),
+    billing_probe=_chat_probe("https://api.mistral.ai/v1/chat/completions", "mistral-small-latest"),
     defaults={"chat:fast": "mistral/mistral-small-latest",
               "chat:smart": "mistral/mistral-large-latest",
               "chat:code": "mistral/codestral-latest",
@@ -175,6 +183,9 @@ register(build_provider(
     "cohere", rank=90, cooldown_base_s=60, json_reliability="unreliable",
     quota=Quota(req_per_day=1_000, doc="https://docs.cohere.com/v2/docs/rate-limits"),
     probe=ProbeSpec("https://api.cohere.com/v1/models?page_size=1"),
+    billing_probe=ProbeSpec("https://api.cohere.com/v2/chat",
+                            {"model": "command-r7b-12-2024", "max_tokens": 1,
+                             "messages": _CHAT_USER_PING}),
     defaults={"chat:fast": "cohere/command-r7b-12-2024",
               "chat:smart": "cohere/command-r7b-12-2024",
               "chat:code": "cohere/command-r7b-12-2024",

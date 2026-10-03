@@ -30,6 +30,7 @@ from aibroker.crypto import decrypt
 from aibroker.db import close_engine, get_session, init_engine
 from aibroker.db.models import ApiKeyRow
 from aibroker.providers.health_probes import probe_all
+from aibroker.providers.provider_errors import is_billing_error
 from aibroker.providers.quotas import quota_for_key
 from aibroker.routing.chains import chain_for, has_paid_tail, scope_for
 from aibroker.telemetry import alert, recover
@@ -164,6 +165,13 @@ def _should_probe(key, sweep: int) -> bool:
     return sweep % _ALIVE_PROBE_EVERY_N == 0
 
 
+def _needs_billable_probe(key) -> bool:
+    """Paid keys and keys last killed by a billing error are probed with a
+    1-token generation (list endpoints can't see an empty balance); free keys
+    keep the cheap unmetered probe."""
+    return key.tier == "paid" or (not key.is_alive and is_billing_error(key.last_error))
+
+
 async def tick(sweep: int = 0) -> None:
     async with get_session() as s:
         rows = (
@@ -186,7 +194,7 @@ async def tick(sweep: int = 0) -> None:
             decrypt_failed.add(r.id)  # pragma: no cover — see test_tick_marks_undecryptable_key_dead_and_alerts
             continue  # pragma: no cover — Postgres-only tick
         if _should_probe(r, sweep):  # pragma: no cover — cadence logic unit-tested via _should_probe
-            plain_keys.append((r.id, r.provider, plain, r.account_id))
+            plain_keys.append((r.id, r.provider, plain, r.account_id, _needs_billable_probe(r)))
 
     results = await probe_all(plain_keys)
 

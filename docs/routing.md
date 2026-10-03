@@ -98,6 +98,19 @@
 > input, $0 output, mode=embedding). Free-tier voyage keys still bill $0 via
 > the `tier` check in `_billed_cost`.
 
+> **2026-10-04 (billing-dead keys no longer auto-revived by a list probe)**: gemini's
+> health probe is the free `models.list` endpoint, which returns 200 for a key with
+> depleted prepayment credits — so the monitor revived paid gemini key 16 every ~10 min
+> (`key.dead` in audit_log every sweep), real traffic then hit it and failed with
+> HTTP 402. Fix: `ProviderSpec.billing_probe` (a 1-token generation; gemini,
+> openrouter, mistral, cohere) is used instead of `probe` for **paid keys and for keys
+> whose `last_error` is a billing error** (`provider_errors.is_billing_error`,
+> `monitor._needs_billable_probe`); free keys keep the cheap list probe. The probe
+> also maps a billing body on any status (400/402/429) to `dead` ("no funds") rather
+> than `cooldown`, so a "credits depleted" 429 cannot revive a key either. Providers
+> whose normal probe is already a generation are unchanged. Tests:
+> `tests/test_health_probes.py`.
+
 > **2026-07-16 (cloudflare health probe + neutral "skip" verdict)**: cloudflare
 > had no `_PROBES` entry, and `probe_with_headers` defaulted an unprobed
 > provider to `("alive", 0, "no probe configured")` — so the monitor

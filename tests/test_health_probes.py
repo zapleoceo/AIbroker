@@ -169,3 +169,63 @@ async def test_gemini_bad_key_400_is_dead_not_alive():
         ctx.request = AsyncMock(return_value=fake)
         verdict, http, _ = await probe("gemini", "bad")
     assert (verdict, http) == ("dead", 400)
+
+
+def _fake(status, text=""):
+    fake = _response()
+    fake.status_code = status
+    fake.text = text
+    return fake
+
+
+async def _probe_capture(provider, status, text="", **kw):
+    with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
+        ctx = m.return_value.__aenter__.return_value
+        ctx.request = AsyncMock(return_value=_fake(status, text))
+        out = await probe(provider, "fake-key", **kw)
+    return out, ctx.request.await_args
+
+
+async def test_free_gemini_key_keeps_cheap_list_probe():
+    (verdict, _, _), call = await _probe_capture("gemini", 200)
+    assert verdict == "alive"
+    assert call.args[0] == "GET" and "generateContent" not in call.args[1]
+
+
+async def test_billable_gemini_probe_is_one_token_generation():
+    (verdict, _, _), call = await _probe_capture("gemini", 200, billable=True)
+    assert verdict == "alive"
+    assert call.args[0] == "POST" and "generateContent" in call.args[1]
+    assert call.kwargs["json"]["generationConfig"]["maxOutputTokens"] == 1
+
+
+@pytest.mark.parametrize("status", [400, 402, 429])
+async def test_billing_dead_body_is_dead_not_cooldown(status):
+    (verdict, _, hint), _ = await _probe_capture(
+        "gemini", status, "Your prepayment credits are depleted", billable=True)
+    assert (verdict, hint) == ("dead", "no funds")
+
+
+async def test_provider_without_billing_probe_ignores_billable():
+    (_, _, _), call = await _probe_capture("cerebras", 200, billable=True)
+    assert call.args[0] == "POST"   # its normal generation probe
+
+
+def test_monitor_billable_probe_selection():
+    from types import SimpleNamespace as K
+
+    from aibroker.monitor import _needs_billable_probe
+    assert _needs_billable_probe(K(tier="paid", is_alive=True, last_error=None))
+    assert _needs_billable_probe(K(tier="free", is_alive=False,
+                                   last_error="Your prepayment credits are depleted"))
+    assert not _needs_billable_probe(K(tier="free", is_alive=False, last_error="auth failed"))
+    assert not _needs_billable_probe(K(tier="free", is_alive=True, last_error=None))
+
+
+async def test_probe_all_passes_billable_flag():
+    from aibroker.providers.health_probes import probe_all
+    with patch("aibroker.providers.health_probes.probe",
+               AsyncMock(return_value=("alive", 200, ""))) as p:
+        await probe_all([(1, "gemini", "k", None, True), (2, "groq", "k", None)])
+    flags = {c.args[0]: c.args[3] for c in p.await_args_list}
+    assert flags == {"gemini": True, "groq": False}

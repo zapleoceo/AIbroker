@@ -75,6 +75,17 @@ _BILLING_DEPLETED_SIGNS = (
     "insufficient balance",
 )
 
+
+
+def is_billing_error(text: str | None) -> bool:
+    """True when a stored/returned error text says the key is out of money (not
+    revoked). Such a key must only be revived by a probe that bills a call."""
+    low = (text or "").lower()
+    return (any(s in low for s in _BILLING_DEPLETED_SIGNS + _AUTH_SIGNS)
+            or "payment required" in low or "no funds" in low or '"code": 402' in low
+            or "error code: 402" in low)
+
+
 # Provider-SCOPED signatures (narrow strings that must not penalise another
 # provider's key) live on ProviderSpec: rate_limit_signs / auth_signs /
 # monthly_signs - see providers/specs.py; history in docs/history/provider-choices.md.

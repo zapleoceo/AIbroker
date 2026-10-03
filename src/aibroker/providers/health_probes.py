@@ -7,6 +7,7 @@ import re
 
 import httpx
 
+from aibroker.providers.provider_errors import is_billing_error
 from aibroker.providers.registry import spec_or_default
 
 log = logging.getLogger(__name__)
@@ -16,16 +17,19 @@ PROBE_TIMEOUT_S = 15
 
 
 async def probe(
-    provider: str, plain_key: str, account_id: str | None = None
+    provider: str, plain_key: str, account_id: str | None = None,
+    billable: bool = False,
 ) -> tuple[str, int, str]:
     """Returns (verdict, http_status, hint).
     verdict in {alive, cooldown, dead, neterr, skip}."""
-    verdict, code, hint, _ = await probe_with_headers(provider, plain_key, account_id)
+    verdict, code, hint, _ = await probe_with_headers(
+        provider, plain_key, account_id, billable)
     return verdict, code, hint
 
 
 async def probe_with_headers(
-    provider: str, plain_key: str, account_id: str | None = None
+    provider: str, plain_key: str, account_id: str | None = None,
+    billable: bool = False,
 ) -> tuple[str, int, str, dict[str, str]]:
     """Same as probe() but also returns the provider's response headers — used
     by the key-create flow to extract published rate limits via
@@ -37,8 +41,14 @@ async def probe_with_headers(
     dead/revoked key of any unprobed provider on every sweep (is_alive=True,
     last_error wiped), so it flapped pick→fail→dead→revive forever
     (cloudflare, caught 2026-07-16). "skip" tells the monitor to leave the
-    key's state exactly as real traffic left it."""
-    cfg = spec_or_default(provider).probe
+    key's state exactly as real traffic left it.
+
+    `billable` (paid or billing-dead key): use the provider's 1-token
+    generation `billing_probe` when its normal probe is a free list endpoint —
+    a list 200s for a key with depleted credits, which made the monitor revive
+    a billing-dead gemini key every sweep (2026-10-04)."""
+    spec = spec_or_default(provider)
+    cfg = (spec.billing_probe if billable and spec.billing_probe else spec.probe)
     if cfg is None:
         return "skip", 0, "no probe configured", {}
 
@@ -56,6 +66,9 @@ async def probe_with_headers(
     b = r.text.lower()
     if 200 <= r.status_code < 300:
         return "alive", r.status_code, "", h
+    # Out of money can arrive as 400/402/429 — never a throttle or a live key.
+    if is_billing_error(b):
+        return "dead", r.status_code, "no funds", h
     if r.status_code == 429:
         return "cooldown", 429, "rate limit", h
     if r.status_code in (401, 403):
@@ -185,17 +198,18 @@ def extract_quota_headers(
 
 
 async def probe_all(
-    keys: list[tuple[int, str, str, str | None]],
+    keys: list[tuple],
 ) -> dict[int, tuple[str, int, str]]:
-    """keys: list of (api_key_id, provider, plain_token, account_id)."""
+    """keys: list of (api_key_id, provider, plain_token, account_id[, billable])."""
     sem = asyncio.Semaphore(8)
 
-    async def one(kid: int, provider: str, plain: str, account_id: str | None):
+    async def one(kid: int, provider: str, plain: str, account_id: str | None,
+                  billable: bool = False):
         async with sem:
-            return kid, await probe(provider, plain, account_id)
+            return kid, await probe(provider, plain, account_id, billable)
 
     out: dict[int, tuple[str, int, str]] = {}
-    tasks = [one(kid, p, k, acc) for kid, p, k, acc in keys]
+    tasks = [one(*entry) for entry in keys]
     for coro in asyncio.as_completed(tasks):
         kid, result = await coro
         out[kid] = result

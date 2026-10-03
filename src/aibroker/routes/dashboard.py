@@ -551,7 +551,8 @@ async def dash_test_key(
     except Exception:
         return HTMLResponse(render_html("_key_test.html", cls="bad", en="token decrypt failed",
                                         ru="не удалось расшифровать токен", detail=""))
-    verdict, code, hint = await probe(row.provider, token, row.account_id)
+    verdict, code, hint = await probe(row.provider, token, row.account_id,
+                                    billable=row.tier == "paid")
     await audit(actor="dashboard", action="key.test", target=f"{row.provider}/{row.label}",
                 metadata={"verdict": verdict, "http": code}, ip=client_ip(request))
     cls, en, ru = _PROBE_CHIP.get(verdict, ("warn", verdict, verdict))
