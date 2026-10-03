@@ -742,7 +742,7 @@ async def test_transcribe_passes_filename_as_buffer_name():
     """The format is inferred from the file's .name — verify we set it."""
     captured = {}
 
-    async def fake_atranscription(*, model, file, api_key):
+    async def fake_atranscription(*, model, file, api_key, **_kw):
         captured["name"] = getattr(file, "name", None)
         captured["model"] = model
         return SimpleNamespace(text="ok")

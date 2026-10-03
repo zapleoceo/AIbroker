@@ -1067,11 +1067,24 @@ def _native_field(message: Any, name: str) -> Any:
     return value
 
 
+async def _bounded(awaitable: Any, timeout: float, what: str) -> Any:
+    """Await with a HARD wall-clock ceiling (asyncio.wait_for), the way call_llm
+    does. The labelled TimeoutError keeps provider context in the logs and is
+    classified as a transient slow key (classify_provider_error)."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except TimeoutError as e:
+        raise TimeoutError(f"{what} timed out after {timeout:g}s") from e
+
+
 async def embed(
     *, model: str, texts: list[str], api_key: str
 ) -> tuple[list[list[float]], dict[str, Any]]:
     t0 = time.time()
-    resp = await litellm.aembedding(model=model, input=texts, api_key=api_key)
+    timeout = get_settings().EMBED_TIMEOUT_S
+    resp = await _bounded(
+        litellm.aembedding(model=model, input=texts, api_key=api_key, timeout=timeout),
+        timeout, f"embedding {model}")
     latency_ms = int((time.time() - t0) * 1000)
     # LiteLLM may return either objects with .embedding or plain dicts
     data_items = resp.data or []
@@ -1137,7 +1150,9 @@ async def _transcribe_via_chat(
     }
     adapter_for(model.split("/", 1)[0]).prepare(model, kwargs)  # gemini: thinking off
     t0 = time.time()
-    resp = await litellm.acompletion(**kwargs)
+    timeout = get_settings().TRANSCRIBE_TIMEOUT_S
+    resp = await _bounded(litellm.acompletion(timeout=timeout, **kwargs),
+                          timeout, f"chat transcription {model}")
     latency_ms = int((time.time() - t0) * 1000)
     usage = getattr(resp, "usage", None)
     tokens_in = getattr(usage, "prompt_tokens", 0) or 0
@@ -1173,7 +1188,6 @@ async def _transcribe_via_chat(
 _GEMINI_ASR_MODEL = "gemini/gemini-3.5-transcribe"
 _GEMINI_ASR_FALLBACK = "gemini/gemini-2.5-flash"
 _GEMINI_ASR_URL = "https://generativelanguage.googleapis.com/v1beta/models/{name}:generateContent"
-_GEMINI_ASR_TIMEOUT_S = 60.0
 _GEMINI_AUDIO_TOKENS_PER_S = 32
 
 
@@ -1201,9 +1215,13 @@ async def _transcribe_via_gemini_asr(
         }},
     }
     t0 = time.time()
+    timeout = get_settings().GEMINI_ASR_TIMEOUT_S
     try:
-        resp = await _post_gemini_asr(
-            _GEMINI_ASR_URL.format(name=name), api_key, body, _GEMINI_ASR_TIMEOUT_S,
+        # httpx's timeout is per-PHASE (a slow-drip response never trips it), so
+        # the whole POST also gets a hard wait_for ceiling.
+        resp = await _bounded(
+            _post_gemini_asr(_GEMINI_ASR_URL.format(name=name), api_key, body, timeout),
+            timeout, f"gemini-asr {name}",
         )
     except httpx.TimeoutException as e:
         raise TimeoutError(f"gemini-asr timeout: {e}") from e
@@ -1320,7 +1338,10 @@ async def transcribe(
     t0 = time.time()
     buf = io.BytesIO(audio)
     buf.name = filename   # litellm/openai SDK reads .name for the format
-    resp = await litellm.atranscription(model=model, file=buf, api_key=api_key)
+    timeout = get_settings().TRANSCRIBE_TIMEOUT_S
+    resp = await _bounded(
+        litellm.atranscription(model=model, file=buf, api_key=api_key, timeout=timeout),
+        timeout, f"transcription {model}")
     latency_ms = int((time.time() - t0) * 1000)
     # Response is an object with .text (or a dict)
     text = resp.get("text", "") if isinstance(resp, dict) else (getattr(resp, "text", "") or "")

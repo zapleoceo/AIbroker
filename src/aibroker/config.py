@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     # Limits
     GLOBAL_DAILY_CAP_USD: float = 20.0
 
+    # Hard wall-clock ceilings (asyncio.wait_for) on the non-chat provider
+    # calls, like call_llm's timeout (2026-10-03 review): litellm's own
+    # `timeout` kwarg does not reliably cut a hung call (confirmed live on zai,
+    # see call_llm), and embed/transcribe had NO ceiling at all, so one hung
+    # upstream could pin a request and its reservation until the client gave
+    # up. A hit raises TimeoutError → classified rate_limit → key cooled.
+    EMBED_TIMEOUT_S: float = 60.0
+    # Whisper (groq/openai atranscription) and chat-based transcription (gemini
+    # fallback). Typical is ~1 s; the ceiling covers a 25 MB upload.
+    TRANSCRIBE_TIMEOUT_S: float = 120.0
+    GEMINI_ASR_TIMEOUT_S: float = 60.0
+
     # Self-hosted transcription (this repo's own services/asr-local) — empty
     # = the "local" provider is unreachable and every transcription request
     # falls straight through to groq/openai (see routing/chains.py).
