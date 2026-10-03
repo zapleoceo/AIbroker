@@ -10,6 +10,8 @@ consumed by routing/cooldown.py.
 """
 from __future__ import annotations
 
+import re
+
 # Substrings (lower-cased) that mean a provider throttled us — covers the
 # many shapes: '429', 'rate_limit' (underscore), 'ratelimiterror' (CamelCase
 # from litellm/cerebras), Google's 'resource_exhausted', and the quota
@@ -27,12 +29,17 @@ from __future__ import annotations
 # through to generic 'error'. _penalize does NOTHING for 'error' (no
 # cooldown, no mark_dead) — an exhausted key was retried on every single pick
 # with zero backoff: 1447 wasted attempts / 17h before this fix.
+#
+# 2026-10-03 review: bare "429"/"401"/"403"/"auth"/"quota" SUBSTRINGS anywhere
+# in a message misfired (a request id "...4291...", "author", a 400 about a
+# "quota" parameter) and killed healthy keys. Classification now goes
+# status/exception-type first, then these phrase tables, with the former bare
+# tokens as anchored word-boundary regexes (_QUOTA_WORD_RE / _AUTH_WORD_RE) —
+# see classify_provider_error.
 _RATE_LIMIT_SIGNS = (
     "rate_limit",
     "ratelimit",
-    "429",
     "resource_exhausted",
-    "quota",
     "tokens per day",
     "tokens per minute",
     "too many tokens",
@@ -113,12 +120,65 @@ _PROVIDER_AUTH_SIGNS: dict[str, tuple[str, ...]] = {
 }
 
 
+# HTTP status as it appears in provider/litellm message bodies: "Error code:
+# 401", '"code": 429', "status_code=403", a leading "429 Too Many Requests",
+# and the raw gemini ASR adapter's RuntimeError("gemini-asr 429: ..."). Anchored
+# on a keyword so an id like "req_4291x" or "line 429" cannot be mistaken for a
+# status.
+_STATUS_RE = re.compile(
+    r"(?:\b(?:status(?:[ _]code)?|code|http|error|gemini-asr)\b\W{0,4}|^\s*)(\d{3})\b",
+    re.IGNORECASE,
+)
+# 'quota' / 'auth' as WHOLE WORDS only (not "author", "oauth", "quotation").
+_QUOTA_WORD_RE = re.compile(r"\bquotas?\b")
+_AUTH_WORD_RE = re.compile(
+    r"\b(?:auth|authentication|authenticationerror|unauthori[sz]ed|unauthenticated"
+    r"|forbidden|permissiondeniederror|permission_denied)\b"
+)
+# Bad-credential phrasings that arrive as HTTP 400 (gemini: 400 "API key not
+# valid") — unconditional, they never describe anything but a bad key.
+_BAD_KEY_RE = re.compile(
+    r"\b(?:api key not valid|invalid[ _-]?api[ _-]?key|incorrect api key)\b"
+)
+_AUTH_EXC_NAMES = frozenset({"AuthenticationError", "PermissionDeniedError"})
+_RATE_EXC_NAMES = frozenset({"RateLimitError"})
+# Client errors that say nothing about key health (bad request, 404, 413, 422).
+_NEUTRAL_4XX_EXCLUDED = frozenset({401, 403, 408, 429})
+
+
+def _exc_names(exc: BaseException) -> set[str]:
+    return {c.__name__ for c in type(exc).__mro__}
+
+
+def _attr_status(exc: BaseException) -> int | None:
+    """HTTP status carried by the exception object (litellm sets status_code;
+    httpx errors carry .response)."""
+    for src in (exc, getattr(exc, "response", None)):
+        code = getattr(src, "status_code", None)
+        if isinstance(code, int) and 100 <= code <= 599:
+            return code
+    return None
+
+
+def _message_statuses(emsg: str) -> set[int]:
+    return {int(m) for m in _STATUS_RE.findall(emsg)}
+
+
 def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     """Map a provider exception to one of: 'rate_limit', 'auth', 'error'.
 
     Single source of truth — both chat and embed paths classify the same way.
     `provider` enables provider-scoped signatures (narrow strings that must not
     penalise other providers' keys); omit it to match only the global signs.
+
+    Order (2026-10-03): billing-depleted phrases → provider-scoped rate-limit
+    phrases (mistral's 401 is a monthly quota) → exception TYPE / HTTP status
+    (RateLimitError / 429 → rate_limit; AuthenticationError / 401 / 403 → auth)
+    → global phrase tables, skipped when the exception carries an explicit
+    neutral 4xx status (a 400 that merely mentions "quota" is not a throttle)
+    → provider-scoped auth phrases. litellm sometimes MIS-types a provider's
+    429 (cohere → APIConnectionError, status 500), which is why the phrase
+    tables still apply to untyped / 5xx errors.
     """
     # 2026-07-07: our own call-timeout backstop (litellm_adapter.call_llm's
     # asyncio.wait_for) raises a bare TimeoutError with NO message — none of
@@ -136,12 +196,22 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     # (auth) state, NOT a throttle; it must not fall through to rate_limit below.
     if any(s in emsg for s in _BILLING_DEPLETED_SIGNS):
         return "auth"
-    if any(sign in emsg for sign in _RATE_LIMIT_SIGNS):
-        return "rate_limit"
     if provider and any(s in emsg for s in _PROVIDER_RATE_LIMIT_SIGNS.get(provider, ())):
         return "rate_limit"
-    if any(sign in emsg for sign in _AUTH_SIGNS) or "401" in emsg or "403" in emsg or "auth" in emsg:
+    names = _exc_names(exc)
+    attr = _attr_status(exc)
+    statuses = _message_statuses(emsg) | ({attr} if attr else set())
+    if 429 in statuses or names & _RATE_EXC_NAMES:
+        return "rate_limit"
+    if (any(sign in emsg for sign in _AUTH_SIGNS) or _BAD_KEY_RE.search(emsg)
+            or statuses & {401, 403} or names & _AUTH_EXC_NAMES):
         return "auth"
+    neutral_4xx = attr is not None and 400 <= attr < 500 and attr not in _NEUTRAL_4XX_EXCLUDED
+    if not neutral_4xx:
+        if any(sign in emsg for sign in _RATE_LIMIT_SIGNS) or _QUOTA_WORD_RE.search(emsg):
+            return "rate_limit"
+        if _AUTH_WORD_RE.search(emsg):
+            return "auth"
     if provider and any(s in emsg for s in _PROVIDER_AUTH_SIGNS.get(provider, ())):
         return "auth"
     return "error"
@@ -172,10 +242,15 @@ def is_model_unavailable(exc: Exception) -> bool:
 def is_timeout(exc: Exception) -> bool:
     """True if the attempt died on OUR call-timeout backstop or the provider's
     own timeout. Distinct from a pre-processing reject (429/auth/503): on a
-    timeout the provider HELD the request long enough to generate — and BILL —
-    a response we never received (verified 2026-07-12: Google billed $122 on the
-    paid gemini key while the broker recorded $2, the gap being ~1.2k/day gemini
-    timeouts booked at $0). So a timeout must charge the cap, not be free."""
+    timeout the provider HELD the request for a long time. Used to steepen the
+    cooldown for a hanging key (a ~60s-wasted timeout escalates faster than a
+    0s-wasted 429) and to feed the timeout circuit-breaker.
+
+    NOT a billing signal: since 2026-07-16 an answerless timeout books $0 and
+    its reservation is fully released (see llm_service._record_error) — the
+    upstream spend of a timed-out call is reconciled against the provider
+    invoice out-of-band, not charged to the admission cap. (This docstring used
+    to say a timeout "must charge the cap"; that was reversed on 2026-07-16.)"""
     return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
 
 
