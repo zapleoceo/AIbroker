@@ -363,6 +363,27 @@
 > `llm:audio` to all groq (1→4) and gemini keys. NB the audio *format* is
 > verified accepted by gemini (a live probe reached 429, not a 400); the
 > transcription *output* awaits a gemini key with capacity (paid id=16 top-up).
+>
+> **2026-10-03 (gemini transcription → dedicated ASR model)**: the gemini slot
+> now uses Google's `gemini-3.5-transcribe` (`DEFAULT_MODEL["gemini"]
+> ["transcription"]`) via `_transcribe_via_gemini_asr` — raw httpx POST to
+> `generateContent` with `generationConfig.audioTranscriptionConfig`
+> (`mode: VERBATIM`, no text prompt; without that config the model returns HTTP
+> 200 with EMPTY output, so it cannot go through litellm/`_transcribe_via_chat`).
+> Transcript = join of `candidates[0].content.parts[*].audioTranscription.text`
+> (or `.text`); empty → raises so the chain moves on. Cost: `promptTokenCount`
+> (~32 audio tokens/s) gives duration, priced at ~$0.005/audio-minute in
+> `_WHISPER_USD_PER_MIN` (free-tier keys still zeroed by `_billed_cost`).
+> Bake-off on 15 real Russian voice notes: groq turbo median 312 ms;
+> gemini-3.5-transcribe 15/15 ok, median 1208 ms, 0 rate-limit errors;
+> gemini-2.5-flash (chat) 13/15 (two 429), median 1264 ms; local faster-whisper
+> 18.5 s. **Fallback:** `run_transcribe` walks one model per provider and never
+> consults `MODEL_ROTATION`, so `transcribe()` itself retries
+> `gemini/gemini-2.5-flash` (`_transcribe_via_chat`) on the same key when the
+> ASR call fails for any non-auth reason (429 on the ASR model's own quota, 5xx,
+> empty transcript). An auth-class error is re-raised immediately (the fallback
+> would fail the same way). If both fail, the fallback's error is raised
+> (`__cause__` = the ASR error) and the normal key cooldown applies.
 
 > **2026-09-12 (vision: slow but free)** — owner request: vera's image backlog
 > (800 photos pending on her side, ~350 jobs/day) must drain on the local

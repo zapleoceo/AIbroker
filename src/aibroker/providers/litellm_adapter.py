@@ -148,7 +148,11 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                "structured": "gemini/gemini-2.5-flash",
                "translate": "gemini/gemini-2.5-flash-lite",
                "vision": "gemini/gemini-2.5-flash",
-               "transcription": "gemini/gemini-2.5-flash"},
+               # 2026-10-03: Google's dedicated ASR model leads gemini
+               # transcription; gemini-2.5-flash stays as the in-adapter
+               # fallback (_GEMINI_ASR_FALLBACK — run_transcribe walks ONE model
+               # per provider, so MODEL_ROTATION can't carry it).
+               "transcription": "gemini/gemini-3.5-transcribe"},
     # 2026-07-17: moved to deepseek-v4-flash AHEAD of deepseek-chat's
     # deprecation (2026-07-24 15:59 UTC; DeepSeek: "deepseek-chat corresponds
     # to the non-thinking mode of deepseek-v4-flash"). The 2026-07-10 "v4-flash
@@ -1104,6 +1108,79 @@ async def _transcribe_via_chat(
     return (resp.choices[0].message.content or "").strip(), meta
 
 
+# 2026-10-03: gemini-3.5-transcribe is Google's dedicated ASR model. Bake-off
+# on 15 real Russian voice notes: groq turbo median 312 ms; gemini-3.5-transcribe
+# (VERBATIM) 15/15 ok, median 1208 ms, 0 rate-limit errors; gemini-2.5-flash
+# via chat 13/15 (two 429), median 1264 ms; local faster-whisper 18.5 s. It
+# needs generationConfig.audioTranscriptionConfig and takes NO text prompt —
+# without that config it returns HTTP 200 with EMPTY output — so it cannot go
+# through litellm / _transcribe_via_chat. Raw httpx, like asr-local.
+_GEMINI_ASR_MODEL = "gemini/gemini-3.5-transcribe"
+_GEMINI_ASR_FALLBACK = "gemini/gemini-2.5-flash"
+_GEMINI_ASR_URL = "https://generativelanguage.googleapis.com/v1beta/models/{name}:generateContent"
+_GEMINI_ASR_TIMEOUT_S = 60.0
+_GEMINI_AUDIO_TOKENS_PER_S = 32
+
+
+async def _post_gemini_asr(url: str, api_key: str, body: dict[str, Any], timeout: float) -> httpx.Response:  # pragma: no cover — thin network I/O, exercised via _transcribe_via_gemini_asr's mocked tests
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.post(url, json=body, headers={"x-goog-api-key": api_key})
+
+
+async def _transcribe_via_gemini_asr(
+    *, model: str, audio: bytes, filename: str, api_key: str,
+) -> tuple[str, dict[str, Any]]:
+    """Dedicated Gemini ASR model via the raw generateContent endpoint. Errors
+    carry the HTTP status + body text so classify_provider_error (string
+    based: "429"/RESOURCE_EXHAUSTED → rate_limit, 401/403 → auth) works; an
+    empty transcript raises so the chain falls through rather than returning
+    a silent empty success."""
+    name = model.split("/", 1)[1]
+    body = {
+        "contents": [{"parts": [{"inline_data": {
+            "mime_type": _audio_mime(filename),
+            "data": base64.b64encode(audio).decode(),
+        }}]}],
+        "generationConfig": {"audioTranscriptionConfig": {
+            "languageCodes": [], "mode": "VERBATIM",
+        }},
+    }
+    t0 = time.time()
+    try:
+        resp = await _post_gemini_asr(
+            _GEMINI_ASR_URL.format(name=name), api_key, body, _GEMINI_ASR_TIMEOUT_S,
+        )
+    except httpx.TimeoutException as e:
+        raise TimeoutError(f"gemini-asr timeout: {e}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"gemini-asr unreachable: {e}") from e
+    latency_ms = int((time.time() - t0) * 1000)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"gemini-asr {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    pieces = []
+    for part in parts:
+        t = (part.get("audioTranscription") or {}).get("text") or part.get("text")
+        if t:
+            pieces.append(t)
+    text = " ".join(p.strip() for p in pieces if p.strip()).strip()
+    if not text:
+        raise RuntimeError("gemini-asr returned an empty transcript")
+    tokens_in = int((data.get("usageMetadata") or {}).get("promptTokenCount") or 0)
+    audio_s = (tokens_in / _GEMINI_AUDIO_TOKENS_PER_S) if tokens_in         else _estimate_audio_seconds(len(audio))
+    meta = {
+        "model": model,
+        "model_served": served_model(model, data.get("modelVersion")),
+        "tokens_in": tokens_in,
+        "tokens_out": 0,
+        "cost_usd": whisper_cost(model, audio_s),
+        "audio_s": round(audio_s, 1),
+        "latency_ms": latency_ms,
+    }
+    return text, meta
+
+
 async def _post_local_asr(url: str, audio: bytes, timeout: float) -> httpx.Response:  # pragma: no cover — thin network I/O, exercised via _transcribe_via_local_asr's mocked tests
     async with httpx.AsyncClient(timeout=timeout) as client:
         return await client.post(url, content=audio)
@@ -1157,6 +1234,28 @@ async def transcribe(
     provider = model.split("/", 1)[0]
     if provider == "local":
         return await _transcribe_via_local_asr(audio=audio)
+    if model == _GEMINI_ASR_MODEL:
+        try:
+            return await _transcribe_via_gemini_asr(
+                model=model, audio=audio, filename=filename, api_key=api_key,
+            )
+        except Exception as e:  # noqa: BLE001 — fall back unless the key itself is bad
+            # run_transcribe walks one model per provider (no rotation), so the
+            # fallback lives here. A bad key fails the fallback identically →
+            # surface it at once; anything else (429 on the ASR model's own
+            # quota, 5xx, empty) tries gemini-2.5-flash on the same key.
+            from aibroker.providers.provider_errors import classify_provider_error
+            if classify_provider_error(e, "gemini") == "auth":
+                raise
+            log.warning("gemini ASR %s failed (%s) — falling back to %s",
+                        model, e, _GEMINI_ASR_FALLBACK)
+            try:
+                return await _transcribe_via_chat(
+                    model=_GEMINI_ASR_FALLBACK, audio=audio,
+                    filename=filename, api_key=api_key,
+                )
+            except Exception as fb:
+                raise fb from e
     if provider in _CHAT_TRANSCRIBE_PROVIDERS:
         return await _transcribe_via_chat(
             model=model, audio=audio, filename=filename, api_key=api_key,
@@ -1195,6 +1294,9 @@ _WHISPER_USD_PER_MIN: dict[str, float] = {
     "openai/whisper-1": 0.006,
     "groq/whisper-large-v3-turbo": 0.04 / 60,
     "groq/whisper-large-v3": 0.111 / 60,
+    # 2026-10-03: paid list price ~$0.005/audio-minute; free-tier keys are
+    # zeroed by _billed_cost. Google reports no output tokens for it.
+    "gemini/gemini-3.5-transcribe": 0.005,
 }
 # Voice notes are opus/ogg at ~24-32 kbps; mp3 uploads run higher, which only
 # makes this OVER-estimate duration (safe direction for a cost reservation).

@@ -831,6 +831,122 @@ async def test_transcribe_local_asr_4xx_stays_plain_error(monkeypatch):
     assert not isinstance(exc_info.value, TimeoutError)
 
 
+# ─── transcribe — gemini-3.5-transcribe (raw generateContent ASR) ──────────
+
+_ASR = "gemini/gemini-3.5-transcribe"
+
+
+def _asr_ok(parts, tokens=320):
+    payload = {"candidates": [{"content": {"parts": parts}}],
+               "usageMetadata": {"promptTokenCount": tokens},
+               "modelVersion": "gemini-3.5-transcribe-001"}
+    return SimpleNamespace(status_code=200, json=lambda: payload, text="")
+
+
+async def test_gemini_asr_parses_audio_transcription_and_body():
+    captured = {}
+
+    async def fake_post(url, api_key, body, timeout):
+        captured.update(url=url, key=api_key, body=body)
+        return _asr_ok([{"audioTranscription": {"text": "привет "}},
+                        {"audioTranscription": {"text": "мир"}}])
+
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr", side_effect=fake_post):
+        text, meta = await transcribe(model=_ASR, audio=b"oggbytes",
+                                      filename="v.ogg", api_key="K")
+    assert text == "привет мир"
+    assert captured["url"].endswith("/models/gemini-3.5-transcribe:generateContent")
+    assert captured["key"] == "K"
+    gc = captured["body"]["generationConfig"]["audioTranscriptionConfig"]
+    assert gc == {"languageCodes": [], "mode": "VERBATIM"}
+    part = captured["body"]["contents"][0]["parts"]
+    assert len(part) == 1 and part[0]["inline_data"]["mime_type"] == "audio/ogg"
+    assert meta["model"] == _ASR
+    assert meta["tokens_in"] == 320 and meta["tokens_out"] == 0
+    assert meta["audio_s"] == 10.0
+    assert meta["cost_usd"] == pytest.approx(0.005 * 10 / 60)
+
+
+async def test_gemini_asr_falls_back_to_plain_text_part():
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=_asr_ok([{"text": "hello"}]))):
+        text, _ = await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
+    assert text == "hello"
+
+
+async def test_gemini_asr_empty_transcript_raises():
+    from aibroker.providers.litellm_adapter import _transcribe_via_gemini_asr
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=_asr_ok([]))), \
+         pytest.raises(RuntimeError, match="empty transcript"):
+        await _transcribe_via_gemini_asr(model=_ASR, audio=b"x",
+                                         filename="a.ogg", api_key="K")
+
+
+async def test_gemini_asr_429_is_classified_rate_limit():
+    from aibroker.providers.litellm_adapter import _transcribe_via_gemini_asr
+    from aibroker.providers.provider_errors import classify_provider_error
+    fake = SimpleNamespace(status_code=429, text='{"status":"RESOURCE_EXHAUSTED"}')
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=fake)), \
+         pytest.raises(RuntimeError) as ei:
+        await _transcribe_via_gemini_asr(model=_ASR, audio=b"x",
+                                         filename="a.ogg", api_key="K")
+    assert classify_provider_error(ei.value, "gemini") == "rate_limit"
+
+
+async def test_transcribe_dispatch_asr_model_skips_chat_path():
+    chat = AsyncMock()
+    ok = _asr_ok([{"audioTranscription": {"text": "ok"}}])
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=ok)), \
+         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat):
+        await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
+    chat.assert_not_called()
+
+
+async def test_gemini_asr_failure_falls_back_to_flash_chat():
+    fake = SimpleNamespace(status_code=429, text="RESOURCE_EXHAUSTED")
+    chat = AsyncMock(return_value=("из чата", {"model": "gemini/gemini-2.5-flash"}))
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=fake)), \
+         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat):
+        text, _ = await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
+    assert text == "из чата"
+    assert chat.await_args.kwargs["model"] == "gemini/gemini-2.5-flash"
+
+
+async def test_gemini_asr_auth_error_does_not_fall_back():
+    fake = SimpleNamespace(status_code=403, text="API key not valid")
+    chat = AsyncMock()
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=fake)), \
+         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat), \
+         pytest.raises(RuntimeError, match="403"):
+        await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
+    chat.assert_not_called()
+
+
+async def test_gemini_asr_both_fail_raises_fallback_error_chained():
+    fake = SimpleNamespace(status_code=500, text="boom")
+    chat = AsyncMock(side_effect=RuntimeError("chat 429"))
+    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+               AsyncMock(return_value=fake)), \
+         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat), \
+         pytest.raises(RuntimeError, match="chat 429") as ei:
+        await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
+    assert "gemini-asr 500" in str(ei.value.__cause__)
+
+
+def test_gemini_asr_priced_per_minute():
+    from aibroker.providers.litellm_adapter import (
+        estimate_transcription_cost,
+        whisper_cost,
+    )
+    assert whisper_cost(_ASR, 60) == pytest.approx(0.005)
+    assert estimate_transcription_cost(_ASR, 4000) > 0   # 1 s of assumed 32 kbps
+
+
 def test_models_for_returns_primary_first_then_rotation():
     """The primary from DEFAULT_MODEL must stay first so a provider with no
     rotation configured behaves exactly as it did with plain model_for."""

@@ -30,7 +30,7 @@ def test_gemini_transcription_model_wired():
     """gemini transcribes via chat (no Whisper endpoint) — the chain needs a
     model or run_transcribe skips it (2026-07-11: groq daily-capped, gemini was
     the only live transcription capacity)."""
-    assert model_for("gemini", "transcription") == "gemini/gemini-2.5-flash"
+    assert model_for("gemini", "transcription") == "gemini/gemini-3.5-transcribe"
 
 
 def test_model_for_known_combos():
