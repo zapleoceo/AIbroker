@@ -664,7 +664,7 @@ async def _run_attempt(
     if not tools:
         response_cache.put(capability, messages, text, model=model,
                             max_tokens=max_tokens, temperature=temperature,
-                            project_id=project.id)
+                            project_id=project.id, response_format=response_format)
     # A success pins this (project, provider) to this key so the NEXT pick
     # lands where the provider-side prompt cache is already warm.
     await note_affinity_shared(project.id, provider, key.id)
@@ -745,7 +745,8 @@ async def run_chat(
     # the whole LLM round-trip. No-op for chat/* (not deterministic).
     cached = (None if tools else response_cache.get(capability, messages, model=model,
                                  max_tokens=max_tokens, temperature=temperature,
-                                 project_id=project.id))
+                                 project_id=project.id,
+                                 response_format=response_format))
     if cached is not None:
         return ChatOutcome(
             text=cached, provider="cache", model="cache",

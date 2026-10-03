@@ -125,3 +125,41 @@ def test_vision_is_cacheable_for_a_day():
     other = [{"role": "user", "content": [{"type": "text", "text": "describe"},
                                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}}]}]
     assert rc.get("vision", other, model=None, max_tokens=400, temperature=0.1, project_id=2) is None
+
+
+def test_response_format_is_part_of_the_key():
+    """REGRESSION (2026-10-03): same messages sent as free text and as a JSON
+    schema request collided — the structured caller got cached prose."""
+    schema = {"type": "json_schema", "json_schema": {"name": "x", "schema": {"type": "object"}}}
+    response_cache.put("translate", _MSGS, "plain prose", **_KW)
+    assert response_cache.get("translate", _MSGS, response_format=schema, **_KW) is None
+    response_cache.put("translate", _MSGS, '{"a": 1}', response_format=schema, **_KW)
+    assert response_cache.get("translate", _MSGS, response_format=schema, **_KW) == '{"a": 1}'
+    assert response_cache.get("translate", _MSGS, **_KW) == "plain prose"
+    other = {"type": "json_object"}
+    assert response_cache.get("translate", _MSGS, response_format=other, **_KW) is None
+
+
+def test_tools_and_tool_choice_are_part_of_the_key():
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+    response_cache.put("translate", _MSGS, "A", **_KW)
+    assert response_cache.get("translate", _MSGS, tools=tools, **_KW) is None
+    response_cache.put("translate", _MSGS, "B", tools=tools, tool_choice="auto", **_KW)
+    assert response_cache.get("translate", _MSGS, tools=tools, tool_choice="auto", **_KW) == "B"
+    assert response_cache.get("translate", _MSGS, tools=tools, tool_choice="none", **_KW) is None
+
+
+async def test_run_chat_cache_distinguishes_response_format(monkeypatch):
+    """End-to-end: run_chat must hand response_format to the cache on both the
+    read and the write side."""
+    from aibroker.services import llm_service as svc
+
+    seen = []
+    monkeypatch.setattr(svc.response_cache, "get",
+                        lambda *a, **kw: seen.append(("get", kw.get("response_format"))))
+    monkeypatch.setattr(svc, "chain_for", lambda cap: [])
+    fmt = {"type": "json_object"}
+    await svc.run_chat(project=type("P", (), {"id": 1, "name": "p"})(), capability="translate",
+                       messages=_MSGS, model=None, max_tokens=64, temperature=0.0,
+                       response_format=fmt, workflow=None)
+    assert seen == [("get", fmt)]
