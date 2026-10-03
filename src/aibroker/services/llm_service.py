@@ -6,6 +6,7 @@ and walking to the next provider in the chain lives here.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -270,6 +271,25 @@ async def _rotate_model(pool: list[str], api_key_id: int, start: int) -> str:
         if candidate not in cooled:
             return candidate
     return pool[start]
+
+
+async def _release_reservation(key: ApiKeyRow, estimated_cost: float) -> None:
+    """Refund a reserve_cost reservation. Shielded from cancellation (a client
+    disconnect cancelling the request mid-refund must still finish it) and never
+    raises: a failed refund only leaves the daily counter conservatively high —
+    it must not mask the real outcome of the attempt it is cleaning up after.
+
+    Every path that called reserve_cost must reach this exactly once, INCLUDING
+    asyncio.CancelledError (a BaseException that `except Exception` misses) and
+    a failure between the reserve and the provider call such as decrypt()
+    (2026-10-03 review: both leaked the reservation until midnight)."""
+    try:
+        await asyncio.shield(release_cost(api_key=key, estimated_cost=estimated_cost))
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        log.exception("release_cost failed for key %s — reservation of $%.4f leaks "
+                      "until the daily reset", key.id, estimated_cost)
 
 
 def _scrub_secrets(text: str) -> str:
@@ -582,8 +602,10 @@ async def _run_attempt(
         if e.kind in ("project", "global"):
             return _Flow.BUDGET_EXHAUSTED, None
         return _Flow.NEXT_PROVIDER, None
-    plain = decrypt(key.token_encrypted)
     try:
+        # decrypt INSIDE the try: it runs after reserve_cost, so a failure here
+        # must release the reservation like any other attempt failure.
+        plain = decrypt(key.token_encrypted)
         text, meta = await call_llm(
             model=use_model, messages=messages, api_key=plain,
             max_tokens=max_tokens, temperature=temperature,
@@ -594,11 +616,14 @@ async def _run_attempt(
             **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
         )
         meta["cost_usd"] = _billed_cost(key, meta)
-    except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
+    except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
         # Attempt is over (however it ends) — fully release the reservation so
         # an answerless call (incl. a paid timeout) consumes NO admission budget;
-        # _record_error books the row at $0.
-        await release_cost(api_key=key, estimated_cost=estimated_cost)
+        # _record_error books the row at $0. BaseException so a cancelled
+        # request (CancelledError) releases too; it is re-raised untouched.
+        await _release_reservation(key, estimated_cost)
+        if not isinstance(e, Exception):
+            raise
         return await _handle_call_error(
             exc=e, key=key, project=project, provider=provider,
             use_model=use_model, capability=capability, workflow=workflow,
@@ -608,7 +633,7 @@ async def _run_attempt(
     # Call resolved (successfully) — release the reservation; record_usage
     # below books the REAL final cost (meta["cost_usd"]) on top, so the
     # key ends up debited by exactly the real cost, never the estimate.
-    await release_cost(api_key=key, estimated_cost=estimated_cost)
+    await _release_reservation(key, estimated_cost)
 
     if tools and (failure := validate_result(text, meta, tools, tool_choice)):
         await record_usage(
@@ -1061,13 +1086,14 @@ async def run_embed(
             if e.fatal:
                 raise EmbedFailed(str(e)) from e
             continue  # this key's own cap — a sibling key may still have room
-        plain = decrypt(key.token_encrypted)
         try:
+            plain = decrypt(key.token_encrypted)  # after the reserve → inside the try
             vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
             meta["cost_usd"] = _billed_cost(key, meta)
-        except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-            if estimated_cost > 0:
-                await release_cost(api_key=key, estimated_cost=estimated_cost)
+        except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
+            await _release_reservation(key, estimated_cost)
+            if not isinstance(e, Exception):
+                raise  # CancelledError etc.: reservation released, propagate
             last_exc = e
             await _handle_attempt_failure(
                 key=key, project=project, provider=provider,
@@ -1079,8 +1105,7 @@ async def run_embed(
         # Reservation was the worst case; record_usage books the real cost. A
         # $0 estimate reserved nothing (reserve_cost's own free-tier skip), so
         # there is nothing to release — and no DB round trip for free keys.
-        if estimated_cost > 0:
-            await release_cost(api_key=key, estimated_cost=estimated_cost)
+        await _release_reservation(key, estimated_cost)
         request_id = await record_usage(
             api_key_id=key.id, project_id=project.id, lease_id=None,
             provider=provider, model=use_model,
@@ -1175,8 +1200,10 @@ async def run_decision(
                                              questions=questions, api_key=plain)
                 meta["cost_usd"] = _billed_cost(key, meta)
                 served_model = use_model
-            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-                await release_cost(api_key=key, estimated_cost=estimated_cost)
+            except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
+                await _release_reservation(key, estimated_cost)
+                if not isinstance(e, Exception):
+                    raise  # CancelledError etc.: reservation released, propagate
                 primary_exc = e
                 await _handle_attempt_failure(
                     key=key, project=project, provider=provider,
@@ -1185,7 +1212,7 @@ async def run_decision(
                 log.warning("provider %s key %s decision failed, trying next key: %s",
                             provider, key.label, e)
             else:
-                await release_cost(api_key=key, estimated_cost=estimated_cost)
+                await _release_reservation(key, estimated_cost)
         if primary_exc is not None:
             last_exc = primary_exc
             fallback_ok = False
@@ -1370,23 +1397,23 @@ async def run_transcribe(
                 if e.fatal:
                     raise TranscribeFailed(str(e)) from e
                 continue  # this key's own cap — try the provider's next key
-            plain = decrypt(key.token_encrypted)
             try:
+                plain = decrypt(key.token_encrypted)  # after the reserve → inside the try
                 text, meta = await transcribe(
                     model=use_model, audio=audio, filename=filename, api_key=plain,
                 )
                 meta["cost_usd"] = _billed_cost(key, meta)
-            except Exception as e:  # noqa: BLE001 — classify, cool the key, try next
-                if estimated_cost > 0:
-                    await release_cost(api_key=key, estimated_cost=estimated_cost)
+            except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
+                await _release_reservation(key, estimated_cost)
+                if not isinstance(e, Exception):
+                    raise  # CancelledError etc.: reservation released, propagate
                 last_exc = e
                 await _handle_attempt_failure(
                     key=key, project=project, provider=provider,
                     model=use_model, capability="transcription", workflow=workflow, exc=e,
                 )
                 continue  # next key of the same provider
-            if estimated_cost > 0:
-                await release_cost(api_key=key, estimated_cost=estimated_cost)
+            await _release_reservation(key, estimated_cost)
             # local's small model + aggressive VAD can clip a REAL message to an
             # empty string. Returning that as a successful "" silently DROPS the
             # voice (caller sees 200 with no text, never retries). An empty from
