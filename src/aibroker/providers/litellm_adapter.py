@@ -1168,7 +1168,7 @@ async def _transcribe_via_gemini_asr(
     if not text:
         raise RuntimeError("gemini-asr returned an empty transcript")
     tokens_in = int((data.get("usageMetadata") or {}).get("promptTokenCount") or 0)
-    audio_s = (tokens_in / _GEMINI_AUDIO_TOKENS_PER_S) if tokens_in         else _estimate_audio_seconds(len(audio))
+    audio_s = (tokens_in / _GEMINI_AUDIO_TOKENS_PER_S) if tokens_in else _estimate_audio_seconds(len(audio))
     meta = {
         "model": model,
         "model_served": served_model(model, data.get("modelVersion")),
