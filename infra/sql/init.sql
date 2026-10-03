@@ -190,3 +190,24 @@ BEGIN
     EXECUTE FUNCTION aibroker_block_destructive_ddl();
 END
 $guard$;
+
+-- 013 least-privilege app role grants; see migrations/013_app_role_grants.sql
+DO $roles$
+DECLARE
+  app_role constant text := 'aibroker_app';
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app_role) THEN
+    RAISE NOTICE 'aibroker: role % missing, skipping app grants', app_role;
+    RETURN;
+  END IF;
+
+  EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', app_role);
+  EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', app_role);
+  EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', app_role);
+  -- Tables/sequences the owner creates in FUTURE migrations inherit the same.
+  EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', app_role);
+  EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', app_role);
+  -- Never let the app role create objects, even if PUBLIC has CREATE.
+  EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', app_role);
+END
+$roles$;
