@@ -69,6 +69,10 @@ async def probe_with_headers(
         return "dead", r.status_code, "auth failed", h
     if r.status_code == 402:
         return "dead", 402, "payment required", h
+    # Google answers a bad key with HTTP 400 (API_KEY_INVALID), not 401/403 —
+    # without this a revoked gemini key read "alive/uncertain" forever.
+    if r.status_code == 400 and ("api key not valid" in b or "api_key_invalid" in b):
+        return "dead", 400, "auth failed", h
     return "alive", r.status_code, "uncertain", h
 
 
@@ -179,6 +183,27 @@ def _bearer(k: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {k}", "content-type": "application/json"}
 
 
+# FREE-QUOTA probes (2026-10-03 review). A generation probe spends one of the
+# key's metered calls on every sweep — and dead/in-cooldown keys are probed
+# EVERY sweep (auto-revive depends on it). Gemini's free tier is 20 requests/day
+# PER MODEL, so a generateContent probe on gemini-2.5-flash ate a real slice of
+# the same quota production traffic needs; cohere's trial is 1000 calls/MONTH
+# and mistral's plan allowance is monthly. Those providers (and openrouter's
+# :free pool, ~20-50/day) are probed through their free key-validation/list
+# endpoints instead: they authenticate the key but are not metered.
+# NOT switched, deliberately: PAID providers (anthropic/openai/deepseek) — a
+# list endpoint 200s for an out-of-credit key, so the monitor would revive a
+# billing-dead key every sweep (flap) where a 1-token generation detects it;
+# sambanova (its quota headers feed key-create discovery from the chat probe),
+# cloudflare/nvidia/zai/voyage/groq/cerebras (token- or neuron-metered, 1-token
+# probes are negligible).
+def _gemini_list_probe(k: str, _acc=None):
+    # Key in the x-goog-api-key header, NOT the URL query string — a key in the
+    # URL can leak into any proxy/exception that renders the request URL.
+    return ("GET", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+            {"x-goog-api-key": k}, None)
+
+
 _PROBES = {
     "cerebras": lambda k, _acc=None: ("POST", "https://api.cerebras.ai/v1/chat/completions",
                             _bearer(k),
@@ -190,11 +215,10 @@ _PROBES = {
                         {"model": "openai/gpt-oss-120b",
                          "messages": [{"role": "user", "content": "."}],
                          "max_tokens": 1}),
-    "openrouter": lambda k, _acc=None: ("POST", "https://openrouter.ai/api/v1/chat/completions",
-                              _bearer(k),
-                              {"model": "google/gemma-4-31b-it:free",  # gpt-oss:free delisted 2026-07-16
-                               "messages": [{"role": "user", "content": "."}],
-                               "max_tokens": 1}),
+    # /auth/key validates the key and returns its limits — free, unmetered
+    # (the :free pool's ~20-50 requests/day must not be spent on liveness).
+    "openrouter": lambda k, _acc=None: ("GET", "https://openrouter.ai/api/v1/auth/key",
+                              _bearer(k), None),
     # deepseek-v4-flash (matches DEFAULT_MODEL; deepseek-chat is deprecated
     # 2026-07-24). thinking disabled to mirror production calls — the v4
     # default is thinking mode, which at max_tokens=1 burns the whole budget
@@ -210,14 +234,7 @@ _PROBES = {
                               "content-type": "application/json"},
                              {"model": "claude-haiku-4-5", "max_tokens": 1,
                               "messages": [{"role": "user", "content": "."}]}),
-    # Key goes in the x-goog-api-key header, NOT the URL query string — a key in
-    # the URL can leak into any proxy/exception that renders the request URL.
-    "gemini": lambda k, _acc=None: ("POST",
-                          "https://generativelanguage.googleapis.com/v1beta/models/"
-                          "gemini-2.5-flash:generateContent",
-                          {"content-type": "application/json", "x-goog-api-key": k},
-                          {"contents": [{"parts": [{"text": "."}]}],
-                           "generationConfig": {"maxOutputTokens": 1}}),
+    "gemini": _gemini_list_probe,
     # voyage-4, NOT voyage-3: the voyage-3 family has zero free-token allocation
     # (real $ from token 1 — see litellm_adapter migration 2026-07-07), so a
     # probe on voyage-3 billed real money every monitor sweep. voyage-4 has the
@@ -225,18 +242,11 @@ _PROBES = {
     "voyage": lambda k, _acc=None: ("POST", "https://api.voyageai.com/v1/embeddings",
                           _bearer(k),
                           {"model": "voyage-4", "input": "."}),
-    "mistral": lambda k, _acc=None: ("POST", "https://api.mistral.ai/v1/chat/completions",
-                           _bearer(k),
-                           {"model": "mistral-small-latest",
-                            "messages": [{"role": "user", "content": "."}],
-                            "max_tokens": 1}),
-    # Cohere v2 (/v2/chat). command-r was retired 2025-09-15; use the small
-    # current model for probes — it's cheapest and most likely to stay live.
-    "cohere": lambda k, _acc=None: ("POST", "https://api.cohere.com/v2/chat",
-                          _bearer(k),
-                          {"model": "command-r7b-12-2024",
-                           "messages": [{"role": "user", "content": "."}],
-                           "max_tokens": 1}),
+    "mistral": lambda k, _acc=None: ("GET", "https://api.mistral.ai/v1/models",
+                           _bearer(k), None),
+    # Cohere trial = 1000 calls/month: list models instead of a chat call.
+    "cohere": lambda k, _acc=None: ("GET", "https://api.cohere.com/v1/models?page_size=1",
+                          _bearer(k), None),
     # 2026-07-04: confirmed live — 200 OK + x-ratelimit-limit-requests-day header.
     "sambanova": lambda k, _acc=None: ("POST", "https://api.sambanova.ai/v1/chat/completions",
                              _bearer(k),

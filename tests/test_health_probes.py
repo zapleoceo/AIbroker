@@ -132,3 +132,35 @@ def test_gemini_probe_key_in_header_not_url():
     assert "SECRET_KEY" not in url
     assert "key=" not in url
     assert headers.get("x-goog-api-key") == "SECRET_KEY"
+
+
+@pytest.mark.parametrize("provider", ["gemini", "cohere", "mistral", "openrouter"])
+def test_scarce_free_quota_providers_probe_via_unmetered_endpoints(provider):
+    """REGRESSION (2026-10-03): the gemini probe was a generateContent call on
+    gemini-2.5-flash — one of the 20/day/model free calls — every sweep; cohere
+    (1000/month) and mistral (monthly allowance) burned theirs the same way. A
+    key-validation GET spends nothing."""
+    from aibroker.providers.health_probes import _PROBES
+    method, url, _headers, body = _PROBES[provider]("K", None)
+    assert method == "GET" and body is None
+    assert "generateContent" not in url and "chat/completions" not in url
+    assert "/chat" not in url
+
+
+def test_gemini_probe_is_models_list_endpoint():
+    from aibroker.providers.health_probes import _PROBES
+    _, url, headers, _ = _PROBES["gemini"]("K")
+    assert url.startswith("https://generativelanguage.googleapis.com/v1beta/models")
+    assert "gemini-2.5-flash" not in url
+    assert headers["x-goog-api-key"] == "K"
+
+
+async def test_gemini_bad_key_400_is_dead_not_alive():
+    """Google answers an invalid key with HTTP 400 API_KEY_INVALID, which used to
+    fall through to 'alive/uncertain'."""
+    fake = _response(400, '{"error": {"message": "API key not valid. Please pass a valid API key."}}')
+    with patch("aibroker.providers.health_probes.httpx.AsyncClient") as m:
+        ctx = m.return_value.__aenter__.return_value
+        ctx.request = AsyncMock(return_value=fake)
+        verdict, http, _ = await probe("gemini", "bad")
+    assert (verdict, http) == ("dead", 400)

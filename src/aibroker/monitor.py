@@ -23,7 +23,7 @@ import os
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import select, text, update
+from sqlalchemy import case, select, text, update
 
 from aibroker.config import get_settings
 from aibroker.crypto import decrypt
@@ -83,6 +83,20 @@ def _cooldown_end(hint: str) -> datetime:
     if hint == "monthly quota":
         return next_utc_month_start().replace(tzinfo=None)
     return datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+
+
+def _extend_cooldown_values(cd_until: datetime, hint: str) -> dict:
+    """UPDATE values for a probe 'cooldown' verdict that only ever EXTEND a
+    cooldown. A probe 429 used to overwrite cooldown_until with now+5min even
+    when real traffic had parked the key to UTC midnight / next month (daily or
+    monthly quota), shortening the park so the key was re-picked and re-failed
+    (2026-10-03 review). `last_error` follows the same rule: the longer park's
+    reason is kept. CASE (not GREATEST) so the SQLite test gate runs it."""
+    keep_long = ApiKeyRow.cooldown_until > cd_until
+    return {
+        "cooldown_until": case((keep_long, ApiKeyRow.cooldown_until), else_=cd_until),
+        "last_error": case((keep_long, ApiKeyRow.last_error), else_=hint or None),
+    }
 
 
 def _paid_key_usable(key, cap_providers: set[str], scope: str,
@@ -223,9 +237,8 @@ async def tick(sweep: int = 0) -> None:
                 await s.execute(
                     update(ApiKeyRow).where(ApiKeyRow.id == r.id).values(
                         is_alive=True,
-                        cooldown_until=cd_until,
                         last_alive_check_at=datetime.now(UTC).replace(tzinfo=None),
-                        last_error=hint or None,
+                        **_extend_cooldown_values(cd_until, hint),
                     )
                 )
                 if not was_alive:  # pragma: no cover

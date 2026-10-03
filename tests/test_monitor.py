@@ -497,3 +497,35 @@ async def test_tick_micro_rpd_alive_never_probed_dead_probed():
         probed = await _probed_ids(sweep)
         assert alive_kid not in probed
         assert dead_kid in probed
+
+
+async def test_probe_cooldown_only_extends_an_existing_cooldown():
+    """REGRESSION (2026-10-03): a probe 429 overwrote cooldown_until with
+    now+5min even when real traffic had parked the key to midnight/next month."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from aibroker import monitor
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    long_until, short_until = now + timedelta(hours=10), now + timedelta(minutes=5)
+    async with get_session() as s:
+        s.add(ApiKeyRow(id=1, provider="gemini", label="long", tier="free", scopes=[],
+                        token_encrypted="x", cooldown_until=long_until, last_error="daily quota"))
+        s.add(ApiKeyRow(id=2, provider="gemini", label="none", tier="free", scopes=[],
+                        token_encrypted="x", cooldown_until=None))
+        s.add(ApiKeyRow(id=3, provider="gemini", label="short", tier="free", scopes=[],
+                        token_encrypted="x", cooldown_until=now + timedelta(seconds=30),
+                        last_error="old"))
+    async with get_session() as s:
+        await s.execute(update(ApiKeyRow).values(
+            **monitor._extend_cooldown_values(short_until, "rate limit")))
+    async with get_session() as s:
+        rows = {r.id: r for r in (await s.execute(
+            ApiKeyRow.__table__.select())).fetchall()}
+    assert rows[1].cooldown_until == long_until and rows[1].last_error == "daily quota"
+    assert rows[2].cooldown_until == short_until and rows[2].last_error == "rate limit"
+    assert rows[3].cooldown_until == short_until and rows[3].last_error == "rate limit"
