@@ -348,3 +348,35 @@ def test_is_daily_quota_error_detects_cloudflare_neurons():
         'AiError: you have used up your daily free allocation of 10,000 '
         "neurons, please upgrade to Cloudflare's Workers Paid plan"
     )
+
+
+async def test_adaptive_backoff_counts_status_rate_limit_rows_without_a_429():
+    """The escalation signal moved off the fabricated http_status=429: rows
+    booked status='rate_limit' (e.g. timeouts, http_status NULL) must still
+    escalate the backoff; an unrelated plain error must not."""
+    import os as _os
+    from datetime import datetime as _dt
+
+    from sqlalchemy import insert
+
+    from aibroker.crypto import encrypt
+    from aibroker.db import get_session
+    from aibroker.db.models import ApiKeyRow, UsageLogRow
+    from aibroker.routing.cooldown import adaptive_cooldown
+
+    async with get_session() as s:
+        key = ApiKeyRow(provider="gemini", label=f"cd-{_os.urandom(4).hex()}",
+                        tier="free", scopes=["llm:chat"],
+                        token_encrypted=encrypt("x"))
+        s.add(key)
+        await s.flush()
+        kid = key.id
+        for _ in range(6):
+            await s.execute(insert(UsageLogRow).values(
+                api_key_id=kid, provider="gemini", status="rate_limit",
+                http_status=None, created_at=_dt.now(UTC).replace(tzinfo=None)))
+        await s.execute(insert(UsageLogRow).values(
+            api_key_id=kid, provider="gemini", status="error",
+            http_status=500, created_at=_dt.now(UTC).replace(tzinfo=None)))
+    until = await adaptive_cooldown(kid, "gemini")
+    assert (until - datetime.now(UTC)).total_seconds() > 120   # 6 strikes -> escalated

@@ -48,6 +48,7 @@ from aibroker.providers.peak_pricing import peak_multiplier
 # Re-exported: tests and services/__init__ import classify_provider_error from here.
 from aibroker.providers.provider_errors import (
     classify_provider_error,
+    http_status_of,
     is_model_unavailable,
     is_timeout,
 )
@@ -354,6 +355,10 @@ async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = 
     return kind
 
 
+# classify_provider_error verdict -> usage_log.status (init.sql vocabulary).
+_STATUS_BY_KIND = {"rate_limit": "rate_limit", "auth": "auth_fail"}
+
+
 async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
@@ -376,20 +381,22 @@ async def _record_error(
     reconciled against the provider invoice, out-of-band — not via the admission
     counter that gates whether the NEXT answer is allowed to run.
 
-    http_status is derived from the error class, NOT left NULL: a rate_limit
-    books 429 specifically because adaptive_cooldown counts recent
-    `http_status = 429` rows to escalate its backoff. With NULL that count was
-    always 0, so the exponential step never fired and a per-minute-429 key got
-    re-picked every base-cooldown and re-stormed the provider — the exact retry
-    storm the adaptive backoff exists to damp (fix 2026-07-10)."""
+    `http_status` is the status the provider REALLY returned (None when the
+    exception carries none: timeouts, network errors). It used to be FABRICATED
+    from our classification (rate_limit -> 429, auth -> 401) so that
+    adaptive_cooldown could count `http_status = 429` rows to escalate its
+    backoff (fix 2026-07-10); that corrupted reporting - a timeout, a mistral
+    monthly-401 and a cohere 500 all showed as "429". The escalation signal now
+    rides the separate `status` column, in the vocabulary init.sql always
+    declared (ok|rate_limit|auth_fail|error): cooldown._recent_throttle_count
+    counts `status = 'rate_limit'` rows (plus legacy http_status=429 rows)."""
     kind = classify_provider_error(exc, provider)
-    http_status = 429 if kind == "rate_limit" else (401 if kind == "auth" else None)
     await record_usage(
         api_key_id=key.id, project_id=project.id, lease_id=None,
         provider=provider, model=model, capability=capability,
         workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-        latency_ms=None, status="error", error_kind=type(exc).__name__,
-        http_status=http_status,
+        latency_ms=None, status=_STATUS_BY_KIND.get(kind, "error"),
+        error_kind=type(exc).__name__, http_status=http_status_of(exc),
     )
 
 

@@ -1926,10 +1926,10 @@ async def test_run_embed_succeeds_first_try_records_usage(monkeypatch):
     assert recorded["tokens_in"] == 42
 
 
-async def test_record_error_books_429_for_rate_limit(monkeypatch):
-    """REGRESSION (2026-07-10): _record_error must book http_status=429 for a
-    rate_limit — adaptive_cooldown counts recent `http_status = 429` rows to
-    escalate backoff; with NULL the exponential step never fired."""
+async def test_record_error_books_rate_limit_status_without_inventing_http_status(monkeypatch):
+    """2026-07-10, reworked 2026-10-03: adaptive_cooldown must still see rate
+    limits (the escalating backoff needs them) - now via status='rate_limit' -
+    while http_status carries only what the provider really returned."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
@@ -1944,8 +1944,8 @@ async def test_record_error_books_429_for_rate_limit(monkeypatch):
         provider="cerebras", model="m", capability="chat:fast", workflow=None,
         exc=RuntimeError("RateLimitError - Tokens per day limit exceeded"),
     )
-    assert captured["http_status"] == 429
-    assert captured["status"] == "error"
+    assert captured["http_status"] is None      # message names no status: not invented
+    assert captured["status"] == "rate_limit"
 
 
 async def test_record_error_books_none_for_generic_error(monkeypatch):
@@ -2568,3 +2568,50 @@ async def test_run_chat_records_and_returns_the_served_model(monkeypatch):
     assert out.model_served == "DeepSeek-V4.1-Flash"     # exact model returned
     assert recorded["model"] == "deepseek/deepseek-flash"
     assert recorded["model_served"] == "DeepSeek-V4.1-Flash"
+
+
+async def _booked(monkeypatch, exc, provider="x"):
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    captured: dict = {}
+
+    async def fake_record(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(svc, "record_usage", fake_record)
+    await svc._record_error(
+        key=SimpleNamespace(id=1, provider=provider), project=SimpleNamespace(id=2),
+        provider=provider, model="m", capability="chat:fast", workflow=None, exc=exc)
+    return captured
+
+
+def _with_status(exc: Exception, code: int) -> Exception:
+    exc.status_code = code
+    return exc
+
+
+async def test_record_error_stores_the_real_status_not_the_classification(monkeypatch):
+    """REGRESSION (2026-10-03): every rate_limit-classified failure was stored
+    as http_status=429 and every auth one as 401 - a timeout, a mistral
+    monthly-401 and a mis-typed cohere 500 all read 429/401 in reports."""
+    got = await _booked(monkeypatch, _with_status(RuntimeError("upstream"), 429))
+    assert (got["http_status"], got["status"]) == (429, "rate_limit")
+
+    # A timeout is a rate_limit-class failure with NO http status.
+    got = await _booked(monkeypatch, TimeoutError("gemini-asr timed out after 60s"))
+    assert (got["http_status"], got["status"]) == (None, "rate_limit")
+
+    # mistral's monthly 401: throttle class, but the provider really said 401.
+    exc = _with_status(RuntimeError('{"detail":"Unauthorized"}'), 401)
+    got = await _booked(monkeypatch, exc, provider="mistral")
+    assert (got["http_status"], got["status"]) == (401, "rate_limit")
+
+    # litellm mis-types cohere's quota 429 as status 500 - stored as 500.
+    exc = _with_status(RuntimeError("Trial key limited to 1000 API calls / month"), 500)
+    got = await _booked(monkeypatch, exc, provider="cohere")
+    assert (got["http_status"], got["status"]) == (500, "rate_limit")
+
+    # auth class -> auth_fail, true status.
+    got = await _booked(monkeypatch, _with_status(RuntimeError("bad key"), 403))
+    assert (got["http_status"], got["status"]) == (403, "auth_fail")

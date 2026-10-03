@@ -232,11 +232,15 @@ async def cooldown_until(
                                    timeout_bump=is_timeout)
 
 
-async def _recent_429_count(s: AsyncSession, api_key_id: int, since: datetime) -> int:
+async def _recent_throttle_count(s: AsyncSession, api_key_id: int, since: datetime) -> int:
+    """Recent throttle strikes of this key: rows booked status='rate_limit'
+    (llm_service._record_error - covers timeouts and provider quirks whose real
+    HTTP status is not 429) plus legacy rows from before that change, which
+    flagged throttles only via http_status=429."""
     return int((await s.execute(
         text(
             "SELECT COUNT(*) FROM usage_log "
-            "WHERE api_key_id = :id AND http_status = 429 "
+            "WHERE api_key_id = :id AND (status = 'rate_limit' OR http_status = 429) "
             "  AND created_at > :since"
         ),
         {"id": api_key_id, "since": since},
@@ -261,9 +265,9 @@ async def adaptive_cooldown(
     # retry-after path too, which the SQLite deploy gate exercises.
     since = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=BACKOFF_WINDOW_S)
     if session is not None:
-        recent = await _recent_429_count(session, api_key_id, since)
+        recent = await _recent_throttle_count(session, api_key_id, since)
     else:
         async with get_session() as s:
-            recent = await _recent_429_count(s, api_key_id, since)
+            recent = await _recent_throttle_count(s, api_key_id, since)
     secs = _adaptive_jitter(cooldown_seconds(provider, recent, timeout_bump=timeout_bump))
     return datetime.now(UTC) + timedelta(seconds=secs)

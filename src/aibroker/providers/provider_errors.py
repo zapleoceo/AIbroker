@@ -164,6 +164,18 @@ def _message_statuses(emsg: str) -> set[int]:
     return {int(m) for m in _STATUS_RE.findall(emsg)}
 
 
+def http_status_of(exc: BaseException) -> int | None:
+    """The HTTP status the provider ACTUALLY returned, when the exception tells
+    us (status_code attribute, else an anchored status in the message), else
+    None. What usage_log.http_status stores - never a status inferred from our
+    own classification (see llm_service._record_error)."""
+    attr = _attr_status(exc)
+    if attr is not None:
+        return attr
+    found = _STATUS_RE.findall(str(exc).lower())
+    return next((int(c) for c in found if 100 <= int(c) <= 599), None)
+
+
 def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     """Map a provider exception to one of: 'rate_limit', 'auth', 'error'.
 
