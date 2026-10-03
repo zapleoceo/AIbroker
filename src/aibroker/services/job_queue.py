@@ -29,6 +29,7 @@ import base64
 import contextlib
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -96,6 +97,39 @@ _PURGE_EVERY_TICKS = int(os.environ.get("JOB_RETENTION_EVERY_TICKS", "300"))
 _USAGE_RETENTION_DAYS = int(os.environ.get("USAGE_RETENTION_DAYS", "120"))
 _AUDIT_CAPBLOCK_RETENTION_DAYS = int(os.environ.get("AUDIT_CAPBLOCK_RETENTION_DAYS", "14"))
 _AUDIT_RETENTION_DAYS = int(os.environ.get("AUDIT_RETENTION_DAYS", "365"))
+
+
+# Errors that retrying cannot fix: the job's own request is malformed (missing
+# field, bad value, incompatible tool request). Re-running them 8 times just
+# burns provider attempts and delays the honest failure by ~10 minutes.
+_DETERMINISTIC_ERRORS = (ValueError, TypeError, KeyError)
+
+# Dispatcher tick failures (DB outage): back off exponentially instead of
+# hammering a down database every second, and log the full traceback once per
+# window rather than every tick (a 10-minute outage wrote ~600 tracebacks).
+_TICK_BACKOFF_MAX_S = 30.0
+_TICK_TRACEBACK_EVERY_S = 60.0
+
+
+class _TickFailures:
+    """Consecutive-failure tracker for the dispatcher loop."""
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self.consecutive = 0
+        self._last_traceback = float("-inf")
+
+    def ok(self) -> None:
+        self.consecutive = 0
+
+    def failed(self) -> tuple[float, bool]:
+        """Record a failure -> (extra wait in seconds, log the full traceback?)."""
+        self.consecutive += 1
+        now = self._clock()
+        full = now - self._last_traceback >= _TICK_TRACEBACK_EVERY_S
+        if full:
+            self._last_traceback = now
+        return min(2.0 ** (self.consecutive - 1), _TICK_BACKOFF_MAX_S), full
 
 
 def _backoff_s(retry_count: int) -> int:
@@ -240,6 +274,11 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             )
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
+        if isinstance(e, _DETERMINISTIC_ERRORS):
+            await _finish(row.id, status="error",
+                           error_message=f"invalid job ({type(e).__name__}): {e}",
+                           expect_started_at=row.started_at)
+            return
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
                                 expect_started_at=row.started_at)
         return
@@ -289,6 +328,20 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         },
         expect_started_at=row.started_at,
     )
+
+
+async def _execute_guarded(row: DeepJobRow) -> None:  # pragma: no cover
+    """_execute, but a failure of its own bookkeeping (_finish/_requeue during a
+    DB blip) is logged here instead of escaping as an unretrieved task
+    exception. The row stays `running` and _requeue_stale_running reclaims it -
+    the same recovery as a dead worker, so nothing is lost."""
+    try:
+        await _execute(row)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        log.exception("job %d: could not record its outcome - left for stale-running "
+                      "reclaim", row.id)
 
 
 async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DELETE, covered by test_job_queue.py's Postgres test
@@ -451,11 +504,13 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
     idle_timeout = _IDLE_POLL_INTERVAL_S if listener is not None else _POLL_INTERVAL_S
     log.info("job dispatcher started (concurrency=%d, idle poll=%.1fs, notify=%s)",
              _MAX_CONCURRENCY, idle_timeout, listener is not None)
+    failures = _TickFailures()
     while not stop.is_set():
         # Clear BEFORE claiming: a NOTIFY landing mid-pass re-sets it, so the
         # wait below returns immediately instead of losing that wake-up.
         wake.clear()
         claimed = 0
+        extra_wait = 0.0
         try:
             await _requeue_stale_running()
             if listener is not None:          # Postgres-only (make_interval)
@@ -468,14 +523,21 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
             if free > 0:
                 for row in await _claim_batch(free):
                     claimed += 1
-                    t = asyncio.create_task(_execute(row))
+                    t = asyncio.create_task(_execute_guarded(row))
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
+            failures.ok()
         except Exception as e:  # noqa: BLE001 — a bad tick must not kill the loop
-            log.exception("dispatcher tick failed: %s", e)
+            extra_wait, full = failures.failed()
+            if full:
+                log.exception("dispatcher tick failed (%d in a row): %s",
+                              failures.consecutive, e)
+            else:
+                log.warning("dispatcher tick failed (%d in a row, backing off %.0fs): %s",
+                            failures.consecutive, extra_wait, e)
         if listener is not None and claimed:
             continue  # queue still hot — keep draining without waiting
-        await _wait_stop_or_wake(stop, wake, idle_timeout)
+        await _wait_stop_or_wake(stop, wake, idle_timeout + extra_wait)
     if listener is not None:
         listener.cancel()
         with contextlib.suppress(asyncio.CancelledError):

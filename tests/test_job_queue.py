@@ -509,3 +509,65 @@ async def test_purge_finished_jobs_respects_status_and_age():
         assert await s.get(DeepJobRow, ids["fresh_done"]) is not None
         assert await s.get(DeepJobRow, ids["old_pending"]) is not None
         assert await s.get(DeepJobRow, ids["old_running"]) is not None
+
+
+async def test_execute_deterministic_error_fails_at_once_without_retries():
+    """REGRESSION (2026-10-03): a ValueError/KeyError/TypeError from a malformed
+    job request was requeued up to 8 times (~10 min of backoff) before failing."""
+    pid = 990505
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="deterministic-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:chat"]))
+
+    for exc in (ValueError("incompatible native tool request"), KeyError("messages"),
+                TypeError("bad")):
+        async def fake_run_chat(**kw):
+            raise exc
+
+        with patch.object(job_queue, "run_chat", fake_run_chat), \
+             patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue, \
+             patch.object(job_queue, "_finish", AsyncMock()) as finish:
+            await job_queue._execute(_unclaimed_row(pid, retry_count=0))
+        requeue.assert_not_awaited()
+        assert finish.await_args.kwargs["status"] == "error"
+        assert "invalid job" in finish.await_args.kwargs["error_message"]
+
+
+async def test_execute_transient_error_is_still_requeued():
+    pid = 990606
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="transient-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:chat"]))
+
+    async def fake_run_chat(**kw):
+        raise RuntimeError("provider blew up")
+
+    with patch.object(job_queue, "run_chat", fake_run_chat), \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue:
+        await job_queue._execute(_unclaimed_row(pid, retry_count=0))
+    requeue.assert_awaited_once()
+
+
+async def test_execute_guarded_swallows_bookkeeping_failure():
+    """A DB blip inside _finish/_requeue must not escape as an unretrieved task
+    exception: the row stays running and stale-reclaim recovers it."""
+    row = _unclaimed_row(1, retry_count=0)
+    with patch.object(job_queue, "_execute", AsyncMock(side_effect=RuntimeError("db down"))):
+        await job_queue._execute_guarded(row)  # must not raise
+
+
+def test_tick_failures_back_off_and_throttle_tracebacks():
+    t = {"now": 1000.0}
+    f = job_queue._TickFailures(clock=lambda: t["now"])
+    waits, fulls = [], []
+    for _ in range(8):
+        w, full = f.failed()
+        waits.append(w)
+        fulls.append(full)
+        t["now"] += 1
+    assert waits == [1, 2, 4, 8, 16, 30, 30, 30]       # exponential, capped
+    assert fulls == [True] + [False] * 7               # one traceback per window
+    t["now"] += job_queue._TICK_TRACEBACK_EVERY_S
+    assert f.failed()[1] is True                       # next window logs again
+    f.ok()
+    assert f.failed()[0] == 1                          # recovery resets the backoff
