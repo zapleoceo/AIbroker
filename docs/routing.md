@@ -1983,3 +1983,57 @@ in `JSON_UNRELIABLE_PROVIDERS` and deprioritized for JSON either way.
 > The provider-scoped `_PROVIDER_RATE_LIMIT_SIGNS["deepseek"]` cooldown stays
 > as defence-in-depth. Remove deepseek from the set if it re-enables
 > json_schema.
+
+## 2026-10-03 routing bugfix batch
+
+Fixes from the project review; each is pinned by a regression test.
+
+- **Error classification** (`providers/provider_errors.py`). `classify_provider_error`
+  goes exception TYPE / HTTP status first (`RateLimitError`/429 -> rate_limit,
+  `AuthenticationError`/401/403 -> auth), then the phrase tables, then anchored
+  word-boundary regexes. Bare `"401"`/`"403"`/`"auth"`/`"429"`/`"quota"`
+  substrings no longer match ids like `req_4291x` or words like "author". A 4xx
+  that is not 401/403/408/429 is neutral for the generic tables (a 400 mentioning
+  "quota" is not a throttle). litellm mis-types some 429s (cohere -> status 500),
+  so untyped / 5xx errors still use the phrase tables. The raw
+  `RuntimeError("gemini-asr <status>: ...")` path is read via an anchored status
+  regex. `http_status_of(exc)` returns the status the provider really sent.
+- **Retry hints and per-(key, model) cooldown** (`routing/cooldown.py`,
+  `routing/model_cooldown.py`). `parse_retry_after` honours hints up to 48 h
+  (`MAX_RETRY_HINT_S`); Gemini's daily-quota `retryDelay: "39791s"` used to be
+  dropped. `is_model_scoped_quota` recognises Gemini's per-day quota
+  (`quotaId` ...`PerDay`...): `_penalize` parks only that (key, model) pair via
+  `mark_model_cooldown` (table `api_key_model_cooldowns`, migration 014, extend-only
+  upsert), not the whole key. `pick_and_reserve(models=[...])` skips a key only
+  when it is cooled for every model of the request; chat rotation skips cooled
+  models via `cooled_models`. Other 429s still cool the whole key.
+- **Monitor probes** (`monitor.py`, `providers/health_probes.py`). A probe 429
+  only ever extends `cooldown_until`. gemini, cohere, mistral and openrouter
+  probe through free key-validation/list endpoints instead of spending metered
+  calls (gemini free = 20/day/model). Paid providers, sambanova (quota-header
+  discovery) and token-metered providers keep their 1-token generation probes.
+- **`model_served` degradation** (`routing/selector.py`): only SQLSTATE 42703
+  (missing column) disables the column for the process; transient DB errors go
+  to the retry harness.
+- **Embed model/provider guard**: `run_embed` raises `EmbedRequestInvalid` (HTTP
+  400) when the model's provider prefix differs from `?provider=`, as chat does.
+- **Hard timeouts**: `EMBED_TIMEOUT_S`, `TRANSCRIBE_TIMEOUT_S`,
+  `GEMINI_ASR_TIMEOUT_S` (`asyncio.wait_for` on embed, whisper, chat
+  transcription and gemini ASR).
+- **Response cache key** includes `response_format`, `tools`, `tool_choice`.
+- **Reservations** are released on every exit (decrypt failure, cancellation):
+  `_release_reservation` is shielded and never raises.
+- **`_prompt_chars`** reuses `content_chars` (`providers/context_limits.py`), so
+  base64 images no longer count as text.
+- **Learned size ceilings** (`providers/observations.py`) expire after
+  `CEILING_TTL_DAYS` (14); a new rejection replaces a stale one. Still per
+  provider, not per model.
+- **usage_log**: `http_status` is the provider's real status (or NULL); the
+  adaptive-backoff signal is `status = 'rate_limit'` (legacy `http_status = 429`
+  rows still count). `is_timeout` is not a billing signal (answerless timeouts
+  book $0).
+- **Job queue**: dispatcher tick failures back off exponentially with one full
+  traceback per minute; `_execute_guarded` logs bookkeeping failures; ValueError/
+  TypeError/KeyError fail the job at once instead of 8 retries.
+- **Gemini 3.x**: `temperature` is dropped in `_GeminiAdapter`.
+- **Audio uploads** are read in chunks with a size limit before buffering.

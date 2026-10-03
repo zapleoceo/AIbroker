@@ -108,7 +108,7 @@ class ApiKeyRow(Base):
 
 class ApiKeyModelCooldownRow(Base):
     """Per-(key, model) cooldown — one exhausted model (gemini's per-model daily
-    free quota) parks only itself, not the whole key. See migration 013 and
+    free quota) parks only itself, not the whole key. See migration 014 and
     routing/model_cooldown.py."""
     __tablename__ = "api_key_model_cooldowns"
 

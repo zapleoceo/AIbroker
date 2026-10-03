@@ -88,7 +88,11 @@ Billing + analytics; rows are never updated, only deleted by retention (120 days
 | `latency_ms` | End-to-end |
 | `status` | `ok` / `rate_limit` / `auth_fail` / `error` |
 | `error_kind` | Exception class name |
-| `http_status` | Provider HTTP status code when known, NULL otherwise |
+| `http_status` | The status the provider REALLY returned when the exception carries one (`http_status_of`), NULL otherwise (timeouts, network errors). Never inferred from our classification; the adaptive-backoff signal is `status = 'rate_limit'` instead |
+
+`api_key_model_cooldowns (api_key_id, model, cooldown_until, reason)` (migration
+014, row `ApiKeyModelCooldownRow`) holds per-(key, model) cooldowns for quotas metered
+per model (Gemini's daily free tier); see `docs/routing.md`.
 
 Indexes on `(project_id, created_at)`, `(api_key_id, created_at)`,
 `(provider, created_at)`, and a plain `(created_at)` (migration 005) cover the

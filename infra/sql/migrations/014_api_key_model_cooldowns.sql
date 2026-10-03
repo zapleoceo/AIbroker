@@ -13,7 +13,7 @@
 -- place by the next cooldown for the same pair.
 --
 -- Idempotent; apply BEFORE deploying the code that writes it:
---   psql "$DATABASE_URL" -f infra/sql/migrations/013_api_key_model_cooldowns.sql
+--   psql "$DATABASE_URL" -f infra/sql/migrations/014_api_key_model_cooldowns.sql
 
 CREATE TABLE IF NOT EXISTS api_key_model_cooldowns (
   api_key_id     BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,

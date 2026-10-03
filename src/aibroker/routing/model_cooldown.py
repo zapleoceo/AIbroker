@@ -7,7 +7,7 @@ other models (2026-10-03 review). A cooldown here parks one (key, model) pair;
 the selector (routing/selector.pick_and_reserve, `models=`) skips a key only
 when it is cooled for every model the request could use.
 
-Storage: table api_key_model_cooldowns (migration 013). Writes only ever EXTEND
+Storage: table api_key_model_cooldowns (migration 014). Writes only ever EXTEND
 a cooldown (GREATEST semantics) so a short later 429 cannot shorten a long
 daily-quota park. The upsert is portable (no GREATEST()) so the SQLite test
 gate exercises it.
