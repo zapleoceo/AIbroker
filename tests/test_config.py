@@ -35,9 +35,11 @@ def test_session_secret_strong_is_accepted():
     assert _settings(SESSION_SECRET="y" * 40).SESSION_SECRET == "y" * 40
 
 
-def test_direct_database_url_falls_back_to_database_url():
+def test_direct_database_url_falls_back_to_database_url(monkeypatch):
     """No pooler in front (DIRECT_DATABASE_URL unset) → the LISTEN connection
     uses the same URL as everything else."""
+    # conftest pins DIRECT_DATABASE_URL to the test DB for the whole run.
+    monkeypatch.delenv("DIRECT_DATABASE_URL", raising=False)
     s = _settings()
     assert s.direct_database_url == s.DATABASE_URL
 
