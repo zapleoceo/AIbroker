@@ -312,7 +312,7 @@ def test_key_test_endpoint_returns_a_status_chip(monkeypatch):
     ds.seed(ds.key(1, "gemini", "k", token_encrypted=encrypt("tok")))
     seen = {}
 
-    async def fake_probe(provider, token, account_id=None):
+    async def fake_probe(provider, token, account_id=None, billable=False):
         seen["args"] = (provider, token)
         return "cooldown", 429, "rate limit"
 
