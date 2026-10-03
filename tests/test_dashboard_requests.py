@@ -439,7 +439,7 @@ def test_done_job_joined_by_a_prod_format_id_and_direct_calls_by_uuid_hex():
 
 def test_select_options_are_translatable_on_every_page_that_has_them():
     ds.seed(ds.project(1, "stepan"))
-    for path in ("/dashboard/requests", "/dashboard/models"):
+    for path in ("/dashboard/requests",):
         body = _get(path).text
         assert '<option value="" data-i18n data-en="All" data-ru="Все">All</option>' in body
     req = _get("/dashboard/requests", params={"type": "job", "status": "failed"}).text

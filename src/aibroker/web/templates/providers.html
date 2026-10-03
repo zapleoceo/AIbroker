@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block topbar_actions %}
+<button type="button" class="btn btn-primary" hx-get="/dashboard/keys/new" hx-target="#drawer-body" hx-swap="innerHTML" aria-haspopup="dialog">{{ m.icon("plus") }}{{ t("Add key", "Добавить ключ") }}</button>
+{% endblock %}
+
+{# One provider: header roll-up + a Models tab and a Keys tab. #}
+{% macro provider_card(c) %}
+<section class="card prov-card" id="p-{{ c.provider }}" aria-labelledby="h-{{ c.provider }}" data-pcard
+         data-prov="{{ c.provider }}" data-live="{{ 1 if c.live else 0 }}"
+         x-data="provCard('{{ c.provider }}', {{ 'false' if c.inactive else 'true' }}, '{{ 'models' if c.models else 'keys' }}')"
+         x-show="cardVisible($el)" x-effect="if (filtering) { open = true; tab = 'models' }">
+  <div class="phead">
+    <h3 id="h-{{ c.provider }}" class="phead-title">
+      <button type="button" class="phead-toggle" @click="toggle()" :aria-expanded="open" aria-controls="b-{{ c.provider }}">
+        <span class="caret" aria-hidden="true"></span>
+        <span class="dot {{ c.cls }}"></span>
+        <span class="trunc">{{ c.provider }}</span>
+      </button>
+    </h3>
+    {% if c.paid %}<span class="chip warn plain">{{ t("paid", "платный") }}</span>{% else %}<span class="chip ok plain">{{ t("free", "бесплатный") }}</span>{% endif %}
+    {% if c.total %}<span class="chip {{ 'ok' if c.alive else 'bad' }} plain">{{ t(c.alive ~ " of " ~ c.total ~ " keys alive", "Живых ключей: " ~ c.alive ~ " из " ~ c.total) }}</span>
+    {% else %}<span class="chip off plain">{{ t("no keys", "нет ключей") }}</span>{% endif %}
+    {% if c.cooling %}<span class="chip warn plain">{{ tn(c.cooling, "paused", "paused", "на паузе", "на паузе", "на паузе") }}</span>{% endif %}
+    {% if c.dead %}<span class="chip bad plain">{{ tn(c.dead, "dead", "dead", "мёртвый", "мёртвых", "мёртвых") }}</span>{% endif %}
+    {% if c.disabled %}<span class="chip off plain">{{ tn(c.disabled, "disabled", "disabled", "отключён", "отключены", "отключено") }}</span>{% endif %}
+    <span class="muted phead-errs">
+      {% if c.errs_1h %}<a class="{{ 'bad' if c.err_rate >= 0.3 else 'warn' }}" href="/dashboard/requests?provider={{ c.provider }}&amp;status=error&amp;range=today">{{ tn(c.errs_1h, "error", "errors", "ошибка", "ошибки", "ошибок") }} {{ t("in the last hour", "за час") }}</a>
+      {% elif c.calls_1h %}{{ tn(c.calls_1h, "call", "calls", "вызов", "вызова", "вызовов") }} {{ t("in the last hour", "за час") }}{% endif %}
+    </span>
+    {% if c.burn %}<div class="phead-burn">{{ m.meter(t("quota today · " ~ c.burn.label[0], "квота сегодня · " ~ c.burn.label[1]), (c.burn.used|num) ~ " / " ~ (c.burn.cap|num), c.burn.pct, c.burn.cls) }}</div>{% endif %}
+  </div>
+
+  <div id="b-{{ c.provider }}" x-show="open" {% if c.inactive %}x-cloak{% endif %}>
+    <div class="ptabs" role="tablist" aria-label="{{ c.provider }}">
+      <button type="button" role="tab" id="tm-{{ c.provider }}" class="ptab" :aria-selected="tab === 'models'" @click="setTab('models')">{{ t("Models", "Модели") }} <span class="dim">{{ c.models|length }}</span></button>
+      <button type="button" role="tab" id="tk-{{ c.provider }}" class="ptab" :aria-selected="tab === 'keys'" @click="setTab('keys')">{{ t("Keys", "Ключи") }} <span class="dim">{{ c.total }}</span></button>
+    </div>
+
+    <div role="tabpanel" aria-labelledby="tm-{{ c.provider }}" x-show="tab === 'models'">
+      {% for mo in c.models %}
+      <article class="mrow" data-model-row data-prov="{{ c.provider }}" data-model="{{ mo.id }}" data-caps="{{ mo.groups|join(' ') }}" x-show="rowShow($el)">
+        <div class="mrow-id">
+          <span class="rowline" style="gap:6px">
+            <code class="model-id" title="{{ mo.id }}">{{ mo.id }}</code>
+            <button type="button" class="icon-btn" data-copy="{{ mo.id }}" {{ ttl("Copy model id", "Копировать id модели") }}>{{ m.icon("copy") }}</button>
+          </span>
+          <div class="pills">
+            {% for en, ru in mo.group_labels %}<span class="chip info plain">{{ t(en, ru) }}</span>{% endfor %}
+            {% if mo.rotation %}<span class="chip plain" title="in the rotation pool of its lane">{{ t("rotation", "ротация") }}</span>{% endif %}
+            {% if not mo.routed %}<span class="chip off plain" title="known but in no routing chain for its capability">{{ t("unrouted", "не в маршруте") }}</span>{% endif %}
+            {% if mo.cooling_keys %}<span class="chip warn plain">{{ tn(mo.cooling_keys, "key cooling", "keys cooling", "ключ на паузе", "ключа на паузе", "ключей на паузе") }}</span>{% endif %}
+          </div>
+        </div>
+        <div class="mrow-price mono">
+          <small class="dim">{{ t("price per 1M in / out", "цена за 1M вх / исх") }}</small>
+          {% if mo.free %}<span class="good">{{ t("free", "бесплатно") }}</span>
+          {% elif mo.per_minute is not none %}<span>${{ "%.4f"|format(mo.per_minute) }}{{ t("/min", "/мин") }}</span>
+          {% elif mo.price_in is none %}<span class="dim">—</span>
+          {% else %}<span>${{ "%.2f"|format(mo.price_in) }} / {{ ("$%.2f"|format(mo.price_out)) if mo.price_out is not none else "—" }}</span>{% endif %}
+        </div>
+        <div class="mrow-perf">
+          <small class="dim">{{ t("p50 · success, 7d", "p50 · успех, 7д") }}</small>
+          {% if mo.p50 is not none or mo.success is not none %}
+          <span><span class="mono">{{ mo.p50|ms if mo.p50 is not none else "—" }}</span>
+            {% if mo.success is not none %} · <span class="{{ 'bad' if mo.success < 50 else 'warn' if mo.success < 90 else 'good' }}">{{ mo.success|pct(0) }}</span> <span class="dim">({{ mo.calls|num }})</span>{% endif %}</span>
+          {% else %}<span class="dim">—</span>{% endif %}
+        </div>
+      </article>
+      {% else %}
+      <div class="empty">{{ t("No models registered for this provider", "Для провайдера нет зарегистрированных моделей") }}</div>
+      {% endfor %}
+    </div>
+
+    <div role="tabpanel" aria-labelledby="tk-{{ c.provider }}" x-show="tab === 'keys'" x-cloak>
+      {% for r in c.rows %}
+      {% set k = r.key %}
+      <article class="krow" aria-label="{{ c.provider }}/{{ k.label }}">
+        <div class="krow-id">
+          <b title="{{ k.label }}">{{ k.label }}</b>
+          <div class="pills">
+            <span class="pill">{{ k.tier }}</span>
+            {% if k.is_reserve %}<span class="pill rsv" title="picked only when every shared key is exhausted">rsv</span>{% endif %}
+            <span class="pill dim">#{{ k.id }}</span>
+          </div>
+        </div>
+        <div class="krow-status">
+          <div class="row" style="gap:8px">
+            <span class="chip {{ r.status.cls }}">{{ t(r.status.en, r.status.ru) }}</span>
+            {% if r.cooldown_until %}<span class="muted nowrap" x-data="countdown('{{ r.cooldown_until.replace(microsecond=0).isoformat() }}Z')">⏱ <span x-text="left"></span></span>{% endif %}
+            <span id="test-{{ k.id }}" role="status" aria-live="polite"></span>
+          </div>
+          {% if r.reason %}<small title="{{ k.last_error }}">{{ t(r.reason[0], r.reason[1]) }}</small>{% endif %}
+          {% for cm in r.cooling_models %}
+          <small class="mcool"><span class="chip warn plain">{{ t("model cooling", "модель на паузе") }}</span> <code>{{ cm.model }}</code>
+            <span class="muted nowrap" x-data="countdown('{{ cm.until.replace(microsecond=0).isoformat() }}Z')">⏱ <span x-text="left"></span></span></small>
+          {% endfor %}
+          <small>
+            {% if r.last_ok %}{{ t("last success", "последний успех") }} {{ r.last_ok|ago }}{% elif k.last_used_at %}{{ t("last used", "использован") }} {{ k.last_used_at|ago }}{% else %}{{ t("never used", "не использовался") }}{% endif %}
+            {% if r.last_err %} · {{ t("last error", "последняя ошибка") }} {{ r.last_err|ago }}{% endif %}
+            {% if r.errs %} · <span class="bad">{{ r.errs }}/{{ r.calls }} {{ t("failed in 24h", "с ошибкой за 24ч") }}</span>{% elif r.calls %} · {{ r.calls }} {{ t("calls in 24h", "вызовов за 24ч") }}{% endif %}
+          </small>
+          <div class="pills" aria-label="{{ 'scopes' }}">
+            {% for s in (k.scopes or []) %}<span class="pill on">{{ s|replace("llm:", "") }}</span>{% endfor %}
+          </div>
+        </div>
+        <div class="krow-meters">
+          {% for a in r.axes %}
+            {{ m.meter(t(a.label[0], a.label[1]), (a.used|num) ~ " / " ~ (a.cap|num), a.pct, a.cls) }}
+          {% endfor %}
+          {% if r.cost_cap %}
+            {{ m.meter(t("$ today", "$ сегодня"), (r.cost_used|money(4)) ~ " / " ~ (r.cost_cap|money), r.cost_pct, r.cost_cls) }}
+          {% elif not r.axes %}
+            <span class="muted" style="font-size:12px">{{ t("no quota tracked", "квота не отслеживается") }} · {{ k.daily_used|num }} {{ t("req today", "запр. сегодня") }}{% if r.cost_used %} · {{ r.cost_used|money(4) }}{% endif %}</span>
+          {% endif %}
+          {% if r.axes %}<small class="dim">{{ t("caps: " ~ r.quota_src[0], "лимиты: " ~ r.quota_src[1]) }}</small>{% endif %}
+        </div>
+        <div class="krow-actions">
+          <button type="button" class="btn btn-sm" hx-post="/dashboard/keys/{{ k.id }}/test" hx-target="#test-{{ k.id }}" hx-swap="innerHTML" {{ ttl("Probe this key now", "Проверить ключ сейчас") }}>{{ m.icon("play") }}{{ t("Test", "Тест") }}</button>
+          <button type="button" class="btn btn-sm" hx-get="/dashboard/keys/{{ k.id }}/edit" hx-target="#drawer-body" hx-swap="innerHTML" aria-haspopup="dialog">{{ m.icon("edit") }}{{ t("Edit", "Изм.") }}</button>
+          <form method="post" action="/dashboard/keys/{{ k.id }}/disable" class="inline">
+            <input type="hidden" name="next" value="/dashboard/providers">
+            <button type="submit" class="btn btn-sm">{{ m.icon("power") }}{{ t("Enable", "Вкл.") if not k.is_active else t("Disable", "Откл.") }}</button>
+          </form>
+          <form method="post" action="/dashboard/keys/{{ k.id }}/delete" class="inline" data-confirm="Delete {{ c.provider }}/{{ k.label }}? The stored token is destroyed.">
+            <input type="hidden" name="next" value="/dashboard/providers">
+            <button type="submit" class="btn btn-sm btn-danger" {{ ttl("Delete key", "Удалить ключ") }}>{{ m.icon("trash") }}</button>
+          </form>
+        </div>
+      </article>
+      {% else %}
+      <div class="empty">{{ t("No keys for this provider yet", "Ключей этого провайдера пока нет") }}</div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endmacro %}
+
+{% block content %}
+<div class="stack" x-data='providersPage({{ init|tojson }})'>
+  <form class="card card-pad ptool" role="search" @submit.prevent>
+    <div class="field wide"><label for="pf-q">{{ t("Search", "Поиск") }}</label>
+      <input id="pf-q" type="search" x-model="q" {{ ph("model id or provider", "id модели или провайдер") }}></div>
+    <div class="field"><span class="lbl" id="pf-caps">{{ t("Capability", "Способность") }}</span>
+      <div class="cchips" role="group" aria-labelledby="pf-caps">
+        {% for c in capabilities %}
+        <button type="button" class="cchip" :aria-pressed="cap === '{{ c.key }}'" @click="cap = (cap === '{{ c.key }}' ? '' : '{{ c.key }}')">{{ t(c.en, c.ru) }}</button>
+        {% endfor %}
+      </div></div>
+    <label class="check" for="pf-live"><input id="pf-live" type="checkbox" x-model="live"> {{ t("Only with live keys", "Только с живыми ключами") }}</label>
+  </form>
+
+  <div class="section-title">
+    <p>{{ t(alive ~ " of " ~ total ~ " keys alive, one card per provider: its models and its keys. Quota bars show today's burn against each daily cap.", "Живых ключей: " ~ alive ~ " из " ~ total ~ ". Одна карточка на провайдера: модели и ключи. Полосы — расход за сегодня относительно дневных лимитов.") }}</p>
+  </div>
+
+  {% if not total %}
+  <div class="card">{{ m.empty("key", "No API keys yet", "Ключей пока нет", "Add a provider key and the broker starts routing through it.", "Добавьте ключ провайдера — и брокер начнёт им пользоваться.") }}</div>
+  {% endif %}
+
+  {% for c in cards %}{{ provider_card(c) }}{% endfor %}
+
+  {% if inactive %}
+  <section class="card inactive-box" x-data="{ more: false }" x-effect="if (filtering) more = true"
+           x-show="!live && (!filtering || anyMatch($el))" aria-labelledby="inactive-h">
+    <h3 id="inactive-h" class="inactive-head">
+      <button type="button" class="phead-toggle" @click="more = !more" :aria-expanded="more" aria-controls="inactive-body">
+        <span class="caret" aria-hidden="true"></span>
+        <span>{{ t("Inactive providers", "Неактивные провайдеры") }}</span> <span class="dim">{{ inactive|length }}</span>
+      </button>
+    </h3>
+    <p class="dim inactive-hint">{{ t("No keys and no routed models: catalogue only.", "Нет ключей и нет моделей в маршрутах: только каталог.") }}</p>
+    <div id="inactive-body" class="stack inactive-body" x-show="more" x-cloak>
+      {% for c in inactive %}{{ provider_card(c) }}{% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="card" x-show="noMatch()" x-cloak>{{ m.empty("search", "Nothing matches", "Ничего не найдено", "Clear the search or the capability filter.", "Сбросьте поиск или фильтр по способности.") }}</div>
+
+  <p class="dim" style="font-size:12px">{{ t("Models come from the provider registry; prices from LiteLLM's map (— = unpriced). Latency and success are observed over the last 7 days, matched by routing model name.", "Модели берутся из реестра провайдеров; цены — из карты LiteLLM (— = нет цены). Задержка и успех — за последние 7 дней по имени модели в маршруте.") }}</p>
+</div>
+{% endblock %}

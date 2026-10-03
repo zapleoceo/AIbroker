@@ -389,11 +389,6 @@ dialog.modal p { color: var(--muted); margin-bottom: 18px; overflow-wrap: anywhe
 .rowline { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; min-width: 0; }
 .rowline > .trunc { flex: 1 1 0; min-width: 0; }
 .rowline > .nowrap { flex: none; }
-.table-models th { white-space: normal; }
-.table-models code.model-id { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.table-models td.model-cell { max-width: 280px; }
-@media (max-width: 1100px) { .table-models .hide-md { display: none; } }
-.table-models code.model-id { flex: 1 1 0; min-width: 0; }
 
 /* ─── requests: slim live queue strip, filter chips, wrapped outcome cell ─ */
 .qstrip { position: sticky; top: var(--topbar-h, 57px); z-index: 15; display: flex; gap: 6px; padding: 6px 0; background: var(--bg); overflow-x: auto; scrollbar-width: none; }
@@ -412,3 +407,35 @@ dialog.modal p { color: var(--muted); margin-bottom: 18px; overflow-wrap: anywhe
 html[lang="ru"] .rtable td[data-ru-label]::before { content: attr(data-ru-label); }
 @media (min-width: 721px) { .rtable td.status-cell .chip { white-space: nowrap; overflow-wrap: normal; } }
 @media (min-width: 721px) { .table td.cell-wrap { white-space: normal; overflow-wrap: anywhere; min-width: 150px; } }
+
+/* ─── providers: toolbar, provider cards, Models / Keys tabs ──────────── */
+.ptool { display: grid; gap: 12px 16px; grid-template-columns: minmax(200px, 1.2fr) minmax(0, 2fr) auto; align-items: end; }
+.cchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cchip { padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font: inherit; font-size: 13px; font-weight: 550; cursor: pointer; }
+.cchip:hover { border-color: var(--line-strong); color: var(--text); }
+.cchip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+@media (max-width: 900px) { .ptool { grid-template-columns: minmax(0, 1fr); } }
+.phead { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 12px 18px; }
+.phead-title { font-size: 15px; min-width: 0; max-width: 100%; }
+.phead-toggle { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-height: 32px; padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-weight: 650; cursor: pointer; text-align: left; }
+.phead-toggle .trunc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.caret { width: 0; height: 0; flex: none; border-left: 6px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s var(--ease); }
+.phead-toggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+.phead-errs { margin-left: auto; font-size: 13px; }
+.phead-burn { flex: 1 1 100%; max-width: 460px; }
+.ptabs { display: flex; gap: 2px; padding: 0 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ptab { padding: 9px 14px; margin-bottom: -1px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: inherit; font-weight: 550; cursor: pointer; }
+.ptab:hover { color: var(--text); }
+.ptab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.mrow { display: grid; gap: 8px 18px; padding: 12px 18px; border-bottom: 1px solid var(--line); grid-template-columns: minmax(0, 2.2fr) minmax(130px, 1fr) minmax(150px, 1fr); align-items: start; }
+.mrow:last-child { border-bottom: 0; }
+.mrow-id { min-width: 0; display: grid; gap: 6px; }
+.mrow-id code.model-id { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mrow-price, .mrow-perf { display: grid; gap: 2px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.mrow small { font-size: 11px; }
+@media (max-width: 720px) { .mrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .mrow-id { grid-column: 1 / -1; } .phead, .mrow, .ptabs { padding-left: 14px; padding-right: 14px; } }
+.mcool code { overflow-wrap: anywhere; }
+.inactive-head { font-size: 15px; padding: 12px 18px 0; }
+.inactive-hint { padding: 0 18px 12px; font-size: 12.5px; }
+.inactive-body { padding: 0 12px 12px; }
+.inactive-body .prov-card { box-shadow: none; }

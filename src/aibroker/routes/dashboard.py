@@ -539,7 +539,7 @@ async def dash_test_key(
     _: OwnerSession = Depends(require_owner_session),
 ) -> Response:
     """Probe one key right now (the same cheap call the monitor makes) and
-    answer with a status chip for the keys page to swap in. Read-only: the key's
+    answer with a status chip for the providers page to swap in. Read-only: the key's
     stored state is left to the monitor / real traffic."""
     async with get_session() as s:
         row = await s.get(ApiKeyRow, key_id)

@@ -14,8 +14,8 @@ client = TestClient(app)
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 PAGES = [
-    "/dashboard", "/dashboard/requests", "/dashboard/projects", "/dashboard/keys",
-    "/dashboard/models", "/dashboard/audit", "/dashboard/settings",
+    "/dashboard", "/dashboard/requests", "/dashboard/projects", "/dashboard/providers",
+    "/dashboard/audit", "/dashboard/settings",
 ]
 
 
@@ -53,7 +53,7 @@ def test_admin_key_header_also_opens_pages():
     ("/dashboard", "No calls in this period"),
     ("/dashboard/requests", "No requests match"),
     ("/dashboard/projects", "No projects yet"),
-    ("/dashboard/keys", "No API keys yet"),
+    ("/dashboard/providers", "No API keys yet"),
     ("/dashboard/audit", "No audit entries"),
 ])
 def test_empty_database_renders_an_empty_state(path, marker):
@@ -70,7 +70,7 @@ def test_empty_overview_still_has_kpis_and_all_clear():
 
 
 def test_models_and_settings_render_without_data():
-    assert "deepseek/deepseek-flash" in _get("/dashboard/models").text
+    assert "deepseek/deepseek-flash" in _get("/dashboard/providers").text
     assert "v" in _get("/dashboard/settings").text
 
 
@@ -100,9 +100,10 @@ def test_pages_are_no_store_and_bilingual():
 def test_bottom_tab_bar_and_rail_both_present():
     body = _get("/dashboard").text
     assert 'class="rail"' in body and 'class="tabbar"' in body
-    for href in ("/dashboard/requests", "/dashboard/projects", "/dashboard/keys",
-                 "/dashboard/models", "/dashboard/audit", "/dashboard/settings"):
+    for href in ("/dashboard/requests", "/dashboard/projects", "/dashboard/providers",
+                 "/dashboard/audit", "/dashboard/settings"):
         assert f'href="{href}"' in body
+    assert 'href="/dashboard/keys"' not in body and 'href="/dashboard/models"' not in body
     assert 'href="/dashboard/jobs"' not in body              # merged into Requests
 
 
@@ -127,7 +128,7 @@ def test_overview_with_data_shows_chart_attention_and_provider_health():
     body = _get("/dashboard", params={"range": "today"}).text
     assert 'id="chart-usage-data"' in body and 'data-chart="stacked"' in body
     assert "dead key" in body and "alive-key" not in body.split("Needs attention")[1][:400]
-    assert 'href="/dashboard/keys#p-gemini"' in body
+    assert 'href="/dashboard/providers#p-gemini"' in body
     assert "Provider health" in body and ">gemini<" in body
     assert "Top projects" in body and "stepan" in body
     assert "Job queue" in body
@@ -262,9 +263,9 @@ def test_rotate_token_requires_auth_and_404s_politely():
 # ─── keys ───────────────────────────────────────────────────────────────────
 
 
-def test_keys_page_groups_by_provider_with_status_chips():
+def test_providers_page_shows_a_card_per_provider_with_key_rows_and_actions():
     ds.seed_demo()
-    body = _get("/dashboard/keys").text
+    body = _get("/dashboard/providers").text
     for provider in ("gemini", "groq", "deepseek", "cerebras"):
         assert f'id="p-{provider}"' in body
     assert "auth failed" in body                               # friendly last_error
@@ -274,11 +275,12 @@ def test_keys_page_groups_by_provider_with_status_chips():
         assert f"/dashboard/keys/1{action}" in body
     assert 'data-confirm="Delete gemini/alive-key?' in body
     assert 'hx-get="/dashboard/keys/new"' in body
+    assert body.count('name="next" value="/dashboard/providers"') >= 2   # actions land back here
 
 
-def test_keys_page_groups_are_not_swallowed_by_the_dict_keys_method():
+def test_providers_page_groups_are_not_swallowed_by_the_dict_keys_method():
     ds.seed(ds.key(1, "gemini", "only"))
-    assert ">only<" in _get("/dashboard/keys").text.replace('title="only"', "")
+    assert ">only<" in _get("/dashboard/providers").text.replace('title="only"', "")
 
 
 def test_add_key_drawer_collapses_advanced_quota_and_hides_unrouted_providers():
@@ -334,8 +336,8 @@ def test_key_test_endpoint_auth_missing_key_and_bad_token(monkeypatch):
 def test_disable_key_returns_to_the_page_it_came_from_and_rejects_evil_next():
     ds.seed(ds.key(1, "gemini", "k"))
     r = client.post("/dashboard/keys/1/disable", cookies=ds.cookies(),
-                    data={"next": "/dashboard/keys"}, follow_redirects=False)
-    assert r.status_code == 303 and r.headers["location"].startswith("/dashboard/keys?flash=")
+                    data={"next": "/dashboard/providers"}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/dashboard/providers?flash=")
     r = client.post("/dashboard/keys/1/disable", cookies=ds.cookies(),
                     data={"next": "https://evil.example/x"}, follow_redirects=False)
     assert r.headers["location"].startswith("/dashboard?flash=")
@@ -344,15 +346,15 @@ def test_disable_key_returns_to_the_page_it_came_from_and_rejects_evil_next():
 # ─── models / audit / settings ───────────────────────────────────────
 
 
-def test_models_catalogue_has_prices_copy_buttons_and_flags_unrouted():
+def test_providers_models_tab_has_prices_copy_buttons_and_flags_unrouted():
     ds.seed(ds.usage(1, provider="deepseek", model="deepseek/deepseek-flash",
                      capability="chat:smart", latency_ms=900, minutes_ago=60))
-    body = _get("/dashboard/models").text
+    body = _get("/dashboard/providers").text
     assert "deepseek/deepseek-flash" in body and 'data-copy="deepseek/deepseek-flash"' in body
     assert "$0.15 / $0.60" in body                              # per 1M, from the litellm map
     assert "unrouted" in body and "mistral/mistral-small-latest" in body
     assert "900 ms" in body                                     # observed p50
-    assert 'x-data="modelFilter()"' in body and 'type="search"' in body
+    assert "x-data='providersPage(" in body and 'type="search"' in body
 
 
 def test_audit_page_filters_and_paginates():
@@ -429,10 +431,11 @@ def test_plural_helpers_en_and_ru():
                    "21 ошибка", "22 ошибки", "25 ошибок"]
 
 
-def test_keys_page_counts_use_plurals_and_translated_labels():
+def test_providers_page_counts_use_plurals_and_translated_labels():
     ds.seed_demo()
-    body = _get("/dashboard/keys").text
+    body = _get("/dashboard/providers").text
     assert 'data-en="1 dead" data-ru="1 мёртвый"' in body
+    assert 'data-en="1 of 2 keys alive" data-ru="Живых ключей: 1 из 2"' in body
     assert 'data-ru="$ сегодня"' in body
     assert 'data-ru="ошибка авторизации"' in body                 # was raw "auth failed"
 
@@ -440,7 +443,7 @@ def test_keys_page_counts_use_plurals_and_translated_labels():
 def test_quota_labels_and_sources_are_translated():
     ds.seed(ds.key(1, "cerebras", "c", daily_used=10), ds.key(2, "gemini", "g",
             manual_tok_in_limit=1000))
-    body = _get("/dashboard/keys").text
+    body = _get("/dashboard/providers").text
     assert 'data-ru="токенов/день"' in body
     assert 'data-ru="лимиты: вручную"' in body
     assert 'data-ru="лимиты: оценка по умолчанию"' in body
@@ -497,6 +500,6 @@ def test_text_is_not_ellipsized_on_phones_and_wide_blocks_can_shrink():
     assert ".modes > *" in pub and "min-width: 0" in pub and "max-width: 900px" in pub
 
 
-def test_models_table_has_no_forced_wide_columns():
-    body = _get("/dashboard/models").text
-    assert "table-models" in body and 'class="model-id"' in body
+def test_providers_rows_have_no_forced_wide_columns():
+    body = _get("/dashboard/providers").text
+    assert "<table" not in body and 'class="mrow"' in body and 'class="model-id"' in body

@@ -68,7 +68,7 @@
     <a class="tab" href="{{ n.href }}" {% if active == n.key %}aria-current="page"{% endif %}>{{ m.icon(n.icon) }}<span>{{ t(n.en, n.ru) }}</span></a>
     {% endfor %}
     <button type="button" class="tab" @click="more = !more" :aria-expanded="more"
-            {% if active in ("models", "audit", "settings") %}aria-current="page"{% endif %}>
+            {% if active in ("audit", "settings") %}aria-current="page"{% endif %}>
       {{ m.icon("more") }}<span>{{ t("More", "Ещё") }}</span></button>
   </nav>
   <div class="sheet-scrim" x-show="more" x-cloak @click="more = false"></div>

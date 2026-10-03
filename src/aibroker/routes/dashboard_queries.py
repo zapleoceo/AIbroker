@@ -500,6 +500,20 @@ async def observed_model_stats(since: datetime) -> dict[tuple[str, str], dict[st
     return out
 
 
+async def model_cooldowns(now: datetime) -> dict[int, list[dict[str, Any]]]:
+    """api_key_id -> its (key, model) cooldowns still running at `now`, soonest
+    first. One exhausted model parks only itself (routing/model_cooldown.py)."""
+    async with get_session() as s:
+        rows = (await s.execute(text(
+            "SELECT api_key_id, model, cooldown_until, reason FROM api_key_model_cooldowns "
+            "WHERE cooldown_until > :now ORDER BY cooldown_until"), {"now": now})).all()
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(int(r.api_key_id), []).append(
+            {"model": r.model, "until": _dt(r.cooldown_until), "reason": r.reason})
+    return out
+
+
 # ─── jobs / audit ───────────────────────────────────────────────────────────
 
 

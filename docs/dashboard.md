@@ -21,9 +21,8 @@ templates; `build_env` builds the Jinja environment; formatters live in web/form
 | Request drawer | `/dashboard/requests/{ref}` (`request_drawer`) | `ref` is a usage_log id or `job-<id>`. Status, copyable request id, job block (queued at, waited, retries, final error), the attempt trail (provider, key, model served, latency, cost, tokens, cache) and totals; `?open=<ref>` deep-links |
 | Projects | `/dashboard/projects` (`projects_page`) | cards: today's spend vs daily cap, lifetime-request meter (`request_cap_view`, only when a cap is set), cache-hit badge, sparkline, a **self-signup** badge for projects created via `POST /v1/signup` and a `?signup=1` filter chip; "New project" drawer (`project_new_form`) |
 | Project detail | `/dashboard/projects/{id}?tab=usage\|models\|keys\|settings` (`project_detail`, `render_project_detail`; `render_projects` re-renders the list after create) | settings: edit (incl. **lifetime request cap**, blank = unlimited, with a used/limit progress bar), rotate token, delete |
-| Keys & providers | `/dashboard/keys` (`keys_page`) | grouped by provider; status chip, cooldown countdown, quota burn per axis, last success/error; Test / Edit / Enable-Disable / Delete |
+| Providers | `/dashboard/providers` (`providers_page`) | **Keys and Models merged into one page.** Toolbar: search (model id or provider), capability filter chips (`capability_filters`, derived from the registry: Chat, Structured, Vision, Voice, Embeddings, Decisions), "Only with live keys", "Add key". Then one card per provider (`build_providers`; live keys first, then registry rank): free/paid badge, status dot, "N of M keys alive", paused / dead / disabled counts, aggregate quota-burn bar (`_quota_burn`), errors in the last hour. Two Alpine tabs per card, last tab (and collapsed state) remembered per provider in localStorage: **Models** (capability chips, copy-able pin id, price per token / per minute / free from `catalog.price_info`, 7-day p50 and success, `rotation` / `unrouted` hints, "N keys cooling") and **Keys** (status chip, cooldown countdown, a `model cooling` line per running `api_key_model_cooldowns` row, quota meters, last success/error; Test / Edit / Enable-Disable / Delete). Search or a capability filter shows only matching models and opens the Models tab; filters seed from `?q=&cap=&live=1`. Providers with no keys and no routed model fold under "Inactive providers". `/dashboard/keys` and `/dashboard/models` answer 301 to it (query string kept, the old `provider` filter becomes `q`) |
 | Add/edit key drawer | `/dashboard/keys/new` (`key_new_form`), `/dashboard/keys/{id}/edit` (`key_edit_form`) | advanced quota overrides collapsed |
-| Models | `/dashboard/models` (`models_page`) | catalogue from `providers/catalog` (`price_info`) and the registry, with the capability chains: capability, provider, id (copy), price in/out per 1M, 7-day p50 latency and success; unrouted models flagged |
 | Audit log | `/dashboard/audit` | `audit_log`, actor/action filters, keyset paging |
 | Settings | `/dashboard/settings` (`settings_page`) | version, caps, links to `/docs` and `/v1/health`, language, logout |
 
@@ -47,10 +46,10 @@ path, else ignored) to land back on the page they came from.
 `routes/dashboard_queries.py` — read-only, **portable** SQL (Postgres and SQLite):
 `range_totals`, `latency_percentile`, `time_series`, `usage_by_model_series`,
 `provider_activity`, `project_range_stats`, `project_breakdown`, `request_facets`,
-`get_request`, `request_attempts`, `get_job`, `key_activity`, `gather` (parallel on Postgres, sequential on SQLite), `observed_model_stats`, `job_overview`, `audit_page`, `bucket_starts`,
+`get_request`, `request_attempts`, `get_job`, `key_activity`, `model_cooldowns`, `gather` (parallel on Postgres, sequential on SQLite), `observed_model_stats`, `job_overview`, `audit_page`, `bucket_starts`,
 `floor_bucket`. `routes/dashboard_views.py` shapes rows into view-models (pure functions:
 `build_kpis`, `build_attention`, `build_key_rows`, `group_by_provider`,
-`build_project_cards`, `build_model_catalogue`, `pct_change`);
+`build_project_cards`, `build_providers`, `capability_filters`, `cap_group`, `pct_change`);
 `routes/dashboard_labels.py` holds friendly error labels and `key_status` (`KeyStatus`,
 `reason_labels`); `provider_catalogue` drives the add-key drawer.
 

@@ -206,16 +206,47 @@
       };
     });
 
-    // Client-side filter for the models catalogue.
-    Alpine.data("modelFilter", function () {
+    // Providers page: search / capability / "live keys only" filters. Model rows
+    // and provider cards read these (child scopes see the parent's state).
+    Alpine.data("providersPage", function (init) {
+      init = init || {};
       return {
-        q: "", cap: "", prov: "", routed: false,
-        show: function (el) {
-          var d = el.dataset;
-          return (!this.cap || d.cap === this.cap) && (!this.prov || d.prov === this.prov) &&
-            (!this.routed || d.routed === "1") &&
-            (!this.q || (d.model + " " + d.prov).toLowerCase().indexOf(this.q.toLowerCase()) !== -1);
+        q: init.q || "", cap: init.cap || "", live: !!init.live,
+        get filtering() { return !!(this.q.trim() || this.cap); },
+        match: function (d) {
+          var q = this.q.trim().toLowerCase();
+          if (this.cap && (" " + d.caps + " ").indexOf(" " + this.cap + " ") === -1) return false;
+          return !q || (d.model + " " + d.prov).toLowerCase().indexOf(q) !== -1;
+        },
+        rowShow: function (el) { return !this.filtering || this.match(el.dataset); },
+        anyMatch: function (el) {
+          var rows = el.querySelectorAll("[data-model-row]");
+          for (var i = 0; i < rows.length; i++) if (this.match(rows[i].dataset)) return true;
+          return false;
+        },
+        cardVisible: function (el) {
+          if (this.live && el.dataset.live !== "1") return false;
+          return !this.filtering || this.anyMatch(el);
+        },
+        noMatch: function () {
+          var cards = document.querySelectorAll("[data-pcard]");
+          for (var i = 0; i < cards.length; i++) if (this.cardVisible(cards[i])) return false;
+          return cards.length > 0;
         }
+      };
+    });
+
+    // One provider card: collapsed state and last tab, remembered per provider.
+    Alpine.data("provCard", function (name, openDefault, tabDefault) {
+      var kOpen = "aib.prov.open." + name, kTab = "aib.prov.tab." + name;
+      function read(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+      function write(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+      var o = read(kOpen), t = read(kTab);
+      return {
+        open: o === null ? openDefault : o === "1",
+        tab: t === "models" || t === "keys" ? t : tabDefault,
+        toggle: function () { this.open = !this.open; write(kOpen, this.open ? "1" : "0"); },
+        setTab: function (v) { this.tab = v; write(kTab, v); }
       };
     });
 

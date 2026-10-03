@@ -54,7 +54,7 @@
   {% if groups %}
   <div class="provgrid">
     {% for g in groups %}
-    <a class="prov" href="/dashboard/keys#p-{{ g.provider }}">
+    <a class="prov" href="/dashboard/providers#p-{{ g.provider }}">
       <div class="prov-top"><span class="dot {{ g.cls }}"></span><b class="trunc">{{ g.provider }}</b>
         <span class="muted" style="margin-left:auto">{{ g.alive }}/{{ g.total - g.disabled }}</span></div>
       <span class="bar stackbar" aria-hidden="true">
@@ -72,7 +72,7 @@
   </div>
   {% else %}
   <div class="card">{{ m.empty("key", "No API keys yet", "Ключей пока нет", "Add a provider key to start routing.", "Добавьте ключ провайдера, чтобы начать.") }}
-    <div class="row" style="justify-content:center;padding-bottom:20px"><a class="btn btn-primary" href="/dashboard/keys">{{ t("Go to keys", "К ключам") }}</a></div></div>
+    <div class="row" style="justify-content:center;padding-bottom:20px"><a class="btn btn-primary" href="/dashboard/providers">{{ t("Go to providers", "К провайдерам") }}</a></div></div>
   {% endif %}
 </section>
 

@@ -52,10 +52,8 @@ NAV: list[dict[str, Any]] = [
      "en": "Requests", "ru": "Запросы"},
     {"key": "projects", "href": "/dashboard/projects", "icon": "folder", "primary": True,
      "en": "Projects", "ru": "Проекты"},
-    {"key": "keys", "href": "/dashboard/keys", "icon": "key", "primary": True,
-     "en": "Keys", "ru": "Ключи"},
-    {"key": "models", "href": "/dashboard/models", "icon": "cpu", "primary": False,
-     "en": "Models", "ru": "Модели"},
+    {"key": "providers", "href": "/dashboard/providers", "icon": "key", "primary": True,
+     "en": "Providers", "ru": "Провайдеры"},
     {"key": "audit", "href": "/dashboard/audit", "icon": "shield", "primary": False,
      "en": "Audit log", "ru": "Аудит"},
     {"key": "settings", "href": "/dashboard/settings", "icon": "sliders", "primary": False,
@@ -449,20 +447,51 @@ def provider_catalogue() -> list[dict[str, Any]]:
     return out
 
 
+def _forward(path: str, request: Request) -> Response:
+    """301 to `path`, carrying the query string (flash, deep-link filters)."""
+    qs = request.url.query
+    return RedirectResponse(f"{path}?{qs}" if qs else path, status_code=301)
+
+
 @router.get("/dashboard/keys")
-async def keys_page(request: Request) -> Response:
+async def keys_page_moved(request: Request) -> Response:
+    """Keys and Models were merged into Providers."""
+    return _forward("/dashboard/providers", request)
+
+
+@router.get("/dashboard/models")
+async def models_page_moved(request: Request) -> Response:
+    """Keys and Models were merged into Providers. The old page's `provider`
+    filter becomes the search box."""
+    params = dict(request.query_params)
+    if "provider" in params and "q" not in params:
+        params["q"] = params.pop("provider")
+    qs = urlencode(params)
+    return RedirectResponse("/dashboard/providers" + (f"?{qs}" if qs else ""), status_code=301)
+
+
+@router.get("/dashboard/providers")
+async def providers_page(request: Request) -> Response:
     if (r := _guard(request)):
         return r
     tz = _tz(request)
     now = _utc_now()
-    keys, tokens_today, act, act_1h = await q.gather(
+    keys, tokens_today, act, act_1h, observed, cooldowns = await q.gather(
         _fetch_keys(), _fetch_tokens_today(tz), q.key_activity(now - timedelta(days=1)),
-        q.provider_activity(now - timedelta(hours=1)))
-    rows = views.build_key_rows(keys, tokens_today, act, now)
-    groups = views.group_by_provider(rows, act_1h)
-    return render("keys.html", **_ctx(request, "keys", ("Keys & providers", "Ключи и провайдеры")),
-                  groups=groups, total=len(rows),
-                  alive=sum(g["alive"] for g in groups))
+        q.provider_activity(now - timedelta(hours=1)),
+        q.observed_model_stats(now - timedelta(days=7)), q.model_cooldowns(now))
+    rows = views.build_key_rows(keys, tokens_today, act, now, cooldowns)
+    cards = views.build_providers(views.group_by_provider(rows, act_1h), observed)
+    p = request.query_params
+    filters = views.capability_filters()
+    cap = p.get("cap", "")
+    return render("providers.html", **_ctx(request, "providers", ("Providers", "Провайдеры")),
+                  cards=[c for c in cards if not c["inactive"]],
+                  inactive=[c for c in cards if c["inactive"]], capabilities=filters,
+                  total=len(rows), alive=sum(c["alive"] for c in cards),
+                  init={"q": (p.get("q") or "")[:100],
+                        "cap": cap if cap in {f["key"] for f in filters} else "",
+                        "live": p.get("live") in ("1", "true", "on")})
 
 
 @router.get("/dashboard/keys/new")
@@ -485,20 +514,6 @@ async def key_edit_form(key_id: int, request: Request) -> Response:
     return render("_key_form.html", key=key, catalogue=[],
                   scope_boxes=_scope_checkboxes(key.scopes or ["llm:chat"], provider=key.provider),
                   reason=reason_labels(key.last_error))
-
-
-# ─── models / audit / settings ───────────────────────────────────────
-
-
-@router.get("/dashboard/models")
-async def models_page(request: Request) -> Response:
-    if (r := _guard(request)):
-        return r
-    observed = await q.observed_model_stats(_utc_now() - timedelta(days=7))
-    rows = views.build_model_catalogue(observed)
-    return render("models.html", **_ctx(request, "models", ("Models", "Модели")),
-                  rows=rows, capabilities=list(CAPABILITY_CHAINS),
-                  providers=sorted({r["provider"] for r in rows}))
 
 
 @router.get("/dashboard/jobs")

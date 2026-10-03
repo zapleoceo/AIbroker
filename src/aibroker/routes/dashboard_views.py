@@ -12,9 +12,9 @@ from typing import Any
 
 from aibroker.providers.catalog import price_info
 from aibroker.providers.quotas import axes_for_key, severity_class
-from aibroker.providers.registry import all_models, paid_providers
+from aibroker.providers.registry import all_models, get_spec, provider_names, spec_or_default
 from aibroker.routes.dashboard_labels import KeyStatus, key_status, reason_labels
-from aibroker.routing.chains import CAPABILITY_CHAINS, CAPABILITY_SCOPE
+from aibroker.routing.chains import CAPABILITY_CHAINS
 from aibroker.web import format as fmt
 
 NEAR_CAP_PCT = 85
@@ -53,9 +53,13 @@ _QUOTA_SRC = {"manual": ("manual", "вручную"), "discovered": ("discovered
 
 
 def build_key_rows(keys: Iterable[Any], tokens_today: Mapping[int, Mapping[str, int]],
-                   activity: Mapping[int, Mapping[str, Any]], now: datetime) -> list[dict[str, Any]]:
+                   activity: Mapping[int, Mapping[str, Any]], now: datetime,
+                   model_cooldowns: Mapping[int, Sequence[Mapping[str, Any]]] | None = None
+                   ) -> list[dict[str, Any]]:
     """One display dict per api key: derived status + reason, every quota axis
-    with its severity, the $ cap bar, and recent activity."""
+    with its severity, the $ cap bar, recent activity, and the models of this
+    key that are cooling on their own (api_key_model_cooldowns)."""
+    model_cooldowns = model_cooldowns or {}
     rows: list[dict[str, Any]] = []
     for k in keys:
         st: KeyStatus = key_status(k, now)
@@ -84,6 +88,8 @@ def build_key_rows(keys: Iterable[Any], tokens_today: Mapping[int, Mapping[str, 
             "top_pct": top_pct,
             "calls": act.get("calls", 0), "errs": act.get("errs", 0),
             "last_ok": act.get("last_ok"), "last_err": act.get("last_err"),
+            "cooling_models": [c for c in model_cooldowns.get(k.id, ())
+                               if c.get("until") and c["until"] > now],
         })
     return rows
 
@@ -92,7 +98,7 @@ def group_by_provider(rows: Iterable[dict[str, Any]],
                       activity_1h: Mapping[str, Mapping[str, Any]] | None = None
                       ) -> list[dict[str, Any]]:
     """Keys grouped under their provider with a roll-up (alive/cooling/dead
-    counts, last-hour errors) — the section header on the keys page and the
+    counts, last-hour errors) — the card header on the providers page and the
     provider health grid on the overview."""
     activity_1h = activity_1h or {}
     groups: dict[str, dict[str, Any]] = {}
@@ -206,12 +212,12 @@ def build_attention(key_rows: Sequence[dict[str, Any]], groups: Sequence[Mapping
         n = len(labels)
         add("bad", f"{prov}: {fmt.plural_en(n, 'dead key', 'dead keys')} — {shown}",
             f"{prov}: {fmt.plural_ru(n, 'мёртвый ключ', 'мёртвых ключа', 'мёртвых ключей')} ({shown})",
-            f"/dashboard/keys#p-{prov}")
+            f"/dashboard/providers#p-{prov}")
     for prov, labels in sorted(by_status["no_credits"].items()):
         n = len(labels)
         add("warn", f"{prov}: {fmt.plural_en(n, 'key', 'keys')} out of credits — top up",
             f"{prov}: {fmt.plural_ru(n, 'ключ', 'ключа', 'ключей')} без средств — пополните",
-            f"/dashboard/keys#p-{prov}")
+            f"/dashboard/providers#p-{prov}")
     for r in key_rows:
         k = r["key"]
         if r["status"].code in ("alive", "capped") and (r["top_pct"] or 0) >= NEAR_CAP_PCT:
@@ -219,7 +225,7 @@ def build_attention(key_rows: Sequence[dict[str, Any]], groups: Sequence[Mapping
                     r["axes"][0]["pct"] == r["top_pct"] else "$ cap")
             add("warn", f"{k.provider}/{k.label} at {r['top_pct']}% of its {what}",
                 f"{k.provider}/{k.label}: {r['top_pct']}% лимита ({what})",
-                f"/dashboard/keys#p-{k.provider}")
+                f"/dashboard/providers#p-{k.provider}")
     for g in groups:
         if g["errs_1h"] >= ERR_SPIKE_MIN and g["err_rate"] >= ERR_SPIKE_RATE:
             sev = "bad" if g["err_rate"] >= 0.7 else "warn"
@@ -278,36 +284,110 @@ def build_project_cards(projects: Iterable[Any], range_stats: Mapping[int, Mappi
     return cards
 
 
-# ─── models ─────────────────────────────────────────────────────────────────
+# ─── providers (the merged Keys + Models page) ─────────────────────────────
 
 
-def build_model_catalogue(observed: Mapping[tuple[str, str], Mapping[str, Any]]
-                          ) -> list[dict[str, Any]]:
-    """One row per (capability, model) from the provider catalog: chain position,
-    price (catalog.price_info) and the last-7-days p50 latency / success from
-    usage_log. Models wired for a capability whose chain does not reach their
-    provider are listed too, flagged unrouted."""
-    rows: list[dict[str, Any]] = []
-    paid = paid_providers()
-    for spec in all_models():
-        price = price_info(spec)
-        kind = price["kind"]
-        pin, pout = price.get("input_usd_per_mtok"), price.get("output_usd_per_mtok")
-        obs = observed.get((spec.provider, spec.id), {})
-        for cap in sorted(spec.capabilities):
-            chain = CAPABILITY_CHAINS.get(cap, [])
-            routed = spec.provider in chain
-            rows.append({
-                "capability": cap, "scope": CAPABILITY_SCOPE.get(cap, ""),
-                "provider": spec.provider, "model": spec.id, "routed": routed,
-                "position": (chain.index(spec.provider) + 1) if routed else None,
-                "paid": spec.provider in paid,
-                "price_in": pin, "price_out": pout,
-                "per_minute": price.get("usd_per_minute"),
-                "free": kind in ("free", "local") or (pin == 0 and pout in (0, None)),
-                "calls": obs.get("calls", 0), "success": obs.get("success"),
-                "p50": obs.get("p50"),
-            })
-    order = {c: i for i, c in enumerate(CAPABILITY_CHAINS)}
-    rows.sort(key=lambda r: (order.get(r["capability"], 99), r["position"] or 99, r["model"]))
-    return rows
+# Capability filter chips: the registry's lanes folded into the kinds a human
+# picks between. Only groups that some registered model serves are offered.
+_CAP_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("chat", "Chat", "Чат"), ("structured", "Structured", "Структура"),
+    ("vision", "Vision", "Зрение"), ("voice", "Voice", "Голос"),
+    ("embedding", "Embeddings", "Эмбеддинги"), ("decision", "Decisions", "Решения"),
+)
+_CAP_GROUP_OF = {"structured": "structured", "vision": "vision", "transcription": "voice",
+                 "embedding": "embedding", "decision": "decision"}
+
+
+def cap_group(capability: str) -> str:
+    """`chat:fast` / `prefilter` / `translate` -> chat, `transcription` -> voice…"""
+    if capability.startswith("chat:") or capability in ("prefilter", "translate"):
+        return "chat"
+    return _CAP_GROUP_OF.get(capability, capability)
+
+
+def capability_filters() -> list[dict[str, str]]:
+    """Filter chips derived from the registry, in a stable human order."""
+    present = {cap_group(c) for m in all_models() for c in m.capabilities}
+    known = [g for g in _CAP_GROUPS if g[0] in present]
+    extra = sorted(present - {g[0] for g in _CAP_GROUPS})
+    return [{"key": k, "en": en, "ru": ru} for k, en, ru in known] +            [{"key": k, "en": k.capitalize(), "ru": k.capitalize()} for k in extra]
+
+
+def _quota_burn(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate today's burn of a provider's enabled keys: per quota axis the
+    summed used / summed cap, reported for the axis that is closest to its cap."""
+    totals: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if r["status"].code == "disabled":
+            continue
+        for a in r["axes"]:
+            t = totals.setdefault(a["name"], {"label": a["label"], "used": 0, "cap": 0})
+            t["used"] += a["used"]
+            t["cap"] += a["cap"]
+    best: dict[str, Any] | None = None
+    for t in totals.values():
+        if not t["cap"]:
+            continue
+        t["pct"] = min(100, int(t["used"] / t["cap"] * 100))
+        if best is None or t["pct"] > best["pct"]:
+            best = t
+    if best:
+        best["cls"] = severity_class(best["pct"])
+    return best
+
+
+def _model_view(spec: Any, provider: str, observed: Mapping[tuple[str, str], Mapping[str, Any]],
+                rotation_ids: frozenset[str], cooling: Mapping[str, int]) -> dict[str, Any]:
+    price = price_info(spec)
+    kind = price["kind"]
+    pin, pout = price.get("input_usd_per_mtok"), price.get("output_usd_per_mtok")
+    obs = observed.get((provider, spec.id), {})
+    caps = sorted(spec.capabilities)
+    groups = sorted({cap_group(c) for c in caps}, key=lambda g: next(
+        (i for i, x in enumerate(_CAP_GROUPS) if x[0] == g), 99))
+    routed = any(provider in CAPABILITY_CHAINS.get(c, []) for c in caps)
+    labels = {k: (en, ru) for k, en, ru in _CAP_GROUPS}
+    return {
+        "id": spec.id, "caps": caps, "groups": groups,
+        "group_labels": [labels.get(g, (g.capitalize(), g.capitalize())) for g in groups],
+        "routed": routed, "rotation": spec.id in rotation_ids,
+        "price_in": pin, "price_out": pout, "per_minute": price.get("usd_per_minute"),
+        "free": kind in ("free", "local") or (pin == 0 and pout in (0, None)),
+        "calls": obs.get("calls", 0), "success": obs.get("success"), "p50": obs.get("p50"),
+        "cooling_keys": cooling.get(spec.id, 0),
+    }
+
+
+def build_providers(key_groups: Sequence[Mapping[str, Any]],
+                    observed: Mapping[tuple[str, str], Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One card per provider for the Providers page: the key roll-up from
+    group_by_provider, the registry's models with price / 7d latency / success,
+    and an aggregate quota burn. Order: providers with a live key first, then
+    by registry rank; `inactive` marks a provider with no keys and no routed
+    model (the page folds those away)."""
+    by_name = {g["provider"]: g for g in key_groups}
+    cards: list[dict[str, Any]] = []
+    for name in dict.fromkeys([*provider_names(), *by_name]):
+        spec = get_spec(name)
+        g = by_name.get(name) or {
+            "provider": name, "rows": [], "alive": 0, "cooling": 0, "dead": 0,
+            "disabled": 0, "total": 0, "calls_1h": 0, "errs_1h": 0, "err_rate": 0.0, "cls": "off"}
+        rows = g["rows"]
+        cooling: dict[str, int] = {}
+        for r in rows:
+            for c in r.get("cooling_models", ()):
+                cooling[c["model"]] = cooling.get(c["model"], 0) + 1
+        rotation_ids = frozenset(m for ms in (spec.rotation.values() if spec else ()) for m in ms)
+        models = [_model_view(m, name, observed, rotation_ids, cooling)
+                  for m in (spec.models.values() if spec else ())]
+        models.sort(key=lambda m: (not m["routed"], m["id"]))
+        card = {
+            **g, "paid": spec_or_default(name).paid, "rank": spec_or_default(name).rank,
+            "models": models, "routed_n": sum(1 for m in models if m["routed"]),
+            "burn": _quota_burn(rows), "live": g["alive"] > 0,
+            "cap_groups": sorted({x for m in models for x in m["groups"]}),
+        }
+        card["inactive"] = not g["total"] and not card["routed_n"]
+        cards.append(card)
+    cards.sort(key=lambda c: (c["inactive"], not c["live"], c["rank"], c["provider"]))
+    return cards

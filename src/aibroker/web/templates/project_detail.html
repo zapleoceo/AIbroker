@@ -150,7 +150,7 @@
     <tbody>
       {% for r in d.used_keys %}
       <tr>
-        <td data-label="Provider">{% if r.provider %}<a href="/dashboard/keys#p-{{ r.provider }}">{{ r.provider }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td data-label="Provider">{% if r.provider %}<a href="/dashboard/providers#p-{{ r.provider }}">{{ r.provider }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
         <td data-label="Key">{{ r.label or t("(deleted key)", "(удалённый ключ)") }}</td>
         <td data-label="Calls" class="num">{{ r.n|num }}</td>
         <td data-label="Errors" class="num {{ 'bad' if r.errs }}">{{ r.errs|num }}</td>

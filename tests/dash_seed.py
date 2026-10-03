@@ -15,6 +15,7 @@ from aibroker.auth_session import COOKIE_NAME, issue_session_cookie
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import (
+    ApiKeyModelCooldownRow,
     ApiKeyRow,
     AuditLogRow,
     DeepJobRow,
@@ -55,6 +56,12 @@ def key(id_: int = 1, provider: str = "gemini", label: str = "k1", **kw: Any) ->
         "token_encrypted": "x", "is_active": True, "is_alive": True}
     base.update(kw)
     return ApiKeyRow(**base)
+
+
+def model_cooldown(key_id: int, model: str, minutes: int = 30,
+                   reason: str = "daily quota") -> ApiKeyModelCooldownRow:
+    return ApiKeyModelCooldownRow(api_key_id=key_id, model=model, reason=reason,
+                                  cooldown_until=now() + timedelta(minutes=minutes))
 
 
 def usage(id_: int, *, minutes_ago: float = 5, project_id: int | None = 1,

@@ -140,44 +140,6 @@ def test_group_by_provider_classes():
     assert g["a"]["alive"] == 1 and g["a"]["dead"] == 1 and now
 
 
-def test_model_catalogue_flags_unrouted_prices_and_observed_stats():
-    rows = v.build_model_catalogue({("deepseek", "deepseek/deepseek-flash"): {"calls": 4, "success": 75.0, "p50": 900}})
-    ds_row = next(r for r in rows if r["model"] == "deepseek/deepseek-flash" and r["capability"] == "chat:smart")
-    assert ds_row["paid"] and ds_row["p50"] == 900 and round(ds_row["price_in"], 2) == 0.15
-    assert not any(r["capability"] not in __import__("aibroker.routing.chains", fromlist=["x"]).CAPABILITY_CHAINS for r in rows)
-    mistral = [r for r in rows if r["provider"] == "mistral"]
-    assert mistral and not any(r["routed"] for r in mistral)
-
-
-# ─── portable queries ───────────────────────────────────────────────────────
-
-
-def test_range_totals_and_percentile_and_series():
-    ds.seed(ds.project(1), ds.key(1))
-    ds.seed(*[ds.usage(i, minutes_ago=5 + i, latency_ms=100 * i, cost=0.01, cache_read=10,
-                       tokens_in=100) for i in range(1, 11)],
-            ds.usage(20, status="error", error_kind="X", http_status=500, latency_ms=None))
-    start = ds.now() - timedelta(hours=2)
-    t = ds.run(q.range_totals(start, None))
-    assert t["calls"] == 11 and t["ok_n"] == 10 and t["err_n"] == 1
-    assert round(t["success"], 1) == 90.9 and round(t["cache_hit"], 1) == 9.1 and round(t["spend"], 2) == 0.1
-    assert ds.run(q.latency_percentile(start, None, 0.95)) == 1000
-    assert ds.run(q.latency_percentile(start, None, 0.5)) == 500
-    assert ds.run(q.range_totals(start, None, project_id=99))["calls"] == 0
-    series = ds.run(q.time_series(start, ds.now() + timedelta(hours=1), "hour"))
-    assert sum(s["calls"] for s in series) == 11 and len(series) >= 3
-    assert any(s["calls"] == 0 for s in series) or len(series) == 3
-
-
-def test_usage_by_model_series_top_n_and_other():
-    ds.seed(ds.project(1), ds.key(1))
-    ds.seed(*[ds.usage(i, model=f"m{i}", minutes_ago=3, cost=0.01 * i) for i in range(1, 5)])
-    out = ds.run(q.usage_by_model_series(ds.now() - timedelta(hours=3), ds.now() + timedelta(hours=1), "hour", top=2))
-    assert out["spend"]["names"] == ["m4", "m3", "other"]
-    assert sum(sum(s) for s in out["calls"]["series"]) == 4
-    assert len(out["buckets"]) == len(out["spend"]["series"][0])
-
-
 def test_project_stats_breakdown_activity_models_jobs_audit():
     ds.seed_demo()
     start = ds.now() - timedelta(days=1)

@@ -7,7 +7,7 @@
 </div>
 <form method="post" action="{{ ('/dashboard/keys/' ~ key.id ~ '/edit') if editing else '/dashboard/keys/create' }}"
       class="drawer-pad" autocomplete="off" {% if not editing %}x-data="keyForm()"{% endif %}>
-  <input type="hidden" name="next" value="/dashboard/keys">
+  <input type="hidden" name="next" value="/dashboard/providers">
   {% if not editing %}
   <script type="application/json">{{ catalogue_map|tojson }}</script>
   {% endif %}
