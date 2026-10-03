@@ -62,9 +62,10 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # Self-hosted Qwen3-VL first (no fast free cloud alternative exists), then the
     # free cloud pools; paid tail is final-retry only (see FREE_WALK_CAPABILITIES).
     "vision": ["local", "gemini", "sambanova", "openrouter", "deepseek", "openai"],
-    # groq ~150x faster than local whisper on this host, also free; local is the
-    # backstop for when groq's daily quota is spent.
-    "transcription": ["groq", "local", "gemini", "openai"],
+    # groq first (fastest, free); gemini-3.5-transcribe next (free tier, 1-12 s);
+    # local whisper (~80 s/clip on this host) is the last free backstop. 2026-10-04:
+    # if local is never reached over a long period it can be switched off for good.
+    "transcription": ["groq", "gemini", "local", "openai"],
     # voyage primary; cohere is the fallback when voyage is down.
     "embedding": ["voyage", "cohere"],
     # Typed decisions: OpenRouter is the only host, PAID keys only (see run_decision).
