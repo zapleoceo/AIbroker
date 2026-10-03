@@ -443,3 +443,21 @@ def test_zai_disables_thinking():
 def test_default_adapter_key_extra_is_none():
     assert adapter_for("cerebras").key_extra("anything") is None
     assert isinstance(adapter_for("nonexistent"), ProviderAdapter)
+
+
+def test_prompt_chars_does_not_count_base64_image_payloads():
+    """REGRESSION (2026-10-03): _prompt_chars str()'d a multimodal content list,
+    so one base64 image (megabytes of repr) looked like a huge text prompt and
+    flipped deepseek's big-JSON thresholds. Images now count as the flat
+    context_limits proxy."""
+    from aibroker.providers.adapters import _prompt_chars, is_deepseek_big_json_prompt
+
+    huge_b64 = "A" * 2_000_000
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + huge_b64}},
+    ]}]
+    assert _prompt_chars(msgs) == len("describe") + 1000
+    assert not is_deepseek_big_json_prompt({"type": "json_object"}, msgs)
+    assert _prompt_chars([{"role": "user", "content": "abc"}]) == 3
+    assert _prompt_chars([{"role": "assistant", "content": None}]) == 0

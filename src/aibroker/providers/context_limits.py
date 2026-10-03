@@ -78,7 +78,7 @@ _RATE_LIMIT_MARKERS = (
 MIN_LEARNABLE_CEILING = 4_000
 
 
-def _content_chars(content: Any) -> int:
+def content_chars(content: Any) -> int:
     """Char count of a message's content — handles plain str and
     OpenAI-style multimodal block lists. Image blocks count as a flat
     ~1000-char proxy (vision tokens aren't text-linear, but this keeps
@@ -101,7 +101,7 @@ def _content_chars(content: Any) -> int:
 def estimate_prompt_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token estimate from message chars. ~4 chars/token (English);
     Russian is denser so this under-counts — compensated by the 90% margin."""
-    chars = sum(_content_chars(m.get("content")) for m in messages)
+    chars = sum(content_chars(m.get("content")) for m in messages)
     # Native assistant calls carry potentially large JSON arguments outside
     # content. Count only these extra fields, so text/image contents are not
     # counted twice and legacy estimates remain unchanged.

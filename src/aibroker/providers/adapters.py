@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from aibroker.providers.context_limits import content_chars
+
 
 class ProviderAdapter:
     """Default adapter: no quirks. Providers with none use this.
@@ -208,7 +210,10 @@ _DEEPSEEK_THINKING_HEADROOM_TOKENS = 3_000
 
 
 def _prompt_chars(messages: list[dict[str, Any]]) -> int:
-    return sum(len(str(m.get("content") or "")) for m in messages)
+    # Shares context_limits' counter (DRY). The old `len(str(content))` measured
+    # a multimodal block LIST by its repr — a single base64 image (megabytes)
+    # tripped the "big JSON prompt" thresholds on its own (2026-10-03 review).
+    return sum(content_chars(m.get("content")) for m in messages)
 
 
 def is_deepseek_big_json_prompt(
