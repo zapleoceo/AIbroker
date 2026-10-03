@@ -21,6 +21,7 @@ from aibroker.routing import scope_for
 from aibroker.services import (
     DecisionFailed,
     EmbedFailed,
+    EmbedRequestInvalid,
     TranscribeFailed,
     get_job,
     next_poll_after_s,
@@ -208,6 +209,8 @@ async def embed_endpoint(
             project=ctx.project, provider=provider,
             inputs=body.input, model=body.model, workflow=body.workflow,
         )
+    except EmbedRequestInvalid as e:
+        raise HTTPException(400, str(e)) from e
     except EmbedFailed as e:
         raise HTTPException(502, f"embed failed: {e}") from e
     if outcome is None:

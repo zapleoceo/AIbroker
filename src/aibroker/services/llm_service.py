@@ -990,6 +990,11 @@ class EmbedFailed(Exception):
     """Every key of `provider` failed — route maps this to HTTP 502."""
 
 
+class EmbedRequestInvalid(ValueError):
+    """The request itself is wrong (e.g. a model that belongs to another
+    provider) — route maps this to HTTP 400. Nothing was sent anywhere."""
+
+
 async def _handle_attempt_failure(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
@@ -1025,6 +1030,14 @@ async def run_embed(
     failures — is a transient network blip, not a bad key or a dead
     provider; a fresh key retry turns most of these into a normal success.)
     """
+    # Same guard chat has had since 2026-09-26: LiteLLM routes by the model's OWN
+    # prefix, so `?provider=voyage` + `model="cohere/embed-…"` would send a
+    # voyage key to cohere (a 401 → mark_dead on a healthy key). Reject up front.
+    pinned_provider = provider_of_model(model)
+    if pinned_provider is not None and pinned_provider != provider:
+        raise EmbedRequestInvalid(
+            f"model {model!r} belongs to provider {pinned_provider!r}, not "
+            f"provider={provider!r}")
     use_model = model or model_for(provider, "embedding") or "voyage/voyage-4"
     any_key_seen = False
     last_exc: Exception | None = None

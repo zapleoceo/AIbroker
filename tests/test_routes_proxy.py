@@ -857,3 +857,19 @@ async def test_jobs_submit_vision_rejects_non_image_payload_with_400():
     )
     assert r.status_code == 400
     assert "MP4" in r.json()["detail"]
+
+
+async def test_embed_400_when_model_belongs_to_another_provider():
+    """REGRESSION (2026-10-03): ?provider=voyage with model='cohere/…' sent a
+    voyage key to cohere (LiteLLM routes by the model's own prefix) — a 401 that
+    mark_dead'ed a healthy key. Now a 400 and no key is ever picked."""
+    plain, _ = await _make_project(["llm:embed"])
+    with patch("aibroker.services.llm_service.pick_and_reserve",
+               new=AsyncMock(side_effect=AssertionError("must not pick a key"))):
+        r = client.post(
+            "/v1/embed?provider=voyage",
+            json={"input": ["x"], "model": "cohere/embed-english-v3.0"},
+            headers={"X-Project-Key": plain},
+        )
+    assert r.status_code == 400
+    assert "cohere" in r.json()["detail"] and "voyage" in r.json()["detail"]
