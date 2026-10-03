@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m with context %}
 {% block content %}
+{% include "_queue_strip.html" %}
+
 <form class="card card-pad stack-sm" method="get" action="/dashboard/requests" aria-label="{{ 'Filters' }}"
       x-data="{ open: window.innerWidth > 720 || {{ 'true' if n_filters else 'false' }} }"
       hx-boost="true" hx-target="#req-results" hx-select="#req-results" hx-swap="outerHTML" hx-push-url="true">
@@ -9,40 +11,41 @@
     <button type="button" class="btn" @click="open = !open" :aria-expanded="open" aria-controls="req-filters">{{ m.icon("search") }}{{ t("Filters", "Фильтры") }}{% if n_filters %} · {{ n_filters }}{% endif %}</button>
   </div>
   <div class="filters" id="req-filters" x-show="open" x-cloak>
-    <div class="field"><label for="f-id">{{ t("Request ID", "ID запроса") }}</label>
-      <input id="f-id" type="search" inputmode="numeric" name="id" value="{{ f.request_id if f.request_id is not none else '' }}" {{ ph("e.g. 90123", "напр. 90123") }}></div>
+    <div class="field"><label for="f-q">{{ t("Request ID", "ID запроса") }}</label>
+      <input id="f-q" type="search" name="q" value="{{ f.search or '' }}" {{ ph("job-123 or uuid", "job-123 или uuid") }}></div>
+    <div class="field"><label for="f-type">{{ t("Type", "Тип") }}</label>
+      <select id="f-type" name="type">
+        <option value="">{{ t("All", "Все") }}</option>
+        <option value="job" {{ 'selected' if f.kind == 'job' }}>{{ t("Queued job", "Задача из очереди") }}</option>
+        <option value="direct" {{ 'selected' if f.kind == 'direct' }}>{{ t("Direct call", "Прямой вызов") }}</option>
+      </select></div>
+    <div class="field"><label for="f-status">{{ t("Status", "Статус") }}</label>
+      <select id="f-status" name="status">
+        <option value="">{{ t("All", "Все") }}</option>
+        {% for st, en, ru in (("ok", "ok", "ок"), ("failed", "failed", "ошибка"), ("pending", "pending", "ожидает"), ("running", "running", "в работе")) %}
+        <option value="{{ st }}" {{ 'selected' if f.status == st }}>{{ t(en, ru) }}</option>
+        {% endfor %}
+      </select></div>
     <div class="field"><label for="f-project">{{ t("Project", "Проект") }}</label>
       <select id="f-project" name="project">
-        <option value="">{{ "All" }}</option>
+        <option value="">{{ t("All", "Все") }}</option>
         {% for p in projects %}<option value="{{ p.id }}" {{ 'selected' if f.project_id == p.id }}>{{ p.name }}</option>{% endfor %}
       </select></div>
     <div class="field"><label for="f-workflow">{{ t("Workflow", "Workflow") }}</label>
       <input id="f-workflow" type="text" name="workflow" list="dl-workflow" value="{{ f.workflow or '' }}" {{ ph("any", "любой") }}>
       <datalist id="dl-workflow">{% for w in facets.workflow %}<option value="{{ w }}">{% endfor %}</datalist></div>
     <div class="field"><label for="f-cap">{{ t("Capability", "Способность") }}</label>
-      <select id="f-cap" name="capability"><option value="">{{ "All" }}</option>
+      <select id="f-cap" name="capability"><option value="">{{ t("All", "Все") }}</option>
         {% for c in capabilities %}<option {{ 'selected' if f.capability == c }}>{{ c }}</option>{% endfor %}
       </select></div>
     <div class="field"><label for="f-prov">{{ t("Provider", "Провайдер") }}</label>
-      <select id="f-prov" name="provider"><option value="">{{ "All" }}</option>
+      <select id="f-prov" name="provider"><option value="">{{ t("All", "Все") }}</option>
         {% for p in providers %}<option {{ 'selected' if f.provider == p }}>{{ p }}</option>{% endfor %}
       </select></div>
-    <div class="field"><label for="f-model">{{ t("Model", "Модель") }}</label>
-      <input id="f-model" type="text" name="model" list="dl-model" value="{{ f.model or '' }}" {{ ph("any", "любая") }}>
-      <datalist id="dl-model">{% for x in facets.model %}<option value="{{ x }}">{% endfor %}</datalist></div>
-    <div class="field"><label for="f-status">{{ t("Status", "Статус") }}</label>
-      <select id="f-status" name="status">
-        <option value="">{{ t("All", "Все") }}</option>
-        <option value="ok" {{ 'selected' if f.status == 'ok' }}>{{ "ok" }}</option>
-        <option value="error" {{ 'selected' if f.status == 'error' }}>{{ t("failed", "ошибка") }}</option>
-      </select></div>
-    <div class="field"><label for="f-cost">{{ t("Min cost, $", "Мин. цена, $") }}</label>
-      <input id="f-cost" type="number" step="any" min="0" name="min_cost" value="{{ f.min_cost if f.min_cost is not none else '' }}"></div>
-    <div class="field"><label for="f-lat">{{ t("Min latency, ms", "Мин. задержка, мс") }}</label>
-      <input id="f-lat" type="number" min="0" name="min_latency" value="{{ f.min_latency if f.min_latency is not none else '' }}"></div>
   </div>
   <div class="row" x-show="open" x-cloak>
     <button class="btn btn-primary" type="submit">{{ m.icon("search") }}{{ t("Apply filters", "Применить") }}</button>
+    <a class="btn{{ ' btn-primary' if f.status == 'failed' }}" href="{{ failed_href }}" hx-boost="false">{{ t("Only failed", "Только ошибки") }}</a>
     <a class="btn btn-ghost" href="/dashboard/requests?{{ rng.qs }}" hx-boost="false">{{ t("Reset", "Сбросить") }}</a>
     <a class="btn" style="margin-left:auto" href="{{ export_url }}" hx-boost="false" download>{{ m.icon("download") }}{{ t("Export CSV", "Экспорт CSV") }}</a>
   </div>
@@ -56,33 +59,33 @@
         <th scope="col"><a href="{{ sort_links.time }}" {% if f.sort == 'time' %}aria-sort="{{ 'descending' if f.desc else 'ascending' }}"{% endif %}>{{ t("When", "Когда") }}{{ " ↓" if f.sort == 'time' and f.desc }}{{ " ↑" if f.sort == 'time' and not f.desc }}</a></th>
         <th scope="col">{{ t("Project · workflow", "Проект · workflow") }}</th>
         <th scope="col">{{ t("Capability", "Способность") }}</th>
-        <th scope="col">{{ t("Provider · model", "Провайдер · модель") }}</th>
-        <th scope="col" class="num"><a href="{{ sort_links.tokens }}">{{ t("Tokens in/out", "Токены вх/исх") }}{{ " ↓" if f.sort == 'tokens' and f.desc }}{{ " ↑" if f.sort == 'tokens' and not f.desc }}</a></th>
-        <th scope="col" class="num"><a href="{{ sort_links.cost }}">{{ t("Cost", "Цена") }}{{ " ↓" if f.sort == 'cost' and f.desc }}{{ " ↑" if f.sort == 'cost' and not f.desc }}</a></th>
-        <th scope="col" class="num"><a href="{{ sort_links.latency }}">{{ t("Latency", "Задержка") }}{{ " ↓" if f.sort == 'latency' and f.desc }}{{ " ↑" if f.sort == 'latency' and not f.desc }}</a></th>
         <th scope="col">{{ t("Status", "Статус") }}</th>
+        <th scope="col">{{ t("Outcome", "Итог") }}</th>
+        <th scope="col" class="num"><a href="{{ sort_links.latency }}">{{ t("Time", "Время") }}{{ " ↓" if f.sort == 'latency' and f.desc }}{{ " ↑" if f.sort == 'latency' and not f.desc }}</a></th>
+        <th scope="col" class="num"><a href="{{ sort_links.cost }}">{{ t("Cost", "Цена") }}{{ " ↓" if f.sort == 'cost' and f.desc }}{{ " ↑" if f.sort == 'cost' and not f.desc }}</a></th>
+        <th scope="col" class="num"><a href="{{ sort_links.tokens }}">{{ t("Tokens in/out", "Токены вх/исх") }}{{ " ↓" if f.sort == 'tokens' and f.desc }}{{ " ↑" if f.sort == 'tokens' and not f.desc }}</a></th>
       </tr></thead>
       <tbody id="req-rows">
         {% for r in rows %}
         <tr class="clickable">
           <td data-label="{{ 'When' }}" class="nowrap nolabel s3 first">
-            <button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.id }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" hx-swap="innerHTML"
-                    aria-haspopup="dialog" title="#{{ r.id }}">{{ r.created_at|time_tag("mdhms") }}</button>
+            <button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.ref }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" hx-swap="innerHTML"
+                    aria-haspopup="dialog" title="{{ r.request_id }}">{{ r.created_at|time_tag("mdhms") }}</button>
           </td>
-          <td data-label="{{ 'Project · workflow' }}" class="cell-trunc s4 nolabel"><span title="{{ r.project or '—' }} · {{ r.workflow or '—' }}">{{ r.project or "—" }}<span class="dim"> · {{ r.workflow or "—" }}</span></span></td>
+          <td data-label="{{ 'Project · workflow' }}" class="cell-wrap s4 nolabel">{{ r.project or "—" }}<span class="dim"> · {{ r.workflow or "—" }}</span>{% if r.is_job %} <span class="pill">{{ t("job", "задача") }}</span>{% endif %}</td>
           <td data-label="{{ 'Capability' }}" class="s2 nolabel"><span class="pill">{{ r.capability or "—" }}</span></td>
-          <td data-label="{{ 'Provider · model' }}" class="cell-trunc s6 nolabel"><span title="{{ r.model or '' }}">{{ r.provider }}<span class="dim"> · {{ r.model_served or r.model or "—" }}</span></span></td>
-          <td data-label="{{ 'Tokens' }}" class="num mono s2">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}</td>
-          <td data-label="{{ 'Cost' }}" class="num mono s2 {{ 'dim' if r.cost_usd == 0 }}">{{ r.cost_usd|money(4) }}</td>
-          <td data-label="{{ 'Latency' }}" class="num mono s2">{{ r.latency_ms|ms }}</td>
-          <td data-label="{{ 'Status' }}" class="nolabel second">{{ m.call_status(r) }}</td>
+          <td data-label="{{ 'Status' }}" class="nolabel second status-cell">{{ m.req_status(r) }}</td>
+          <td data-label="{{ 'Outcome' }}" class="cell-wrap s6 nolabel">{{ m.req_outcome(r) }}</td>
+          <td data-label="Time" class="num mono s2">{% if r.is_job %}<span class="dim">{{ t("wait", "ждала") }} {{ r.wait_ms|ms }}</span><br>{% endif %}{{ r.latency_ms|ms if r.tries else "—" }}</td>
+          <td data-label="Cost" class="num mono s2 {{ 'dim' if r.cost_usd == 0 }}">{{ r.cost_usd|money(4) }}</td>
+          <td data-label="Tokens" class="num mono s2">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   <div id="req-more" class="row between" style="padding:12px 16px;border-top:1px solid var(--line)">
-    <span class="muted">{{ t("Showing " ~ (page * page_size + rows|length) ~ " most recent matches", "Показано совпадений: " ~ (page * page_size + rows|length)) }}</span>
+    <span class="muted">{{ t("Showing " ~ (page * page_size + rows|length) ~ " most recent requests", "Показано запросов: " ~ (page * page_size + rows|length)) }}</span>
     {% if next_url %}
     <button type="button" class="btn" hx-get="{{ next_url }}" hx-target="#req-rows" hx-select="#req-rows > tr" hx-swap="beforeend"
             hx-select-oob="#req-more" hx-push-url="false">{{ t("Load more", "Показать ещё") }}</button>
@@ -92,7 +95,7 @@
   {{ m.empty("inbox", "No requests match", "Запросов не найдено", "Widen the time range or clear a filter.", "Расширьте период или сбросьте фильтр.") }}
   {% endif %}
 </section>
-<p class="dim" style="font-size:12px">{{ t("Click a row for the full attempt trail. CSV export is capped at " ~ row_limit ~ " rows.", "Клик по строке — полная цепочка попыток. Экспорт CSV ограничен " ~ row_limit ~ " строками.") }}</p>
+<p class="dim" style="font-size:12px">{{ t("One row per client request; click it for the attempt trail. Queued jobs appear as soon as they are submitted. CSV export is capped at " ~ row_limit ~ " rows.", "Одна строка — один запрос клиента; клик — цепочка попыток. Задачи из очереди видны сразу после отправки. Экспорт CSV ограничен " ~ row_limit ~ " строками.") }}</p>
 
 {% if drawer %}
 <div id="drawer-preload" hidden>{% include "_request_drawer.html" %}</div>

@@ -170,34 +170,6 @@ def test_usage_by_model_series_top_n_and_other():
     assert len(out["buckets"]) == len(out["spend"]["series"][0])
 
 
-def test_request_filter_conditions_and_sort_whitelist():
-    f = q.RequestFilter.from_params({"project": "3", "status": "error", "min_cost": "0.5",
-                                     "sort": "evil", "dir": "asc", "provider": " groq "}, None, None)
-    conds, p = f.conditions()
-    assert "u.status <> 'ok'" in conds and p["proj"] == 3 and p["prov"] == "groq" and p["min_cost"] == 0.5
-    assert f.order_by == "u.id ASC" and f.as_query()["status"] == "error"
-    assert q.RequestFilter.from_params({"sort": "cost"}, None, None).order_by.startswith("u.cost_usd DESC")
-
-
-def test_link_attempts_orders_chain_and_ignores_unrelated_rows():
-    t0 = datetime(2026, 1, 1, 12, 0, 0)
-
-    def r(i, end, lat, status):
-        return {"id": i, "created_at": t0 + timedelta(seconds=end), "latency_ms": lat, "status": status}
-    a, b, c = r(1, 5, 5000, "error"), r(2, 5.5, 500, "error"), r(3, 7, 1500, "ok")
-    other = r(4, 60, 800, "ok")                                   # concurrent, different timing
-    for anchor in (a, b, c):
-        assert [x["id"] for x in q.link_attempts(anchor, [a, b, c, other])] == [1, 2, 3]
-    assert [x["id"] for x in q.link_attempts(other, [a, b, c, other])] == [4]
-
-
-def test_request_attempts_from_db_and_get_request():
-    ds.seed_demo()
-    row = ds.run(q.get_request(12))
-    assert [x["id"] for x in ds.run(q.request_attempts(row))] == [10, 11, 12]
-    assert ds.run(q.get_request(424242)) is None
-
-
 def test_project_stats_breakdown_activity_models_jobs_audit():
     ds.seed_demo()
     start = ds.now() - timedelta(days=1)
@@ -213,6 +185,7 @@ def test_project_stats_breakdown_activity_models_jobs_audit():
     assert ds.run(q.provider_activity(ds.now() - timedelta(hours=1)))["groq"]["errs"] == 2
     jobs = ds.run(q.job_overview())
     assert jobs["by_status"]["pending"] == 1 and jobs["stuck_pending"] and not jobs["stuck_running"]
+    assert jobs["failed_24h"] == 1
     rows, more = ds.run(q.audit_page(before_id=None, actor=None, action="key."))
     assert {r["action"] for r in rows} == {"key.added", "key.delete"} and not more
     assert ds.run(q.audit_page(before_id=None, actor=None, action="%"))[0] == []   # LIKE escaped

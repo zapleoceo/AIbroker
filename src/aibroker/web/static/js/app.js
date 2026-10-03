@@ -144,7 +144,15 @@
   document.addEventListener("htmx:beforeHistorySave", closeDrawer);
   window.addEventListener("pageshow", function (e) { if (e.persisted) closeDrawer(); });
 
+  // The sticky queue strip sits right under the (possibly wrapped) top bar.
+  function syncTopbarHeight() {
+    var tb = document.querySelector(".topbar");
+    if (tb) document.documentElement.style.setProperty("--topbar-h", tb.offsetHeight + "px");
+  }
+  window.addEventListener("resize", syncTopbarHeight);
+
   document.addEventListener("DOMContentLoaded", function () {
+    syncTopbarHeight();
     refresh(document);
     // Deep link (?open=<id>): the server rendered the drawer content hidden.
     var pre = document.getElementById("drawer-preload"), body = document.getElementById("drawer-body");

@@ -246,7 +246,7 @@ table.table { width: 100%; border-collapse: collapse; }
   .rtable thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   .rtable tr { padding: 11px 14px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px 12px; align-items: start; }
   .rtable tbody tr:last-child { border-bottom: 0; }
-  .rtable td { padding: 0; border: 0; text-align: left !important; max-width: none !important; grid-column: span 3; order: 3; min-width: 0; }
+  .rtable td { padding: 0; border: 0; text-align: left !important; max-width: none !important; grid-column: span 3; order: 3; min-width: 0; overflow-wrap: anywhere; }
   .rtable td[data-label]::before { content: attr(data-label); display: block; font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
   .rtable td.nolabel::before { display: none; }
   .rtable td.s2 { grid-column: span 2; } .rtable td.s4 { grid-column: span 4; }
@@ -392,3 +392,15 @@ dialog.modal p { color: var(--muted); margin-bottom: 18px; overflow-wrap: anywhe
 .table-models td.model-cell { max-width: 280px; }
 @media (max-width: 1100px) { .table-models .hide-md { display: none; } }
 .table-models code.model-id { flex: 1 1 0; min-width: 0; }
+
+/* ─── requests: live queue strip + wrapped outcome cell ───────────────── */
+.qstrip { position: sticky; top: var(--topbar-h, 57px); z-index: 15; display: flex; gap: 8px; padding: 8px 0; background: var(--bg); }
+.qtile { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); }
+.qtile:hover { text-decoration: none; border-color: var(--line-strong); }
+.qtile b { font-size: 18px; font-weight: 650; line-height: 1.25; letter-spacing: -.01em; }
+.qtile span { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.qtile.bad b { color: var(--bad); }
+.qtile.on { border-color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 560px) { .qstrip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 721px) { .rtable td.status-cell .chip { white-space: nowrap; overflow-wrap: normal; } }
+@media (min-width: 721px) { .table td.cell-wrap { white-space: normal; overflow-wrap: anywhere; min-width: 150px; } }

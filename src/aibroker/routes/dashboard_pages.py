@@ -23,6 +23,7 @@ from aibroker.config import get_settings
 from aibroker.crypto import decrypt, encrypt
 from aibroker.providers.registry import default_models, provider_names
 from aibroker.routes import dashboard_queries as q
+from aibroker.routes import dashboard_requests as rq
 from aibroker.routes import dashboard_views as views
 from aibroker.routes.dashboard_assets import ASSETS_VERSION
 from aibroker.routes.dashboard_data import (
@@ -55,8 +56,6 @@ NAV: list[dict[str, Any]] = [
      "en": "Keys", "ru": "Ключи"},
     {"key": "models", "href": "/dashboard/models", "icon": "cpu", "primary": False,
      "en": "Models", "ru": "Модели"},
-    {"key": "jobs", "href": "/dashboard/jobs", "icon": "layers", "primary": False,
-     "en": "Jobs", "ru": "Задачи"},
     {"key": "audit", "href": "/dashboard/audit", "icon": "shield", "primary": False,
      "en": "Audit log", "ru": "Аудит"},
     {"key": "settings", "href": "/dashboard/settings", "icon": "sliders", "primary": False,
@@ -189,9 +188,9 @@ async def overview(request: Request) -> Response:
 # ─── requests ───────────────────────────────────────────────────────────────
 
 
-def _req_filter(request: Request) -> tuple[DateRange, q.RequestFilter]:
+def _req_filter(request: Request) -> tuple[DateRange, rq.RequestFilter]:
     rng = resolve_range(request.query_params, _tz(request))
-    return rng, q.RequestFilter.from_params(request.query_params, rng.start, rng.end)
+    return rng, rq.RequestFilter.from_params(request.query_params, rng.start, rng.end)
 
 
 def _csv_cell(v: Any) -> Any:
@@ -201,10 +200,17 @@ def _csv_cell(v: Any) -> Any:
     return v
 
 
-_CSV_COLUMNS = ("id", "created_at", "project", "workflow", "capability", "provider",
-                "model", "model_served", "key_label", "status", "http_status",
-                "error_kind", "tokens_in", "tokens_out", "cache_read_tokens",
-                "cache_write_tokens", "cost_usd", "latency_ms")
+_CSV_COLUMNS = ("request_id", "created_at", "type", "project", "workflow", "capability",
+                "status", "tries", "provider", "model", "model_served", "tokens_in",
+                "tokens_out", "cache_read_tokens", "cache_write_tokens", "cost_usd",
+                "wait_ms", "latency_ms", "retries", "error")
+
+
+def _csv_row(r: dict[str, Any]) -> list[Any]:
+    cells = {**r, "type": "job" if r["is_job"] else "direct", "status": r["state"],
+             "created_at": r["created_at"].isoformat() + "Z",
+             "retries": r["job_retries"], "error": r["job_error"]}
+    return [_csv_cell(cells.get(c)) for c in _CSV_COLUMNS]
 
 
 @router.get("/dashboard/requests.csv")
@@ -212,16 +218,41 @@ async def requests_csv(request: Request) -> Response:
     if (r := _guard(request)):
         return r
     _, f = _req_filter(request)
-    rows, _ = await q.query_requests(f, limit=q.CSV_EXPORT_LIMIT)
+    rows, _ = await rq.query_requests(f, limit=rq.CSV_EXPORT_LIMIT)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(_CSV_COLUMNS)
     for row in rows:
-        w.writerow([_csv_cell(row["created_at"].isoformat() + "Z" if c == "created_at"
-                              else row.get(c)) for c in _CSV_COLUMNS])
+        w.writerow(_csv_row(row))
     return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": 'attachment; filename="aibroker-requests.csv"',
         "Cache-Control": "no-store"})
+
+
+def _queue_ctx(jobs: dict[str, Any], request: Request) -> dict[str, Any]:
+    """The strip's tiles; each is a filter link, the active one is marked."""
+    p = request.query_params
+    live = {k: p.get(k, "") for k in ("status", "type")}
+    tiles = []
+    for key, en, ru, n in (
+        ("pending", "Pending", "Ожидают", jobs["by_status"].get("pending", 0)),
+        ("running", "Running", "В работе", jobs["by_status"].get("running", 0)),
+        ("failed", "Failed 24h", "Ошибки за 24ч", jobs["failed_24h"]),
+    ):
+        href = "/dashboard/requests?" + urlencode(
+            {"type": "job", "status": key, "range": "7d" if key == "failed" else "all"})
+        tiles.append({"key": key, "en": en, "ru": ru, "n": n, "href": href,
+                      "active": live["type"] == "job" and live["status"] == key,
+                      "bad": key == "failed" and n > 0})
+    return {"tiles": tiles, "jobs": jobs,
+            "poll_qs": urlencode({k: v for k, v in live.items() if v})}
+
+
+@router.get("/dashboard/requests/queue")
+async def requests_queue_strip(request: Request) -> Response:
+    if (r := _guard(request)):
+        return r
+    return render("_queue_strip.html", **_queue_ctx(await q.job_overview(), request))
 
 
 @router.get("/dashboard/requests")
@@ -231,8 +262,9 @@ async def requests_page(request: Request) -> Response:
     rng, f = _req_filter(request)
     now = _utc_now()
     facets_since = max(rng.start or now - timedelta(days=7), now - timedelta(days=7))
-    (rows, has_more), facets, projects = await q.gather(
-        q.query_requests(f), q.request_facets(facets_since), _fetch_projects())
+    (rows, has_more), facets, projects, jobs = await q.gather(
+        rq.query_requests(f), q.request_facets(facets_since), _fetch_projects(),
+        q.job_overview())
     base = {**f.as_query(), **rng.query}
     nxt = f"/dashboard/requests?{urlencode({**base, 'page': f.page + 1})}" if has_more else ""
     sort_links = {}
@@ -241,40 +273,42 @@ async def requests_page(request: Request) -> Response:
         sort_links[key] = "/dashboard/requests?" + urlencode(
             {**{k: v for k, v in base.items() if k not in ("sort", "dir")},
              "sort": key, "dir": "desc" if desc else "asc"})
-    open_id = q._opt_int(request.query_params.get("open"))
-    drawer = await _request_drawer_ctx(open_id) if open_id is not None else None
+    ref = request.query_params.get("open")
+    drawer = await _request_drawer_ctx(ref) if ref else None
     for row in rows:
         row["err"] = _friendly_call_error(row["http_status"], row["error_kind"])
+    failed_href = "/dashboard/requests?" + urlencode({**base, "status": "failed"})
     return render(
         "requests.html",
         **_ctx(request, "requests", ("Requests", "Запросы"), rng=rng, keep=f.as_query()),
+        **_queue_ctx(jobs, request),
         f=f, n_filters=len([k for k in f.as_query() if k not in ("sort", "dir")]),
-        rows=rows, has_more=has_more, next_url=nxt, projects=projects,
+        rows=rows, next_url=nxt, projects=projects,
         facets=facets, sort_links=sort_links, providers=sorted(provider_names()),
-        capabilities=list(CAPABILITY_CHAINS), export_url="/dashboard/requests.csv?" + urlencode(base),
-        base_query=base, page=f.page, page_size=q.REQUEST_PAGE_SIZE, drawer=drawer,
-        row_limit=q.CSV_EXPORT_LIMIT,
+        capabilities=list(CAPABILITY_CHAINS), failed_href=failed_href,
+        export_url="/dashboard/requests.csv?" + urlencode(base),
+        page=f.page, page_size=rq.REQUEST_PAGE_SIZE, drawer=drawer,
+        row_limit=rq.CSV_EXPORT_LIMIT, statuses=rq.STATUSES,
     )
 
 
-async def _request_drawer_ctx(request_id: int) -> dict[str, Any] | None:
-    row = await q.get_request(request_id)
-    if row is None:
+async def _request_drawer_ctx(ref: str) -> dict[str, Any] | None:
+    d = await rq.request_detail(ref)
+    if d is None:
         return None
-    attempts = await q.request_attempts(row)
-    for a in (row, *attempts):
+    for a in (d["summary"], *d["attempts"]):
         a["err"] = _friendly_call_error(a["http_status"], a["error_kind"])
-    return {"row": row, "attempts": attempts}
+    return d
 
 
-@router.get("/dashboard/requests/{request_id}")
-async def request_drawer(request_id: int, request: Request) -> Response:
+@router.get("/dashboard/requests/{ref}")
+async def request_drawer(ref: str, request: Request) -> Response:
     if (r := _guard(request)):
         return r
     if not request.headers.get("hx-request"):
-        return RedirectResponse(f"/dashboard/requests?open={request_id}&range=all", status_code=303)
-    d = await _request_drawer_ctx(request_id)
-    return render("_request_drawer.html", drawer=d, request_id=request_id)
+        return RedirectResponse(
+            f"/dashboard/requests?{urlencode({'open': ref, 'range': 'all'})}", status_code=303)
+    return render("_request_drawer.html", drawer=await _request_drawer_ctx(ref), ref=ref)
 
 
 # ─── projects ───────────────────────────────────────────────────────────────
@@ -422,7 +456,7 @@ async def key_edit_form(key_id: int, request: Request) -> Response:
                   reason=reason_labels(key.last_error))
 
 
-# ─── models / jobs / audit / settings ───────────────────────────────────────
+# ─── models / audit / settings ───────────────────────────────────────
 
 
 @router.get("/dashboard/models")
@@ -437,11 +471,9 @@ async def models_page(request: Request) -> Response:
 
 
 @router.get("/dashboard/jobs")
-async def jobs_page(request: Request) -> Response:
-    if (r := _guard(request)):
-        return r
-    jobs = await q.job_overview()
-    return render("jobs.html", **_ctx(request, "jobs", ("Job queue", "Очередь задач")), jobs=jobs)
+async def jobs_page_moved(request: Request) -> Response:
+    """The Jobs page was merged into Requests (queued jobs are rows there)."""
+    return RedirectResponse("/dashboard/requests?type=job", status_code=301)
 
 
 @router.get("/dashboard/audit")

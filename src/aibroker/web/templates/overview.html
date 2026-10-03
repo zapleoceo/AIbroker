@@ -95,11 +95,11 @@
 
   <section class="card" aria-labelledby="q-h">
     <div class="card-head"><h2 id="q-h">{{ t("Job queue", "Очередь задач") }}</h2>
-      <a href="/dashboard/jobs">{{ t("Open queue", "Открыть очередь") }}</a></div>
+      <a href="/dashboard/requests?type=job&amp;range=all">{{ t("Open queue", "Открыть очередь") }}</a></div>
     <div class="card-body">
       <div class="pcard stats" style="padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
-        {% for st, en, ru in (("pending", "pending", "ожидают"), ("running", "running", "в работе"), ("done", "done", "готово"), ("error", "failed", "с ошибкой")) %}
-        <div class="stat"><b class="{{ 'bad' if st == 'error' and jobs.by_status.get(st) else '' }}">{{ jobs.by_status.get(st, 0) }}</b><span>{{ t(en, ru) }}</span></div>
+        {% for st, q, en, ru in (("pending", "pending", "pending", "ожидают"), ("running", "running", "running", "в работе"), ("done", "ok", "done", "готово"), ("error", "failed", "failed", "с ошибкой")) %}
+        <a class="stat" href="/dashboard/requests?type=job&amp;status={{ q }}&amp;range={{ 'all' if st in ('pending', 'running') else '7d' }}" style="color:inherit"><b class="{{ 'bad' if st == 'error' and jobs.by_status.get(st) else '' }}">{{ jobs.by_status.get(st, 0) }}</b><span>{{ t(en, ru) }}</span></a>
         {% endfor %}
       </div>
     </div>

@@ -2,8 +2,6 @@
 auth gates, HTMX fragments, CSV export, static assets."""
 from __future__ import annotations
 
-import csv
-import io
 import os
 
 import pytest
@@ -17,7 +15,7 @@ ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 PAGES = [
     "/dashboard", "/dashboard/requests", "/dashboard/projects", "/dashboard/keys",
-    "/dashboard/models", "/dashboard/jobs", "/dashboard/audit", "/dashboard/settings",
+    "/dashboard/models", "/dashboard/audit", "/dashboard/settings",
 ]
 
 
@@ -56,7 +54,6 @@ def test_admin_key_header_also_opens_pages():
     ("/dashboard/requests", "No requests match"),
     ("/dashboard/projects", "No projects yet"),
     ("/dashboard/keys", "No API keys yet"),
-    ("/dashboard/jobs", "No jobs yet"),
     ("/dashboard/audit", "No audit entries"),
 ])
 def test_empty_database_renders_an_empty_state(path, marker):
@@ -104,9 +101,9 @@ def test_bottom_tab_bar_and_rail_both_present():
     body = _get("/dashboard").text
     assert 'class="rail"' in body and 'class="tabbar"' in body
     for href in ("/dashboard/requests", "/dashboard/projects", "/dashboard/keys",
-                 "/dashboard/models", "/dashboard/jobs", "/dashboard/audit",
-                 "/dashboard/settings"):
+                 "/dashboard/models", "/dashboard/audit", "/dashboard/settings"):
         assert f'href="{href}"' in body
+    assert 'href="/dashboard/jobs"' not in body              # merged into Requests
 
 
 def test_range_picker_presets_and_custom_form():
@@ -139,88 +136,6 @@ def test_overview_with_data_shows_chart_attention_and_provider_health():
 def test_overview_flash_is_shown_and_errors_are_styled():
     assert 'class="flash"' in _get("/dashboard", params={"flash": "Key x added"}).text
     assert 'class="flash err"' in _get("/dashboard", params={"flash": "!Bad cap"}).text
-
-
-# ─── requests ───────────────────────────────────────────────────────────────
-
-
-def test_requests_list_filters_and_sorting():
-    ds.seed_demo()
-    allr = _get("/dashboard/requests", params={"range": "all"}).text
-    assert "gemini" in allr and "groq" in allr and "DeepSeek-V4.1-Flash" in allr
-    errs = _get("/dashboard/requests", params={"range": "all", "status": "error"}).text
-    assert "timeout" in errs and 'class="chip ok"' not in errs.split("<tbody")[1]
-    one = _get("/dashboard/requests", params={"range": "all", "project": "2"}).text
-    assert "describe" in one and "triage" not in one.split("<tbody")[1]
-    costly = _get("/dashboard/requests", params={"range": "all", "min_cost": "0.001"}).text
-    assert "deepseek" in costly and "groq" not in costly.split("<tbody")[1]
-    by_id = _get("/dashboard/requests", params={"range": "all", "id": "3"}).text
-    assert by_id.count('class="clickable"') == 1
-    assert "sort=cost" in allr and "sort=latency" in allr
-
-
-def test_requests_junk_filters_never_500():
-    assert _get("/dashboard/requests", params={
-        "project": "x", "min_cost": "nan", "min_latency": "-4", "status": "zzz",
-        "sort": "; drop table", "page": "99999999", "id": "abc"}).status_code == 200
-
-
-def test_requests_pagination_offers_load_more_then_stops():
-    ds.seed(ds.project(1), ds.key(1))
-    ds.seed(*[ds.usage(100 + i, minutes_ago=i) for i in range(53)])
-    first = _get("/dashboard/requests", params={"range": "today"}).text
-    assert first.count('class="clickable"') == 50
-    assert 'hx-select-oob="#req-more"' in first and "page=1" in first
-    second = _get("/dashboard/requests", params={"range": "today", "page": "1"}).text
-    assert second.count('class="clickable"') == 3 and "Load more" not in second
-
-
-def test_requests_row_opens_drawer_via_htmx():
-    ds.seed_demo()
-    body = _get("/dashboard/requests", params={"range": "all"}).text
-    assert 'hx-get="/dashboard/requests/1"' in body and 'hx-target="#drawer-body"' in body
-    assert 'hx-trigger="click from:closest tr"' in body
-
-
-def test_request_drawer_shows_the_inferred_fallback_trail():
-    ds.seed_demo()
-    r = _get("/dashboard/requests/12", headers={"HX-Request": "true"})
-    assert r.status_code == 200
-    html = r.text
-    assert html.index("cerebras") < html.index("groq") < html.index("gemini")
-    assert html.count('class="n"') == 3 and "timeout" in html and "rate limited" in html
-    assert "inferred" in html                                  # honest about the heuristic
-    for field in ("Routed model", "Model served", "cache read", "cache write", "Latency", "Cost"):
-        assert field in html
-    assert 'aria-labelledby="trail-h"' in html and 'data-close' in html
-
-
-def test_request_drawer_for_unknown_id_says_so():
-    html = _get("/dashboard/requests/999999", headers={"HX-Request": "true"}).text
-    assert "Request not found" in html
-
-
-def test_request_drawer_url_without_htmx_deep_links_into_the_page():
-    r = _get("/dashboard/requests/12")
-    assert r.status_code == 303 and "open=12" in r.headers["location"]
-    ds.seed_demo()
-    page = _get("/dashboard/requests", params={"open": "12", "range": "all"}).text
-    assert 'id="drawer-preload"' in page and "Attempt trail" in page
-
-
-def test_csv_export_columns_filters_and_formula_neutralising():
-    ds.seed(ds.project(1), ds.key(1))
-    ds.seed(ds.usage(1, workflow="=HYPERLINK(1)"), ds.usage(2, status="error", provider="groq"))
-    r = _get("/dashboard/requests.csv", params={"range": "all"})
-    assert r.status_code == 200 and "text/csv" in r.headers["content-type"]
-    assert "attachment" in r.headers["content-disposition"]
-    rows = list(csv.DictReader(io.StringIO(r.text)))
-    assert {x["id"] for x in rows} == {"1", "2"}
-    assert {"cost_usd", "latency_ms", "model_served", "key_label", "cache_read_tokens"} <= set(rows[0])
-    assert next(x for x in rows if x["id"] == "1")["workflow"] == "'=HYPERLINK(1)"
-    only = list(csv.DictReader(io.StringIO(
-        _get("/dashboard/requests.csv", params={"range": "all", "status": "error"}).text)))
-    assert [x["id"] for x in only] == ["2"]
 
 
 # ─── projects ───────────────────────────────────────────────────────────────
@@ -426,7 +341,7 @@ def test_disable_key_returns_to_the_page_it_came_from_and_rejects_evil_next():
     assert r.headers["location"].startswith("/dashboard?flash=")
 
 
-# ─── models / jobs / audit / settings ───────────────────────────────────────
+# ─── models / audit / settings ───────────────────────────────────────
 
 
 def test_models_catalogue_has_prices_copy_buttons_and_flags_unrouted():
@@ -438,14 +353,6 @@ def test_models_catalogue_has_prices_copy_buttons_and_flags_unrouted():
     assert "unrouted" in body and "mistral/mistral-small-latest" in body
     assert "900 ms" in body                                     # observed p50
     assert 'x-data="modelFilter()"' in body and 'type="search"' in body
-
-
-def test_jobs_page_lists_states_and_flags_a_stuck_queue():
-    ds.seed_demo()
-    body = _get("/dashboard/jobs").text
-    for marker in ("Pending", "Running", "Done", "Failed", "Recent jobs",
-                   "all providers failed", "waiting for over 30 minutes"):
-        assert marker in body
 
 
 def test_audit_page_filters_and_paginates():
@@ -539,13 +446,6 @@ def test_quota_labels_and_sources_are_translated():
     assert 'data-ru="лимиты: оценка по умолчанию"' in body
 
 
-def test_job_states_are_translated():
-    ds.seed_demo()
-    body = _get("/dashboard/jobs").text
-    for ru in ("ожидает", "в работе", "готово", "ошибка"):
-        assert f'data-ru="{ru}"' in body
-
-
 def test_attention_plurals_in_both_languages():
     from types import SimpleNamespace as NS
 
@@ -569,7 +469,8 @@ def _icon_only_buttons(html: str):
 
 
 @pytest.mark.parametrize("path", PAGES + ["/dashboard/keys/new", "/dashboard/projects/new",
-                                          "/dashboard/requests/12", "/dashboard/keys/1/edit"])
+                                          "/dashboard/requests/12", "/dashboard/requests/job-1",
+                                          "/dashboard/keys/1/edit"])
 def test_icon_only_buttons_have_an_accessible_name(path):
     ds.seed_demo()
     html = _get(path, headers={"HX-Request": "true"}).text
@@ -599,22 +500,3 @@ def test_text_is_not_ellipsized_on_phones_and_wide_blocks_can_shrink():
 def test_models_table_has_no_forced_wide_columns():
     body = _get("/dashboard/models").text
     assert "table-models" in body and 'class="model-id"' in body
-
-
-def test_request_attempts_group_by_request_id_and_fall_back_to_inference():
-    from aibroker.routes import dashboard_queries as q
-    ds.seed(ds.project(1), ds.key(1))
-    # three rows of one request_id, far apart in time (timing inference could not link them)
-    ds.seed(ds.usage(1, minutes_ago=50, status="error", provider="a", request_id="rq-1"),
-            ds.usage(2, minutes_ago=30, status="error", provider="b", request_id="rq-1"),
-            ds.usage(3, minutes_ago=2, provider="c", request_id="rq-1"),
-            ds.usage(4, minutes_ago=2, provider="d", request_id="rq-2"))
-    row = ds.run(q.get_request(3))
-    assert row["request_id"] == "rq-1"
-    assert [a["id"] for a in ds.run(q.request_attempts(row))] == [1, 2, 3]
-    # NULL request_id: timing inference still works (seeded chain 10 -> 11 -> 12)
-    ds.seed(ds.usage(10, minutes_ago=10, status="error", latency_ms=5000, provider="x",
-                     workflow="w", at=ds.now() - __import__("datetime").timedelta(minutes=10)))
-    old = ds.run(q.get_request(10))
-    assert old["request_id"] is None
-    assert [a["id"] for a in ds.run(q.request_attempts(old))][-1] == 10

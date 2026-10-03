@@ -38,6 +38,31 @@
 {%- endif -%}
 {%- endmacro %}
 
+{# Final state of a client request (list row or drawer summary): ok / pending / running / the last failure's friendly label. #}
+{% macro req_status(r) -%}
+{%- if r.state == "ok" -%}
+  <span class="chip ok">{{ t("ok", "ок") }}</span>
+{%- elif r.state == "pending" -%}
+  <span class="chip warn">{{ t("pending", "ожидает") }}</span>
+{%- elif r.state == "running" -%}
+  <span class="chip info">{{ t("running", "в работе") }}</span>
+{%- elif r.err -%}
+  <span class="chip {{ r.err[2] }}" title="{{ r.http_status or '' }} {{ r.error_kind or '' }}">{{ t(r.err[0], r.err[1]) }}</span>
+{%- else -%}
+  <span class="chip bad">{{ t("failed", "ошибка") }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# "N tries → provider · model" (served), or what is known while the request is still open. #}
+{% macro req_outcome(r) -%}
+{%- if not r.tries -%}
+  <span class="dim">{{ t("no attempt yet", "попыток ещё не было") }}</span>
+{%- else -%}
+  {%- if r.tries > 1 %}<span class="dim">{{ tn(r.tries, "try", "tries", "попытка", "попытки", "попыток") }}{% if r.state == "ok" %} →{% else %} ·{% endif %}</span> {% endif -%}
+  <b>{{ r.provider }}</b><span class="dim"> · {{ r.model_served or r.model or "—" }}</span>
+{%- endif -%}
+{%- endmacro %}
+
 {% macro delta(d) -%}
 {%- if d -%}
 <span class="delta {{ d.tone }}" title="vs previous period">{{ "▲" if d.dir == "up" else "▼" if d.dir == "down" else "■" }} {{ d.text }}</span>

@@ -238,10 +238,12 @@ def build_attention(key_rows: Sequence[dict[str, Any]], groups: Sequence[Mapping
                 f"/dashboard/projects/{p.id}")
     if jobs and jobs.get("stuck_pending"):
         add("bad", "Job queue: pending jobs are waiting too long — dispatcher stuck?",
-            "Очередь: задачи ждут слишком долго — завис диспетчер?", "/dashboard/jobs")
+            "Очередь: задачи ждут слишком долго — завис диспетчер?",
+            "/dashboard/requests?type=job&status=pending&range=all")
     if jobs and jobs.get("stuck_running"):
         add("warn", "Job queue: a job has been running for a very long time",
-            "Очередь: задача выполняется слишком долго", "/dashboard/jobs")
+            "Очередь: задача выполняется слишком долго",
+            "/dashboard/requests?type=job&status=running&range=all")
     order = {"bad": 0, "warn": 1, "info": 2}
     items.sort(key=lambda i: order[i["sev"]])
     return items

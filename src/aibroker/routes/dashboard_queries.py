@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,20 +22,10 @@ from aibroker.db import get_session
 from aibroker.db.models import AuditLogRow
 from aibroker.routes.dashboard_data import _LAT_EDGES_MS, _LAT_LABELS
 
-REQUEST_PAGE_SIZE = 50
-CSV_EXPORT_LIMIT = 20_000
 AUDIT_PAGE_SIZE = 50
 STUCK_PENDING_MIN = 30   # same threshold monitor.check_queue_backlog alerts on
 STUCK_RUNNING_MIN = 25   # job_queue reclaims `running` jobs after this long
 _ALL_TIME_DAYS = 120     # usage_log retention, the 'all' window's left edge
-
-# Whitelisted ORDER BY — user input only ever selects a key, never SQL.
-_SORTS: dict[str, str] = {
-    "time": "u.id",
-    "cost": "u.cost_usd",
-    "latency": "COALESCE(u.latency_ms, -1)",
-    "tokens": "(u.tokens_in + u.tokens_out)",
-}
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -417,135 +406,21 @@ def _opt_int(v: Any) -> int | None:
     return n if n >= 0 else None
 
 
-def _opt_float(v: Any) -> float | None:
-    try:
-        x = float(str(v).strip())
-    except (TypeError, ValueError):
-        return None
-    return x if math.isfinite(x) and x >= 0 else None
-
-
 def _opt_str(v: Any, maxlen: int = 120) -> str | None:
     s = (str(v).strip() if v is not None else "")[:maxlen]
     return s or None
 
 
-@dataclass
-class RequestFilter:
-    start: datetime | None = None
-    end: datetime | None = None
-    project_id: int | None = None
-    workflow: str | None = None
-    capability: str | None = None
-    provider: str | None = None
-    model: str | None = None
-    status: str | None = None          # ok | error
-    min_cost: float | None = None
-    min_latency: int | None = None
-    request_id: int | None = None
-    sort: str = "time"
-    desc: bool = True
-    page: int = 0
-
-    @classmethod
-    def from_params(cls, params: Mapping[str, str], start: datetime | None,
-                    end: datetime | None) -> RequestFilter:
-        status = params.get("status")
-        sort = params.get("sort", "time")
-        return cls(
-            start=start, end=end,
-            project_id=_opt_int(params.get("project")),
-            workflow=_opt_str(params.get("workflow")),
-            capability=_opt_str(params.get("capability")),
-            provider=_opt_str(params.get("provider")),
-            model=_opt_str(params.get("model")),
-            status=status if status in ("ok", "error") else None,
-            min_cost=_opt_float(params.get("min_cost")),
-            min_latency=_opt_int(params.get("min_latency")),
-            request_id=_opt_int(params.get("id")),
-            sort=sort if sort in _SORTS else "time",
-            desc=params.get("dir", "desc") != "asc",
-            page=min(_opt_int(params.get("page")) or 0, 10_000),
-        )
-
-    def conditions(self) -> tuple[list[str], dict[str, Any]]:
-        conds, p = _win(self.start, self.end, "u.created_at")
-        if self.request_id is not None:
-            conds.append("u.id = :rid")
-            p["rid"] = self.request_id
-        for col, val, key in (
-            ("u.project_id", self.project_id, "proj"), ("u.workflow", self.workflow, "wf"),
-            ("u.capability", self.capability, "cap"), ("u.provider", self.provider, "prov"),
-            ("u.model", self.model, "mod"),
-        ):
-            if val is not None:
-                conds.append(f"{col} = :{key}")
-                p[key] = val
-        if self.status == "ok":
-            conds.append("u.status = 'ok'")
-        elif self.status == "error":
-            conds.append("u.status <> 'ok'")
-        if self.min_cost is not None:
-            conds.append("u.cost_usd >= :min_cost")
-            p["min_cost"] = self.min_cost
-        if self.min_latency is not None:
-            conds.append("u.latency_ms >= :min_lat")
-            p["min_lat"] = self.min_latency
-        return conds, p
-
-    @property
-    def order_by(self) -> str:
-        d = "DESC" if self.desc else "ASC"
-        col = _SORTS[self.sort]
-        return f"{col} {d}" if self.sort == "time" else f"{col} {d}, u.id DESC"
-
-    def as_query(self) -> dict[str, str]:
-        """Active filters as query params (sans range/page) — for links."""
-        q: dict[str, str] = {}
-        for key, val in (("project", self.project_id), ("workflow", self.workflow),
-                         ("capability", self.capability), ("provider", self.provider),
-                         ("model", self.model), ("status", self.status),
-                         ("min_cost", self.min_cost), ("min_latency", self.min_latency),
-                         ("id", self.request_id)):
-            if val is not None:
-                q[key] = str(val)
-        if self.sort != "time" or not self.desc:
-            q["sort"] = self.sort
-            q["dir"] = "desc" if self.desc else "asc"
-        return q
-
-
-async def query_requests(f: RequestFilter, *, page_size: int = REQUEST_PAGE_SIZE,
-                         limit: int | None = None) -> tuple[list[dict[str, Any]], bool]:
-    """One page of usage_log rows (+ whether another page exists). `limit`
-    overrides paging for the CSV export (a single bounded query)."""
-    conds, p = f.conditions()
-    if limit is not None:
-        p.update(take=limit, offset=0)
-    else:
-        p.update(take=page_size + 1, offset=f.page * page_size)
+async def request_facets(since: datetime) -> dict[str, list[str]]:
+    """Distinct workflow values (recent, most-used first) for the filter
+    datalist. Capped, so it stays cheap on a large usage_log."""
     async with get_session() as s:
         rows = (await s.execute(text(
-            f"{_REQUEST_SELECT} {_where(conds)} ORDER BY {f.order_by} "
-            "LIMIT :take OFFSET :offset"), p)).all()
-    out = [_row(r, "created_at") for r in rows]
-    if limit is not None:
-        return out, False
-    return out[:page_size], len(out) > page_size
+            "SELECT workflow AS v, COUNT(*) AS c FROM usage_log "
+            "WHERE created_at >= :since AND workflow IS NOT NULL "
+            "GROUP BY v ORDER BY c DESC LIMIT 60"), {"since": since})).all()
+    return {"workflow": [str(r.v) for r in rows]}
 
-
-async def request_facets(since: datetime) -> dict[str, list[str]]:
-    """Distinct workflow / model values (recent, most-used first) for the
-    filter datalists. Capped, so it stays cheap on a large usage_log."""
-    async def top(col: str) -> list[str]:
-        async with get_session() as s:
-            rows = (await s.execute(text(
-                f"SELECT {col} AS v, COUNT(*) AS c FROM usage_log "
-                f"WHERE created_at >= :since AND {col} IS NOT NULL "
-                "GROUP BY v ORDER BY c DESC LIMIT 60"), {"since": since})).all()
-        return [str(r.v) for r in rows]
-    workflows, models = await gather(top("workflow"), top("model"))
-    return {"workflow": workflows, "model": models}
 
 
 async def get_request(request_id: int) -> dict[str, Any] | None:
@@ -555,83 +430,28 @@ async def get_request(request_id: int) -> dict[str, Any] | None:
     return _row(r, "created_at") if r else None
 
 
-# usage_log has no request / lease / job id linking the attempts of one request
-# (lease_id is always NULL), so the fallback trail is INFERRED: the attempts of
-# one walk run back to back, which puts attempt N+1's start (created_at minus
-# its latency) right on attempt N's end (created_at).
-_CHAIN_TOLERANCE_S = 5.0
-_CHAIN_WINDOW = timedelta(minutes=20)
-_CHAIN_MAX_ROWS = 600
-
-
-def _start_of(r: Mapping[str, Any]) -> datetime:
-    return r["created_at"] - timedelta(milliseconds=int(r["latency_ms"] or 0))
-
-
-def link_attempts(anchor: dict[str, Any], cands: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Order the attempts of the request `anchor` belongs to. Pure (testable):
-    walks backwards through failed predecessors and forwards through successors
-    whose start matches the previous attempt's end."""
-    same = [c for c in cands if c["id"] != anchor["id"]]
-    chain = [anchor]
-    used = {anchor["id"]}
-
-    def closest(gap_of: Any, ok_only_failed: bool) -> dict[str, Any] | None:
-        best: tuple[float, dict[str, Any]] | None = None
-        for c in same:
-            if c["id"] in used or (ok_only_failed and c["status"] == "ok"):
-                continue
-            gap = abs(gap_of(c))
-            if gap <= _CHAIN_TOLERANCE_S and (best is None or gap < best[0]):
-                best = (gap, c)
-        return best[1] if best else None
-
-    cur = anchor
-    while True:   # backwards: a predecessor is a FAILED attempt ending as `cur` began
-        nxt = closest(lambda c, cur=cur: (_start_of(cur) - c["created_at"]).total_seconds(), True)
-        if nxt is None:
-            break
-        chain.insert(0, nxt)
-        used.add(nxt["id"])
-        cur = nxt
-    cur = anchor
-    while cur["status"] != "ok":   # forwards: only a failure is followed by another try
-        nxt = closest(lambda c, cur=cur: (_start_of(c) - cur["created_at"]).total_seconds(), False)
-        if nxt is None:
-            break
-        chain.append(nxt)
-        used.add(nxt["id"])
-        cur = nxt
-    return chain
-
-
-async def request_attempts(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """The attempt trail for one usage_log row. Rows carrying a request_id
-    (migration 015) are grouped by it exactly; older rows (NULL) keep the timing
-    inference below (see _CHAIN_*)."""
-    if row.get("request_id"):
-        async with get_session() as s:
-            rows = (await s.execute(text(
-                f"{_REQUEST_SELECT} WHERE u.request_id = :rid ORDER BY u.id"),
-                {"rid": row["request_id"]})).all()
-        return [_row(r, "created_at") for r in rows]
-    p: dict[str, Any] = {
-        "lo": row["created_at"] - _CHAIN_WINDOW, "hi": row["created_at"] + _CHAIN_WINDOW,
-        "take": _CHAIN_MAX_ROWS,
-    }
-    conds = ["u.created_at >= :lo", "u.created_at <= :hi"]
-    for col, key, val in (("u.project_id", "proj", row["project_id"]),
-                          ("u.capability", "cap", row["capability"]),
-                          ("u.workflow", "wf", row["workflow"])):
-        if val is None:
-            conds.append(f"{col} IS NULL")
-        else:
-            conds.append(f"{col} = :{key}")
-            p[key] = val
+async def request_attempts(request_id: str | None) -> list[dict[str, Any]]:
+    """Every attempt row of one client request (migration 015's request_id),
+    oldest first."""
+    if not request_id:
+        return []
     async with get_session() as s:
         rows = (await s.execute(text(
-            f"{_REQUEST_SELECT} {_where(conds)} ORDER BY u.id LIMIT :take"), p)).all()
-    return link_attempts(row, [_row(r, "created_at") for r in rows])
+            f"{_REQUEST_SELECT} WHERE u.request_id = :rid ORDER BY u.id"),
+            {"rid": request_id})).all()
+    return [_row(r, "created_at") for r in rows]
+
+
+async def get_job(job_id: int) -> dict[str, Any] | None:
+    """One deep_jobs row (queue state, no payload) for the request drawer."""
+    async with get_session() as s:
+        r = (await s.execute(text(
+            "SELECT j.id, j.project_id, p.name AS project, j.capability, j.status, "
+            "j.retry_count, j.created_at, j.started_at, j.completed_at, j.error_message "
+            "FROM deep_jobs j LEFT JOIN projects p ON p.id = j.project_id "
+            "WHERE j.id = :id"), {"id": job_id})).first()
+    return _row(r, "created_at", "started_at", "completed_at") if r else None
+
 
 
 # ─── keys / models ──────────────────────────────────────────────────────────
@@ -692,12 +512,10 @@ async def job_overview() -> dict[str, Any]:
             "SELECT MIN(created_at) FROM deep_jobs WHERE status = 'pending'"))).scalar()
         longest = (await s.execute(text(
             "SELECT MIN(started_at) FROM deep_jobs WHERE status = 'running'"))).scalar()
-        recent = (await s.execute(text(
-            "SELECT j.id, j.project_id, p.name AS project, j.capability, j.status, "
-            "j.retry_count, j.created_at, j.started_at, j.completed_at, j.run_after, "
-            "j.error_message "
-            "FROM deep_jobs j LEFT JOIN projects p ON p.id = j.project_id "
-            "ORDER BY j.id DESC LIMIT 50"))).all()
+        failed_24h = (await s.execute(text(
+            "SELECT COUNT(*) FROM deep_jobs WHERE status = 'error' "
+            "AND COALESCE(completed_at, created_at) >= :since"),
+            {"since": now - timedelta(hours=24)})).scalar()
     oldest_pending, oldest_running = _dt(oldest), _dt(longest)
     return {
         "by_status": {r.status: int(r.n) for r in counts},
@@ -706,8 +524,7 @@ async def job_overview() -> dict[str, Any]:
                               and now - oldest_pending > timedelta(minutes=STUCK_PENDING_MIN)),
         "stuck_running": bool(oldest_running
                               and now - oldest_running > timedelta(minutes=STUCK_RUNNING_MIN)),
-        "recent": [_row(r, "created_at", "started_at", "completed_at", "run_after")
-                   for r in recent],
+        "failed_24h": int(failed_24h or 0),
     }
 
 

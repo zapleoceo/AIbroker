@@ -16,15 +16,14 @@ templates; `build_env` builds the Jinja environment; formatters live in web/form
 
 | Page | Route | Notes |
 |---|---|---|
-| Overview | `/dashboard` (`overview`) | KPI strip with sparklines and delta vs previous period, stacked usage-by-model chart (spend/calls), "needs attention" list, provider health grid, top projects, job queue summary |
-| Requests | `/dashboard/requests` (`requests_page`) | filters (project, workflow, capability, provider, model, status, min cost/latency, request id), server-side sort, "load more", CSV export `/dashboard/requests.csv` (`requests_csv`, capped, formula-injection safe) |
-| Request drawer | `/dashboard/requests/{id}` (`request_drawer`) | tokens in/out/cache, cost, latency, error label, `model_served`, attempt trail; `?open=<id>` deep-links |
+| Overview | `/dashboard` (`overview`) | KPI strip with sparklines and delta vs previous period, stacked usage-by-model chart (spend/calls), "needs attention" list, provider health grid, top projects, job queue summary whose tiles link to the filtered Requests page |
+| Requests | `/dashboard/requests` (`requests_page`) | **one row per client request**, queued jobs included (the former Jobs page). Sticky live queue strip (`requests_queue_strip`, HTMX poll every 10 s: pending, running, failed 24 h, oldest pending; each tile is a filter link). Columns: time, project · workflow, capability, final status, "N tries → provider/model", queue wait + response time (jobs wait; direct calls only respond), cost and tokens summed over the attempts. Filters: range picker, project, workflow, capability, provider (any attempt), status (`ok`/`failed`/`pending`/`running`), type (`job`/`direct`), request-id search (`q`), "Only failed". Server-side sort and "load more"; CSV `/dashboard/requests.csv` (`requests_csv`, one row per request, capped, formula-injection safe) |
+| Request drawer | `/dashboard/requests/{ref}` (`request_drawer`) | `ref` is a usage_log id or `job-<id>`. Status, copyable request id, job block (queued at, waited, retries, final error), the attempt trail (provider, key, model served, latency, cost, tokens, cache) and totals; `?open=<ref>` deep-links |
 | Projects | `/dashboard/projects` (`projects_page`) | cards: today's spend vs daily cap, lifetime-request meter (`request_cap_view`, only when a cap is set), cache-hit badge, sparkline, a **self-signup** badge for projects created via `POST /v1/signup` and a `?signup=1` filter chip; "New project" drawer (`project_new_form`) |
 | Project detail | `/dashboard/projects/{id}?tab=usage\|models\|keys\|settings` (`project_detail`, `render_project_detail`; `render_projects` re-renders the list after create) | settings: edit (incl. **lifetime request cap**, blank = unlimited, with a used/limit progress bar), rotate token, delete |
 | Keys & providers | `/dashboard/keys` (`keys_page`) | grouped by provider; status chip, cooldown countdown, quota burn per axis, last success/error; Test / Edit / Enable-Disable / Delete |
 | Add/edit key drawer | `/dashboard/keys/new` (`key_new_form`), `/dashboard/keys/{id}/edit` (`key_edit_form`) | advanced quota overrides collapsed |
 | Models | `/dashboard/models` (`models_page`) | catalogue from `providers/catalog` (`price_info`) and the registry, with the capability chains: capability, provider, id (copy), price in/out per 1M, 7-day p50 latency and success; unrouted models flagged |
-| Jobs | `/dashboard/jobs` (`jobs_page`) | `deep_jobs` states, stuck-queue warning |
 | Audit log | `/dashboard/audit` | `audit_log`, actor/action filters, keyset paging |
 | Settings | `/dashboard/settings` (`settings_page`) | version, caps, links to `/docs` and `/v1/health`, language, logout |
 
@@ -45,21 +44,32 @@ path, else ignored) to land back on the page they came from.
 
 `routes/dashboard_queries.py` — read-only, **portable** SQL (Postgres and SQLite):
 `range_totals`, `latency_percentile`, `time_series`, `usage_by_model_series`,
-`provider_activity`, `project_range_stats`, `project_breakdown`, `query_requests`
-(`RequestFilter`), `request_facets`, `get_request`, `request_attempts` (`link_attempts`),
-`key_activity`, `gather` (parallel on Postgres, sequential on SQLite), `observed_model_stats`, `job_overview`, `audit_page`, `bucket_starts`,
+`provider_activity`, `project_range_stats`, `project_breakdown`, `request_facets`,
+`get_request`, `request_attempts`, `get_job`, `key_activity`, `gather` (parallel on Postgres, sequential on SQLite), `observed_model_stats`, `job_overview`, `audit_page`, `bucket_starts`,
 `floor_bucket`. `routes/dashboard_views.py` shapes rows into view-models (pure functions:
 `build_kpis`, `build_attention`, `build_key_rows`, `group_by_provider`,
 `build_project_cards`, `build_model_catalogue`, `pct_change`);
 `routes/dashboard_labels.py` holds friendly error labels and `key_status` (`KeyStatus`,
 `reason_labels`); `provider_catalogue` drives the add-key drawer.
 
-### Attempt trail (honest limitation)
+### One row per client request
 
-`usage_log` has no request/lease/job id linking the attempts of one request (`lease_id`
-is always NULL). The drawer therefore **infers** the trail: same project, workflow and
-capability, each attempt starting (created_at − latency) within 5 s of the previous
-failure's end. Concurrent identical requests can in theory be mixed; the UI says so.
+`routes/dashboard_requests.py` builds the Requests list (`query_requests`, `RequestFilter`,
+`search_target`, `request_detail`). `usage_log` has one row per provider **attempt**; the
+attempts of one request share `request_id` (a uuid for direct calls, `job-<id>` for queued
+jobs, migration 015) and are aggregated in the database with `GROUP BY`. Rows with a NULL
+`request_id` (older than the migration) are each their own request (`u-<usage id>`). Queued
+jobs are LEFT JOINed on `'job-' || deep_jobs.id`, and a job with no attempt yet still appears
+straight from `deep_jobs`, so `pending` / `running` work is visible. The final state is the
+job's own state while it is live or once it ended, otherwise `ok` iff some attempt succeeded.
+
+Cost control: only the requested page is joined to its served attempt, project and key, and
+the newest-first page is cut from a recent slice (1 d, 7 d, 30 d, then the whole range) that
+reaches one day further back than it keeps, so a request started just before the cut is still
+aggregated whole. On 1M `usage_log` rows the default view answers in about 0.2 s (EXPLAIN
+shows `ix_usage_created_at`, and `ix_usage_request_id` for the id search and job lookups);
+a rare filter (e.g. one provider over the whole retention window) still scans the range.
+`/dashboard/jobs` answers 301 to `/dashboard/requests?type=job` (`jobs_page_moved`).
 
 ## Landing and health
 

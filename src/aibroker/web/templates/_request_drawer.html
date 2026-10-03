@@ -1,25 +1,41 @@
 {% import "_macros.html" as m with context %}
 <div class="drawer-head">
-  <h2 id="drawer-title">{{ t("Request", "Запрос") }} #{{ request_id if request_id is defined else (drawer.row.id if drawer else "") }}</h2>
+  <h2 id="drawer-title">{{ t("Request", "Запрос") }}</h2>
   <button type="button" class="icon-btn" data-close {{ ttl("Close", "Закрыть") }}>{{ m.icon("x") }}</button>
 </div>
 {% if not drawer %}
   {{ m.empty("inbox", "Request not found", "Запрос не найден", "It may have been purged (usage history is kept for a limited time).", "Возможно, он удалён (история хранится ограниченное время).") }}
 {% else %}
-{% set r = drawer.row %}
+{% set r = drawer.summary %}
+{% set job = drawer.job %}
 <div class="drawer-pad">
   <div class="row">
-    {{ m.call_status(r) }}
+    {{ m.req_status(r) }}
     <span class="muted">{{ r.created_at|time_tag("full") }}</span>
-    <button type="button" class="btn btn-sm btn-ghost" style="margin-left:auto" data-copy="{{ r.id }}">{{ m.icon("copy") }}{{ t("Copy ID", "Копировать ID") }}</button>
+    <button type="button" class="btn btn-sm btn-ghost" style="margin-left:auto" data-copy="{{ r.request_id }}">{{ m.icon("copy") }}{{ t("Copy ID", "Копировать ID") }}</button>
   </div>
+  <p class="mono wrap-any muted" style="font-size:12.5px">{{ r.request_id }}</p>
+
+  {% if job %}
+  <section class="stack-sm" aria-labelledby="job-h">
+    <h3 id="job-h">{{ t("Queued job", "Задача из очереди") }}</h3>
+    <dl class="kv">
+      <dt>{{ t("Queued at", "Поставлена") }}</dt><dd>{{ job.created_at|time_tag("full") }}</dd>
+      <dt>{{ t("Waited", "Ждала в очереди") }}</dt><dd>{{ r.wait_ms|ms }}</dd>
+      <dt>{{ t("Retries", "Повторы") }}</dt><dd>{{ job.retry_count }}</dd>
+      {% if job.completed_at %}<dt>{{ t("Finished", "Завершена") }}</dt><dd>{{ job.completed_at|time_tag("full") }}</dd>{% endif %}
+      {% if job.error_message %}<dt>{{ t("Final error", "Итоговая ошибка") }}</dt><dd class="bad wrap-any">{{ job.error_message }}</dd>{% endif %}
+    </dl>
+  </section>
+  {% endif %}
 
   <section class="stack-sm" aria-labelledby="trail-h">
     <h3 id="trail-h">{{ t("Attempt trail", "Цепочка попыток") }}
       {% if drawer.attempts|length > 1 %}<span class="muted">· {{ tn(drawer.attempts|length, "attempt", "attempts", "попытка", "попытки", "попыток") }}</span>{% endif %}</h3>
+    {% if drawer.attempts %}
     <ol class="trail">
       {% for a in drawer.attempts %}
-      <li class="{{ 'ok' if a.status == 'ok' else 'bad' }}{{ ' here' if a.id == r.id }}">
+      <li class="{{ 'ok' if a.status == 'ok' else 'bad' }}">
         <span class="n">{{ loop.index }}</span>
         <div class="t stack-sm" style="gap:3px;min-width:0">
           <div class="row" style="gap:8px">
@@ -28,34 +44,27 @@
             {{ m.call_status(a) }}
             <span class="muted nowrap" style="margin-left:auto">{{ a.latency_ms|ms }}</span>
           </div>
-          <span class="muted wrap-any" style="font-size:12.5px">{{ a.model_served or a.model or "—" }}{% if a.id == r.id %} · {{ t("this row", "эта строка") }} (#{{ a.id }}){% else %} · #{{ a.id }}{% endif %}</span>
+          <span class="muted wrap-any" style="font-size:12.5px">{{ a.model_served or a.model or "—" }} · #{{ a.id }} · {{ a.created_at|time_tag("hm") }}</span>
+          <span class="dim wrap-any mono" style="font-size:12px">{{ a.cost_usd|money(6) }} · {{ a.tokens_in|num }} / {{ a.tokens_out|num }} {{ t("tokens", "токенов") }}{% if a.cache_read_tokens or a.cache_write_tokens %} · {{ t("cache", "кэш") }} {{ a.cache_read_tokens|num }} / {{ a.cache_write_tokens|num }}{% endif %}</span>
         </div>
       </li>
       {% endfor %}
     </ol>
-    <p class="dim" style="font-size:12px">{{ t("usage_log has no request ID linking attempts, so this trail is inferred: same project, workflow and capability, each attempt starting when the previous one failed.", "В usage_log нет ID, связывающего попытки, поэтому цепочка восстановлена: тот же проект, workflow и способность, каждая попытка стартует сразу после неудачи предыдущей.") }}</p>
+    {% else %}
+    <p class="muted">{{ t("No attempt yet — the job is waiting for the dispatcher.", "Попыток ещё не было — задача ждёт диспетчера.") }}</p>
+    {% endif %}
   </section>
 
   <section class="stack-sm" aria-labelledby="det-h">
-    <h3 id="det-h">{{ t("Details", "Детали") }}</h3>
+    <h3 id="det-h">{{ t("Totals", "Итого") }}</h3>
     <dl class="kv">
       <dt>{{ t("Project", "Проект") }}</dt><dd>{% if r.project_id %}<a href="/dashboard/projects/{{ r.project_id }}">{{ r.project or r.project_id }}</a>{% else %}—{% endif %}</dd>
       <dt>{{ t("Workflow", "Workflow") }}</dt><dd>{{ r.workflow or "—" }}</dd>
       <dt>{{ t("Capability", "Способность") }}</dt><dd><span class="pill">{{ r.capability or "—" }}</span></dd>
-      <dt>{{ t("Provider", "Провайдер") }}</dt><dd>{{ r.provider }}{% if r.key_label %} <span class="pill">{{ r.key_label }}</span>{% endif %}</dd>
-      <dt>{{ t("Routed model", "Маршрут") }}</dt><dd class="mono">{{ r.model or "—" }}</dd>
-      <dt>{{ t("Model served", "Ответила модель") }}</dt><dd class="mono">{{ r.model_served or t("same as routed", "как в маршруте") }}</dd>
-      <dt>{{ t("Latency", "Задержка") }}</dt><dd>{{ r.latency_ms|ms }}</dd>
+      <dt>{{ t("Response time", "Время ответа") }}</dt><dd>{{ r.latency_ms|ms if r.tries else "—" }}</dd>
       <dt>{{ t("Cost", "Цена") }}</dt><dd>{{ r.cost_usd|money(6) }}</dd>
-      {% if r.status != "ok" %}
-      <dt>{{ t("Error", "Ошибка") }}</dt><dd>{% if r.err %}{{ t(r.err[0], r.err[1]) }} · {% endif %}<span class="mono">{{ r.http_status or "" }} {{ r.error_kind or "" }}</span></dd>
-      {% endif %}
     </dl>
-  </section>
-
-  <section class="stack-sm" aria-labelledby="tok-h">
-    <h3 id="tok-h">{{ t("Tokens", "Токены") }}</h3>
-    <div class="pcard stats" style="padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
+    <div class="pcard stats" style="padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
       <div class="stat"><b>{{ r.tokens_in|num }}</b><span>{{ t("in", "вход") }}</span></div>
       <div class="stat"><b>{{ r.tokens_out|num }}</b><span>{{ t("out", "выход") }}</span></div>
       <div class="stat"><b>{{ r.cache_read_tokens|num }}</b><span>{{ t("cache read", "чтение кэша") }}</span></div>
@@ -65,7 +74,6 @@
 
   <div class="row">
     {% if r.project_id %}<a class="btn" href="/dashboard/requests?project={{ r.project_id }}&amp;range=all">{{ t("All requests of this project", "Все запросы проекта") }}</a>{% endif %}
-    {% if r.api_key_id %}<a class="btn" href="/dashboard/keys#p-{{ r.provider }}">{{ t("Show key", "К ключу") }}</a>{% endif %}
   </div>
 </div>
 {% endif %}
