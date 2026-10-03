@@ -44,6 +44,7 @@ from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.llm_service import (
     BUDGET_EXHAUSTED,
+    CONTENT_FAILED,
     run_chat,
     run_transcribe,
 )
@@ -63,6 +64,11 @@ _POLL_INTERVAL_S = float(os.environ.get("JOB_POLL_INTERVAL_S", "1.0"))
 _IDLE_POLL_INTERVAL_S = 5.0
 _LISTEN_RECONNECT_MAX_S = 30.0
 _MAX_RETRIES = int(os.environ.get("JOB_MAX_RETRIES", "8"))
+# A walk where every provider returned a billed EmptyBody / InvalidJSON and nothing
+# transient happened is a verdict on the PROMPT: re-running it 8 times just re-bills
+# the same input (2026-10-04: ~36 attempts / 13 min for one job). One retry covers
+# the odd coin-flip empty; then the job fails with an honest message.
+_MAX_CONTENT_RETRIES = int(os.environ.get("JOB_MAX_CONTENT_RETRIES", "1"))
 # A `running` row whose worker died mid-call is re-queued after this long. Must
 # sit safely ABOVE the longest a live worker can hold a job: run_chat's own hard
 # backstop is _DEEP_CALL_TIMEOUT_S (19 min via asyncio.wait_for), so a live
@@ -189,7 +195,8 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
 
 
 async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
-                            expect_started_at: datetime | None = None) -> None:  # pragma: no cover
+                            expect_started_at: datetime | None = None,
+                            max_retries: int | None = None) -> None:  # pragma: no cover
     """A job attempt didn't produce a result (no capacity, or an error). Retry
     with backoff until `_MAX_RETRIES`, then give up and mark it error. Covered
     by test_job_queue.py's Postgres tests (test_drain_once_requeues_when_no_
@@ -201,7 +208,7 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
     worker can't clobber the live claim — reset its started_at, or fail a job
     that's legitimately running elsewhere (2026-07-19 review: only the success
     path was guarded, so the error/no-provider paths could double-execute)."""
-    if retry_count + 1 > _MAX_RETRIES:
+    if retry_count + 1 > (_MAX_RETRIES if max_retries is None else max_retries):
         await _finish(job_id, status="error",
                        error_message=f"{reason} (gave up after {retry_count} retries)",
                        expect_started_at=expect_started_at)
@@ -305,6 +312,12 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         await alert(f"budget:{row.project_id}",
                     f"project <b>{project.name}</b> hit its daily budget cap — "
                     "jobs paused until 00:00 UTC", throttle_min=24 * 60)
+        return
+    if outcome is CONTENT_FAILED:
+        await _requeue_or_fail(
+            row.id, row.retry_count,
+            "all providers returned empty/invalid JSON for this prompt",
+            expect_started_at=row.started_at, max_retries=_MAX_CONTENT_RETRIES)
         return
     if outcome is None:
         # No provider available right now — retry as capacity frees up.

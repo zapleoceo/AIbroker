@@ -273,6 +273,10 @@ broker finishes its fallback chain). See `docs/api.md`.
     cooling), the job is re-queued with exponential backoff (`run_after`,
     `retry_count`) up to `JOB_MAX_RETRIES`, then errors. The queue drains as
     capacity frees up.
+  - *Content failures.* If every provider returned a billed EmptyBody /
+    InvalidJSON and nothing transient happened, `run_chat` returns
+    `CONTENT_FAILED` and the job gets only `JOB_MAX_CONTENT_RETRIES` (default 1)
+    retries before erroring - see docs/routing.md "Content failures".
 - `drain_once()` is one deterministic pass (claim + run to completion) — what
   the loop repeats, and what tests drive directly.
 - Queue state lives on `deep_jobs` (migrations 008 `capability`, 009

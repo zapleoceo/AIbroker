@@ -649,6 +649,8 @@
 > **github REMOVED entirely** (provider + key + chains/DEFAULT_MODEL/quotas/probe) —
 > free tier is ~150 req/day on 1 key with a non-UTC reset window, so the key sat
 > exhausted (155 attempts / 0 success / all 429 on its last full day). Dead weight.
+> **SUPERSEDED 2026-10-04 — see "Content failures: EmptyBody / InvalidJSON" at the
+> end of this file: there is no same-provider key retry any more.**
 > **Empty-body retry (JSON gate)**: a blank/whitespace response is now a TRANSIENT
 > throttle, not a model defect — DeepSeek's json_object intermittently returns an
 > empty string on very large prompts (~24% on Stepan's 52k-char follow-up prompt,
@@ -2090,3 +2092,50 @@ Fixes from the project review; each is pinned by a regression test.
   TypeError/KeyError fail the job at once instead of 8 retries.
 - **Gemini 3.x**: `temperature` is dropped in `_GeminiAdapter`.
 - **Audio uploads** are read in chunks with a size limit before buffering.
+
+## Content failures: EmptyBody / InvalidJSON (2026-10-04)
+
+An `EmptyBody` (blank JSON reply) or `InvalidJSON` (unparseable reply) is a property
+of the (model, prompt) pair, not of the key. Evidence: one Stepan `reply` prompt
+(39k tokens, `response_format=json_object`, queued job) produced ~36 attempts over
+13 minutes — per job run gemini-3.5-flash-lite `InvalidJSON`, then 3-4 deepseek
+keys (18/19/24/100) all `EmptyBody` (http 200, 200-1200 output tokens, billed), and
+the queue re-ran the job about 9 times with the identical outcome. 172 `EmptyBody`
+rows on those four keys in 24 h.
+
+Policy (`services/llm_service.py`, `services/job_queue.py`):
+
+- **Walk.** The JSON gate returns `Flow.NEXT_PROVIDER` for both kinds: after the first
+  one the walk moves to the next provider/model in the chain, never to a sibling key
+  of the same model. The failed attempt is still billed (the input was charged) and
+  an `EmptyBody` still feeds `circuit.note_empty_body` (the empty-storm reorder).
+  `Flow.NEXT_KEY_EMPTY` and `_MAX_EMPTY_RETRIES` are gone. Trade-off: the
+  2026-07-31 measurement (deepseek-v4-pro chat:sales, ~49% coin-flip empties that a
+  same-key retry rescued) no longer gets that rescue — the next provider answers
+  instead.
+- **Verdict.** `run_chat` counts content failures and every other failed attempt
+  (rate limit, timeout, 5xx, cap block, tool-contract miss, ...). If at least one
+  content failure happened and nothing else failed, it returns `CONTENT_FAILED`
+  (a sentinel next to `BUDGET_EXHAUSTED`) instead of `None`.
+- **Job retry policy.** `CONTENT_FAILED` re-queues with the short budget
+  `JOB_MAX_CONTENT_RETRIES` (default 1): the job runs, is retried once, then fails
+  with "all providers returned empty/invalid JSON for this prompt (gave up after 1
+  retries)". `None` (no capacity / transient errors) keeps `JOB_MAX_RETRIES` (8).
+- **Why deepseek empties here.** On the thinking-keep path (JSON + prompt >=
+  `_DEEPSEEK_JSON_EMPTY_CHARS`) `max_tokens` is already raised to 3000, and the
+  empties still carry only 200-1200 output tokens, so it is not budget starvation:
+  it is DeepSeek's JSON-mode empty-content behaviour on very large prompts (DeepSeek's
+  own JSON-output guide warns that the model may return empty content). Big-JSON
+  prompts already defer deepseek behind the free providers
+  (`is_deepseek_big_json_prompt`); the fix here is to stop paying for it N times.
+  The real lever stays caller-side (trim the system prompt).
+
+### Gemini key 16 "auth_fail / BadRequestError" (checked 2026-10-04)
+
+`api_keys.last_error` for key 16 is a real 402 `"Your prepayment credits are
+depleted"` that litellm typed as `BadRequestError`: a genuine billing death, so
+`auth` is correct (`_BILLING_DEPLETED_SIGNS`). The classifier is nevertheless
+tightened: an exception without a `status_code` attribute whose message names a 4xx
+(`Error code: 400`) is treated as a neutral client error too, so a 400 that merely
+contains "unauthorized"/"forbidden" can no longer kill a healthy key. Explicit
+bad-key phrasings ("API key not valid") and the billing phrases still win.

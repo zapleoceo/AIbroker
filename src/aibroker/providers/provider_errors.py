@@ -178,7 +178,13 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     if (any(sign in emsg for sign in _AUTH_SIGNS) or _BAD_KEY_RE.search(emsg)
             or statuses & {401, 403} or names & _AUTH_EXC_NAMES):
         return "auth"
-    neutral_4xx = attr is not None and 400 <= attr < 500 and attr not in _NEUTRAL_4XX_EXCLUDED
+    # An exception without a status attribute still names its status in the body
+    # ("Error code: 400 ..."); a 400 that merely contains the word "unauthorized"
+    # or "forbidden" in its text is a bad REQUEST, never a bad key (explicit
+    # bad-key phrasings were already handled above, unconditionally).
+    http = {attr} if attr is not None else {c for c in statuses if 100 <= c <= 599}
+    neutral_4xx = bool(http) and all(
+        400 <= c < 500 and c not in _NEUTRAL_4XX_EXCLUDED for c in http)
     if not neutral_4xx:
         if any(sign in emsg for sign in _RATE_LIMIT_SIGNS) or _QUOTA_WORD_RE.search(emsg):
             return "rate_limit"

@@ -166,3 +166,16 @@ def test_bucket_helpers():
     assert q.floor_bucket(s, "hour") == datetime(2026, 1, 1, 10) and q.floor_bucket(s, "day").hour == 0
     assert len(q.bucket_starts(s, s + timedelta(hours=3), "hour")) == 4
     assert datetime.now(UTC) and len(q.bucket_starts(s, s + timedelta(days=2), "day")) == 3
+
+
+def test_key_activity_denominator_counts_ok_and_error_rows():
+    """The keys list prints `errs/calls`: calls must be ALL rows of the key in the
+    window (31 ok + 19 error -> 19/50), never just the failed ones."""
+    ds.seed(ds.project(777, "p777"), ds.key(77, "deepseek", "k77"),
+            *[ds.usage(9000 + i, project_id=777, api_key_id=77) for i in range(31)],
+            *[ds.usage(9100 + i, project_id=777, api_key_id=77, status="error", error_kind="EmptyBody",
+                       http_status=200) for i in range(19)])
+    act = ds.run(q.key_activity(ds.now() - timedelta(hours=1)))
+    assert (act[77]["errs"], act[77]["calls"]) == (19, 50)
+    rows = v.build_key_rows([ds.key(77, "deepseek", "k77")], {}, act, ds.now(), {})
+    assert (rows[0]["errs"], rows[0]["calls"]) == (19, 50)

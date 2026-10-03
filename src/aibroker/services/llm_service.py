@@ -61,7 +61,7 @@ from aibroker.services.attempt import Attempt, AttemptResult, Flow, Rejection, r
 from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
 
 __all__ = [
-    "BUDGET_EXHAUSTED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
+    "BUDGET_EXHAUSTED", "CONTENT_FAILED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
     "EmbedOutcome", "EmbedRequestInvalid", "TranscribeFailed", "TranscribeOutcome", "classify_provider_error",
     "run_chat", "run_decision", "run_embed", "run_transcribe",
 ]
@@ -70,11 +70,13 @@ log = logging.getLogger(__name__)
 
 # Keys tried per provider before the walk moves on: ProviderSpec.max_keys
 # (default 5; gemini/cerebras 3 — they rate-limit their keys in lockstep).
-# Empty/whitespace JSON bodies: retry the same provider at most this many times
-# before treating it as a real miss. An empty body is a ~coin flip on big JSON
-# prompts (measured 49% on deepseek-v4-pro, same key/prompt/cache), so the retry
-# count IS the fix; retries land on the SAME key and re-read its warm cache.
-_MAX_EMPTY_RETRIES = 3
+# EmptyBody / InvalidJSON are properties of the (model, prompt) pair, not of the
+# key: after the first one a request moves to the NEXT provider instead of trying
+# the sibling keys of the same model (2026-10-04: one 39k-token Stepan prompt burned
+# ~36 attempts over 13 min, 3-4 deepseek keys per walk, every one empty). See
+# docs/routing.md "Content failures".
+# Failure kinds a quality gate raises for a deterministic bad answer.
+_CONTENT_FAILURES = frozenset({"EmptyBody", "InvalidJSON"})
 
 # Distinct keys of one provider that must return an empty body inside the breaker
 # window before we try the free tier ahead of it (one flaky key must not reorder).
@@ -187,6 +189,17 @@ class _BudgetExhausted:
 BUDGET_EXHAUSTED = _BudgetExhausted()
 
 
+class _ContentFailed:
+    """Sentinel run_chat returns when EVERY attempt of the walk got a billed,
+    deterministic bad answer (EmptyBody / InvalidJSON) and nothing else went wrong
+    (no rate limit, timeout, 5xx, capped key). The prompt, not capacity, is the
+    problem, so the job queue gives it one more try at most instead of eight."""
+    __slots__ = ()
+
+
+CONTENT_FAILED = _ContentFailed()
+
+
 # ─── Chat ───────────────────────────────────────────────────────────────────
 
 
@@ -207,11 +220,13 @@ def _chat_gate(
             return Rejection("EmptyBody", Flow.NEXT_PROVIDER, http_status=502, bill=False,
                              log_message=f"{provider} returned an empty body — escalating")
         if _wants_json(response_format) and not _is_valid_json(text):
-            # EMPTY = transient provider throttle (retry the same provider);
-            # non-empty-but-malformed = a MODEL property (next provider).
+            # Empty and malformed are both a (model, prompt) property: the next
+            # provider, never a sibling key of this model.
             if not (text or "").strip():
-                return Rejection("EmptyBody", Flow.NEXT_KEY_EMPTY,
-                                 note=lambda: circuit.note_empty_body(provider, key_id))
+                return Rejection(
+                    "EmptyBody", Flow.NEXT_PROVIDER,
+                    note=lambda: circuit.note_empty_body(provider, key_id),
+                    log_message=f"provider {provider} returned an empty JSON body, next provider")
             return Rejection(
                 "InvalidJSON", Flow.NEXT_PROVIDER,
                 log_message=f"provider {provider} returned unparseable JSON, next provider")
@@ -337,7 +352,7 @@ async def run_chat(
     at: datetime | None = None,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
-) -> ChatOutcome | _BudgetExhausted | None:
+) -> ChatOutcome | _BudgetExhausted | _ContentFailed | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
     `model` pins EXACTLY that model (a routing id or a bare canonical name — see
@@ -349,7 +364,8 @@ async def run_chat(
     `paid_only=True` demands a paid-tier key on every pick (the job queue's
     final-retry escalation). Returns `BUDGET_EXHAUSTED` (not None) when a
     project/global daily cap is spent, so the job fails honestly instead of
-    burning retries that cannot create budget.
+    burning retries that cannot create budget. Returns `CONTENT_FAILED` when every
+    attempt was an EmptyBody / InvalidJSON and nothing transient happened.
     """
     pinned_tool_provider = tool_model_provider(model) if tools else None
     scope = scope_for(capability)
@@ -399,11 +415,12 @@ async def run_chat(
     finish_by = _now() + (
         _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
     attempts = 0
+    content_failures = 0     # attempts that came back EmptyBody / InvalidJSON
+    other_failures = False   # any failure that a later retry could plausibly cure
     for step in steps:
         provider = step.provider
         require_tier = "free" if (degraded_free and step.tier is None) else (
             step.tier or base_tier)
-        empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch
         # Starting offset into the provider's model pool, fixed ONCE from the first
         # key we get: varying it per key id spreads which model burns its daily
         # quota first, then advancing by attempt_in_provider guarantees consecutive
@@ -470,6 +487,11 @@ async def run_chat(
                 pinned_model=model,
             ))
             flow = res.flow
+            if flow is not Flow.SUCCESS:
+                if res.rejection in _CONTENT_FAILURES:
+                    content_failures += 1
+                else:
+                    other_failures = True
             if flow is Flow.SUCCESS:
                 # Cache deterministic (translate/prefilter) successes for repeats.
                 if not tools:
@@ -498,16 +520,11 @@ async def run_chat(
                              capability)
                     continue
                 break
-            if flow is Flow.NEXT_KEY_EMPTY:
-                if empty_retries < _MAX_EMPTY_RETRIES:
-                    empty_retries += 1
-                    log.warning("provider %s returned empty body — retrying next key", provider)
-                    continue
-                log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
-                break
             if flow is Flow.NEXT_PROVIDER:
                 break
             # Flow.NEXT_KEY — walk to this provider's next key
+    if content_failures and not other_failures:
+        return CONTENT_FAILED
     return None
 
 

@@ -5,7 +5,9 @@ in `services/attempt.py`. The code keeps a one-line rationale; the incidents are
 
 ## Walk constants (llm_service.py)
 
-- **`_MAX_EMPTY_RETRIES = 3`.** It was 1, on the premise that a big-prompt DeepSeek
+- **`_MAX_EMPTY_RETRIES` (REMOVED 2026-10-04: an empty body now goes straight to the
+  next provider, see docs/routing.md "Content failures"; the history below is why it
+  existed).** It was 1, on the premise that a big-prompt DeepSeek
   empty body is deterministic. Measured 2026-07-31 over 6 h of live chat:sales on
   deepseek-v4-pro it is a coin flip: ok 185 (avg_in 31247, avg_out 810, cache_read
   30722) vs EmptyBody 179 (avg_in 31299, avg_out 518, cache_read 30916) — same model,

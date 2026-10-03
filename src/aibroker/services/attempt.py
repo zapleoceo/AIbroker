@@ -54,7 +54,6 @@ _COOLDOWN = timedelta(minutes=5)
 class Flow(Enum):
     """Verdict of one key attempt — how the runner's walk proceeds."""
     NEXT_KEY = auto()
-    NEXT_KEY_EMPTY = auto()    # empty JSON body — retry same provider, bounded by the runner
     NEXT_PROVIDER = auto()
     BUDGET_EXHAUSTED = auto()  # project/global cap spent — abort the whole walk
     SUCCESS = auto()
@@ -196,6 +195,7 @@ class AttemptResult:
     meta: dict[str, Any] = field(default_factory=dict)
     usage_id: int | None = None
     error: Exception | None = None          # the exception behind a non-SUCCESS flow
+    rejection: str | None = None            # error_kind of a quality-gate veto (EmptyBody...)
 
 
 # classify_provider_error verdict -> usage_log.status (init.sql vocabulary).
@@ -326,7 +326,7 @@ async def run_attempt(a: Attempt) -> AttemptResult:
 
     if a.check is not None and (rej := a.check(payload, meta)) is not None:
         await _record_rejection(a, rej, meta)
-        return AttemptResult(rej.flow, payload=payload, meta=meta)
+        return AttemptResult(rej.flow, payload=payload, meta=meta, rejection=rej.error_kind)
 
     usage_id = await record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,

@@ -568,3 +568,36 @@ def test_tick_failures_back_off_and_throttle_tracebacks():
     assert f.failed()[1] is True                       # next window logs again
     f.ok()
     assert f.failed()[0] == 1                          # recovery resets the backoff
+
+
+async def test_execute_content_failed_uses_the_short_retry_budget():
+    """EmptyBody/InvalidJSON from every provider is a verdict on the prompt: the
+    job is requeued with the SHORT budget (not 8 retries) and a clear reason."""
+    pid = 990404
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="content-fixture", project_key_hash="h",
+                         project_key_prefix="pk_x", allowed_scopes=["llm:chat"]))
+    with patch.object(job_queue, "run_chat", AsyncMock(return_value=job_queue.CONTENT_FAILED)), \
+         patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue:
+        await job_queue._execute(_unclaimed_row(pid, retry_count=1))
+    args, kwargs = requeue.await_args
+    assert "empty/invalid JSON" in args[2]
+    assert kwargs["max_retries"] == job_queue._MAX_CONTENT_RETRIES == 1
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="claim uses FOR UPDATE SKIP LOCKED - Postgres only")
+async def test_drain_once_content_failed_fails_after_one_retry():
+    pid = await _make_project(["llm:chat"])
+    jid = await _enqueue(pid)
+    with patch("aibroker.services.job_queue.run_chat",
+               AsyncMock(return_value=job_queue.CONTENT_FAILED)):
+        await drain_once()                       # run 1 -> requeued (retry 1)
+        async with get_session() as s:
+            row = await s.get(DeepJobRow, jid)
+            assert row.status == "pending" and row.retry_count == 1
+            row.run_after = None                 # skip the backoff wait
+        await drain_once()                       # run 2 -> out of content retries
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, jid)
+        assert row.status == "error"
+        assert "empty/invalid JSON" in row.error_message

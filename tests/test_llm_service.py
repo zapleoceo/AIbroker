@@ -834,12 +834,10 @@ async def test_run_chat_invalid_json_skips_provider_not_key(monkeypatch):
     assert out.text == '{"ok": true}'
 
 
-async def test_run_chat_empty_body_retries_same_provider(monkeypatch):
-    """REGRESSION (2026-07-10): a blank/whitespace body is a TRANSIENT provider
-    throttle (deepseek json_object intermittently returns an empty string on
-    large prompts under load), not a model JSON defect. run_chat must RETRY the
-    same provider's next key — which almost always returns valid JSON — instead
-    of skipping the whole provider like it does for genuinely malformed JSON."""
+async def test_run_chat_empty_body_does_not_retry_sibling_keys(monkeypatch):
+    """REVERSED 2026-10-04 (was: retry the sibling key, 2026-07-10): an empty body
+    is a property of the (model, prompt) pair - one 39k prompt came back empty on
+    every deepseek key, ~36 attempts per job. The sibling key is NOT tried."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
@@ -881,8 +879,8 @@ async def test_run_chat_empty_body_retries_same_provider(monkeypatch):
         max_tokens=128, temperature=0.7,
         response_format={"type": "json_object"}, workflow=None,
     )
-    assert picks.count("deepseek") == 2   # retried the SAME provider, not skipped
-    assert out.text == '{"ok": true}'     # got valid JSON on the retry
+    assert picks.count("deepseek") == 1   # one empty body, then the walk ends
+    assert out is svc.CONTENT_FAILED
 
 
 async def test_run_chat_json_request_deprioritizes_unreliable(monkeypatch):
@@ -2035,66 +2033,11 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
     assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
 
 
-async def test_run_chat_empty_body_retry_rescues_same_provider(monkeypatch):
-    """A big-prompt DeepSeek empty is a ~coin flip, not a dead end (measured
-    2026-07-31: 185 ok vs 179 EmptyBody on identical requests), so a retry on
-    the SAME provider must be able to rescue the call instead of conceding it
-    to the next one. Guards _MAX_EMPTY_RETRIES against being tuned back down to
-    a value that can't outlast a run of misses."""
-    from types import SimpleNamespace
-
-    import aibroker.services.llm_service as svc
-
-    picks: list[str] = []
-    calls = {"n": 0}
-
-    async def fake_pick(provider, scope, **kw):
-        picks.append(provider)
-        # One active key, re-picked on every retry — the real deepseek shape.
-        return SimpleNamespace(id=1, label="k1", tier="paid",
-                                provider=provider, token_encrypted="x")
-
-    async def fake_noop(**kw):
-        return None
-
-    async def fake_call_llm(**kw):
-        if kw["model"].startswith("deepseek"):
-            calls["n"] += 1
-            body = "   " if calls["n"] <= 2 else '{"ok": true}'
-        else:
-            body = '{"from": "gemini"}'
-        return body, {"model": kw["model"], "tokens_in": 100, "tokens_out": 0,
-                      "cost_usd": 0.0, "latency_ms": 50,
-                      "cache_read_tokens": 0, "cache_write_tokens": 0}
-
-    monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
-    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
-    monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
-    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
-    monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
-    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
-    monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
-
-    out = await svc.run_chat(
-        project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
-        messages=[{"role": "user", "content": "hi"}], model=None,
-        max_tokens=128, temperature=0.7,
-        response_format={"type": "json_object"}, workflow=None,
-        at=OFF_PEAK_AT,
-    )
-    assert out.provider == "deepseek"       # rescued, not conceded to gemini
-    assert out.text == '{"ok": true}'
-    assert "gemini" not in picks
-    assert calls["n"] == 3                  # two misses, then the answer
-
-
-async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
-    """A provider that returns empty bodies DETERMINISTICALLY (deepseek
-    json_object on a 30k prompt) must burn at most _MAX_EMPTY_RETRIES + 1 keys
-    before the chain breaks to the next provider — not every key it has."""
+async def _walk_with_bodies(monkeypatch, bodies, *, chain=("deepseek", "gemini"),
+                            call_error=None):
+    """Drive run_chat over `chain` with one JSON request. `bodies` maps a provider
+    to the text its call returns; `call_error` maps a provider to an exception its
+    call raises. Returns (outcome, [provider per pick])."""
     from types import SimpleNamespace
 
     import aibroker.services.llm_service as svc
@@ -2110,10 +2053,12 @@ async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
         return None
 
     async def fake_call_llm(**kw):
-        body = "   " if kw["model"].startswith("deepseek") else '{"ok": true}'
-        return body, {"model": kw["model"], "tokens_in": 100, "tokens_out": 0,
-                      "cost_usd": 0.0, "latency_ms": 50,
-                      "cache_read_tokens": 0, "cache_write_tokens": 0}
+        prov = kw["model"].split("/")[0]
+        if call_error and prov in call_error:
+            raise call_error[prov]
+        return bodies[prov], {"model": kw["model"], "tokens_in": 100, "tokens_out": 5,
+                              "cost_usd": 0.0, "latency_ms": 50,
+                              "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
@@ -2123,19 +2068,51 @@ async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
     monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
-    monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
+    monkeypatch.setattr(svc, "chain_for", lambda cap: list(chain))
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
-
     out = await svc.run_chat(
         project=SimpleNamespace(id=1, name="stepan"), capability="chat:smart",
         messages=[{"role": "user", "content": "hi"}], model=None,
         max_tokens=128, temperature=0.7,
-        response_format={"type": "json_object"}, workflow=None,
-        at=OFF_PEAK_AT,
-    )
-    assert picks.count("deepseek") == svc._MAX_EMPTY_RETRIES + 1  # capped, not 5
+        response_format={"type": "json_object"}, workflow=None, at=OFF_PEAK_AT)
+    return out, picks
+
+
+async def test_run_chat_empty_body_goes_to_next_provider_not_next_key(monkeypatch):
+    """EmptyBody is a (model, prompt) property: ONE empty body from deepseek and the
+    walk moves to gemini - it must not spend the sibling deepseek keys first
+    (2026-10-04: one 39k prompt, 3-4 deepseek keys per walk, all empty)."""
+    out, picks = await _walk_with_bodies(
+        monkeypatch, {"deepseek": "   ", "gemini": '{"ok": true}'})
+    assert picks == ["deepseek", "gemini"]
+    assert out.provider == "gemini" and out.text == '{"ok": true}'
+
+
+async def test_run_chat_invalid_json_goes_to_next_provider_not_next_key(monkeypatch):
+    out, picks = await _walk_with_bodies(
+        monkeypatch, {"deepseek": "not json at all", "gemini": '{"ok": true}'})
+    assert picks == ["deepseek", "gemini"]
     assert out.provider == "gemini"
-    assert out.text == '{"ok": true}'
+
+
+async def test_run_chat_all_content_failures_returns_content_failed(monkeypatch):
+    """Every provider answered EmptyBody/InvalidJSON and nothing transient happened:
+    the verdict is on the prompt, so the job queue is told (CONTENT_FAILED), not
+    handed the 'no capacity' None that retries 8 times."""
+    import aibroker.services.llm_service as svc
+
+    out, picks = await _walk_with_bodies(
+        monkeypatch, {"deepseek": "", "gemini": "plain prose"})
+    assert out is svc.CONTENT_FAILED
+    assert picks == ["deepseek", "gemini"]       # one attempt per provider
+
+
+async def test_run_chat_mixed_failures_stay_retryable(monkeypatch):
+    """A rate limit / 5xx anywhere in the walk means a retry may help: None."""
+    out, _ = await _walk_with_bodies(
+        monkeypatch, {"deepseek": "", "gemini": "unused"},
+        call_error={"gemini": RuntimeError("503 service unavailable")})
+    assert out is None
 
 
 # ─── _penalize — single-session penalty path (2026-07-16) ────────────────────

@@ -83,3 +83,31 @@ def test_mistral_typed_401_is_still_the_monthly_rate_limit():
 def test_billing_429_stays_auth_even_when_typed_rate_limit():
     exc = _named("RateLimitError", "Your prepayment credits are depleted", 429)
     assert classify_provider_error(exc, "gemini") == "auth"
+
+
+# 2026-10-04: a gemini key (#16) showed `auth_fail / BadRequestError` - its body
+# really was a 402 "prepayment credits are depleted" (genuinely an auth/billing
+# death, handled by _BILLING_DEPLETED_SIGNS). These pin the other direction: a
+# plain 400 must never be read as a bad key.
+def test_gemini_402_depleted_prepayment_is_auth_even_typed_as_bad_request():
+    exc = _named("BadRequestError",
+                 'litellm.BadRequestError: GeminiException - {"error": {"code": 402, '
+                 '"message": "Your prepayment credits are depleted."}}', 400)
+    assert classify_provider_error(exc, "gemini") == "auth"
+
+
+@pytest.mark.parametrize("status", [400, None])
+@pytest.mark.parametrize("msg", [
+    "Error code: 400 - the request is unauthorized to use this tool schema",
+    "Error code: 400 - forbidden field 'foo' in response_format",
+    "Error code: 400 - Invalid argument: contents must not be empty",
+])
+def test_plain_bad_request_is_never_auth(msg, status):
+    exc = _named("BadRequestError", msg, status)
+    assert classify_provider_error(exc, "gemini") == "error"
+
+
+def test_bad_request_naming_an_invalid_key_is_still_auth():
+    exc = _named("BadRequestError",
+                 "Error code: 400 - API key not valid. Please pass a valid API key.", 400)
+    assert classify_provider_error(exc, "gemini") == "auth"
