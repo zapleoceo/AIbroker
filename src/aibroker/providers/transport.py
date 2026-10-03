@@ -19,7 +19,7 @@ from aibroker.providers.registry import model_spec
 @runtime_checkable
 class ChatTransport(Protocol):
     async def chat(self, *, model: str, messages: list[dict[str, Any]], api_key: str,
-                   **options: Any) -> tuple[str, dict[str, Any]]: ...
+                   **_options: Any) -> tuple[str, dict[str, Any]]: ...
 
 
 @runtime_checkable
