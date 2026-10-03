@@ -1,6 +1,6 @@
 """LLM proxy mode — broker calls the provider with its key, returns the response.
 
-Endpoint: POST /v1/chat?capability=chat:fast
+Endpoint: POST /v1/jobs?capability=chat:fast (async chat; POST /v1/chat is a 410)
 Endpoint: POST /v1/embed?provider=voyage
 
 Thin layer: authenticate, gate on the capability's scope, delegate to
@@ -36,7 +36,7 @@ from aibroker.services.tool_contract import ToolDefinition, tool_model_provider,
 from aibroker.services.vision_payload import inline_image_problem
 
 # Capabilities the generic /v1/jobs endpoint serves — everything run_chat
-# handles, i.e. everything whose payload is chat messages. embed stays
+# handles, i.e. everything whose payload is chat messages. embed is
 # sync-only (fast, no held-connection problem to solve). TRANSCRIPTION is
 # async too, but through its own multipart route (/v1/transcribe/jobs) since
 # its payload is an audio file, not messages — it is polled via the same
@@ -278,14 +278,30 @@ class TranscribeResponse(BaseModel):
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
+_AUDIO_READ_CHUNK = 1024 * 1024
+
+
 async def _read_audio_upload(file: UploadFile) -> bytes:
-    """Shared validation for both transcription entry points."""
-    audio = await file.read()
-    if not audio:
+    """Shared validation for both transcription entry points.
+
+    Reads in chunks and stops at the limit: `await file.read()` pulled the whole
+    upload into memory BEFORE the size check, so an oversized body cost its full
+    size in RAM per request (2026-10-03 review). The multipart part is already
+    spooled by Starlette, so the declared `file.size` is checked first and a
+    chunked read bounds memory for anything that under-reports it."""
+    too_big = HTTPException(413, f"audio exceeds {_MAX_AUDIO_BYTES // (1024 * 1024)} MB")
+    if file.size is not None and file.size > _MAX_AUDIO_BYTES:
+        raise too_big
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(_AUDIO_READ_CHUNK):
+        total += len(chunk)
+        if total > _MAX_AUDIO_BYTES:
+            raise too_big
+        chunks.append(chunk)
+    if not total:
         raise HTTPException(400, "empty audio file")
-    if len(audio) > _MAX_AUDIO_BYTES:
-        raise HTTPException(413, f"audio exceeds {_MAX_AUDIO_BYTES // (1024 * 1024)} MB")
-    return audio
+    return b"".join(chunks)
 
 
 @router.post("/transcribe", response_model=TranscribeResponse)
@@ -448,11 +464,10 @@ async def deep_poll(
 
 # ─── Generic async jobs — submit+poll for ANY chat capability (Phase 4) ─────
 #
-# Same submit/poll shape as /v1/deep, opened to every chat capability so
-# clients (Vera, Stepan) can migrate off the sync /v1/chat endpoint at their
-# own pace: they get a guaranteed answer (exhaustive rotation, no held
-# connection that a slow provider could 504). Sync /v1/chat stays — additive,
-# backward-compatible. See docs/routing.md and services/deep_jobs.py.
+# Same submit/poll shape as /v1/deep, opened to every chat capability: the
+# caller gets a guaranteed answer (exhaustive rotation, no held connection that
+# a slow provider could 504). Sync /v1/chat no longer exists (410 above). See
+# docs/routing.md and services/deep_jobs.py.
 
 
 class JobSubmitResponse(BaseModel):
@@ -469,8 +484,8 @@ async def jobs_submit(
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse:
     """Submit any chat `capability` as an async job. Returns a job_id
-    immediately — poll GET /v1/jobs/{job_id}. Mirrors POST /v1/chat's body
-    (incl. response_format), but never holds the connection."""
+    immediately — poll GET /v1/jobs/{job_id}. Takes the same body shape as the
+    removed sync chat (incl. response_format), but never holds the connection."""
     if capability not in _JOB_CAPABILITIES:
         raise HTTPException(
             400,

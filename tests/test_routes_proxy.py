@@ -873,3 +873,57 @@ async def test_embed_400_when_model_belongs_to_another_provider():
         )
     assert r.status_code == 400
     assert "cohere" in r.json()["detail"] and "voyage" in r.json()["detail"]
+
+
+class _FakeUpload:
+    """UploadFile stand-in that records how much was read and in what chunks."""
+
+    def __init__(self, data: bytes, size: int | None = ...):
+        self._data, self._pos, self.reads = data, 0, []
+        self.size = len(data) if size is ... else size
+
+    async def read(self, n: int = -1) -> bytes:
+        self.reads.append(n)
+        end = len(self._data) if n < 0 else self._pos + n
+        chunk, self._pos = self._data[self._pos:end], min(end, len(self._data))
+        return chunk
+
+
+async def test_read_audio_upload_streams_with_a_limit(monkeypatch):
+    """REGRESSION (2026-10-03): the whole body was read into memory BEFORE the
+    size check. Now read in chunks and abort once past the limit."""
+    from fastapi import HTTPException
+
+    from aibroker.routes import proxy
+
+    monkeypatch.setattr(proxy, "_MAX_AUDIO_BYTES", 10)
+    monkeypatch.setattr(proxy, "_AUDIO_READ_CHUNK", 4)
+    up = _FakeUpload(b"x" * 1000, size=None)        # under-reports its size
+    with pytest.raises(HTTPException) as ei:
+        await proxy._read_audio_upload(up)
+    assert ei.value.status_code == 413
+    assert -1 not in up.reads and len(up.reads) <= 4  # never slurped, stopped early
+
+
+async def test_read_audio_upload_rejects_declared_oversize_without_reading(monkeypatch):
+    from fastapi import HTTPException
+
+    from aibroker.routes import proxy
+
+    monkeypatch.setattr(proxy, "_MAX_AUDIO_BYTES", 10)
+    up = _FakeUpload(b"x" * 50)
+    with pytest.raises(HTTPException) as ei:
+        await proxy._read_audio_upload(up)
+    assert ei.value.status_code == 413 and up.reads == []
+
+
+async def test_read_audio_upload_happy_and_empty(monkeypatch):
+    from fastapi import HTTPException
+
+    from aibroker.routes import proxy
+
+    monkeypatch.setattr(proxy, "_AUDIO_READ_CHUNK", 3)
+    assert await proxy._read_audio_upload(_FakeUpload(b"abcdefgh")) == b"abcdefgh"
+    with pytest.raises(HTTPException) as ei:
+        await proxy._read_audio_upload(_FakeUpload(b""))
+    assert ei.value.status_code == 400
