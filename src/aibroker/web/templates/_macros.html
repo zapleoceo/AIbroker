@@ -1,0 +1,83 @@
+{# Shared UI atoms. Import with context:  {% import "_macros.html" as m with context %} #}
+
+{% macro icon(name, cls="ic") -%}
+<svg class="{{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-{{ name }}"/></svg>
+{%- endmacro %}
+
+{% macro chip(cls, en, ru) -%}
+<span class="chip {{ cls }}">{{ t(en, ru) }}</span>
+{%- endmacro %}
+
+{# A labelled usage meter: label, "used / cap" text, 0-100 percent, severity class. #}
+{% macro meter(label, text, pct, cls="") -%}
+<div class="meter">
+  <div class="meter-top"><span>{{ label }}</span><b>{{ text }}</b></div>
+  <span class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ pct }}" aria-label="{{ label|striptags }}"><i class="{{ cls }}" style="width:{{ pct }}%"></i></span>
+</div>
+{%- endmacro %}
+
+{% macro empty(icon_name, en, ru, hint_en="", hint_ru="") -%}
+<div class="empty">
+  {{ icon(icon_name) }}
+  <b>{{ t(en, ru) }}</b>
+  {% if hint_en %}<span>{{ t(hint_en, hint_ru) }}</span>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Friendly label for a call. Rows carry `err` = (en, ru, css) from _friendly_call_error. #}
+{% macro call_status(row) -%}
+{%- if row.status == "ok" -%}
+  <span class="chip ok">{{ t("ok", "ок") }}</span>
+{%- else -%}
+  {%- set raw = ((row.http_status or "")|string ~ " " ~ (row.error_kind or ""))|trim -%}
+  {%- if row.err -%}
+    <span class="chip {{ row.err[2] }}" title="{{ raw }}">{{ t(row.err[0], row.err[1]) }}</span>
+  {%- else -%}
+    <span class="chip bad" title="{{ raw }}">{{ raw or row.status }}</span>
+  {%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro delta(d) -%}
+{%- if d -%}
+<span class="delta {{ d.tone }}" title="vs previous period">{{ "▲" if d.dir == "up" else "▼" if d.dir == "down" else "■" }} {{ d.text }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro kpi(k) -%}
+<div class="card kpi">
+  <div class="kpi-label"><span>{{ t(k.en, k.ru) }}</span>{{ delta(k.delta) }}</div>
+  <div class="kpi-value" title="{{ k.value }}">{{ k.value }}</div>
+  <div class="kpi-sub" title="{{ k.sub[0] }}">{{ t(k.sub[0], k.sub[1]) }}</div>
+  {% if k.spark is not none %}{{ k.spark|spark }}{% endif %}
+  {% if k.bar %}
+  {% set total = (k.bar|map(attribute=1)|sum) or 1 %}
+  <span class="bar stackbar" aria-hidden="true">
+    {% for cls, n in k.bar if n %}<i class="{{ cls }}" style="width:{{ (n / total * 100)|round(1) }}%"></i>{% endfor %}
+  </span>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{# Header range picker. Needs range_links / rng / keep / path from the page context. #}
+{% macro range_picker() -%}
+{% if rng %}
+<div class="range" x-data="rangePicker()" @keydown.escape.window="open = false">
+  <div class="seg" role="group" aria-label="{{ 'Time range' }}">
+    {% for l in range_links %}
+    <a href="{{ l.href }}" {% if l.active %}aria-current="true"{% endif %}>{{ t(l.en, l.ru) }}</a>
+    {% endfor %}
+    <button type="button" @click="open = !open" :aria-expanded="open" aria-haspopup="dialog"
+            {% if rng.key == "custom" %}aria-current="true"{% endif %}>{{ t("Custom", "Период") }}</button>
+  </div>
+  <form class="range-pop" method="get" action="{{ path }}" x-show="open" x-cloak @click.outside="open = false">
+    {% for k, v in keep.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    <div class="field"><label for="rf">{{ t("From", "С") }}</label>
+      <input id="rf" type="date" name="from" value="{{ rng.date_from or '' }}"></div>
+    <div class="field"><label for="rt">{{ t("To", "По") }}</label>
+      <input id="rt" type="date" name="to" value="{{ rng.date_to or '' }}"></div>
+    <button class="btn btn-primary" type="submit">{{ t("Apply", "Применить") }}</button>
+  </form>
+</div>
+{% endif %}
+{%- endmacro %}

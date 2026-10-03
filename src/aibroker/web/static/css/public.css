@@ -1,0 +1,198 @@
+/* Public pages (landing, provider health): the same design tokens as the admin
+   UI (tokens.css), so the product reads as one thing. Legacy variable names the
+   markup still uses are aliased to the tokens here. */
+:root { --panel: var(--surface); --panel2: var(--surface-2); --sans: var(--font); }
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+  font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);background:var(--panel);padding:2px 6px;
+  border-radius:4px;font-size:.9em;color:var(--accent)}
+pre{font-family:var(--mono);background:var(--panel);padding:18px 20px;
+  border-radius:8px;border:1px solid var(--line);overflow-x:auto;
+  font-size:13px;line-height:1.6;color:var(--muted)}
+.container{max-width:1080px;margin:0 auto;padding:0 24px}
+
+/* Header */
+header{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 85%,transparent);
+  backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.nav{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 0;gap:24px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px}
+.brand .dot{width:9px;height:9px;background:var(--accent);
+  border-radius:50%;box-shadow:0 0 12px var(--accent)}
+.nav-links{display:flex;gap:24px;font-size:14px}
+.nav-links a{color:var(--muted)}
+.nav-links a:hover{color:var(--text);text-decoration:none}
+.nav-right{display:flex;align-items:center;gap:14px}
+.lang-toggle{display:flex;background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;overflow:hidden;font-family:var(--mono);font-size:12px}
+.lang-toggle button{background:none;border:none;color:var(--muted);
+  padding:6px 12px;cursor:pointer;font-family:var(--mono);font-size:12px}
+.lang-toggle button.active{background:var(--accent-soft);color:var(--accent)}
+.btn{display:inline-block;padding:10px 18px;border-radius:6px;
+  font-size:14px;font-weight:500;border:1px solid var(--accent);
+  color:var(--accent);background:transparent;cursor:pointer;
+  font-family:var(--sans);transition:.15s}
+.btn:hover{background:var(--accent-soft);text-decoration:none}
+.btn-primary{background:var(--accent);color:var(--accent-fg)}
+.btn-primary:hover{background:var(--accent-hover)}
+
+/* Sections */
+section{padding:72px 0;border-bottom:1px solid var(--line)}
+section:last-of-type{border-bottom:none}
+h1,h2,h3{font-weight:600;letter-spacing:-.01em;margin:0 0 16px}
+h1{font-size:54px;line-height:1.08;letter-spacing:-.02em}
+h2{font-size:34px;line-height:1.15}
+h3{font-size:18px}
+.eyebrow{font-family:var(--mono);font-size:12px;color:var(--accent);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}
+.lead{font-size:19px;color:var(--muted);max-width:680px;margin-bottom:28px}
+.section-intro{max-width:720px;margin-bottom:48px;color:var(--muted);font-size:16px}
+
+/* Hero */
+.hero{padding-top:96px}
+.hero-cta{display:flex;gap:14px;margin-top:32px;flex-wrap:wrap}
+.hero-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:24px;margin-top:56px;padding-top:32px;border-top:1px solid var(--line)}
+.stat .num{font-family:var(--mono);font-size:28px;color:var(--text);font-weight:600}
+.stat .lbl{font-size:12px;color:var(--dim);margin-top:4px;
+  font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em}
+
+/* Problem grid */
+.problem-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.problem-card{background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:24px}
+.problem-card.before{border-top:2px solid var(--bad)}
+.problem-card.after{border-top:2px solid var(--good)}
+.problem-card .label{font-family:var(--mono);font-size:11px;
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}
+.problem-card.before .label{color:var(--bad)}
+.problem-card.after .label{color:var(--good)}
+.problem-card ul{padding:0;margin:0;list-style:none}
+.problem-card li{padding:8px 0;color:var(--muted);font-size:14px;
+  display:flex;gap:10px}
+.problem-card li::before{content:"·";color:var(--dim);flex-shrink:0}
+
+/* Features */
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px}
+.feat{padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.feat h3{margin-bottom:8px}
+.feat p{color:var(--muted);font-size:14px;margin:0;line-height:1.6}
+.feat-icon{display:inline-flex;width:36px;height:36px;align-items:center;
+  justify-content:center;background:var(--accent-soft);border-radius:8px;
+  color:var(--accent);font-family:var(--mono);font-weight:600;margin-bottom:14px}
+
+/* How it works */
+.modes{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:28px}
+.mode{background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:28px}
+.mode-head{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.mode-tag{font-family:var(--mono);font-size:11px;padding:3px 10px;
+  background:var(--accent-soft);color:var(--accent);border-radius:4px}
+.mode h3{margin:0;font-size:20px}
+.mode p{color:var(--muted);font-size:14px;margin:0 0 14px}
+
+/* Providers */
+.providers{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.prov{background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:14px 18px;font-family:var(--mono);font-size:13px;
+  display:flex;justify-content:space-between;align-items:center}
+.prov .badge{font-size:10px;padding:2px 6px;border-radius:3px;
+  background:var(--accent-soft);color:var(--accent)}
+.prov .badge.paid{background:var(--warn-soft);color:var(--warn)}
+
+/* API */
+.api-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}
+.api-block h3{font-family:var(--mono);font-size:13px;color:var(--accent);
+  text-transform:uppercase;letter-spacing:.08em}
+
+/* Endpoints */
+.endpoints{display:grid;gap:8px;margin-top:18px}
+.ep{display:grid;grid-template-columns:60px 1fr auto;gap:14px;align-items:center;
+  padding:10px 16px;background:var(--panel);border:1px solid var(--line);
+  border-radius:6px;font-family:var(--mono);font-size:13px}
+.ep .verb{color:var(--accent);font-weight:600;font-size:11px;text-align:center;
+  background:var(--accent-soft);padding:3px 0;border-radius:3px}
+.ep .verb.post{color:var(--good);background:var(--good-soft)}
+.ep .verb.get{color:var(--accent);background:var(--accent-soft)}
+.ep .path{color:var(--text)}
+.ep .note{color:var(--dim);font-size:11px;font-family:var(--sans)}
+
+/* Pricing */
+.pricing{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px}
+.tier{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:28px;display:flex;flex-direction:column}
+.tier.featured{border-color:var(--accent);background:linear-gradient(180deg,var(--accent-soft) 0%,var(--panel) 60%)}
+.tier-name{font-family:var(--mono);font-size:12px;color:var(--accent);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.tier-price{font-size:32px;font-weight:600;margin-bottom:4px}
+.tier-price .currency{color:var(--muted);font-weight:400;font-size:18px}
+.tier-desc{color:var(--muted);font-size:14px;margin-bottom:18px;min-height:42px}
+.tier ul{list-style:none;padding:0;margin:0 0 24px;flex:1}
+.tier li{padding:6px 0;color:var(--muted);font-size:14px}
+.tier li::before{content:"✓ ";color:var(--good)}
+
+/* Footer */
+footer{padding:48px 0 64px;color:var(--dim);font-size:13px}
+.footer-grid{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:32px;margin-bottom:32px}
+.footer-grid h4{color:var(--text);font-size:13px;margin:0 0 14px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.05em}
+.footer-grid ul{list-style:none;padding:0;margin:0}
+.footer-grid li{padding:4px 0}
+.footer-grid li a{color:var(--muted)}
+.footer-bottom{padding-top:24px;border-top:1px solid var(--line);
+  display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}
+
+/* Mobile */
+@media (max-width:720px) {
+  h1{font-size:36px} h2{font-size:26px}
+  .nav-links{display:none}
+  .problem-grid,.modes,.api-grid,.pricing,.footer-grid{grid-template-columns:1fr}
+}
+
+/* GitHub link in header */
+.gh-link {display:inline-flex;align-items:center;justify-content:center;
+  width:32px;height:32px;border-radius:6px;color:var(--muted);
+  transition:.15s;border:1px solid var(--line)}
+.gh-link:hover {color:var(--text);background:var(--panel);border-color:var(--muted);text-decoration:none}
+.gh-link svg {display:block}
+
+/* Language switching — hide non-active lang text */
+[data-i18n].lang-hidden {display:none !important}
+
+/* ─── provider health page ───────────────────────────────────────────── */
+.health .container{max-width:900px;padding:0 24px 64px}
+.health header{position:static;padding:20px 0;margin-bottom:32px;backdrop-filter:none}
+.health .nav{max-width:900px;margin:0 auto;padding:0 24px}
+.health h1{font-size:28px;margin:0 0 6px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 32px}
+.sub code{font-family:var(--mono);background:var(--panel);padding:2px 6px;border-radius:4px;color:var(--accent)}
+.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:32px}
+.tstat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.tstat .n{font-size:24px;font-weight:600;font-family:var(--mono)}
+.tstat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.tstat.good .n{color:var(--good)} .tstat.warn .n{color:var(--warn)} .tstat.bad .n{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.pcard .name{font-family:var(--mono);font-size:14px;font-weight:600;margin-bottom:10px;overflow-wrap:anywhere}
+.pcard .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line);margin-bottom:10px}
+.pcard .bar span{display:block;height:100%}
+.pcard .seg-good{background:var(--good)} .pcard .seg-warn{background:var(--warn)}
+.pcard .seg-bad{background:var(--bad)} .pcard .seg-empty{background:var(--line)}
+.pcard .stats{display:flex;gap:12px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.pcard .stats b{font-family:var(--mono)}
+.pcard .stats .good b{color:var(--good)} .pcard .stats .warn b{color:var(--warn)} .pcard .stats .bad b{color:var(--bad)}
+.empty{color:var(--dim);padding:32px 0;text-align:center}
+.health footer{max-width:900px;margin:32px auto 0;padding:0 24px;color:var(--dim);font-size:12px}
+
+/* grid/flex children must be allowed to shrink or a wide <pre> pushes the page sideways */
+.modes > *, .api-grid > *, .problem-grid > *, .features > *, .pricing > *, .footer-grid > *, .mode, .api-block { min-width: 0; }
+.mode pre, .api-block pre { max-width: 100%; overflow-x: auto; }
+.mode p, .mode h3 { overflow-wrap: anywhere; }
+.ep { grid-template-columns: 60px minmax(0,1fr) auto; }
+.ep .path { overflow-wrap: anywhere; }
+@media (max-width: 900px) { .modes, .api-grid, .problem-grid, .pricing, .footer-grid { grid-template-columns: minmax(0,1fr); } }
+@media (max-width: 560px) { .ep { grid-template-columns: 52px minmax(0,1fr); } .ep .note { grid-column: 2; } }

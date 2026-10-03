@@ -12,7 +12,7 @@ from sqlalchemy import text
 from aibroker import __version__
 from aibroker.auth_session import require_owner_session
 from aibroker.db import get_session
-from aibroker.routes.landing import FAVICON_LINKS
+from aibroker.routes.landing import CSS_LINKS, FAVICON_LINKS
 
 router = APIRouter(tags=["health"])
 
@@ -114,68 +114,6 @@ _LANG_TOGGLE_JS = """
 </script>
 """
 
-_HEALTH_CSS = """
-:root {
-  --bg:#0b0d11; --panel:#13161c; --panel2:#191d25; --line:#262a33;
-  --text:#e6e8ec; --muted:#8b929f; --dim:#7d8494;
-  --accent:#4dabf7; --accent-soft:rgba(77,171,247,.12);
-  --good:#51cf66; --warn:#ffd43b; --bad:#ff6b6b;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
-*{box-sizing:border-box}
-html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
-  font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
-a{color:var(--accent);text-decoration:none}
-a:hover{text-decoration:underline}
-.container{max-width:900px;margin:0 auto;padding:0 24px 64px}
-header{padding:20px 0;border-bottom:1px solid var(--line);margin-bottom:32px}
-.nav{display:flex;align-items:center;justify-content:space-between;
-  max-width:900px;margin:0 auto;padding:0 24px}
-.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px}
-.brand .dot{width:9px;height:9px;background:var(--accent);
-  border-radius:50%;box-shadow:0 0 12px var(--accent)}
-.nav-right{display:flex;align-items:center;gap:14px}
-.lang-toggle{display:flex;background:var(--panel);border:1px solid var(--line);
-  border-radius:6px;overflow:hidden;font-family:var(--mono);font-size:12px}
-.lang-toggle button{background:none;border:none;color:var(--muted);
-  padding:6px 12px;cursor:pointer;font-family:var(--mono);font-size:12px}
-.lang-toggle button.active{background:var(--accent-soft);color:var(--accent)}
-h1{font-weight:600;font-size:28px;margin:0 0 6px;letter-spacing:-.01em}
-.sub{color:var(--muted);font-size:14px;margin:0 0 32px}
-.sub code{font-family:var(--mono);background:var(--panel);padding:2px 6px;
-  border-radius:4px;color:var(--accent)}
-.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
-  gap:12px;margin-bottom:32px}
-.tstat{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  padding:14px 16px}
-.tstat .n{font-size:24px;font-weight:600;font-family:var(--mono)}
-.tstat .l{font-size:11px;color:var(--muted);text-transform:uppercase;
-  letter-spacing:.05em;margin-top:2px}
-.tstat.good .n{color:var(--good)} .tstat.warn .n{color:var(--warn)}
-.tstat.bad .n{color:var(--bad)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
-  gap:12px}
-.pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  padding:14px 16px}
-.pcard .name{font-family:var(--mono);font-size:14px;font-weight:600;
-  margin-bottom:10px}
-.pcard .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;
-  background:#0000;margin-bottom:10px}
-.pcard .bar span{display:block;height:100%}
-.pcard .seg-good{background:var(--good)} .pcard .seg-warn{background:var(--warn)}
-.pcard .seg-bad{background:var(--bad)} .pcard .seg-empty{background:var(--line)}
-.pcard .stats{display:flex;gap:12px;font-size:12px;color:var(--muted);
-  flex-wrap:wrap}
-.pcard .stats b{font-family:var(--mono)}
-.pcard .stats .good b{color:var(--good)} .pcard .stats .warn b{color:var(--warn)}
-.pcard .stats .bad b{color:var(--bad)}
-.empty{color:var(--dim);padding:32px 0;text-align:center}
-footer{max-width:900px;margin:32px auto 0;padding:0 24px;color:var(--dim);
-  font-size:12px}
-"""
-
-
 def _health_provider_card(p: dict[str, Any]) -> str:
     total = p["total"] or 1  # guard div-by-zero; total is always >=1 per row's own GROUP BY
     def pct(n: int) -> float:
@@ -211,8 +149,8 @@ def _render_health_html(providers: list[dict[str, Any]]) -> HTMLResponse:
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AIbroker — provider health</title>
 {FAVICON_LINKS}
-<style>{_HEALTH_CSS}</style>
-</head><body>
+{CSS_LINKS}
+</head><body class="health">
 <header><div class="nav">
   <a href="/" class="brand"><span class="dot"></span> AIbroker</a>
   <div class="nav-right">

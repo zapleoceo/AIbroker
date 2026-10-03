@@ -264,8 +264,10 @@ def test_landing_provider_count_is_consistent_with_tiles():
     import re
     page, llms = _page_and_llms()
     tiles = re.findall(r'<div class="prov">', page)
-    assert len(tiles) == 14
-    assert "Fourteen" in page and "14 providers" in page
+    from aibroker.routes.landing import wired_providers
+    n = len(wired_providers())
+    assert len(tiles) == n == 14
+    assert f"{n} providers" in page
     assert "Fifteen" not in page and "15 providers" not in page
     assert "15 LLM providers" not in page and "15 LLM providers" not in llms
     for text in (page, llms):
@@ -294,7 +296,7 @@ def test_landing_api_section_lists_every_client_endpoint_and_scope():
     """L8: heading said three groups but showed four; several endpoints/scopes missing."""
     page, llms = _page_and_llms()
     assert "Four endpoint groups" in page and "Three endpoint groups" not in page
-    for path in ("/v1/decisions", "/v1/deep", "/v1/deep/{id}", "/v1/transcribe/jobs",
+    for path in ("/v1/decisions", "/v1/deep", "/v1/deep/{job_id}", "/v1/transcribe/jobs",
                  "/admin/keys/{id}"):
         assert path in page, path
     assert "410 Gone" in page
@@ -354,9 +356,49 @@ def _contrast(fg: str, bg: str) -> float:
 
 
 def test_landing_dim_text_meets_wcag_aa_on_the_page_background():
-    """L13: --dim was #5a6171 = 3.13:1 on #0b0d11; #7d8494 is 5.19:1."""
+    """L13 (tokens era): --dim must stay >= 4.5:1 on its surface in light AND dark."""
     import re
-    page = client.get("/").text
-    dim = re.search(r"--dim:(#[0-9a-f]{6});", page).group(1)
-    assert _contrast(dim, "#0b0d11") >= 4.5
+    tokens = client.get("/dashboard/static/css/tokens.css").text
+    light, dark = tokens.split("@media (prefers-color-scheme: dark)")
+    for block in (light, dark):
+        dim = re.search(r"--dim:\s*(#[0-9a-f]{6});", block).group(1)
+        bg = re.search(r"--bg:\s*(#[0-9a-f]{6});", block).group(1)
+        assert _contrast(dim, bg) >= 4.5, (dim, bg)
     assert _contrast("#5a6171", "#0b0d11") < 4.5   # the helper discriminates
+
+
+# ─── generated from the routing tables (no copy drift) ──────────────────────
+
+
+def test_landing_provider_list_is_the_wired_set_and_excludes_mistral():
+    from aibroker.routes.landing import wired_providers
+    wired = wired_providers()
+    assert "mistral" not in wired and "deepseek" in wired and "local" in wired
+    body = client.get("/").text
+    assert "mistral" not in body.lower().split('id="providers"')[1].split("</section>")[0]
+    assert f'<div class="num">{len(wired)}</div>' in body
+    assert "{n_providers}" not in body
+
+
+def test_landing_lists_every_client_route_that_is_actually_routed():
+    from aibroker.routes import proxy
+    body = client.get("/").text
+    for r in proxy.router.routes:
+        assert "/v1" + r.path in body, r.path
+    for path in ("/v1/decisions", "/v1/transcribe", "/v1/transcribe/jobs", "/v1/deep"):
+        assert path in body
+
+
+def test_llms_txt_is_generated_and_names_every_capability_and_scope():
+    from aibroker.routing.chains import CAPABILITY_CHAINS, CAPABILITY_SCOPE
+    txt = client.get("/llms.txt").text
+    assert "@@" not in txt
+    for cap in CAPABILITY_CHAINS:
+        assert f"`{cap}`" in txt
+    for scope in set(CAPABILITY_SCOPE.values()):
+        assert scope in txt
+
+
+def test_public_pages_share_the_design_tokens_stylesheet():
+    body = client.get("/").text
+    assert "/dashboard/static/css/tokens.css" in body and "<style>" not in body

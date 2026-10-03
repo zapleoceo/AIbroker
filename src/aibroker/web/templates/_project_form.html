@@ -1,0 +1,33 @@
+{# Create (project is none) or edit a project. Drawer by default; inline on the
+   detail page's Settings tab when `inline` is set. #}
+{% import "_macros.html" as m with context %}
+{% set editing = project is not none %}
+{% set action = ("/dashboard/projects/" ~ project.id ~ "/edit") if editing else "/dashboard/projects/create" %}
+{% set nxt = ("/dashboard/projects/" ~ project.id ~ "?tab=settings") if editing else "/dashboard/projects" %}
+{% if not inline %}
+<div class="drawer-head">
+  <h2 id="drawer-title">{{ t("Edit project", "Изменить проект") if editing else t("New project", "Новый проект") }}</h2>
+  <button type="button" class="icon-btn" data-close {{ ttl("Close", "Закрыть") }}>{{ m.icon("x") }}</button>
+</div>
+{% endif %}
+<form method="post" action="{{ action }}" class="{{ 'drawer-pad' if not inline else 'stack' }}" id="project-form" style="{{ 'flex:1' if not inline }}">
+  <input type="hidden" name="next" value="{{ nxt }}">
+  <div class="form-grid">
+    <div class="field span-2"><label for="pf-name">{{ t("Name", "Имя") }}</label>
+      <input id="pf-name" name="name" type="text" required maxlength="100" value="{{ project.name if editing else '' }}"
+             {{ ph("lowercase, e.g. stepan", "lowercase, напр. stepan") }}>
+      <small>{{ t("Shown in logs and the dashboard; max 100 characters.", "Показывается в логах и панели; до 100 символов.") }}</small></div>
+    <div class="field"><label for="pf-email">{{ t("Owner email", "Email владельца") }}</label>
+      <input id="pf-email" name="owner_email" type="email" value="{{ (project.owner_email or '') if editing else '' }}" {{ ph("optional", "необязательно") }}></div>
+    <div class="field"><label for="pf-cap">{{ t("Daily cost cap, $", "Дневной лимит, $") }}</label>
+      <input id="pf-cap" name="daily_cost_cap_usd" type="number" step="0.01" min="0" required
+             value="{{ project.daily_cost_cap_usd if editing and project.daily_cost_cap_usd is not none else ('' if editing else '0.20') }}">
+      <small>{{ t("Required. 0 = free providers only; there is no unlimited default.", "Обязательно. 0 = только бесплатные провайдеры; безлимита по умолчанию нет.") }}</small></div>
+    <div class="field span-2"><span class="lbl" id="pf-scopes">{{ t("Allowed scopes", "Разрешённые права") }}</span>
+      <div class="scope-grid" role="group" aria-labelledby="pf-scopes">{{ scope_boxes|safe }}</div></div>
+  </div>
+  <div class="{{ 'drawer-foot' if not inline else 'row' }}" style="{{ 'margin:0 -20px -28px' if not inline }}">
+    {% if not inline %}<button type="button" class="btn" data-close>{{ t("Cancel", "Отмена") }}</button>{% endif %}
+    <button type="submit" class="btn btn-primary">{{ t("Save changes", "Сохранить") if editing else t("Create project", "Создать проект") }}</button>
+  </div>
+</form>

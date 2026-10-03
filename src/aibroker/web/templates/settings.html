@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block topbar_actions %}{% endblock %}
+{% block content %}
+<div class="grid-2">
+  <section class="card card-pad stack">
+    <h2>{{ t("About this instance", "Об этом инстансе") }}</h2>
+    <dl class="kv">
+      <dt>{{ t("Version", "Версия") }}</dt><dd class="mono">v{{ version }}</dd>
+      <dt>{{ t("Public host", "Публичный хост") }}</dt><dd class="mono">{{ host }}</dd>
+      <dt>{{ t("Global daily cap", "Общий дневной лимит") }}</dt><dd>{{ global_cap|money }} / {{ t("day", "день") }}</dd>
+      <dt>{{ t("Usage retention", "Хранение истории") }}</dt><dd>{{ retention }} {{ t("days", "дн.") }}</dd>
+      <dt>{{ t("Your time zone", "Ваш часовой пояс") }}</dt><dd class="mono">{{ tz }}</dd>
+      <dt>{{ t("Known scopes", "Известные права") }}</dt><dd><div class="pills">{% for s in scopes %}<span class="pill">{{ s }}</span>{% endfor %}</div></dd>
+    </dl>
+  </section>
+  <section class="card card-pad stack">
+    <h2>{{ t("Links", "Ссылки") }}</h2>
+    <div class="stack-sm">
+      <a class="btn" href="/docs">{{ m.icon("link") }}{{ t("API reference (Swagger)", "Справочник API (Swagger)") }}</a>
+      <a class="btn" href="/v1/health" target="_blank" rel="noopener">{{ m.icon("activity") }}{{ t("Provider health page", "Страница статуса провайдеров") }}</a>
+      <a class="btn" href="/">{{ m.icon("link") }}{{ t("Public landing page", "Публичная страница") }}</a>
+      <a class="btn" href="/dashboard/audit">{{ m.icon("shield") }}{{ t("Audit log", "Журнал аудита") }}</a>
+    </div>
+  </section>
+  <section class="card card-pad stack">
+    <h2>{{ t("Language", "Язык") }}</h2>
+    <p class="muted">{{ t("The interface follows your system light/dark setting. Language is remembered in this browser.", "Интерфейс следует системной светлой/тёмной теме. Язык запоминается в этом браузере.") }}</p>
+    <div class="seg lang" role="group" aria-label="Language" style="justify-self:start">
+      <button type="button" data-lang="en" aria-pressed="true">English</button>
+      <button type="button" data-lang="ru" aria-pressed="false">Русский</button>
+    </div>
+  </section>
+  <section class="card card-pad stack">
+    <h2>{{ t("Session", "Сессия") }}</h2>
+    <p class="muted">{{ t("Signed in with Telegram as the owner. Sessions last 30 days.", "Вход через Telegram как владелец. Сессия действует 30 дней.") }}</p>
+    <form method="post" action="/logout"><button class="btn btn-danger" type="submit">{{ m.icon("logout") }}{{ t("Log out", "Выйти") }}</button></form>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% if new_key %}
+<div class="flash secret" role="alert">
+  <b>{{ t("Project " ~ (new_key_project or "") ~ " — save this key now, it cannot be shown again:", "Проект " ~ (new_key_project or "") ~ " — сохраните ключ сейчас, позже он не будет показан:") }}</b>
+  <code id="new-key">{{ new_key }}</code>
+  <div class="row"><button type="button" class="btn btn-sm" data-copy="{{ new_key }}">{{ m.icon("copy") }}{{ t("Copy key", "Копировать ключ") }}</button></div>
+</div>
+{% endif %}
+
+<div class="section-title">
+  <p>{{ t(cards|length ~ " project(s) · spend and activity for the selected period; the bar is today's spend against the daily cap.", "Проектов: " ~ cards|length ~ " · расходы и активность за период; полоса — сегодняшние расходы относительно дневного лимита.") }}</p>
+  <button type="button" class="btn btn-primary" hx-get="/dashboard/projects/new" hx-target="#drawer-body" hx-swap="innerHTML" aria-haspopup="dialog">{{ m.icon("plus") }}{{ t("New project", "Новый проект") }}</button>
+</div>
+
+{% if cards %}
+<div class="pcards">
+  {% for c in cards %}
+  {% set p = c.project %}
+  <a class="card pcard" href="/dashboard/projects/{{ p.id }}?{{ rng.qs }}">
+    <div class="pcard-top">
+      <h3 class="trunc" title="{{ p.name }}">{{ p.name }}</h3>
+      {% if p.is_active %}<span class="chip ok">{{ t("active", "активен") }}</span>{% else %}<span class="chip off">{{ t("disabled", "отключён") }}</span>{% endif %}
+    </div>
+    <div class="pills">
+      {% for s in p.allowed_scopes %}<span class="pill">{{ s|replace("llm:", "") }}</span>{% endfor %}
+    </div>
+    {% if c.cap %}
+      {{ m.meter(t("Today vs daily cap", "Сегодня / дневной лимит"), (c.today_spend|money) ~ " / " ~ (c.cap|money), c.cap_pct, c.cap_cls) }}
+    {% else %}
+      <div class="meter"><div class="meter-top"><span>{{ t("Today", "Сегодня") }}</span><b>{{ c.today_spend|money }}</b></div>
+        <span class="muted" style="font-size:12px">{{ t("no daily cap", "без дневного лимита") }}</span></div>
+    {% endif %}
+    <div class="stats">
+      <div class="stat"><b>{{ c.calls|num }}</b><span>{{ t("calls", "вызовов") }}</span></div>
+      <div class="stat"><b>{{ c.spend|money }}</b><span>{{ t("spend", "расход") }}</span></div>
+      <div class="stat"><b>{{ c.success|pct(0) if c.success is not none else "—" }}</b><span>{{ t("success", "успех") }}</span></div>
+    </div>
+    <div class="row between" style="gap:12px">
+      <div style="flex:1;min-width:0">{{ c.spark|spark }}</div>
+      {% if c.cache_hit is not none and c.cache_hit > 0 %}<span class="chip info plain" title="cached share of input tokens">{{ t("cache", "кэш") }} {{ c.cache_hit|pct(0) }}</span>{% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card">{{ m.empty("folder", "No projects yet", "Проектов пока нет", "A project is a client of the broker: it gets its own key, scopes and daily cap.", "Проект — клиент брокера: у него свой ключ, права и дневной лимит.") }}</div>
+{% endif %}
+{% endblock %}

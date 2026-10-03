@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+{% if new_key %}
+<div class="flash secret" role="alert">
+  <b>{{ t("New token for " ~ project.name ~ " — save it now, the old one no longer works and this cannot be shown again:", "Новый токен для " ~ project.name ~ " — сохраните сейчас: старый больше не работает, а этот не будет показан повторно:") }}</b>
+  <code>{{ new_key }}</code>
+  <div class="row"><button type="button" class="btn btn-sm" data-copy="{{ new_key }}">{{ m.icon("copy") }}{{ t("Copy token", "Копировать токен") }}</button></div>
+</div>
+{% endif %}
+
+<div class="row between">
+  <div class="row" style="min-width:0">
+    <a href="/dashboard/projects?{{ rng.qs }}" class="btn btn-sm btn-ghost">← {{ t("Projects", "Проекты") }}</a>
+    {% if project.is_active %}<span class="chip ok">{{ t("active", "активен") }}</span>{% else %}<span class="chip off">{{ t("disabled", "отключён") }}</span>{% endif %}
+    <code title="project key prefix">{{ project.project_key_prefix }}…</code>
+    {% if project.owner_email %}<span class="muted trunc">{{ project.owner_email }}</span>{% endif %}
+  </div>
+  <form method="post" action="/dashboard/projects/{{ project.id }}/rotate-token" class="inline"
+        data-confirm="Rotate the token of {{ project.name }}? The current key stops working immediately.">
+    <input type="hidden" name="next" value="/dashboard/projects/{{ project.id }}?tab=settings">
+    <button class="btn" type="submit">{{ m.icon("refresh") }}{{ t("Rotate token", "Сменить токен") }}</button>
+  </form>
+</div>
+
+<div class="pills">
+  {% for s in project.allowed_scopes %}<span class="pill on">{{ s }}</span>{% endfor %}
+</div>
+
+<nav class="tabs" aria-label="{{ 'Project sections' }}">
+  {% for key, en, ru in (("usage", "Usage", "Использование"), ("models", "Models", "Модели"), ("keys", "Keys", "Ключи"), ("settings", "Settings", "Настройки")) %}
+  <a href="/dashboard/projects/{{ project.id }}?tab={{ key }}&amp;{{ rng.qs }}" {% if tab == key %}aria-current="page"{% endif %}>{{ t(en, ru) }}</a>
+  {% endfor %}
+</nav>
+
+{% if tab == "usage" %}
+<section class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
+  <div class="card kpi"><div class="kpi-label">{{ t("Calls", "Вызовы") }}</div><div class="kpi-value">{{ tot.calls|num }}</div>
+    <div class="kpi-sub"><span class="good">{{ tot.ok_n|num }} ok</span> · <span class="{{ 'bad' if tot.err_n }}">{{ tot.err_n|num }} {{ "failed" }}</span></div></div>
+  <div class="card kpi"><div class="kpi-label">{{ t("Spend", "Расходы") }}</div><div class="kpi-value">{{ tot.spend|money }}</div>
+    <div class="kpi-sub">{{ t("daily cap", "дневной лимит") }} {{ cap|money if cap else "—" }}</div></div>
+  <div class="card kpi"><div class="kpi-label">{{ t("Tokens in / out", "Токены вх / исх") }}</div><div class="kpi-value" style="font-size:20px">{{ tot.tin|compact }} / {{ tot.tout|compact }}</div>
+    <div class="kpi-sub">{{ tot.tin|num }} / {{ tot.tout|num }}</div></div>
+  <div class="card kpi"><div class="kpi-label">{{ t("Success", "Успешность") }}</div><div class="kpi-value">{{ tot.success|pct(0) if tot.success is not none else "—" }}</div>
+    <div class="kpi-sub">{{ t("avg latency", "ср. задержка") }} {{ tot.avg_lat|ms }}</div></div>
+  {% if tot.cache_read or tot.cache_write %}
+  <div class="card kpi"><div class="kpi-label">{{ t("Cache hit", "Кэш-хит") }}</div><div class="kpi-value">{{ tot.cache_hit|pct(0) if tot.cache_hit is not none else "—" }}</div>
+    <div class="kpi-sub">{{ tot.cache_read|num }} {{ t("read", "чтение") }} · {{ tot.cache_write|num }} {{ t("write", "запись") }}</div></div>
+  {% endif %}
+</section>
+
+{% if cap %}
+<section class="card card-pad">{{ m.meter(t("Today vs daily cap", "Сегодня / дневной лимит"), (today_spend|money) ~ " / " ~ (cap|money), cap_pct, "bad" if cap_pct >= 90 else "warn" if cap_pct >= 70 else "") }}</section>
+{% endif %}
+
+<div class="grid-2">
+  <section class="card">
+    <div class="card-head"><h2>{{ t("By provider", "По провайдерам") }}</h2></div>
+    <div class="card-body">
+      <table class="table"><tbody>
+        {% for r in d.by_provider %}
+        <tr><td class="trunc">{{ r.k }}</td><td class="num">{{ r.n|num }}</td><td class="num mono">{{ r.spend|money(4) }}</td></tr>
+        {% else %}<tr><td class="muted">{{ t("no data in this range", "нет данных за период") }}</td></tr>{% endfor %}
+      </tbody></table>
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>{{ t("Latency distribution", "Распределение задержек") }}</h2></div>
+    <div class="card-body hist">
+      {% set hmax = (d.lat_hist|map(attribute=1)|max) or 1 %}
+      {% for label, n in d.lat_hist %}
+      <div class="hist-row"><span>{{ label }}</span><span class="bar"><i style="width:{{ (n / hmax * 100)|round(1) }}%"></i></span><span class="right">{{ n|num }}</span></div>
+      {% endfor %}
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>{{ t("By capability", "По способностям") }}</h2></div>
+    <div class="card-body">
+      <table class="table"><tbody>
+        {% for r in d.by_capability %}
+        <tr><td class="cell-trunc" title="{{ r.k }}">{{ r.k }}</td><td class="num">{{ r.n|num }}</td><td class="num mono">{{ r.spend|money(4) }}</td>
+          <td style="width:90px">{{ d.cap_spark.get(r.k, [])|spark }}</td></tr>
+        {% else %}<tr><td class="muted">{{ t("no data in this range", "нет данных за период") }}</td></tr>{% endfor %}
+      </tbody></table>
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>{{ t("By workflow", "По workflow") }}</h2></div>
+    <div class="card-body">
+      <table class="table"><tbody>
+        {% for r in d.by_workflow %}
+        <tr><td class="cell-trunc" title="{{ r.k }}"><a href="/dashboard/requests?project={{ project.id }}&amp;workflow={{ r.k|urlencode }}&amp;{{ rng.qs }}">{{ r.k }}</a></td><td class="num">{{ r.n|num }}</td><td class="num mono">{{ r.spend|money(4) }}</td>
+          <td style="width:90px">{{ d.wf_spark.get(r.k, [])|spark }}</td></tr>
+        {% else %}<tr><td class="muted">{{ t("no data in this range", "нет данных за период") }}</td></tr>{% endfor %}
+      </tbody></table>
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head"><h2>{{ t("Recent 50 calls", "Последние 50 вызовов") }}</h2>
+    <a href="/dashboard/requests?project={{ project.id }}&amp;{{ rng.qs }}">{{ t("Open in Requests", "Открыть в Запросах") }}</a></div>
+  {% if d.recent %}
+  <div class="table-wrap"><table class="table rtable">
+    <thead><tr><th>{{ t("When", "Когда") }}</th><th>{{ t("Provider · model", "Провайдер · модель") }}</th><th>{{ t("Capability", "Способность") }}</th><th class="num">{{ t("Cost", "Цена") }}</th><th class="num">{{ t("Latency", "Задержка") }}</th><th>{{ t("Status", "Статус") }}</th></tr></thead>
+    <tbody>
+      {% for r in d.recent %}
+      <tr class="clickable">
+        <td data-label="When" class="nowrap"><button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.id }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" aria-haspopup="dialog">{{ r.created_at|time_tag("mdhms") }}</button></td>
+        <td data-label="Provider · model" class="cell-trunc full"><span title="{{ r.model or '' }}">{{ r.provider }}<span class="dim"> · {{ r.model_served or r.model or "—" }}</span></span></td>
+        <td data-label="Capability"><span class="pill">{{ r.capability or "—" }}</span></td>
+        <td data-label="Cost" class="num mono">{{ r.cost_usd|money(4) }}</td>
+        <td data-label="Latency" class="num mono">{{ r.latency_ms|ms }}</td>
+        <td data-label="Status">{{ m.call_status(r) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}{{ m.empty("inbox", "No calls yet", "Вызовов пока нет") }}{% endif %}
+</section>
+
+{% elif tab == "models" %}
+<section class="card">
+  <div class="card-head"><h2>{{ t("Top models", "Топ моделей") }}</h2><p>{{ t("cache hit = cached share of input tokens", "кэш-хит — доля кэшированных входных токенов") }}</p></div>
+  {% if d.by_model %}
+  <div class="table-wrap"><table class="table rtable">
+    <thead><tr><th>{{ t("Model", "Модель") }}</th><th class="num">{{ t("Calls", "Вызовы") }}</th><th class="num">{{ t("Success", "Успех") }}</th><th class="num">{{ t("Cache hit", "Кэш-хит") }}</th><th class="num">{{ t("Spend", "Расход") }}</th></tr></thead>
+    <tbody>
+      {% for r in d.by_model %}
+      <tr>
+        <td data-label="Model" class="cell-trunc full" title="{{ r.k }}"><a href="/dashboard/requests?project={{ project.id }}&amp;model={{ r.k|urlencode }}&amp;{{ rng.qs }}">{{ r.k }}</a></td>
+        <td data-label="Calls" class="num">{{ r.n|num }}</td>
+        <td data-label="Success" class="num">{{ ((r.ok_n / r.n * 100)|pct(0)) if r.n else "—" }}</td>
+        <td data-label="Cache hit" class="num">{{ ((r.cache_r / r.tin * 100)|pct(0)) if r.tin and r.cache_r else "—" }}</td>
+        <td data-label="Spend" class="num mono">{{ r.spend|money(4) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}{{ m.empty("cpu", "No model usage in this range", "Нет использования моделей за период") }}{% endif %}
+</section>
+
+{% elif tab == "keys" %}
+<section class="card">
+  <div class="card-head"><h2>{{ t("Keys that served this project", "Ключи, обслужившие проект") }}</h2><p>{{ t("Provider keys are shared by every project; this is who handled this project's calls.", "Ключи провайдеров общие для всех проектов; здесь — кто обрабатывал вызовы этого проекта.") }}</p></div>
+  {% if d.used_keys %}
+  <div class="table-wrap"><table class="table rtable">
+    <thead><tr><th>{{ t("Provider", "Провайдер") }}</th><th>{{ t("Key", "Ключ") }}</th><th class="num">{{ t("Calls", "Вызовы") }}</th><th class="num">{{ t("Errors", "Ошибки") }}</th><th class="num">{{ t("Spend", "Расход") }}</th></tr></thead>
+    <tbody>
+      {% for r in d.used_keys %}
+      <tr>
+        <td data-label="Provider">{% if r.provider %}<a href="/dashboard/keys#p-{{ r.provider }}">{{ r.provider }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td data-label="Key">{{ r.label or t("(deleted key)", "(удалённый ключ)") }}</td>
+        <td data-label="Calls" class="num">{{ r.n|num }}</td>
+        <td data-label="Errors" class="num {{ 'bad' if r.errs }}">{{ r.errs|num }}</td>
+        <td data-label="Spend" class="num mono">{{ r.spend|money(4) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}{{ m.empty("key", "No calls in this range", "Нет вызовов за период") }}{% endif %}
+</section>
+
+{% else %}
+<div class="grid-2">
+  <section class="card card-pad stack">
+    <h2>{{ t("Project settings", "Настройки проекта") }}</h2>
+    {% set inline = true %}
+    {% include "_project_form.html" %}
+  </section>
+  <section class="card card-pad stack" style="border-color:color-mix(in srgb,var(--bad) 35%,var(--line))">
+    <h2>{{ t("Danger zone", "Опасная зона") }}</h2>
+    <p class="muted">{{ t("Deleting a project stops its key at once. Usage history is kept for billing; queued jobs of the project are removed.", "Удаление проекта сразу отключает его ключ. История использования сохраняется; задачи проекта в очереди удаляются.") }}</p>
+    <div class="row">
+      <form method="post" action="/dashboard/projects/{{ project.id }}/rotate-token" class="inline"
+            data-confirm="Rotate the token of {{ project.name }}? The current key stops working immediately.">
+        <input type="hidden" name="next" value="/dashboard/projects/{{ project.id }}?tab=settings">
+        <button class="btn" type="submit">{{ m.icon("refresh") }}{{ t("Rotate token", "Сменить токен") }}</button>
+      </form>
+      <form method="post" action="/dashboard/projects/{{ project.id }}/delete" class="inline"
+            data-confirm="Delete project {{ project.name }}? Its key stops working immediately; usage history is kept.">
+        <button class="btn btn-danger" type="submit">{{ m.icon("trash") }}{{ t("Delete project", "Удалить проект") }}</button>
+      </form>
+    </div>
+  </section>
+</div>
+{% endif %}
+{% endblock %}

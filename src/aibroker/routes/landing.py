@@ -6,10 +6,22 @@ on first paint (useful for sharing); ?lang=en forces EN.
 """
 from __future__ import annotations
 
+from html import escape
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.routing import APIRoute
 
 from aibroker import __version__
+from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.routes import proxy
+from aibroker.routes.dashboard_assets import ASSETS_VERSION
+from aibroker.routing.chains import (
+    CAPABILITY_CHAINS,
+    CAPABILITY_SCOPE,
+    PAID_PROVIDERS,
+    usable_scopes_for_provider,
+)
 
 # SVG favicon — hub-and-spokes: central node = broker, 4 satellites = providers
 # being routed. 32×32 viewBox; scales cleanly to 16×16 in tab strips.
@@ -37,6 +49,83 @@ FAVICON_LINKS = (
     '<link rel="apple-touch-icon" href="/favicon.svg">'
 )
 
+
+# Shared design tokens + the public-pages stylesheet (same tokens as the admin UI).
+CSS_LINKS = (
+    f'<link rel="stylesheet" href="/dashboard/static/css/tokens.css?v={ASSETS_VERSION}">'
+    f'<link rel="stylesheet" href="/dashboard/static/css/public.css?v={ASSETS_VERSION}">'
+)
+
+# Display names for providers whose key differs from how they are written.
+_PROVIDER_LABEL = {"nvidia": "nvidia nim"}
+
+
+def wired_providers() -> list[str]:
+    """Providers the broker can actually route to: a model table AND a seat in
+    at least one capability chain. Derived from the routing tables (the single
+    source of truth) so the landing page cannot drift from them — mistral, which
+    has a model table but sits in no chain since 2026-09-12, is correctly absent.
+    Deliberately NOT derived from which providers hold active keys: the public
+    page must not reveal per-provider key state (see the /v1/health aggregate)."""
+    wired = [p for p in DEFAULT_MODEL if usable_scopes_for_provider(p)]
+    free = [p for p in wired if p not in PAID_PROVIDERS and p != "local"]
+    paid = [p for p in wired if p in PAID_PROVIDERS]
+    return sorted(free) + sorted(paid) + (["local"] if "local" in wired else [])
+
+
+def _providers_html() -> str:
+    rows = []
+    for p in wired_providers():
+        if p == "local":
+            badge = '<span class="badge" data-i18n data-en="self-hosted" data-ru="свой сервер">self-hosted</span>'
+        elif p in PAID_PROVIDERS:
+            badge = '<span class="badge paid">paid</span>'
+        else:
+            badge = '<span class="badge">free</span>'
+        rows.append(f'      <div class="prov">{escape(_PROVIDER_LABEL.get(p, p))} {badge}</div>')
+    return "\n".join(rows)
+
+
+# One-line notes for the client endpoints, keyed by path; a route with no note
+# still lists (the page is generated from the router, so it cannot omit one).
+_ENDPOINT_NOTES = {
+    "/jobs": "chat · async", "/jobs/{job_id}": "poll", "/embed": "sync",
+    "/transcribe": "sync", "/transcribe/jobs": "async", "/decisions": "sync",
+    "/deep": "chat:deep · async", "/deep/{job_id}": "poll", "/chat": "410 Gone",
+}
+_VERB_ORDER = {"POST": 0, "GET": 1}
+
+
+def client_endpoints() -> list[tuple[str, str, str]]:
+    """(METHOD, '/v1/...', note) for every route of the client API, in the
+    order they are declared — read from the real router."""
+    out = []
+    for r in proxy.router.routes:
+        if not isinstance(r, APIRoute):
+            continue
+        for m in sorted(r.methods or (), key=lambda x: _VERB_ORDER.get(x, 9)):
+            if m == "HEAD":
+                continue
+            out.append((m, "/v1" + r.path, _ENDPOINT_NOTES.get(r.path, "")))
+    return out
+
+
+def _client_endpoints_html() -> str:
+    return "\n".join(
+        f'          <div class="ep"><span class="verb {m.lower()}">{m}</span>'
+        f'<span class="path">{escape(path)}</span><span class="note">{escape(note)}</span></div>'
+        for m, path, note in client_endpoints()
+    )
+
+
+def _capability_list() -> str:
+    return ", ".join(f"`{c}`" for c in CAPABILITY_CHAINS)
+
+
+def _scope_list() -> str:
+    return ", ".join(f"`{s}`" for s in dict.fromkeys(CAPABILITY_SCOPE.values()))
+
+
 router = APIRouter(tags=["landing"])
 
 
@@ -47,7 +136,7 @@ _HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {favicon}
 <title>AIbroker — one API key, every LLM provider · free-first routing, cost guard, self-hosted</title>
-<meta name="description" content="Self-hosted LLM key broker. One API across 14 providers (Cerebras, Groq, Gemini, DeepSeek, Anthropic, OpenAI, Voyage and more, plus a self-hosted local one). Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
+<meta name="description" content="Self-hosted LLM key broker. One API across {n_providers} providers (Cerebras, Groq, Gemini, DeepSeek, Anthropic, OpenAI, Voyage and more, plus a self-hosted local one). Free-tier first with paid fallback, per-key cost caps, automatic health probing, encrypted token storage. Self-host on any VPS.">
 <meta name="keywords" content="LLM router, LLM proxy, AI gateway, OpenAI alternative, key rotation, free LLM tier, multi-provider LLM, LiteLLM, AI cost management, self-hosted LLM broker, Cerebras Groq Gemini Cohere OpenRouter DeepSeek Anthropic Voyage">
 <meta name="author" content="zapleoceo">
 <meta name="robots" content="index, follow">
@@ -60,7 +149,7 @@ _HTML = """<!doctype html>
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aib.zapleo.com/">
 <meta property="og:title" content="AIbroker — one API key, every LLM provider">
-<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across 14 providers, cost caps, health monitoring. Self-host on any VPS.">
+<meta property="og:description" content="Self-hosted LLM key broker. Free-first routing across {n_providers} providers, cost caps, health monitoring. Self-host on any VPS.">
 <meta property="og:site_name" content="AIbroker">
 <meta property="og:locale" content="en_US">
 <meta property="og:locale:alternate" content="ru_RU">
@@ -68,7 +157,7 @@ _HTML = """<!doctype html>
 <!-- Twitter / X card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="AIbroker — one API key, every LLM provider">
-<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across 14 providers · cost guard · encrypted keys.">
+<meta name="twitter:description" content="Self-hosted LLM key broker · free-first across {n_providers} providers · cost guard · encrypted keys.">
 
 <!-- Schema.org structured data — picked up by Google rich-results AND by
      LLM crawlers (Perplexity, ChatGPT browse, Claude search). Two graphs:
@@ -90,7 +179,7 @@ _HTML = """<!doctype html>
       "codeRepository": "https://github.com/zapleoceo/AIbroker",
       "programmingLanguage": "Python",
       "featureList": [
-        "Free-tier-first routing across 14 LLM providers",
+        "Free-tier-first routing across {n_providers} LLM providers",
         "Adaptive per-provider cooldowns with exponential backoff and jitter",
         "Per-key, per-project and global daily cost caps",
         "Atomic SELECT FOR UPDATE SKIP LOCKED key selection",
@@ -143,181 +232,13 @@ _HTML = """<!doctype html>
 }}
 </script>
 
-<style>
-:root {{
-  --bg:#0b0d11; --panel:#13161c; --panel2:#191d25; --line:#262a33;
-  --text:#e6e8ec; --muted:#8b929f; --dim:#7d8494;
-  --accent:#4dabf7; --accent-soft:rgba(77,171,247,.12);
-  --good:#51cf66; --warn:#ffd43b; --bad:#ff6b6b;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}}
-*{{box-sizing:border-box}}
-html,body{{margin:0;padding:0;background:var(--bg);color:var(--text);
-  font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}}
-a{{color:var(--accent);text-decoration:none}}
-a:hover{{text-decoration:underline}}
-code{{font-family:var(--mono);background:var(--panel);padding:2px 6px;
-  border-radius:4px;font-size:.9em;color:var(--accent)}}
-pre{{font-family:var(--mono);background:var(--panel);padding:18px 20px;
-  border-radius:8px;border:1px solid var(--line);overflow-x:auto;
-  font-size:13px;line-height:1.6;color:#cfd2d8}}
-.container{{max-width:1080px;margin:0 auto;padding:0 24px}}
-
-/* Header */
-header{{position:sticky;top:0;z-index:10;background:rgba(11,13,17,.85);
-  backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}}
-.nav{{display:flex;align-items:center;justify-content:space-between;
-  padding:14px 0;gap:24px}}
-.brand{{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px}}
-.brand .dot{{width:9px;height:9px;background:var(--accent);
-  border-radius:50%;box-shadow:0 0 12px var(--accent)}}
-.nav-links{{display:flex;gap:24px;font-size:14px}}
-.nav-links a{{color:var(--muted)}}
-.nav-links a:hover{{color:var(--text);text-decoration:none}}
-.nav-right{{display:flex;align-items:center;gap:14px}}
-.lang-toggle{{display:flex;background:var(--panel);border:1px solid var(--line);
-  border-radius:6px;overflow:hidden;font-family:var(--mono);font-size:12px}}
-.lang-toggle button{{background:none;border:none;color:var(--muted);
-  padding:6px 12px;cursor:pointer;font-family:var(--mono);font-size:12px}}
-.lang-toggle button.active{{background:var(--accent-soft);color:var(--accent)}}
-.btn{{display:inline-block;padding:10px 18px;border-radius:6px;
-  font-size:14px;font-weight:500;border:1px solid var(--accent);
-  color:var(--accent);background:transparent;cursor:pointer;
-  font-family:var(--sans);transition:.15s}}
-.btn:hover{{background:var(--accent-soft);text-decoration:none}}
-.btn-primary{{background:var(--accent);color:#0b0d11}}
-.btn-primary:hover{{background:#74c0fc}}
-
-/* Sections */
-section{{padding:72px 0;border-bottom:1px solid var(--line)}}
-section:last-of-type{{border-bottom:none}}
-h1,h2,h3{{font-weight:600;letter-spacing:-.01em;margin:0 0 16px}}
-h1{{font-size:54px;line-height:1.08;letter-spacing:-.02em}}
-h2{{font-size:34px;line-height:1.15}}
-h3{{font-size:18px}}
-.eyebrow{{font-family:var(--mono);font-size:12px;color:var(--accent);
-  text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}}
-.lead{{font-size:19px;color:var(--muted);max-width:680px;margin-bottom:28px}}
-.section-intro{{max-width:720px;margin-bottom:48px;color:var(--muted);font-size:16px}}
-
-/* Hero */
-.hero{{padding-top:96px}}
-.hero-cta{{display:flex;gap:14px;margin-top:32px;flex-wrap:wrap}}
-.hero-stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-  gap:24px;margin-top:56px;padding-top:32px;border-top:1px solid var(--line)}}
-.stat .num{{font-family:var(--mono);font-size:28px;color:var(--text);font-weight:600}}
-.stat .lbl{{font-size:12px;color:var(--dim);margin-top:4px;
-  font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em}}
-
-/* Problem grid */
-.problem-grid{{display:grid;grid-template-columns:1fr 1fr;gap:28px}}
-.problem-card{{background:var(--panel);border:1px solid var(--line);
-  border-radius:10px;padding:24px}}
-.problem-card.before{{border-top:2px solid var(--bad)}}
-.problem-card.after{{border-top:2px solid var(--good)}}
-.problem-card .label{{font-family:var(--mono);font-size:11px;
-  text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}}
-.problem-card.before .label{{color:var(--bad)}}
-.problem-card.after .label{{color:var(--good)}}
-.problem-card ul{{padding:0;margin:0;list-style:none}}
-.problem-card li{{padding:8px 0;color:var(--muted);font-size:14px;
-  display:flex;gap:10px}}
-.problem-card li::before{{content:"·";color:var(--dim);flex-shrink:0}}
-
-/* Features */
-.features{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px}}
-.feat{{padding:24px;background:var(--panel);border:1px solid var(--line);border-radius:10px}}
-.feat h3{{margin-bottom:8px}}
-.feat p{{color:var(--muted);font-size:14px;margin:0;line-height:1.6}}
-.feat-icon{{display:inline-flex;width:36px;height:36px;align-items:center;
-  justify-content:center;background:var(--accent-soft);border-radius:8px;
-  color:var(--accent);font-family:var(--mono);font-weight:600;margin-bottom:14px}}
-
-/* How it works */
-.modes{{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:28px}}
-.mode{{background:var(--panel);border:1px solid var(--line);
-  border-radius:10px;padding:28px}}
-.mode-head{{display:flex;align-items:center;gap:12px;margin-bottom:14px}}
-.mode-tag{{font-family:var(--mono);font-size:11px;padding:3px 10px;
-  background:var(--accent-soft);color:var(--accent);border-radius:4px}}
-.mode h3{{margin:0;font-size:20px}}
-.mode p{{color:var(--muted);font-size:14px;margin:0 0 14px}}
-
-/* Providers */
-.providers{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}}
-.prov{{background:var(--panel);border:1px solid var(--line);
-  border-radius:8px;padding:14px 18px;font-family:var(--mono);font-size:13px;
-  display:flex;justify-content:space-between;align-items:center}}
-.prov .badge{{font-size:10px;padding:2px 6px;border-radius:3px;
-  background:var(--accent-soft);color:var(--accent)}}
-.prov .badge.paid{{background:rgba(255,212,59,.12);color:var(--warn)}}
-
-/* API */
-.api-grid{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:28px}}
-.api-block h3{{font-family:var(--mono);font-size:13px;color:var(--accent);
-  text-transform:uppercase;letter-spacing:.08em}}
-
-/* Endpoints */
-.endpoints{{display:grid;gap:8px;margin-top:18px}}
-.ep{{display:grid;grid-template-columns:60px 1fr auto;gap:14px;align-items:center;
-  padding:10px 16px;background:var(--panel);border:1px solid var(--line);
-  border-radius:6px;font-family:var(--mono);font-size:13px}}
-.ep .verb{{color:var(--accent);font-weight:600;font-size:11px;text-align:center;
-  background:var(--accent-soft);padding:3px 0;border-radius:3px}}
-.ep .verb.post{{color:var(--good);background:rgba(81,207,102,.1)}}
-.ep .verb.get{{color:var(--accent);background:var(--accent-soft)}}
-.ep .path{{color:var(--text)}}
-.ep .note{{color:var(--dim);font-size:11px;font-family:var(--sans)}}
-
-/* Pricing */
-.pricing{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px}}
-.tier{{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  padding:28px;display:flex;flex-direction:column}}
-.tier.featured{{border-color:var(--accent);background:linear-gradient(180deg,var(--accent-soft) 0%,var(--panel) 60%)}}
-.tier-name{{font-family:var(--mono);font-size:12px;color:var(--accent);
-  text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}}
-.tier-price{{font-size:32px;font-weight:600;margin-bottom:4px}}
-.tier-price .currency{{color:var(--muted);font-weight:400;font-size:18px}}
-.tier-desc{{color:var(--muted);font-size:14px;margin-bottom:18px;min-height:42px}}
-.tier ul{{list-style:none;padding:0;margin:0 0 24px;flex:1}}
-.tier li{{padding:6px 0;color:var(--muted);font-size:14px}}
-.tier li::before{{content:"✓ ";color:var(--good)}}
-
-/* Footer */
-footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
-.footer-grid{{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:32px;margin-bottom:32px}}
-.footer-grid h4{{color:var(--text);font-size:13px;margin:0 0 14px;font-weight:600;
-  text-transform:uppercase;letter-spacing:.05em}}
-.footer-grid ul{{list-style:none;padding:0;margin:0}}
-.footer-grid li{{padding:4px 0}}
-.footer-grid li a{{color:var(--muted)}}
-.footer-bottom{{padding-top:24px;border-top:1px solid var(--line);
-  display:flex;justify-content:space-between;flex-wrap:wrap;gap:14px}}
-
-/* Mobile */
-@media (max-width:720px) {{
-  h1{{font-size:36px}} h2{{font-size:26px}}
-  .nav-links{{display:none}}
-  .problem-grid,.modes,.api-grid,.pricing,.footer-grid{{grid-template-columns:1fr}}
-}}
-
-/* GitHub link in header */
-.gh-link {{display:inline-flex;align-items:center;justify-content:center;
-  width:32px;height:32px;border-radius:6px;color:var(--muted);
-  transition:.15s;border:1px solid var(--line)}}
-.gh-link:hover {{color:var(--text);background:var(--panel);border-color:var(--muted);text-decoration:none}}
-.gh-link svg {{display:block}}
-
-/* Language switching — hide non-active lang text */
-[data-i18n].lang-hidden {{display:none !important}}
-</style>
+{css}
 </head>
 <body>
 <noscript>
-  <div style="background:#13161c;border-bottom:1px solid #262a33;padding:16px 24px;color:#e6e8ec;font-size:14px;line-height:1.6">
+  <div style="background:var(--panel);border-bottom:1px solid var(--line);padding:16px 24px;color:var(--text);font-size:14px;line-height:1.6">
     <strong>AIbroker</strong> is a self-hosted LLM key broker: one project key, free-tier-first routing
-    across 14 providers, cost caps, async chat jobs (POST /v1/jobs, poll GET /v1/jobs/{{id}}), and sync
+    across {n_providers} providers, cost caps, async chat jobs (POST /v1/jobs, poll GET /v1/jobs/{{id}}), and sync
     embeddings / transcription / decisions. This page's text is filled in by JavaScript, so enable it
     for the full page. Meanwhile:
     <a href="/docs">/docs</a> &middot; <a href="/openapi.json">/openapi.json</a> &middot;
@@ -370,7 +291,7 @@ footer{{padding:48px 0 64px;color:var(--dim);font-size:13px}}
          data-en="★ Star on GitHub" data-ru="★ Star на GitHub"></a>
     </div>
     <div class="hero-stats">
-      <div class="stat"><div class="num">14</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
+      <div class="stat"><div class="num">{n_providers}</div><div class="lbl" data-i18n="hero.s1" data-en="Providers" data-ru="Провайдеров"></div></div>
       <div class="stat"><div class="num">7</div><div class="lbl" data-i18n="hero.s2" data-en="Scopes" data-ru="Scope-ов"></div></div>
       <div class="stat"><div class="num">~$0</div><div class="lbl" data-i18n="hero.s3" data-en="Avg cost / call" data-ru="Средн. стоим. вызова"></div></div>
       <div class="stat"><div class="num" style="font-size:22px;line-height:42px">Visible</div><div class="lbl" data-i18n="hero.s4" data-en="Source-available" data-ru="Source-available (код виден)"></div></div>
@@ -525,8 +446,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">09</div>
         <h3 data-i18n="f9.t" data-en="Hard CI gates" data-ru="Жёсткие CI-гейты"></h3>
         <p data-i18n="f9.d"
-           data-en="Deploy requires tests + docs to pass. Coverage gate stair-steps up; never drops. 400+ tests, unit + Postgres integration."
-           data-ru="Деплой требует прохождение тестов + документации. Coverage-гейт растёт ступенями; не падает. 400+ тестов, unit + Postgres-интеграция."></p>
+           data-en="Deploy requires tests + docs to pass. Coverage gate stair-steps up; never drops. 900+ tests, unit + Postgres integration."
+           data-ru="Деплой требует прохождение тестов + документации. Coverage-гейт растёт ступенями; не падает. 900+ тестов, unit + Postgres-интеграция."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">10</div>
@@ -558,26 +479,13 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
   <div class="container">
     <div class="eyebrow" data-i18n="prov.eyebrow" data-en="Providers" data-ru="Провайдеры"></div>
     <h2 data-i18n="prov.title"
-        data-en="Fourteen providers. Add more in one row of code."
-        data-ru="Четырнадцать провайдеров. Добавить ещё — одна строка кода."></h2>
+        data-en="{n_providers} providers wired in. Add more in one row of code."
+        data-ru="Подключено провайдеров: {n_providers}. Добавить ещё — одна строка кода."></h2>
     <p class="section-intro" data-i18n="prov.intro"
        data-en="Built on LiteLLM, so any of its 100+ providers can be plugged in. The free-first chain is configurable per capability."
        data-ru="Построено на LiteLLM — можно подключить любой из его 100+ провайдеров. Free-first цепочка настраивается на каждую способность."></p>
     <div class="providers">
-      <div class="prov">cerebras <span class="badge">free</span></div>
-      <div class="prov">groq <span class="badge">free</span></div>
-      <div class="prov">gemini <span class="badge">free</span></div>
-      <div class="prov">cohere <span class="badge">free</span></div>
-      <div class="prov">openrouter <span class="badge">free</span></div>
-      <div class="prov">voyage <span class="badge">free</span></div>
-      <div class="prov">sambanova <span class="badge">free</span></div>
-      <div class="prov">nvidia nim <span class="badge">free</span></div>
-      <div class="prov">cloudflare <span class="badge">free</span></div>
-      <div class="prov">zai <span class="badge">free</span></div>
-      <div class="prov">deepseek <span class="badge paid">paid</span></div>
-      <div class="prov">anthropic <span class="badge paid">paid</span></div>
-      <div class="prov">openai <span class="badge paid">paid</span></div>
-      <div class="prov">local <span class="badge" data-i18n data-en="self-hosted" data-ru="свой сервер">self-hosted</span></div>
+{providers_html}
     </div>
   </div>
 </section>
@@ -594,15 +502,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div class="api-block">
         <h3 data-i18n="api.client" data-en="For clients · X-Project-Key" data-ru="Для клиентов · X-Project-Key"></h3>
         <div class="endpoints">
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/jobs</span><span class="note">chat · async</span></div>
-          <div class="ep"><span class="verb get">GET</span><span class="path">/v1/jobs/{{id}}</span><span class="note">poll</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/embed</span><span class="note">sync</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/transcribe</span><span class="note">sync</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/transcribe/jobs</span><span class="note">async</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/decisions</span><span class="note">sync</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/deep</span><span class="note">chat:deep · async</span></div>
-          <div class="ep"><span class="verb get">GET</span><span class="path">/v1/deep/{{id}}</span><span class="note">poll</span></div>
-          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/chat</span><span class="note">410 Gone</span></div>
+{client_endpoints_html}
         </div>
       </div>
       <div class="api-block">
@@ -803,7 +703,11 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
 @router.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def landing() -> HTMLResponse:
     """Public landing — bilingual EN/RU, default EN."""
-    return HTMLResponse(_HTML.format(version=__version__, favicon=FAVICON_LINKS))
+    return HTMLResponse(_HTML.format(
+        version=__version__, favicon=FAVICON_LINKS, css=CSS_LINKS,
+        n_providers=len(wired_providers()), providers_html=_providers_html(),
+        client_endpoints_html=_client_endpoints_html(),
+    ))
 
 
 @router.get("/favicon.svg")
@@ -866,10 +770,8 @@ _SITEMAP_XML = """<?xml version="1.0" encoding="UTF-8"?>
 _LLMS_TXT = """# AIbroker
 
 > Self-hosted centralized LLM key broker. One API endpoint routes calls across
-> 14 LLM providers (Cerebras, Groq, Gemini, Cohere, OpenRouter, DeepSeek,
-> Anthropic, OpenAI, Voyage, SambaNova, NVIDIA NIM, Cloudflare Workers AI,
-> Z.ai, plus a self-hosted `local` provider for vision and a transcription
-> fallback) with free-tier-first ordering, paid fallback,
+> @@N@@ LLM providers (@@PROVIDERS@@; `local` is a self-hosted provider
+> for vision and a transcription fallback) with free-tier-first ordering, paid fallback,
 > per-key and per-project cost caps, automatic health probing, and
 > Fernet-encrypted token storage at rest. Self-host on any VPS.
 
@@ -880,9 +782,7 @@ _LLMS_TXT = """# AIbroker
 - **Privacy**: request bodies are not logged (metadata only). Async job
   payloads (`/v1/jobs`, `/v1/deep`, `/v1/transcribe/jobs`) are stored in the job
   queue so they can be polled and are purged after 7 days.
-- **Capabilities**: requests are tagged with one of `chat:fast`, `chat:smart`,
-  `chat:sales`, `chat:code`, `chat:edit`, `chat:deep`, `prefilter`,
-  `structured`, `translate`, `vision`, `transcription`, `embedding`. Each maps
+- **Capabilities**: requests are tagged with one of @@CAPABILITIES@@. Each maps
   to an ordered provider chain and a required scope. Most chains are
   free-first; `chat:smart` (free Gemini first, DeepSeek as the paid fallback)
   and `chat:sales` (Claude Sonnet-led) are the money lanes where answer quality
@@ -893,8 +793,7 @@ _LLMS_TXT = """# AIbroker
   guarantee) gated behind its own scope so it never competes with live chat
   traffic.
 - **Scopes**: every project key carries a list of allowed scopes
-  (`llm:chat`, `llm:edit`, `llm:deep`, `llm:vision`, `llm:audio`, `llm:embed`,
-  `llm:decision`). Mismatch → HTTP 403.
+  (@@SCOPES@@). Mismatch → HTTP 403.
 - **Adaptive cooldown**: per-provider base wait (Gemini 60s,
   OpenRouter 5min, etc.) with exponential backoff per consecutive 429.
 - **Reserved lane**: a key marked `is_reserve=true` is picked last in its
@@ -928,6 +827,17 @@ _LLMS_TXT = """# AIbroker
 """
 
 
+def llms_text() -> str:
+    """_LLMS_TXT with the provider / capability / scope lists filled in from the
+    routing tables (they used to be hand-copied and drifted)."""
+    names = ", ".join(_PROVIDER_LABEL.get(p, p).title() if p != "local" else "local"
+                      for p in wired_providers() if p != "local")
+    return (_LLMS_TXT.replace("@@N@@", str(len(wired_providers())))
+            .replace("@@PROVIDERS@@", names)
+            .replace("@@CAPABILITIES@@", _capability_list())
+            .replace("@@SCOPES@@", _scope_list()))
+
+
 @router.get("/robots.txt", response_class=PlainTextResponse)
 async def robots_txt() -> PlainTextResponse:
     """Allow indexing of public pages; block admin / dashboard / api callbacks."""
@@ -945,4 +855,4 @@ async def llms_txt() -> PlainTextResponse:
     """LLM-friendly site descriptor (Jeremy Howard's proposed /llms.txt).
     Plain markdown — crawlers like Perplexity, ChatGPT browse, Claude search
     use it as a hint of what content matters and how it's structured."""
-    return PlainTextResponse(_LLMS_TXT)
+    return PlainTextResponse(llms_text())

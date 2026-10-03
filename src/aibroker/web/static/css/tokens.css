@@ -1,0 +1,78 @@
+/* AIbroker design tokens — the single source of colour, type, space and shape
+   for the dashboard, the landing page and the health page. Light by default,
+   dark via prefers-color-scheme. Nothing else in the UI hard-codes a colour. */
+:root {
+  color-scheme: light dark;
+
+  /* surfaces */
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eff1f5;
+  --line: #e3e6ec;
+  --line-strong: #cfd4de;
+
+  /* text */
+  --text: #0f1218;
+  --muted: #566074;
+  --dim: #616a80;
+
+  /* brand + semantic */
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(79, 70, 229, .1);
+  --good: #0f7a45;
+  --good-soft: rgba(15, 122, 69, .12);
+  --warn: #a55a00;
+  --warn-soft: rgba(217, 119, 6, .14);
+  --bad: #c0282d;
+  --bad-soft: rgba(192, 40, 45, .1);
+
+  /* categorical series (charts); the last one is always "other" */
+  --c1: #4f46e5; --c2: #0891b2; --c3: #059669; --c4: #d97706;
+  --c5: #dc2626; --c6: #9333ea; --c7: #8b95a7;
+
+  --shadow: 0 1px 2px rgba(15, 18, 24, .04), 0 6px 20px rgba(15, 18, 24, .05);
+  --shadow-pop: 0 20px 60px rgba(15, 18, 24, .25);
+
+  /* shape + type */
+  --r-lg: 14px;
+  --r-md: 10px;
+  --r-sm: 7px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --rail-w: 232px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0b0e;
+    --surface: #12141a;
+    --surface-2: #1a1d25;
+    --line: #232733;
+    --line-strong: #323847;
+
+    --text: #e9ebf0;
+    --muted: #a0a9ba;
+    --dim: #7e889c;
+
+    --accent: #8b93ff;
+    --accent-hover: #a5abff;
+    --accent-fg: #0a0b0e;
+    --accent-soft: rgba(139, 147, 255, .14);
+    --good: #3ddc97;
+    --good-soft: rgba(61, 220, 151, .13);
+    --warn: #f5b942;
+    --warn-soft: rgba(245, 185, 66, .14);
+    --bad: #ff7b7f;
+    --bad-soft: rgba(255, 123, 127, .13);
+
+    --c1: #8b93ff; --c2: #38bdf8; --c3: #34d399; --c4: #fbbf24;
+    --c5: #f87171; --c6: #c084fc; --c7: #6b7487;
+
+    --shadow: 0 0 0 1px rgba(255, 255, 255, .02);
+    --shadow-pop: 0 24px 70px rgba(0, 0, 0, .6);
+  }
+}

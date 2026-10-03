@@ -608,6 +608,8 @@ earlier description with `provider: "cache"` and no provider call.
 | `GET` | `/dashboard?from=&to=` | Inventory + range-driven KPIs (spend/calls/tokens for the chosen date range), sortable tables with TOTAL footers, inline edit. `from`/`to` default to today. |
 | `POST` | `/dashboard/keys/create` | HTML form: add or upsert key |
 | `POST` | `/dashboard/keys/{id}/edit` | HTML form: rename, change tier/scope/cap, rotate token |
+| `POST` | `/dashboard/keys/{id}/test` | probe one key, returns a status chip |
+| `POST` | `/dashboard/projects/{id}/rotate-token` | new project key (shown once); see dashboard.md |
 | `POST` | `/dashboard/keys/{id}/disable` | Toggle active |
 | `POST` | `/dashboard/keys/{id}/delete` | Hard delete (confirm prompt) |
 | `POST` | `/dashboard/projects/create` | HTML form handler — shows the one-time key in the flash |

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block topbar_actions %}{% endblock %}
+{% block content %}
+<form class="card card-pad" method="get" action="/dashboard/audit" role="search" aria-label="{{ 'Audit filters' }}">
+  <div class="filters">
+    <div class="field"><label for="a-actor">{{ t("Actor", "Актор") }}</label>
+      <input id="a-actor" name="actor" type="text" value="{{ actor }}" {{ ph("e.g. dashboard", "напр. dashboard") }}></div>
+    <div class="field"><label for="a-action">{{ t("Action starts with", "Действие начинается с") }}</label>
+      <input id="a-action" name="action" type="text" value="{{ action }}" {{ ph("e.g. key.", "напр. key.") }}></div>
+    <div class="row"><button class="btn btn-primary" type="submit">{{ m.icon("search") }}{{ t("Filter", "Фильтр") }}</button>
+      <a class="btn btn-ghost" href="/dashboard/audit">{{ t("Reset", "Сбросить") }}</a></div>
+  </div>
+</form>
+
+<section class="card" aria-label="{{ 'Audit log' }}">
+  {% if rows %}
+  <div class="table-wrap"><table class="table rtable">
+    <thead><tr><th>{{ t("When", "Когда") }}</th><th>{{ t("Actor", "Актор") }}</th><th>{{ t("Action", "Действие") }}</th><th>{{ t("Target", "Объект") }}</th><th>IP</th><th>{{ t("Details", "Детали") }}</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td data-label="When" class="nowrap">{{ r.created_at|time_tag("mdhms") }}</td>
+        <td data-label="Actor" class="cell-trunc" title="{{ r.actor }}">{{ r.actor }}</td>
+        <td data-label="Action"><span class="pill">{{ r.action }}</span></td>
+        <td data-label="Target" class="cell-trunc" title="{{ r.target or '' }}">{{ r.target or "—" }}</td>
+        <td data-label="IP" class="mono dim">{{ r.ip or "—" }}</td>
+        <td data-label="Details" class="full">
+          {% if r.metadata %}<details><summary class="linklike">{{ t("metadata", "метаданные") }}</summary><pre class="mono wrap-any" style="white-space:pre-wrap;margin:6px 0 0;font-size:12px">{{ r.metadata|tojson(indent=2) }}</pre></details>{% else %}<span class="dim">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% if next_url %}<div class="row" style="padding:12px 16px;border-top:1px solid var(--line)"><a class="btn" href="{{ next_url }}">{{ t("Older entries", "Более старые записи") }} →</a></div>{% endif %}
+  {% else %}{{ m.empty("shield", "No audit entries", "Записей аудита нет", "Admin actions — key and project changes, logins — are recorded here.", "Здесь записываются действия администратора: изменения ключей и проектов, входы.") }}{% endif %}
+</section>
+{% endblock %}

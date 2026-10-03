@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block content %}
+<section class="kpis" aria-label="{{ 'Key metrics' }}">
+  {% for k in kpis %}{{ m.kpi(k) }}{% endfor %}
+</section>
+
+<div class="split">
+  <section class="card" aria-labelledby="usage-h">
+    <div class="card-head">
+      <div>
+        <h2 id="usage-h">{{ t("Usage by model", "Использование по моделям") }}</h2>
+        <p>{{ t("Top models per " ~ bucket ~ " · " ~ ("UTC days" if bucket == "day" else "your local time"), "Топ моделей по " ~ ("дням (UTC)" if bucket == "day" else "часам") ) }}</p>
+      </div>
+      <div class="seg" role="group" aria-label="Metric">
+        <button type="button" data-chart-metric="spend" data-target="#chart-usage" aria-pressed="true">{{ t("Spend", "Расходы") }}</button>
+        <button type="button" data-chart-metric="calls" data-target="#chart-usage" aria-pressed="false">{{ t("Calls", "Вызовы") }}</button>
+      </div>
+    </div>
+    <div class="card-body">
+      {% if empty %}
+        {{ m.empty("inbox", "No calls in this period", "Нет вызовов за период", "Pick a wider range or send a request.", "Выберите период шире или отправьте запрос.") }}
+      {% else %}
+      <div class="chart" id="chart-usage" data-chart="stacked" data-src="chart-usage-data" data-metric="spend" data-empty="—">
+        <div class="chart-canvas" role="img" aria-label="Stacked usage by model"></div>
+        <div class="chart-tip"></div>
+      </div>
+      <div class="legend" aria-hidden="true"></div>
+      <script type="application/json" id="chart-usage-data">{{ by_model|tojson }}</script>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="attn-h">
+    <div class="card-head">
+      <h2 id="attn-h">{{ t("Needs attention", "Требует внимания") }}</h2>
+      {% if attention %}<span class="chip {{ attention[0].sev }}">{{ attention|length }}</span>{% endif %}
+    </div>
+    <ul class="attn">
+      {% for a in attention %}
+      <li><a href="{{ a.href }}"><span class="dot {{ a.sev }}"></span><span class="grow wrap-any">{{ t(a.en, a.ru) }}</span></a></li>
+      {% else %}
+      <li><span class="attn-ok">{{ m.icon("check") }}<span>{{ t("All clear — no dead keys, caps or error spikes.", "Всё в порядке — нет мёртвых ключей, лимитов и всплесков ошибок.") }}</span></span></li>
+      {% endfor %}
+    </ul>
+  </section>
+</div>
+
+<section aria-labelledby="prov-h" class="stack-sm">
+  <div class="section-title">
+    <h2 id="prov-h">{{ t("Provider health", "Статус провайдеров") }}</h2>
+    <p>{{ t("keys alive / total · last hour", "ключей жив / всего · за час") }}</p>
+  </div>
+  {% if groups %}
+  <div class="provgrid">
+    {% for g in groups %}
+    <a class="prov" href="/dashboard/keys#p-{{ g.provider }}">
+      <div class="prov-top"><span class="dot {{ g.cls }}"></span><b class="trunc">{{ g.provider }}</b>
+        <span class="muted" style="margin-left:auto">{{ g.alive }}/{{ g.total - g.disabled }}</span></div>
+      <span class="bar stackbar" aria-hidden="true">
+        {% set tot = (g.total - g.disabled) or 1 %}
+        {% if g.alive %}<i class="ok" style="width:{{ g.alive / tot * 100 }}%"></i>{% endif %}
+        {% if g.cooling %}<i class="warn" style="width:{{ g.cooling / tot * 100 }}%"></i>{% endif %}
+        {% if g.dead %}<i class="bad" style="width:{{ g.dead / tot * 100 }}%"></i>{% endif %}
+      </span>
+      <small>
+        {% if g.calls_1h %}{{ tn(g.calls_1h, "call", "calls", "вызов", "вызова", "вызовов") }}{% if g.errs_1h %} · <span class="{{ 'bad' if g.err_rate >= 0.3 else 'warn' }}">{{ tn(g.errs_1h, "error", "errors", "ошибка", "ошибки", "ошибок") }}</span>{% endif %}
+        {% else %}{{ t("idle", "нет вызовов") }}{% endif %}
+      </small>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="card">{{ m.empty("key", "No API keys yet", "Ключей пока нет", "Add a provider key to start routing.", "Добавьте ключ провайдера, чтобы начать.") }}
+    <div class="row" style="justify-content:center;padding-bottom:20px"><a class="btn btn-primary" href="/dashboard/keys">{{ t("Go to keys", "К ключам") }}</a></div></div>
+  {% endif %}
+</section>
+
+<div class="grid-2">
+  <section class="card" aria-labelledby="tp-h">
+    <div class="card-head"><h2 id="tp-h">{{ t("Top projects", "Топ проектов") }}</h2>
+      <a href="/dashboard/projects?{{ rng.qs }}">{{ t("All projects", "Все проекты") }}</a></div>
+    <div class="card-body" style="padding-top:8px">
+      {% for c in top_projects %}
+      <a class="rowline" href="/dashboard/projects/{{ c.project.id }}?{{ rng.qs }}" style="padding:9px 0;border-bottom:1px solid var(--line);color:var(--text)">
+        <span class="trunc" title="{{ c.project.name }}"><b>{{ c.project.name }}</b></span>
+        <span class="muted nowrap">{{ tn(c.calls, "call", "calls", "вызов", "вызова", "вызовов") }}</span>
+        <b class="nowrap" style="min-width:64px;text-align:right">{{ c.spend|money }}</b>
+      </a>
+      {% else %}
+      {{ m.empty("folder", "No projects yet", "Проектов пока нет") }}
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="q-h">
+    <div class="card-head"><h2 id="q-h">{{ t("Job queue", "Очередь задач") }}</h2>
+      <a href="/dashboard/jobs">{{ t("Open queue", "Открыть очередь") }}</a></div>
+    <div class="card-body">
+      <div class="pcard stats" style="padding:0;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
+        {% for st, en, ru in (("pending", "pending", "ожидают"), ("running", "running", "в работе"), ("done", "done", "готово"), ("error", "failed", "с ошибкой")) %}
+        <div class="stat"><b class="{{ 'bad' if st == 'error' and jobs.by_status.get(st) else '' }}">{{ jobs.by_status.get(st, 0) }}</b><span>{{ t(en, ru) }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}

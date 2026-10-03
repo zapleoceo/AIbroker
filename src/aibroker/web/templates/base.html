@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex, nofollow">
+<title>{{ title[0] }} · AIbroker</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="alternate icon" href="/favicon.ico">
+<link rel="stylesheet" href="{{ asset('css/tokens.css') }}">
+<link rel="stylesheet" href="{{ asset('vendor/uPlot.min.css') }}">
+<link rel="stylesheet" href="{{ asset('css/app.css') }}">
+<script src="{{ asset('js/app.js') }}" defer></script>
+<script src="{{ asset('vendor/uPlot.iife.min.js') }}" defer></script>
+<script src="{{ asset('js/charts.js') }}" defer></script>
+<script src="{{ asset('vendor/htmx.min.js') }}" defer></script>
+<script src="{{ asset('vendor/alpine.min.js') }}" defer></script>
+</head>
+<body hx-headers='{"X-Requested-With": "htmx"}'>
+{% import "_macros.html" as m with context %}
+{% include "_icons.html" %}
+<a class="skip" href="#main">{{ t("Skip to content", "К содержимому") }}</a>
+
+<div class="app" x-data="{ more: false }" @keydown.escape.window="more = false">
+  <aside class="rail" aria-label="{{ 'Primary' }}">
+    <a class="brand" href="/dashboard">
+      <span class="mark">{{ m.icon("activity") }}</span> AIbroker <small>v{{ version }}</small>
+    </a>
+    <nav aria-label="{{ 'Main' }}" class="stack-sm" style="gap:2px">
+      {% for n in nav if n.primary %}
+      <a class="nav-item" href="{{ n.href }}" {% if active == n.key %}aria-current="page"{% endif %}>{{ m.icon(n.icon) }}<span>{{ t(n.en, n.ru) }}</span></a>
+      {% endfor %}
+      <div class="nav-label">{{ t("System", "Система") }}</div>
+      {% for n in nav if not n.primary %}
+      <a class="nav-item" href="{{ n.href }}" {% if active == n.key %}aria-current="page"{% endif %}>{{ m.icon(n.icon) }}<span>{{ t(n.en, n.ru) }}</span></a>
+      {% endfor %}
+    </nav>
+    <div class="rail-foot">
+      <div class="row" style="padding:4px 10px 8px">
+        <div class="seg lang" role="group" aria-label="Language">
+          <button type="button" data-lang="en" aria-pressed="true">EN</button>
+          <button type="button" data-lang="ru" aria-pressed="false">RU</button>
+        </div>
+      </div>
+      <a href="/v1/health">{{ m.icon("activity") }}<span>{{ t("Provider health", "Статус провайдеров") }}</span></a>
+      <a href="/docs">{{ m.icon("link") }}<span>API docs</span></a>
+      <form method="post" action="/logout" class="inline">
+        <button type="submit">{{ m.icon("logout") }}<span>{{ t("Log out", "Выйти") }}</span></button>
+      </form>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar">
+      <h1 class="page-title">{{ t(title[0], title[1]) if title[0] != title[1] else title[0] }}</h1>
+      {% block topbar_actions %}{{ m.range_picker() }}{% endblock %}
+    </header>
+
+    <main id="main" class="content">
+      {% if flash %}<div class="flash{{ ' err' if flash_err else '' }}" role="status">{{ flash }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <nav class="tabbar" aria-label="{{ 'Main' }}">
+    {% for n in nav if n.primary %}
+    <a class="tab" href="{{ n.href }}" {% if active == n.key %}aria-current="page"{% endif %}>{{ m.icon(n.icon) }}<span>{{ t(n.en, n.ru) }}</span></a>
+    {% endfor %}
+    <button type="button" class="tab" @click="more = !more" :aria-expanded="more"
+            {% if active in ("models", "jobs", "audit", "settings") %}aria-current="page"{% endif %}>
+      {{ m.icon("more") }}<span>{{ t("More", "Ещё") }}</span></button>
+  </nav>
+  <div class="sheet-scrim" x-show="more" x-cloak @click="more = false"></div>
+  <div class="sheet" x-show="more" x-cloak>
+    {% for n in nav if not n.primary %}
+    <a class="nav-item" href="{{ n.href }}" {% if active == n.key %}aria-current="page"{% endif %}>{{ m.icon(n.icon) }}<span>{{ t(n.en, n.ru) }}</span></a>
+    {% endfor %}
+    <a class="nav-item" href="/v1/health">{{ m.icon("activity") }}<span>{{ t("Provider health", "Статус провайдеров") }}</span></a>
+    <a class="nav-item" href="/docs">{{ m.icon("link") }}<span>API docs</span></a>
+    <div class="row" style="padding:8px 10px">
+      <div class="seg lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="ru" aria-pressed="false">RU</button>
+      </div>
+      <form method="post" action="/logout" class="inline" style="margin-left:auto">
+        <button class="btn btn-sm" type="submit">{{ t("Log out", "Выйти") }}</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<dialog id="drawer" class="drawer" aria-labelledby="drawer-title">
+  <div id="drawer-body" class="drawer-body"></div>
+</dialog>
+
+<dialog id="confirm" class="modal" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">{{ t("Are you sure?", "Вы уверены?") }}</h2>
+  <p data-confirm-text></p>
+  <div class="row" style="justify-content:flex-end">
+    <button type="button" class="btn" data-close>{{ t("Cancel", "Отмена") }}</button>
+    <button type="button" class="btn btn-danger" data-confirm-ok>{{ t("Confirm", "Подтвердить") }}</button>
+  </div>
+</dialog>
+{% block scripts %}{% endblock %}
+</body>
+</html>

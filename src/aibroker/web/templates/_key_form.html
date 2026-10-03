@@ -1,0 +1,74 @@
+{# Add (key is none) or edit an API key, as a drawer. Advanced quota fields are collapsed. #}
+{% import "_macros.html" as m with context %}
+{% set editing = key is not none %}
+<div class="drawer-head">
+  <h2 id="drawer-title">{% if editing %}{{ t("Edit key", "Изменить ключ") }} · {{ key.provider }}/{{ key.label }}{% else %}{{ t("Add API key", "Добавить API-ключ") }}{% endif %}</h2>
+  <button type="button" class="icon-btn" data-close {{ ttl("Close", "Закрыть") }}>{{ m.icon("x") }}</button>
+</div>
+<form method="post" action="{{ ('/dashboard/keys/' ~ key.id ~ '/edit') if editing else '/dashboard/keys/create' }}"
+      class="drawer-pad" autocomplete="off" {% if not editing %}x-data="keyForm()"{% endif %}>
+  <input type="hidden" name="next" value="/dashboard/keys">
+  {% if not editing %}
+  <script type="application/json">{{ catalogue_map|tojson }}</script>
+  {% endif %}
+  <div class="form-grid">
+    {% if not editing %}
+    <div class="field span-2"><label for="kf-provider">{{ t("Provider", "Провайдер") }}</label>
+      <select id="kf-provider" name="provider" required x-model="provider" @change="$nextTick(() => pick())">
+        <option value="" disabled selected hidden>{{ "—" }}</option>
+        {% for c in catalogue %}<option value="{{ c.provider }}">{{ c.provider }}</option>{% endfor %}
+      </select></div>
+    {% endif %}
+    <div class="field"><label for="kf-label">{{ t("Label", "Ярлык") }}</label>
+      <input id="kf-label" name="label" type="text" required maxlength="100" value="{{ key.label if editing else '' }}" {{ ph("your handle, project…", "ваш handle, проект…") }}></div>
+    <div class="field"><label for="kf-tier">{{ t("Tier", "Тариф") }}</label>
+      <select id="kf-tier" name="tier">
+        {% for tier in ("free", "paid", "trial") %}<option value="{{ tier }}" {{ 'selected' if editing and key.tier == tier }}>{{ tier }}</option>{% endfor %}
+      </select></div>
+    <div class="field span-2"><label for="kf-token">{{ t("Token", "Токен") }}{% if editing %} <span class="dim">({{ t("blank = keep the current one", "пусто = оставить текущий") }})</span>{% endif %}</label>
+      <input id="kf-token" name="token" type="password" {{ 'required' if not editing }} autocomplete="new-password" {{ ph("provider API key", "API-ключ провайдера") }}></div>
+    {% if editing %}
+    <div class="field span-2" {% if key.provider != "cloudflare" and not key.account_id %}hidden{% endif %}><label for="kf-acct">{{ t("Account ID", "Account ID") }}</label>
+      <input id="kf-acct" name="account_id" type="text" value="{{ key.account_id or '' }}"><small>{{ t("Only cloudflare needs it.", "Нужен только cloudflare.") }}</small></div>
+    {% else %}
+    <div class="field span-2" x-show="provider === 'cloudflare'" x-cloak><label for="kf-acct">{{ t("Account ID", "Account ID") }}</label>
+      <input id="kf-acct" name="account_id" type="text"><small>{{ t("Cloudflare embeds the account ID in its API URL.", "Cloudflare встраивает account ID в URL API.") }}</small></div>
+    {% endif %}
+    <div class="field span-2"><span class="lbl" id="kf-scopes">{{ t("Scopes this key may serve", "Права ключа") }}</span>
+      <div class="scope-grid" role="group" aria-labelledby="kf-scopes">{{ scope_boxes|safe }}</div>
+      <small>{{ t("Greyed-out scopes are ones this provider can never serve (not in its routing chain).", "Серые права провайдер обслужить не может (его нет в цепочке маршрутизации).") }}</small></div>
+    <div class="field"><label class="check" for="kf-rsv"><input id="kf-rsv" type="checkbox" name="is_reserve" value="1" {{ 'checked' if editing and key.is_reserve }}> {{ t("Reserve lane", "Резервная линия") }}</label>
+      <small>{{ t("Picked last, only when every shared key is exhausted.", "Берётся последним, когда общие ключи исчерпаны.") }}</small></div>
+    <div class="field"><label for="kf-cap">{{ t("Daily cost cap, $", "Дневной лимит, $") }}</label>
+      <input id="kf-cap" name="daily_cost_cap_usd" type="number" step="0.01" min="0" value="{{ key.daily_cost_cap_usd if editing and key.daily_cost_cap_usd is not none else '' }}" {{ ph("optional", "необязательно") }}></div>
+  </div>
+
+  <details class="adv" {% if editing and (key.manual_req_limit or key.manual_tok_limit or key.manual_tok_in_limit or key.manual_tok_out_limit) %}open{% endif %}>
+    <summary>{{ t("Advanced: daily quota override", "Дополнительно: свои дневные лимиты") }}</summary>
+    <div class="adv-body stack-sm">
+      <p class="muted" style="font-size:12.5px">{{ t("Blank = use the limit discovered from provider headers, else the provider default. Set these for keys with known caps (e.g. a corporate Gemini key: 3M in / 80k out).", "Пусто = лимит из заголовков провайдера, иначе значение по умолчанию. Задайте для ключей с известными лимитами (напр. корпоративный Gemini: 3M вх / 80k исх).") }}</p>
+      <div class="form-grid">
+        <div class="field"><label for="kf-rq">{{ t("Requests / day", "Запросов / день") }}</label><input id="kf-rq" name="manual_req_limit" type="number" min="0" value="{{ (key.manual_req_limit or '') if editing else '' }}"></div>
+        <div class="field"><label for="kf-tk">{{ t("Tokens / day", "Токенов / день") }}</label><input id="kf-tk" name="manual_tok_limit" type="number" min="0" value="{{ (key.manual_tok_limit or '') if editing else '' }}"></div>
+        <div class="field"><label for="kf-ti">{{ t("Input tokens / day", "Вх. токенов / день") }}</label><input id="kf-ti" name="manual_tok_in_limit" type="number" min="0" value="{{ (key.manual_tok_in_limit or '') if editing else '' }}"></div>
+        <div class="field"><label for="kf-to">{{ t("Output tokens / day", "Исх. токенов / день") }}</label><input id="kf-to" name="manual_tok_out_limit" type="number" min="0" value="{{ (key.manual_tok_out_limit or '') if editing else '' }}"></div>
+      </div>
+    </div>
+  </details>
+
+  {% if not editing %}
+  <div class="card card-pad stack-sm" x-show="info" x-cloak style="background:var(--surface-2);box-shadow:none">
+    <b>{{ t("Models the broker will route through this key", "Модели, которые брокер будет вызывать через этот ключ") }}</b>
+    <template x-if="info"><dl class="kv">
+      <template x-for="(model, cap) in info.models" :key="cap"><div style="display:contents"><dt x-text="cap"></dt><dd class="mono wrap-any" x-text="model"></dd></div></template>
+    </dl></template>
+  </div>
+  {% elif reason %}
+  <div class="flash err">{{ t(reason[0], reason[1]) }}<br><span class="mono" style="font-size:12px">{{ key.last_error }}</span></div>
+  {% endif %}
+
+  <div class="drawer-foot" style="margin:0 -20px -28px">
+    <button type="button" class="btn" data-close>{{ t("Cancel", "Отмена") }}</button>
+    <button type="submit" class="btn btn-primary">{{ t("Save changes", "Сохранить") if editing else t("Add key", "Добавить ключ") }}</button>
+  </div>
+</form>
