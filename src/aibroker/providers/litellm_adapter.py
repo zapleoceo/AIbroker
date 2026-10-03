@@ -21,6 +21,11 @@ from aibroker.config import get_settings
 from aibroker.providers.adapters import adapter_for
 from aibroker.providers.model_identity import served_model
 from aibroker.providers.peak_pricing import peak_multiplier
+from aibroker.providers.pricing import (
+    MIN_BILLED_AUDIO_S,
+    audio_surcharge,
+    reported_cost,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +72,31 @@ litellm.register_model({
         "supports_vision": True,
         "supports_response_schema": True,
         "supports_prompt_caching": True,
+    },
+    # 2026-10-03: NVIDIA's hosted NIM API (build.nvidia.com, our `nvidia` key)
+    # is free-tier: no per-token price exists. Registered at 0.0 so the cost
+    # path treats it as a KNOWN free model instead of logging "unpriced" and
+    # so tests/test_pricing.py can tell "free" from "forgot to price".
+    # (Third-party hosts of the same model charge ~$0.50/$2.20 per M — if the
+    # broker ever routes there, price it then.)
+    "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "litellm_provider": "nvidia_nim",
+        "mode": "chat",
+    },
+    # 2026-10-03: Workers AI llava-1.5-7b-hf is a Beta model with no price on
+    # developers.cloudflare.com/workers-ai/platform/pricing (only the neuron
+    # allowance, $0.011 / 1k neurons, applies to listed models). Treated as
+    # free; revisit when Cloudflare lists a price.
+    # cloudflare/@cf/openai/gpt-oss-120b needs no entry: litellm >=1.103 ships
+    # the official $0.35 / $0.75 per M (verified against the same page).
+    "cloudflare/@cf/llava-hf/llava-1.5-7b-hf": {
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "litellm_provider": "cloudflare",
+        "mode": "chat",
+        "supports_vision": True,
     },
 })
 
@@ -207,8 +237,9 @@ DEFAULT_MODEL: dict[str, dict[str, str]] = {
                    # /api/alpha/decisions directly and strips the prefix.
                    "decision": "openrouter/typesafe/jev-1.13"},
     # 2026-07-02: chat:smart/chat:code/vision/chat:edit bumped sonnet-4-6 →
-    # sonnet-5 (near-Opus coding/agentic quality at Sonnet cost; same $3/$15
-    # sticker, $2/$10 intro through 2026-08-31). chat:edit also bumped off
+    # sonnet-5 (near-Opus coding/agentic quality at Sonnet cost; $2/$10 —
+    # permanently: the launch price became the list price, so there is no
+    # intro window to expire). chat:edit also bumped off
     # haiku-4-5 — it's Stepan/Stepan2's Coach fallback (after gemini, deepseek
     # both fail) and needs sonnet-tier reliability on the big-context JSON-edit
     # task, not the fast/cheap tier. Verified the key reaches sonnet-5 and
@@ -449,6 +480,7 @@ def estimate_llm_cost(
     model: str, tokens_in: int, tokens_out: int, *,
     at: datetime | None = None,
     cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+    audio_input_tokens: int = 0,
 ) -> float:
     """Real per-model cost from LiteLLM's pricing map, times any time-of-day
     surcharge (DeepSeek peak/valley). Returns 0.0 only when the model is
@@ -472,7 +504,11 @@ def estimate_llm_cost(
     write by that difference and quietly blind the daily cost caps — the same
     failure mode as the two stale-pricing incidents (2026-06-01, 2026-06-11).
     Rates are read from litellm's map (never hardcoded), so they stay correct
-    when the vendor's prices change."""
+    when the vendor's prices change.
+
+    `audio_input_tokens` is the SUBSET of `tokens_in` that is audio (gemini
+    chat transcription): Google bills it above the text rate, so the
+    difference is added via pricing.audio_surcharge."""
     try:
         p_cost, c_cost = litellm.cost_per_token(
             model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out,
@@ -480,7 +516,7 @@ def estimate_llm_cost(
             cache_creation_input_tokens=cache_write_tokens,
         )
         base = float(p_cost + c_cost) + _extended_ttl_write_premium(
-            model, cache_write_tokens)
+            model, cache_write_tokens) + audio_surcharge(model, audio_input_tokens)
     except Exception as e:
         if model not in _pricing_warned:
             _pricing_warned.add(model)
@@ -992,8 +1028,10 @@ async def call_llm(
         tokens_in = getattr(usage, "prompt_tokens", 0)
         tokens_out = getattr(usage, "completion_tokens", 0)
     cache_read, cache_write = _cache_tokens(usage)
-    cost = estimate_llm_cost(model, tokens_in, tokens_out,
-                              cache_read_tokens=cache_read, cache_write_tokens=cache_write)
+    cost = _prefer_reported_cost(
+        model, usage,
+        estimate_llm_cost(model, tokens_in, tokens_out,
+                          cache_read_tokens=cache_read, cache_write_tokens=cache_write))
 
     meta = {
         "model": model,
@@ -1009,6 +1047,16 @@ async def call_llm(
         "refusal": _native_field(msg, "refusal") if choices else None,
     }
     return text, meta
+
+
+def _prefer_reported_cost(model: str, usage: Any, estimated: float) -> float:
+    """OpenRouter returns the real charge as usage.cost; use it over the
+    price-table estimate (same rule as providers/decisions.py). Other providers
+    report no cost, so the estimate stands."""
+    if model.split("/", 1)[0] != "openrouter":
+        return estimated
+    reported = reported_cost(usage)
+    return estimated if reported is None else reported
 
 
 def _native_field(message: Any, name: str) -> Any:
@@ -1094,6 +1142,12 @@ async def _transcribe_via_chat(
     usage = getattr(resp, "usage", None)
     tokens_in = getattr(usage, "prompt_tokens", 0) or 0
     tokens_out = getattr(usage, "completion_tokens", 0) or 0
+    # Audio dominates a transcription prompt; if the provider doesn't split
+    # the prompt tokens, price ALL of them as audio (safe, over-counts the
+    # few prompt-text tokens).
+    details = getattr(usage, "prompt_tokens_details", None)
+    audio_tokens = _usage_field(details, "audio_tokens") if details is not None else 0
+    audio_tokens = audio_tokens or tokens_in
     meta = {
         "model": model,
         "model_served": served_model(model, _reported_model(resp)),
@@ -1102,7 +1156,8 @@ async def _transcribe_via_chat(
         # Unlike Whisper (per-second, billed elsewhere), chat transcription bills
         # per token — price it so a PAID key's cost cap is honoured (_billed_cost
         # zeroes free-tier keys anyway). Audio tokens count as prompt tokens.
-        "cost_usd": estimate_llm_cost(model, tokens_in, tokens_out),
+        "cost_usd": estimate_llm_cost(
+            model, tokens_in, tokens_out, audio_input_tokens=audio_tokens),
         "latency_ms": latency_ms,
     }
     return (resp.choices[0].message.content or "").strip(), meta
@@ -1315,6 +1370,8 @@ def whisper_cost(model: str, audio_s: float) -> float:
             _pricing_warned.add(model)
             log.warning("no per-minute pricing for %s — transcription cost recorded as 0", model)
         return 0.0
+    # Providers with a per-request floor (groq: 10 s) bill short clips at it.
+    audio_s = max(audio_s, MIN_BILLED_AUDIO_S.get(model.split("/", 1)[0], 0.0))
     return rate * audio_s / 60.0
 
 
@@ -1328,4 +1385,5 @@ def estimate_transcription_cost(model: str, n_bytes: int) -> float:
         return whisper_cost(model, audio_s)
     if model.split("/", 1)[0] == "local":
         return 0.0
-    return estimate_llm_cost(model, int(audio_s * 32), 2048)
+    tokens_in = int(audio_s * _GEMINI_AUDIO_TOKENS_PER_S)
+    return estimate_llm_cost(model, tokens_in, 2048, audio_input_tokens=tokens_in)

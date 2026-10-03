@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from aibroker.providers.pricing import reported_cost
+
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 
 # Measured 2026-09-23: 120 real Vera triage events, median 0.36s, p90 0.46s,
@@ -125,7 +127,7 @@ async def decide(
     return body.get("answers") or {}, {
         "tokens_in": int(usage.get("input_tokens") or 0),
         "tokens_out": int(usage.get("output_tokens") or 0),
-        "cost_usd": float(usage.get("cost") or 0.0),
+        "cost_usd": reported_cost(usage) or 0.0,
         "latency_ms": latency_ms,
         "model_served": body.get("model"),
     }
