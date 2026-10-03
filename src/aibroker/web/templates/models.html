@@ -8,9 +8,9 @@
       <div class="field wide"><label for="mf-q">{{ t("Search", "Поиск") }}</label>
         <input id="mf-q" type="search" x-model="q" {{ ph("model id or provider", "id модели или провайдер") }}></div>
       <div class="field"><label for="mf-cap">{{ t("Capability", "Способность") }}</label>
-        <select id="mf-cap" x-model="cap"><option value="">{{ t("All", "Все") }}</option>{% for c in capabilities %}<option>{{ c }}</option>{% endfor %}</select></div>
+        <select id="mf-cap" x-model="cap">{{ m.option("", "All", "Все") }}{% for c in capabilities %}<option>{{ c }}</option>{% endfor %}</select></div>
       <div class="field"><label for="mf-prov">{{ t("Provider", "Провайдер") }}</label>
-        <select id="mf-prov" x-model="prov"><option value="">{{ t("All", "Все") }}</option>{% for p in providers %}<option>{{ p }}</option>{% endfor %}</select></div>
+        <select id="mf-prov" x-model="prov">{{ m.option("", "All", "Все") }}{% for p in providers %}<option>{{ p }}</option>{% endfor %}</select></div>
       <label class="check" for="mf-routed"><input id="mf-routed" type="checkbox" x-model="routed"> {{ t("Routed only", "Только в маршрутах") }}</label>
     </div>
   </form>

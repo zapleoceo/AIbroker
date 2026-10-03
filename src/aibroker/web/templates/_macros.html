@@ -4,6 +4,12 @@
 <svg class="{{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-{{ name }}"/></svg>
 {%- endmacro %}
 
+{# A translatable <option>: a <span> inside <option> is stripped by the HTML parser, so the
+   i18n attributes sit on the option itself and the page JS sets its text. #}
+{% macro option(value, en, ru, selected=false) -%}
+<option value="{{ value }}" data-i18n data-en="{{ en }}" data-ru="{{ ru }}"{{ " selected" if selected }}>{{ en }}</option>
+{%- endmacro %}
+
 {% macro chip(cls, en, ru) -%}
 <span class="chip {{ cls }}">{{ t(en, ru) }}</span>
 {%- endmacro %}

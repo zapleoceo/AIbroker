@@ -31,6 +31,8 @@ The header range picker (today / 7d / 30d / all / custom from-to) is one `DateRa
 (`resolve_range`, `range_links`) carried in the query string on every page; default 7d.
 Bounds are the viewer's calendar days (aib_tz cookie).
 
+Language is applied client-side: `data-i18n` elements (`t()`, `tn()`) carry `data-en`/`data-ru`, and the JS re-translates the whole document after every HTMX swap (drawers, load-more, the polled queue strip). A `<select>` option must use the `option` macro in `_macros.html` (i18n attributes on the option itself), since a span inside an option is dropped by the HTML parser.
+
 ## Actions (POST, owner session or X-Admin-Key; unchanged semantics)
 
 `/dashboard/keys/create|{id}/edit|{id}/disable|{id}/delete`,

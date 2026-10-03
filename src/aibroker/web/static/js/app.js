@@ -130,12 +130,15 @@
   }
 
   // ── HTMX hooks ──────────────────────────────────────────────────────────
+  // Re-translate the whole document after EVERY swap: an outerHTML swap (the queue
+  // strip's poll) detaches the old target, and out-of-band swaps (#req-more) land
+  // outside it, so refreshing only e.detail.target would leave EN text behind.
   document.addEventListener("htmx:afterSwap", function (e) {
-    refresh(e.detail.target);
+    refresh(document);
     if (e.detail.target && e.detail.target.id === "drawer-body") openDrawer();
     if (window.AIBCharts) window.AIBCharts.init(e.detail.target);
   });
-  document.addEventListener("htmx:afterSettle", function (e) { refresh(e.detail.target); });
+  document.addEventListener("htmx:afterSettle", function (e) { refresh(document); });
   document.addEventListener("htmx:responseError", function () {
     toast((document.documentElement.lang === "ru") ? "Ошибка запроса" : "Request failed");
   });

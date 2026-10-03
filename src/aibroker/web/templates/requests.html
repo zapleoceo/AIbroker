@@ -16,32 +16,32 @@
       <input id="f-q" type="search" name="q" value="{{ f.search or '' }}" {{ ph("job-123 or uuid", "job-123 или uuid") }}></div>
     <div class="field"><label for="f-type">{{ t("Type", "Тип") }}</label>
       <select id="f-type" name="type">
-        <option value="">{{ t("All", "Все") }}</option>
+        {{ m.option("", "All", "Все") }}
         {% for k, lbl in kind_labels.items() %}
-        <option value="{{ k }}" {{ 'selected' if f.kind == k }}>{{ lbl[0] }}</option>
+        {{ m.option(k, lbl[0], lbl[1], f.kind == k) }}
         {% endfor %}
       </select></div>
     <div class="field"><label for="f-status">{{ t("Status", "Статус") }}</label>
       <select id="f-status" name="status">
-        <option value="">{{ t("All", "Все") }}</option>
+        {{ m.option("", "All", "Все") }}
         {% for st, lbl in status_labels.items() %}
-        <option value="{{ st }}" {{ 'selected' if f.status == st }}>{{ lbl[0] }}</option>
+        {{ m.option(st, lbl[0], lbl[1], f.status == st) }}
         {% endfor %}
       </select></div>
     <div class="field"><label for="f-project">{{ t("Project", "Проект") }}</label>
       <select id="f-project" name="project">
-        <option value="">{{ t("All", "Все") }}</option>
+        {{ m.option("", "All", "Все") }}
         {% for p in projects %}<option value="{{ p.id }}" {{ 'selected' if f.project_id == p.id }}>{{ p.name }}</option>{% endfor %}
       </select></div>
     <div class="field"><label for="f-workflow">{{ t("Workflow", "Сценарий") }}</label>
       <input id="f-workflow" type="text" name="workflow" list="dl-workflow" value="{{ f.workflow or '' }}" {{ ph("any", "любой") }}>
       <datalist id="dl-workflow">{% for w in facets.workflow %}<option value="{{ w }}">{% endfor %}</datalist></div>
     <div class="field"><label for="f-cap">{{ t("Capability", "Способность") }}</label>
-      <select id="f-cap" name="capability"><option value="">{{ t("All", "Все") }}</option>
+      <select id="f-cap" name="capability">{{ m.option("", "All", "Все") }}
         {% for c in capabilities %}<option {{ 'selected' if f.capability == c }}>{{ c }}</option>{% endfor %}
       </select></div>
     <div class="field"><label for="f-prov">{{ t("Provider", "Провайдер") }}</label>
-      <select id="f-prov" name="provider"><option value="">{{ t("All", "Все") }}</option>
+      <select id="f-prov" name="provider">{{ m.option("", "All", "Все") }}
         {% for p in providers %}<option {{ 'selected' if f.provider == p }}>{{ p }}</option>{% endfor %}
       </select></div>
   </div>

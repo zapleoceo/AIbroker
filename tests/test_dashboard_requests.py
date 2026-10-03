@@ -230,7 +230,8 @@ def test_filter_form_has_every_control_and_keeps_state():
     body = _get("/dashboard/requests", params={"type": "job", "status": "failed", "q": "job-3"}).text
     for name in ("q", "type", "status", "project", "workflow", "capability", "provider"):
         assert f'name="{name}"' in body
-    assert '<option value="job" selected>' in body and '<option value="failed" selected>' in body
+    assert '<option value="job" data-i18n' in body and 'selected>Queue</option>' in body
+    assert 'selected>failed</option>' in body
     assert 'value="job-3"' in body and "Only failed" in body
 
 
@@ -434,3 +435,24 @@ def test_done_job_joined_by_a_prod_format_id_and_direct_calls_by_uuid_hex():
     assert [r["request_id"] for r in _rows(q="533735")] == ["job-533735"]
     html = _get("/dashboard/requests/job-533735", headers={"HX-Request": "true"}).text
     assert "Queued job" in html and html.count('class="n"') == 2
+
+
+def test_select_options_are_translatable_on_every_page_that_has_them():
+    ds.seed(ds.project(1, "stepan"))
+    for path in ("/dashboard/requests", "/dashboard/models"):
+        body = _get(path).text
+        assert '<option value="" data-i18n data-en="All" data-ru="Все">All</option>' in body
+    req = _get("/dashboard/requests", params={"type": "job", "status": "failed"}).text
+    assert 'data-en="Queue" data-ru="Очередь" selected>Queue</option>' in req
+    assert 'data-en="Direct" data-ru="Прямой">Direct</option>' in req
+    for en, ru in (("ok", "ок"), ("failed", "ошибка"), ("pending", "ожидает"), ("running", "в работе")):
+        assert f'data-en="{en}" data-ru="{ru}"' in req
+    assert "<option><span" not in req and "<span data-i18n" not in req.split("<select")[1].split("</select>")[0]
+
+
+def test_every_htmx_swap_retranslates_the_whole_document():
+    js = client.get("/dashboard/static/js/app.js").text
+    for hook in ('"htmx:afterSwap"', '"htmx:afterSettle"'):
+        body = js.split(hook)[1].split("});")[0]
+        assert "refresh(document)" in body and "e.detail.target)" not in body.split("refresh")[1][:30]
+    assert 'querySelectorAll("[data-i18n]")' in js          # options use the same attributes
