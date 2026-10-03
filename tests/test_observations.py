@@ -1,16 +1,7 @@
 """providers.observations — learned provider ceilings (upsert + read)."""
 from __future__ import annotations
 
-import os
-
-import pytest
-
 from aibroker.providers.observations import learned_ceilings, record_too_large
-
-ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
-pytestmark = pytest.mark.skipif(
-    ON_SQLITE, reason="ON CONFLICT upsert + LEAST need Postgres"
-)
 
 
 async def test_record_then_read():
@@ -55,3 +46,47 @@ async def test_record_accepts_at_floor():
 
 async def test_read_empty_when_none_learned():
     assert await learned_ceilings() == {}
+
+
+async def _age(provider: str, days: int) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+
+    from aibroker.db import get_session
+    async with get_session() as s:
+        await s.execute(
+            text("UPDATE provider_observations SET learned_at = :t WHERE provider = :p"),
+            {"t": datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days), "p": provider})
+
+
+async def test_stale_ceiling_is_ignored_on_read():
+    """Per-provider ceilings used to live forever; a limit not re-confirmed
+    within CEILING_TTL_DAYS no longer benches the provider."""
+    from aibroker.providers.observations import CEILING_TTL_DAYS
+    await record_too_large("groq", 9000)
+    await _age("groq", CEILING_TTL_DAYS + 1)
+    assert "groq" not in await learned_ceilings()
+
+
+async def test_ceiling_within_ttl_is_kept():
+    from aibroker.providers.observations import CEILING_TTL_DAYS
+    await record_too_large("groq", 9000)
+    await _age("groq", CEILING_TTL_DAYS - 1)
+    assert (await learned_ceilings())["groq"] == 9000
+
+
+async def test_new_rejection_replaces_a_stale_ceiling_instead_of_min():
+    """A stale 5000 must not clamp a fresh 9000 observation (LEAST would)."""
+    from aibroker.providers.observations import CEILING_TTL_DAYS
+    await record_too_large("groq", 5000)
+    await _age("groq", CEILING_TTL_DAYS + 5)
+    await record_too_large("groq", 9000)
+    assert (await learned_ceilings())["groq"] == 9000
+
+
+async def test_fresh_rejections_still_keep_the_minimum():
+    await record_too_large("groq", 9000)
+    await record_too_large("groq", 6000)
+    await record_too_large("groq", 8000)
+    assert (await learned_ceilings())["groq"] == 6000
