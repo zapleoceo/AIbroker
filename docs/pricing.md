@@ -60,3 +60,10 @@ Anthropic `claude-sonnet-5` is permanently $2/$10 per M.
 `tests/test_pricing.py` fails for any model reachable from `DEFAULT_MODEL` /
 `MODEL_ROTATION` that LiteLLM (or a `register_model` entry, or the ASR table) does not
 price. Free models must be registered at 0.0 with a comment naming the source.
+
+## Code map (`providers/pricing.py`)
+
+- `reported_cost(usage)` — the provider's own `usage.cost` (OpenRouter); preferred over the price table when present.
+- `audio_input_rate(model)` — USD per audio input token (LiteLLM map, else `AUDIO_INPUT_USD_PER_M`).
+- `audio_surcharge(model, audio_tokens)` — extra cost of audio tokens over the text rate.
+- `is_priced(model)` — whether LiteLLM's map (incl. our `register_model` entries) knows the model; used by the pricing regression test.
