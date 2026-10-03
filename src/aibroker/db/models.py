@@ -106,6 +106,20 @@ class ApiKeyRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class ApiKeyModelCooldownRow(Base):
+    """Per-(key, model) cooldown — one exhausted model (gemini's per-model daily
+    free quota) parks only itself, not the whole key. See migration 013 and
+    routing/model_cooldown.py."""
+    __tablename__ = "api_key_model_cooldowns"
+
+    api_key_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True
+    )
+    model: Mapped[str] = mapped_column(String(120), primary_key=True)
+    cooldown_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(200))
+
+
 class LeaseRow(Base):
     __tablename__ = "leases"
 

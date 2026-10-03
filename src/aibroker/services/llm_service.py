@@ -62,6 +62,7 @@ from aibroker.routing import (
     scope_for,
 )
 from aibroker.routing.chains import free_first_walk, provider_of_model
+from aibroker.routing.model_cooldown import cooled_models, mark_model_cooldown
 from aibroker.routing.selector import (
     mark_cooldown,
     mark_dead,
@@ -242,6 +243,35 @@ _SECRET_PATTERNS = (
 )
 
 
+def _model_pool(provider: str, capability: str, primary: str | None,
+                pinned: str | None) -> list[str]:
+    """Every model a chat attempt on `provider` may use: the caller's pin alone,
+    else primary + MODEL_ROTATION extras ([] when the provider has no model)."""
+    if pinned:
+        return [pinned]
+    if primary is None:
+        return []
+    return [primary, *(m for m in rotation_for(provider, capability) if m != primary)]
+
+
+async def _rotate_model(pool: list[str], api_key_id: int, start: int) -> str:
+    """pool[start], advanced past models this key has cooling down (per-model
+    daily quota). One DB read, only for a multi-model pool; fails open — a
+    cooldown lookup error must never block a request."""
+    if len(pool) < 2:
+        return pool[start]
+    try:
+        cooled = await cooled_models(api_key_id)
+    except Exception:  # noqa: BLE001 — fail open
+        log.debug("cooled_models lookup failed", exc_info=True)
+        return pool[start]
+    for i in range(len(pool)):
+        candidate = pool[(start + i) % len(pool)]
+        if candidate not in cooled:
+            return candidate
+    return pool[start]
+
+
 def _scrub_secrets(text: str) -> str:
     """Replace anything that looks like a credential with a fixed marker."""
     for pat in _SECRET_PATTERNS:
@@ -249,9 +279,13 @@ def _scrub_secrets(text: str) -> str:
     return text
 
 
-async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = None) -> str:
+async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = None,
+                    model: str | None = None) -> str:
     """Cooldown on rate-limit, mark dead on auth error. Returns the error kind.
-    `capability` scopes the timeout circuit-breaker (see routing/circuit)."""
+    `capability` scopes the timeout circuit-breaker (see routing/circuit).
+    `model` is the model the failed call used: a quota that is metered per
+    (key, model) (gemini's per-day free tier) parks only that pair, not the
+    whole key — see routing/model_cooldown."""
     kind = classify_provider_error(exc, key.provider)
     # Short, human-readable reason surfaced on the dashboard (2026-07-05) — the
     # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
@@ -272,7 +306,8 @@ async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = 
         # 2026-07-16: one session for the whole penalty — the adaptive COUNT
         # and the cooldown UPDATE used to each open their own session, pure
         # pool churn on a path that fires on every failed attempt.
-        from aibroker.routing.cooldown import cooldown_until
+        from aibroker.routing.cooldown import cooldown_until, is_model_scoped_quota
+        model_scoped = bool(model) and is_model_scoped_quota(key.provider, str(exc))
         async with get_session() as s:
             try:
                 until = await cooldown_until(key.id, key.provider, str(exc),
@@ -282,7 +317,10 @@ async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = 
                 # the fallback UPDATE below can still land in this session.
                 await s.rollback()
                 until = datetime.now(UTC) + _COOLDOWN
-            await mark_cooldown(key.id, until, reason, session=s)
+            if model_scoped:
+                await mark_model_cooldown(key.id, model, until, reason, session=s)
+            else:
+                await mark_cooldown(key.id, until, reason, session=s)
     elif kind == "auth":
         await mark_dead(key.id, reason)
         # Traffic-side deaths were untraceable (2026-09-07 review): the only
@@ -442,7 +480,7 @@ async def _handle_call_error(
         log.warning("provider %s model %s unavailable (%s) — next provider",
                     provider, use_model, type(exc).__name__)
         return _Flow.NEXT_PROVIDER  # not next key of the same dead model
-    kind = await _penalize(key, exc, capability=capability)
+    kind = await _penalize(key, exc, capability=capability, model=use_model)
     # Self-learn the size ceiling: if the provider rejected the
     # prompt for being too big, remember it so we skip this
     # provider for prompts ≥ this size next time (no hardcoded cap).
@@ -801,9 +839,12 @@ async def run_chat(
                             "(no double-execution)",
                             capability, int(call_timeout), provider)
                 return None
+            primary = model_for(provider, capability)
+            pool = _model_pool(provider, capability, primary, model)
             key = await pick_and_reserve(provider, scope=scope,
                                           require_tier=require_tier,
-                                          project_id=project.id)
+                                          project_id=project.id,
+                                          models=pool or None)
             if key is None:
                 break  # no (more) available key for this provider → next provider
             attempts += 1
@@ -816,17 +857,15 @@ async def run_chat(
             # the choice deterministic for a given key (testable, and stable
             # for a provider's prompt cache). Providers without a rotation
             # get a one-element list, so this is a no-op for them.
-            primary = model_for(provider, capability)
             if model:
                 use_model = model            # caller pinned it — no rotation
             elif primary is None:
                 use_model = None
             else:
-                pool = [primary, *(m for m in rotation_for(provider, capability)
-                                   if m != primary)]
                 if rotation_base is None:
                     rotation_base = key.id
-                use_model = pool[(rotation_base + attempt_in_provider) % len(pool)]
+                use_model = await _rotate_model(
+                    pool, key.id, (rotation_base + attempt_in_provider) % len(pool))
             if not use_model:
                 break  # provider can't serve this capability → next provider
             flow, outcome = await _run_attempt(
@@ -956,7 +995,7 @@ async def _handle_attempt_failure(
     capability: str, workflow: str | None, exc: Exception,
 ) -> None:
     """Shared embed/transcribe failure tail: penalize the key, book the error row."""
-    await _penalize(key, exc, capability=capability)
+    await _penalize(key, exc, capability=capability, model=model)
     await _record_error(
         key=key, project=project, provider=provider, model=model,
         capability=capability, workflow=workflow, exc=exc,
@@ -991,7 +1030,7 @@ async def run_embed(
     last_exc: Exception | None = None
     for _ in range(_max_keys(provider)):
         key = await pick_and_reserve(provider, scope=scope_for("embedding"),
-                                      project_id=project.id)
+                                      project_id=project.id, models=[use_model])
         if key is None:
             break  # no (more) available key for this provider
         any_key_seen = True
@@ -1294,8 +1333,9 @@ async def run_transcribe(
         # timeout on the picked key must not skip the whole provider while
         # healthy sibling keys sit idle (mirrors run_embed/run_chat).
         for _ in range(_max_keys(provider)):
-            key = await pick_and_reserve(provider, scope=scope,
-                                          project_id=project.id)
+            key = await pick_and_reserve(
+                provider, scope=scope, project_id=project.id,
+                models=[m] if (m := model_for(provider, "transcription")) else None)
             if key is None:
                 break  # no (more) available key for this provider → next provider
             any_key_seen = True

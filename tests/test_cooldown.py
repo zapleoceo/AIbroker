@@ -138,9 +138,17 @@ def test_parse_retry_after_absent():
 
 
 def test_parse_retry_after_caps_absurd_values():
-    # > MAX_COOLDOWN_S (30 min) is ignored — don't park a key for hours on a
-    # weird hint; fall through to other logic.
-    assert parse_retry_after("retry in 99999s") is None
+    # Only a hint beyond the 48h sanity bound is ignored — fall through to other
+    # logic rather than park a key for days on a weird hint.
+    assert parse_retry_after("retry in 999999s") is None
+
+
+def test_parse_retry_after_honours_multi_hour_daily_quota_hint():
+    """REGRESSION (2026-10-03): the hint cap was MAX_COOLDOWN_S (30 min), so
+    Gemini's daily-quota 'retryDelay: 39791s' (~11h) was DROPPED and the dead
+    key was re-hit all day. A provider's explicit hint is honoured up to 48h."""
+    msg = '{"error": {"code": 429, "details": [{"retryDelay": "39791s"}]}}'
+    assert parse_retry_after(msg) == 39791.0
 
 
 def test_is_daily_quota_error_detects_cerebras():

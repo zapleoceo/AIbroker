@@ -166,6 +166,15 @@ CREATE TABLE IF NOT EXISTS provider_observations (
 CREATE INDEX IF NOT EXISTS ix_usage_created_at ON usage_log (created_at);
 CREATE INDEX IF NOT EXISTS ix_leases_project_leased_at ON leases (project_id, leased_at);
 
+-- 013 per-(key, model) cooldowns (one exhausted gemini model must not park the whole key)
+CREATE TABLE IF NOT EXISTS api_key_model_cooldowns (
+  api_key_id     BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  model          VARCHAR(120) NOT NULL,
+  cooldown_until TIMESTAMP NOT NULL,
+  reason         VARCHAR(200),
+  PRIMARY KEY (api_key_id, model)
+);
+
 -- 012 destructive-DDL guard (event trigger); see migrations/012_block_destructive_ddl.sql
 DO $guard$
 BEGIN

@@ -56,6 +56,13 @@ DEFAULT_COOLDOWN_S = 300
 # Cap on backoff — past this we're wasting requests, the key is just dead.
 MAX_COOLDOWN_S = 30 * 60
 
+# Cap on a provider's EXPLICIT retry hint. Distinct from MAX_COOLDOWN_S (our own
+# guessed backoff): a hint is the provider telling us exactly when quota returns,
+# and for a daily quota that is HOURS — Gemini's free-tier per-day 429 says
+# retryDelay "39791s" (~11h). Dropping every hint above 30 min made us re-hit a
+# quota-dead key all day (2026-10-03 review). 48h is a sanity bound only.
+MAX_RETRY_HINT_S = 48 * 60 * 60
+
 # Window in which consecutive cool-downs are considered "the same incident"
 # for backoff math. Past this, counter resets.
 BACKOFF_WINDOW_S = 60 * 60
@@ -115,7 +122,20 @@ def parse_retry_after(msg: str) -> float | None:
         secs = float(m.group(1))
     except ValueError:
         return None
-    return secs if 0 < secs <= MAX_COOLDOWN_S else None
+    return secs if 0 < secs <= MAX_RETRY_HINT_S else None
+
+
+# Gemini's per-day quota 429 names the exhausted quota in QuotaFailure details:
+# quotaId "GenerateRequestsPerDayPerProjectPerModel-FreeTier", with
+# quotaDimensions.model. Free-tier daily quota is metered PER MODEL per key, so
+# the cooldown belongs to (key, model), not the whole key.
+_GEMINI_PER_DAY_QUOTA_RE = re.compile(r"quotaid\W{0,8}[\w-]*?perday", re.IGNORECASE)
+
+
+def is_model_scoped_quota(provider: str, msg: str) -> bool:
+    """True if this 429 exhausted a quota that is metered per (key, model) — so
+    only that model should be parked, not the key's other models."""
+    return provider == "gemini" and bool(_GEMINI_PER_DAY_QUOTA_RE.search(msg))
 
 
 def is_daily_quota_error(msg: str) -> bool:

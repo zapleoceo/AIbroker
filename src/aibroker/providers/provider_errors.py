@@ -265,6 +265,9 @@ def is_timeout(exc: Exception) -> bool:
 _DAILY_QUOTA_MARKERS = (
     "per day",
     "per-day",
+    # Gemini quotaId "GenerateRequestsPerDayPerProjectPerModel-FreeTier" —
+    # CamelCase, so "per day" never matches it.
+    "perday",
     "tokens per day",
     "daily limit",
     "requests per day",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -217,6 +218,7 @@ async def pick_and_reserve(
     *,
     require_tier: str | None = None,
     project_id: int | None = None,
+    models: Sequence[str] | None = None,
 ) -> ApiKeyRow | None:
     """Pick the best available key for `provider` that supports `scope`.
 
@@ -228,6 +230,12 @@ async def pick_and_reserve(
     back, then project→key cache affinity as a tie-break, then random(). A
     reserved key (is_reserve=True) is therefore picked only when every shared
     key in its (provider, scope) group is exhausted — the Coach safety net.
+
+    `models` (optional) = every model this request could be served with on the
+    key. A key is skipped when it has an active per-(key, model) cooldown
+    (api_key_model_cooldowns, see routing/model_cooldown) for ALL of them — one
+    exhausted gemini model no longer parks the whole key, only the key that has
+    no model left to try. Omit to ignore per-model cooldowns.
 
     The returned row already has last_used_at advanced — so concurrent picks
     in another replica will see a different LRU order.
@@ -257,6 +265,15 @@ async def pick_and_reserve(
     if require_tier:
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
+    if models:
+        wanted = sorted(set(models))
+        conds.append(
+            "(SELECT COUNT(*) FROM api_key_model_cooldowns c "
+            " WHERE c.api_key_id = k.id AND c.model = ANY(CAST(:cd_models AS text[])) "
+            "   AND c.cooldown_until > now()) < :cd_n"
+        )
+        params["cd_models"] = wanted
+        params["cd_n"] = len(wanted)
     saturated = await _saturated_key_ids()  # pragma: no cover — Postgres-only glue, covered by tests/test_selector.py
     timed_out = circuit.recent_timeout_key_ids()  # pragma: no cover — same
     affinity_id = await _affinity_for_shared(project_id, provider)  # pragma: no cover — same
