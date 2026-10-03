@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
-from aibroker.providers import litellm_adapter as adapter
+from aibroker.providers import litellm_client as adapter
+from aibroker.providers import transport
 from aibroker.routes.proxy import ChatRequest, _job_response
 from aibroker.services.tool_contract import validate_result
 
@@ -134,7 +135,7 @@ async def test_adapter_preserves_tool_metadata(monkeypatch):
         )
     )
     monkeypatch.setattr(adapter.litellm, "acompletion", completion)
-    text, meta = await adapter.call_llm(
+    text, meta = await transport.call_llm(
         model="openai/gpt-4o-mini",
         messages=[{"role": "user", "content": "find"}],
         api_key="test",
@@ -170,11 +171,14 @@ async def test_service_filters_routes_and_fails_over_invalid_call(monkeypatch, o
     monkeypatch.setattr(svc, "model_for", lambda provider, _: provider + "/model")
     monkeypatch.setattr(svc, "rotation_for", lambda *_: [])
     monkeypatch.setattr(svc, "pick_and_reserve", AsyncMock(return_value=key))
-    monkeypatch.setattr(svc, "decrypt", lambda _: "test")
-    for name in ("reserve_cost", "release_cost", "note_affinity_shared"):
-        monkeypatch.setattr(svc, name, AsyncMock())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda _: "test")
+    for name in ("reserve_cost", "release_cost", "affinity.note_success"):
+        monkeypatch.setattr(f"aibroker.services.attempt.{name}", AsyncMock())
+    from aibroker.providers.catalog import PinTarget
+    monkeypatch.setattr(svc, "resolve_pin",
+                        lambda m, cap, chain: [PinTarget(m.split("/")[0], m)])
     record = AsyncMock(return_value=42)
-    monkeypatch.setattr(svc, "record_usage", record)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", record)
     meta = {
         "model": "openai/model",
         "tokens_in": 10,

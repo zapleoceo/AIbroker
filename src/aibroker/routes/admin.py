@@ -17,7 +17,7 @@ from aibroker.auth import (
 from aibroker.crypto import encrypt
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.providers.registry import get_spec, provider_names
 from aibroker.telemetry import audit
 
 # include_in_schema=False (2026-10-02): keeps the public /openapi.json to the
@@ -150,8 +150,8 @@ class ApiKeyOut(BaseModel):
 async def create_key(body: ApiKeyCreate, request: Request) -> ApiKeyOut:
     # Only min/max length was checked, so any string became a provider name and
     # was later rendered into the dashboard (2026-10-02 review).
-    if body.provider not in DEFAULT_MODEL:
-        raise HTTPException(400, f"unknown provider; known: {', '.join(sorted(DEFAULT_MODEL))}")
+    if get_spec(body.provider) is None:
+        raise HTTPException(400, f"unknown provider; known: {', '.join(sorted(provider_names()))}")
     async with get_session() as s:
         existing = (
             await s.execute(

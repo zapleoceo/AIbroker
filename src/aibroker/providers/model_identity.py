@@ -45,7 +45,7 @@ import posixpath
 # deepseek-v4-pro is deliberately ABSENT: it is a genuinely different model
 # (2026-10-02: an earlier note said it became V4.1-Flash on 2026-09-14; DeepSeek
 # still sells it separately), so mapping it to V4.1-Flash would mislabel its
-# history rows. It is no longer routed to (see DEFAULT_MODEL), and its
+# history rows. It is no longer routed to (see providers/specs.py), and its
 # history rows keep showing the routing name.
 MODEL_IDENTITY: dict[str, str] = {
     "deepseek/deepseek-flash": "DeepSeek-V4.1-Flash",

@@ -1,6 +1,6 @@
 """Pricing helpers shared by every cost path (chat, decisions, transcription).
 
-Kept apart from litellm_adapter so decisions.py can use them without importing
+Kept apart from cost.py so decisions.py can use them without importing
 the adapter, and so the per-model overrides live in one reviewable table.
 See docs/pricing.md for the human-readable version of everything here.
 """

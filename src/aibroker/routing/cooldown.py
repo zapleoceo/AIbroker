@@ -25,34 +25,10 @@ from aibroker.providers.provider_errors import (
     _DAILY_QUOTA_MARKERS,
     _HOURLY_QUOTA_MARKERS,
     _MONTHLY_QUOTA_MARKERS,
-    _PROVIDER_MONTHLY_SIGNS,
 )
+from aibroker.providers.registry import cooldown_base_for, spec_or_default
 
-# Base cooldown in seconds, picked from each provider's published rate-limit
-# reset interval. Conservative for paid (we don't want to spam paid keys).
-COOLDOWN_BASE_S: dict[str, int] = {
-    "cerebras":   60,    # rolling RPM window
-    "groq":       60,    # rolling RPM window
-    "gemini":     60,    # RPM resets every 60 s for flash
-    "mistral":    10,    # 1 RPS — recovers almost instantly
-    "cohere":     60,    # 20 RPM trial / per-minute window
-    "openrouter": 300,   # ":free" pool overloads can last minutes
-    "deepseek":   30,    # paid, fast quotas
-    "anthropic":  120,   # paid, conservative
-    "openai":     120,   # paid, conservative
-    "voyage":     60,    # rolling RPM window
-    "sambanova":  120,   # only 20 req/day — don't hammer a near-exhausted key
-    "nvidia":     300,   # one-time credits + invisible quota — most conservative
-    "cloudflare": 120,   # invisible neuron budget, renews daily — moderate
-    "zai":        60,    # no visible quota — moderate default
-    "local":      30,    # self-hosted single-worker whisper: a timeout means
-                         # the decode lock was busy, NOT a dead credential — re-
-                         # probe fast. (Was DEFAULT 300 → 600 on timeout_bump,
-                         # parking the free/private/quality path ~10 min per
-                         # slow decode and dumping all voice on the paid tail.)
-}
-DEFAULT_COOLDOWN_S = 300
-
+# Per-provider base cooldown lives in the registry (ProviderSpec.cooldown_base_s).
 # Cap on backoff — past this we're wasting requests, the key is just dead.
 MAX_COOLDOWN_S = 30 * 60
 
@@ -82,7 +58,7 @@ def cooldown_seconds(provider: str, recent_cooldowns: int, *,
     wall-clock (vs 0s for a 429), so a hanging key should drop out of rotation
     in ~2 strikes, not ~5 (2026-07-16 storm — hung keys kept getting re-picked
     on a short adaptive wait and re-hung, flooring throughput)."""
-    base = COOLDOWN_BASE_S.get(provider, DEFAULT_COOLDOWN_S)
+    base = cooldown_base_for(provider)
     # 0 prior cooldowns → base; 1 → base*2; 2 → base*4; cap at MAX_COOLDOWN_S.
     steps = recent_cooldowns + (1 if timeout_bump else 0)
     return min(base * (2 ** max(0, steps)), MAX_COOLDOWN_S)
@@ -172,7 +148,7 @@ def is_monthly_quota_error(msg: str) -> bool:
 
 def _is_provider_monthly(provider: str, msg: str) -> bool:
     m = msg.lower()
-    return any(s in m for s in _PROVIDER_MONTHLY_SIGNS.get(provider, ()))
+    return any(s in m for s in spec_or_default(provider).monthly_signs)
 
 
 def next_utc_month_start(now: datetime | None = None) -> datetime:

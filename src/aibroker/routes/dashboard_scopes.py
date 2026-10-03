@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from html import escape as esc
 
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.providers.registry import get_spec
 from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 
 # Derived from the capability table (2026-07-16) — the old hand-copied tuple
@@ -21,7 +21,7 @@ def _is_known_provider(provider: str) -> bool:
     """Provider must be one the adapter has a model table for — the create
     endpoints took any string, which then reached the scope-checkbox title
     attribute unescaped (2026-10-02 review)."""
-    return provider in DEFAULT_MODEL
+    return get_spec(provider) is not None
 
 
 def _validate_scope_list(scopes: list[str]) -> list[str] | None:

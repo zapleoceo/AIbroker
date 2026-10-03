@@ -8,9 +8,8 @@ import pytest
 
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
+from aibroker.providers.registry import DEFAULT_COOLDOWN_S, REGISTRY
 from aibroker.routing.cooldown import (
-    COOLDOWN_BASE_S,
-    DEFAULT_COOLDOWN_S,
     MAX_COOLDOWN_S,
     _adaptive_jitter,
     _boundary_jitter,
@@ -23,6 +22,8 @@ from aibroker.routing.cooldown import (
     next_utc_month_start,
     parse_retry_after,
 )
+
+COOLDOWN_BASE_S = {n: sp.cooldown_base_s for n, sp in REGISTRY.items()}
 
 
 def test_first_cooldown_is_provider_base():

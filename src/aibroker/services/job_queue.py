@@ -39,6 +39,7 @@ from sqlalchemy import text
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.llm_service import (
@@ -47,6 +48,7 @@ from aibroker.services.llm_service import (
     run_transcribe,
 )
 from aibroker.telemetry.notifier import alert
+from aibroker.telemetry.request_context import job_request_id, request_scope
 
 log = logging.getLogger(__name__)
 
@@ -260,18 +262,28 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if paid_only:
         log.info("final retry — paid tail only, job %d", row.id)
     try:
-        if row.capability == "transcription":
-            outcome = await _run_transcription_job(project, req)
-        else:
-            outcome = await run_chat(
-                project=project, capability=row.capability,
-                messages=req["messages"], model=req.get("model"),
-                max_tokens=req["max_tokens"], temperature=req["temperature"],
-                response_format=req.get("response_format"),
-                workflow=req.get("workflow"),
-                paid_only=paid_only,
-                tools=req.get("tools"), tool_choice=req.get("tool_choice"),
-            )
+        # One request id for every dispatcher retry of this job (job-<id>), so the
+        # whole fallback + retry trail groups under the id the client was given.
+        with request_scope(job_request_id(row.id)):
+            if row.capability == "transcription":
+                outcome = await _run_transcription_job(project, req)
+            else:
+                outcome = await run_chat(
+                    project=project, capability=row.capability,
+                    messages=req["messages"], model=req.get("model"),
+                    max_tokens=req["max_tokens"], temperature=req["temperature"],
+                    response_format=req.get("response_format"),
+                    workflow=req.get("workflow"),
+                    paid_only=paid_only,
+                    tools=req.get("tools"), tool_choice=req.get("tool_choice"),
+                )
+    except UnknownModel as e:
+        # The pin is not in the catalog (queued before a registry change): no retry
+        # can fix it — fail the job with the suggestions instead of burning 8 runs.
+        log.warning("job %d (%s) pinned an unknown model: %s", row.id, row.capability, e)
+        await _finish(row.id, status="error", error_message=str(e),
+                      expect_started_at=row.started_at)
+        return
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
         log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
         if isinstance(e, _DETERMINISTIC_ERRORS):

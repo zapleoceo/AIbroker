@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from aibroker.providers.context_limits import (
-    SEED_MAX_REQUEST_TOKENS,
     effective_ceiling,
     estimate_prompt_tokens,
     fits_context,
     is_too_large_error,
 )
+from aibroker.providers.registry import REGISTRY
+
+SEED_MAX_REQUEST_TOKENS = {n: sp.max_request_tokens for n, sp in REGISTRY.items()}
 
 
 def test_estimate_roughly_4_chars_per_token():

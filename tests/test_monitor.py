@@ -164,9 +164,10 @@ def test_paid_tail_caps_cover_every_paid_led_lane():
 
     Free-first lanes stay OUT on purpose: there a paid provider IS the last
     resort, so losing it is the design working, not an incident."""
-    from aibroker.routing.chains import CAPABILITY_CHAINS, PAID_PROVIDERS
+    from aibroker.providers.registry import paid_providers
+    from aibroker.routing.chains import CAPABILITY_CHAINS
     expected = {cap for cap, chain in CAPABILITY_CHAINS.items()
-                if chain and chain[0] in PAID_PROVIDERS}
+                if chain and chain[0] in paid_providers()}
     assert set(_PAID_TAIL_CAPS) == expected
     assert "chat:sales" in _PAID_TAIL_CAPS       # anthropic Sonnet still leads
     # 2026-08-26: chat:smart DROPPED OUT, and that is the derivation working,

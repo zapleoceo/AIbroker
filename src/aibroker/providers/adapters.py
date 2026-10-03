@@ -430,19 +430,15 @@ class _SambanovaAdapter(ProviderAdapter):
         kwargs["api_base"] = _SAMBANOVA_OPENAI_BASE
 
 
-_ADAPTERS: dict[str, ProviderAdapter] = {
-    "sambanova": _SambanovaAdapter(),
-    "gemini": _GeminiAdapter(),
-    "anthropic": _AnthropicAdapter(),
-    "deepseek": _DeepseekAdapter(),
-    "cerebras": _CerebrasAdapter(),
-    "cloudflare": _CloudflareAdapter(),
-    "zai": _ZaiAdapter(),
-}
-_DEFAULT_ADAPTER = ProviderAdapter()
-
-
 def adapter_for(provider: str) -> ProviderAdapter:
     """The adapter for `provider` (bare name, e.g. 'deepseek'), or a no-op
-    default. `provider` is `model.split('/', 1)[0]` at the call site."""
-    return _ADAPTERS.get(provider, _DEFAULT_ADAPTER)
+    default. The adapter instance lives on the provider's registry spec."""
+    from aibroker.providers.registry import spec_or_default
+    return spec_or_default(provider).adapter
+
+
+def extra_for_provider(provider: str, account_id: str | None) -> dict[str, Any] | None:
+    """Per-KEY `extra` kwargs for a chat call, beyond model/api_key — thin
+    delegate to the provider's adapter (cloudflare's account-scoped api_base is
+    the only one today)."""
+    return adapter_for(provider).key_extra(account_id)

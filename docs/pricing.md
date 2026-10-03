@@ -3,8 +3,8 @@
 All prices end up in `cost_usd` on `usage_log`, which feeds the per-key, per-project
 and global daily caps. Free-tier keys are zeroed afterwards by `_billed_cost`; the
 numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
-(helpers + override tables) and `providers/litellm_adapter.py` (`estimate_llm_cost`,
-`whisper_cost`, `register_model` block).
+(helpers + override tables) and `providers/cost.py` (`estimate_llm_cost`,
+`whisper_cost`, `register_price_overrides`; the override table itself is the registry, `providers/specs.py`).
 
 ## Rules, in order of precedence
 
@@ -14,7 +14,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | OpenRouter decisions (`/api/alpha/decisions`) | `usage.cost` only (not in LiteLLM's map). Same helper `reported_cost`. |
 | All other chat/vision/structured | `litellm.cost_per_token` from LiteLLM's map (pinned `litellm==1.103.2`) x `peak_multiplier` (DeepSeek weekday peak). |
 | Embeddings | Same map, input tokens only. |
-| Whisper-style ASR | Per audio minute from `_WHISPER_USD_PER_MIN` x duration. Groq bills at least 10 s per request (`MIN_BILLED_AUDIO_S`). |
+| Whisper-style ASR | Per audio minute from `ModelSpec.usd_per_minute` (provider registry) x duration. Groq bills at least 10 s per request (`MIN_BILLED_AUDIO_S`). |
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
 | `local/*` (asr-local, Qwen3-VL) | Free, no external bill. |
 
@@ -57,9 +57,9 @@ Anthropic `claude-sonnet-5` is permanently $2/$10 per M.
 
 ## Adding a model
 
-`tests/test_pricing.py` fails for any model reachable from `DEFAULT_MODEL` /
-`MODEL_ROTATION` that LiteLLM (or a `register_model` entry, or the ASR table) does not
-price. Free models must be registered at 0.0 with a comment naming the source.
+`tests/test_pricing.py` fails for any model reachable from a
+`ProviderSpec` (`defaults` / `rotation`) that LiteLLM (or a `register_model` entry, or the ASR table) does not
+price. Free models are marked `pricing="free"` in `providers/specs.py` (registered at 0.0 by `providers/cost.register_price_overrides`) with a `note` naming the source.
 
 ## Code map (`providers/pricing.py`)
 

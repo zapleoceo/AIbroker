@@ -13,9 +13,9 @@ from sqlalchemy import insert
 
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow
-from aibroker.routing import selector
+from aibroker.routing import affinity
+from aibroker.routing.affinity import _note_affinity
 from aibroker.routing.selector import (
-    _note_affinity,
     invalidate_saturation_cache,
     mark_cooldown,
     mark_dead,
@@ -35,7 +35,7 @@ def _fresh_selector_caches():
     """Key ids are reused across tests (fresh schema per test) — a stale
     saturation/affinity entry from a previous test would poison this one."""
     invalidate_saturation_cache()
-    selector._affinity.clear()
+    affinity.reset()
     yield
 
 
@@ -92,7 +92,8 @@ def test_cache_sticky_providers_are_paid_percache_only():
     """Sticky concentration is only for PAID per-account-cache providers with no
     tight RPM limit. Free/RPM-limited providers must stay out (concentrating
     them hits rate limits + their cache gives no token discount)."""
-    from aibroker.routing.selector import _CACHE_STICKY_PROVIDERS
+    from aibroker.providers.registry import cache_sticky_providers
+    _CACHE_STICKY_PROVIDERS = cache_sticky_providers()
     assert "deepseek" in _CACHE_STICKY_PROVIDERS
     assert "anthropic" in _CACHE_STICKY_PROVIDERS
     assert len(_CACHE_STICKY_PROVIDERS) == 2

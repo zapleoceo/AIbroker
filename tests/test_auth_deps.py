@@ -20,7 +20,6 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 
-
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
 
 

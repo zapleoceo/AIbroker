@@ -8,16 +8,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from aibroker.providers.litellm_adapter import (
-    estimate_transcription_cost,
-    whisper_cost,
-)
+from aibroker.providers.cost import estimate_transcription_cost, whisper_cost
 from aibroker.routing.cost_guard import CostGuardError
 from aibroker.services import llm_service
+from aibroker.services.attempt import _scrub_secrets
 from aibroker.services.llm_service import (
     EmbedFailed,
     TranscribeFailed,
-    _scrub_secrets,
     run_embed,
     run_transcribe,
 )
@@ -82,13 +79,13 @@ async def test_run_embed_reserves_and_releases_around_the_call():
     release = AsyncMock()
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(return_value=_key())), \
          patch.object(llm_service, "estimate_llm_cost", lambda *a, **k: 0.01), \
-         patch.object(llm_service, "reserve_cost", reserve), \
-         patch.object(llm_service, "release_cost", release), \
-         patch.object(llm_service, "decrypt", lambda _: "plain"), \
+         patch("aibroker.services.attempt.reserve_cost", reserve), \
+         patch("aibroker.services.attempt.release_cost", release), \
+         patch("aibroker.services.attempt.decrypt", lambda _: "plain"), \
          patch.object(llm_service, "embed", AsyncMock(return_value=(
              [[0.1, 0.2]], {"tokens_in": 5, "cost_usd": 0.0001, "latency_ms": 3}))), \
-         patch.object(llm_service, "record_usage", AsyncMock(return_value=42)), \
-         patch.object(llm_service, "note_affinity_shared", AsyncMock()):
+         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=42)), \
+         patch("aibroker.services.attempt.affinity.note_success", AsyncMock()):
         out = await run_embed(project=_project(), provider="voyage",
                               inputs=["hello world"], model=None, workflow=None)
     assert out is not None and out.request_id == 42
@@ -99,9 +96,9 @@ async def test_run_embed_reserves_and_releases_around_the_call():
 async def test_run_embed_project_cap_stops_the_walk_with_a_clear_error():
     blocked = CostGuardError(kind="project", limit=0.2, used=0.2, attempted=0.01)
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(return_value=_key())), \
-         patch.object(llm_service, "reserve_cost", AsyncMock(side_effect=blocked)), \
-         patch.object(llm_service, "record_usage", AsyncMock(return_value=1)), \
-         patch.object(llm_service, "audit", AsyncMock()), \
+         patch("aibroker.services.attempt.reserve_cost", AsyncMock(side_effect=blocked)), \
+         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=1)), \
+         patch("aibroker.services.attempt.audit", AsyncMock()), \
          patch.object(llm_service, "embed", AsyncMock()) as call, \
          pytest.raises(EmbedFailed, match="budget cap"):
         await run_embed(project=_project(), provider="voyage",
@@ -114,14 +111,14 @@ async def test_run_embed_per_key_cap_tries_the_next_key():
     keys = [_key(kid=1), _key(kid=2)]
     reserve = AsyncMock(side_effect=[per_key, None])
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(side_effect=keys)), \
-         patch.object(llm_service, "reserve_cost", reserve), \
-         patch.object(llm_service, "release_cost", AsyncMock()), \
-         patch.object(llm_service, "record_usage", AsyncMock(return_value=9)), \
-         patch.object(llm_service, "audit", AsyncMock()), \
-         patch.object(llm_service, "decrypt", lambda _: "plain"), \
+         patch("aibroker.services.attempt.reserve_cost", reserve), \
+         patch("aibroker.services.attempt.release_cost", AsyncMock()), \
+         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=9)), \
+         patch("aibroker.services.attempt.audit", AsyncMock()), \
+         patch("aibroker.services.attempt.decrypt", lambda _: "plain"), \
          patch.object(llm_service, "embed", AsyncMock(return_value=(
              [[0.0]], {"tokens_in": 1, "cost_usd": 0.0, "latency_ms": 1}))), \
-         patch.object(llm_service, "note_affinity_shared", AsyncMock()):
+         patch("aibroker.services.attempt.affinity.note_success", AsyncMock()):
         out = await run_embed(project=_project(), provider="voyage",
                               inputs=["x"], model=None, workflow=None)
     assert out is not None
@@ -135,11 +132,11 @@ async def test_run_embed_releases_reservation_when_provider_fails():
     # pricing table for a 1-char input.
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(side_effect=[_key(), None])), \
          patch.object(llm_service, "estimate_llm_cost", lambda *a, **k: 0.01), \
-         patch.object(llm_service, "reserve_cost", AsyncMock()), \
-         patch.object(llm_service, "release_cost", release), \
-         patch.object(llm_service, "decrypt", lambda _: "plain"), \
+         patch("aibroker.services.attempt.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.attempt.release_cost", release), \
+         patch("aibroker.services.attempt.decrypt", lambda _: "plain"), \
          patch.object(llm_service, "embed", AsyncMock(side_effect=RuntimeError("boom"))), \
-         patch.object(llm_service, "_handle_attempt_failure", AsyncMock()), \
+         patch("aibroker.services.attempt._penalize", AsyncMock()), patch("aibroker.services.attempt._record_error", AsyncMock()),\
          pytest.raises(EmbedFailed):
         await run_embed(project=_project(), provider="voyage",
                         inputs=["x"], model=None, workflow=None)
@@ -155,9 +152,9 @@ async def test_run_transcribe_project_cap_is_enforced():
     with patch.object(llm_service, "chain_for", lambda _: ["openai"]), \
          patch.object(llm_service, "pick_and_reserve", AsyncMock(return_value=key)), \
          patch.object(llm_service, "model_for", lambda p, c: "openai/whisper-1"), \
-         patch.object(llm_service, "reserve_cost", AsyncMock(side_effect=blocked)), \
-         patch.object(llm_service, "record_usage", AsyncMock(return_value=1)), \
-         patch.object(llm_service, "audit", AsyncMock()), \
+         patch("aibroker.services.attempt.reserve_cost", AsyncMock(side_effect=blocked)), \
+         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=1)), \
+         patch("aibroker.services.attempt.audit", AsyncMock()), \
          patch.object(llm_service, "transcribe", AsyncMock()) as call, \
          pytest.raises(TranscribeFailed, match="budget cap"):
         await run_transcribe(project=_project(), audio=b"\x00" * 4000,

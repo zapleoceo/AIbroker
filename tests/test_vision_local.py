@@ -19,13 +19,13 @@ import httpx
 import pytest
 
 from aibroker.config import get_settings
-from aibroker.providers.litellm_adapter import (
+from aibroker.providers.local_vision import (
     _describe_via_local_vision,
     _downscale,
     _split_vision_messages,
-    call_llm,
-    model_for,
 )
+from aibroker.providers.registry import model_for
+from aibroker.providers.transport import call_llm
 from aibroker.services.llm_service import _call_timeout
 
 _URL = "http://vision-local:8080"
@@ -162,7 +162,7 @@ async def test_local_vision_returns_prose_not_json(monkeypatch):
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
     reply = _reply({"type": "чек", "format": "markdown",
                     "content": "Чек из FESTIVAL MARKET на 200,000"})
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=reply)):
         text, meta = await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
@@ -187,7 +187,7 @@ async def test_local_vision_downscales_before_sending(monkeypatch):
         captured["payload"] = payload
         return _reply({"type": "фото", "format": "text", "content": "кот"})
 
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 side_effect=fake_post):
         await _describe_via_local_vision(
             messages=_msgs(_png(3000, 1500)), max_tokens=400, temperature=0.1)
@@ -212,7 +212,7 @@ async def test_local_vision_falls_back_to_raw_body_when_not_json(monkeypatch):
     """The grammar should make this unreachable; if the server was started
     without schema support the body is still a usable answer."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply("  просто описание  "))):
         text, meta = await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
@@ -225,7 +225,7 @@ async def test_local_vision_json_like_garbage_becomes_empty(monkeypatch):
     caller as prose — that is the exact shape break this provider exists to
     avoid. Empty makes run_chat book EmptyBody and walk on to gemini."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply('{"type": "чек", "content": trunc'))):
         text, _ = await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=400, temperature=0.1)
@@ -268,7 +268,7 @@ async def test_local_vision_unreachable_becomes_timeout_error(monkeypatch):
     plain 'error' NO cooldown, so every following request would re-hit a dead
     endpoint with zero backoff."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(side_effect=httpx.ConnectError("refused"))),          pytest.raises(TimeoutError, match="vision-local unreachable"):
         await _describe_via_local_vision(
             messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
@@ -277,7 +277,7 @@ async def test_local_vision_unreachable_becomes_timeout_error(monkeypatch):
 @pytest.mark.parametrize("status,exc", [(503, TimeoutError), (400, RuntimeError)])
 async def test_local_vision_http_error_classes(monkeypatch, status, exc):
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply("boom", status=status))),          pytest.raises(exc):
         await _describe_via_local_vision(
             messages=_msgs(_png(10, 10)), max_tokens=400, temperature=0.1)
@@ -287,10 +287,10 @@ async def test_call_llm_routes_local_prefix_away_from_litellm(monkeypatch):
     """call_llm is the single entry point for nine capabilities and `local` is
     not a LiteLLM provider — acompletion has never heard of the prefix."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply(
                     {"type": "фото", "format": "text", "content": "кот на диване"}))), \
-         patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+         patch("aibroker.providers.litellm_client.litellm.acompletion",
                 AsyncMock(side_effect=AssertionError("must not reach litellm"))):
         text, meta = await call_llm(
             model="local/qwen3vl", messages=_msgs(_png(40, 40)),
@@ -322,7 +322,7 @@ async def test_local_vision_serialises_on_one_slot_and_escalates_when_busy(monke
         inflight["n"] -= 1
         return _reply({"type": "чек", "format": "text", "content": "ok"})
 
-    with patch("aibroker.providers.litellm_adapter._post_local_vision", slow_post):
+    with patch("aibroker.providers.local_vision._post_local_vision", slow_post):
         first = asyncio.create_task(_describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1))
         await asyncio.sleep(0.01)                      # first holds the slot
@@ -340,12 +340,12 @@ async def test_local_vision_slot_is_released_after_an_error(monkeypatch):
     out on the semaphore and escalate forever."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_QUEUE_WAIT_S", 0.05)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(side_effect=httpx.ConnectError("down"))), \
          pytest.raises(TimeoutError):
         await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply({"type": "x", "format": "text", "content": "again"}))):
         text, _ = await _describe_via_local_vision(
             messages=_msgs(_png(50, 50)), max_tokens=100, temperature=0.1)
@@ -367,7 +367,7 @@ async def test_local_vision_reports_the_gguf_llama_server_loaded(monkeypatch):
         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         "model": "/models/qwen3-vl-4b-Q4_K_M.gguf",
     }
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=reply)):
         _text, meta = await _describe_via_local_vision(
             messages=_msgs(_png(20, 20)), max_tokens=64, temperature=0.1)
@@ -379,7 +379,7 @@ async def test_local_vision_without_a_model_field_reports_nothing(monkeypatch):
     """An older llama-server that omits `model` must not break the call — the
     log simply keeps showing the routing name."""
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", _URL)
-    with patch("aibroker.providers.litellm_adapter._post_local_vision",
+    with patch("aibroker.providers.local_vision._post_local_vision",
                 AsyncMock(return_value=_reply({"type": "x", "format": "text",
                                                 "content": "ok"}))):
         _text, meta = await _describe_via_local_vision(

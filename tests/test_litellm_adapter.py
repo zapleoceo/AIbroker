@@ -1,4 +1,4 @@
-"""providers/litellm_adapter — call_llm + embed wrappers (mocked LiteLLM)."""
+"""providers/transport + litellm_client — call_llm + embed wrappers (mocked LiteLLM)."""
 from __future__ import annotations
 
 import json
@@ -9,14 +9,9 @@ import httpx
 import pytest
 
 from aibroker.config import get_settings
-from aibroker.providers.litellm_adapter import (
-    DEFAULT_MODEL,
-    call_llm,
-    embed,
-    estimate_llm_cost,
-    model_for,
-    transcribe,
-)
+from aibroker.providers.cost import estimate_llm_cost
+from aibroker.providers.registry import default_models, model_for
+from aibroker.providers.transport import call_llm, embed, transcribe
 
 # ─── model_for ────────────────────────────────────────────────────────────
 
@@ -38,7 +33,7 @@ def _marked(msg: dict) -> bool:
 
 
 def test_apply_prompt_cache_marks_system_prefix_end_and_history_end():
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     msgs = [{"role": "system", "content": "big stable prompt"},
             {"role": "user", "content": "hi"}]
     out = apply_prompt_cache("anthropic/claude-haiku-4-5", msgs)
@@ -59,7 +54,7 @@ def test_apply_prompt_cache_uses_the_configured_ttl():
     default (95% of calls within 5 min, timer refreshes on hit), but a lead's
     follow-up turn lands inside 5 min only 73% of the time vs 89% within an
     hour — the extended TTL is bought for the per-dialogue history breakpoint."""
-    from aibroker.providers.litellm_adapter import _CACHE_TTL, apply_prompt_cache
+    from aibroker.providers.prompt_cache import _CACHE_TTL, apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hi"}])
@@ -80,11 +75,8 @@ def test_extended_ttl_write_premium_is_charged_on_cache_writes():
     stale-pricing failure mode). Reads are unaffected."""
     import litellm
 
-    from aibroker.providers.litellm_adapter import (
-        _CACHE_TTL,
-        _CACHE_TTL_RATE_FIELD,
-        estimate_llm_cost,
-    )
+    from aibroker.providers.cost import estimate_llm_cost
+    from aibroker.providers.prompt_cache import _CACHE_TTL, _CACHE_TTL_RATE_FIELD
     model = "anthropic/claude-sonnet-5"
     info = litellm.get_model_info(model)
     default_rate = info.get("cache_creation_input_token_cost")
@@ -114,7 +106,7 @@ def test_extended_ttl_write_premium_stays_zero_without_a_long_ttl_rate():
     long-TTL write. A model with no such rate (or an unpriced/unknown model)
     gets nothing added — otherwise we'd invent cost that isn't billed and the
     caps would throttle traffic for no reason (the mirror of under-counting)."""
-    from aibroker.providers.litellm_adapter import _extended_ttl_write_premium
+    from aibroker.providers.cost import _extended_ttl_write_premium
     # unknown model → get_model_info raises → no premium, no crash
     assert _extended_ttl_write_premium("not-a-real/model-xyz", 10_000) == 0.0
     # a real model with no separate long-TTL write rate (deepseek caches
@@ -125,7 +117,7 @@ def test_extended_ttl_write_premium_stays_zero_without_a_long_ttl_rate():
 
 
 def test_apply_prompt_cache_noop_for_other_providers():
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}]
     # cerebras/gemini/deepseek: no explicit cache_control injected
     assert apply_prompt_cache("cerebras/gpt-oss-120b", msgs) == msgs
@@ -144,7 +136,7 @@ def test_apply_prompt_cache_marks_every_leading_system_message():
     Marking each system message puts a breakpoint at the stable/variable
     boundary wherever it falls; anthropic matches the LONGEST cached prefix, so
     the extra marks cost nothing and the stable part always hits."""
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "stable persona"},
         {"role": "system", "content": "per-lead dossier"},
@@ -158,10 +150,7 @@ def test_apply_prompt_cache_respects_the_breakpoint_budget():
     """anthropic allows _MAX_CACHE_MARKS breakpoints. With more leading system
     messages than the budget, one slot stays reserved for the history mark so
     the multi-turn win isn't lost to a long system run."""
-    from aibroker.providers.litellm_adapter import (
-        _MAX_CACHE_MARKS,
-        apply_prompt_cache,
-    )
+    from aibroker.providers.prompt_cache import _MAX_CACHE_MARKS, apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": f"s{i}"} for i in range(6)])
     assert sum(_marked(m) for m in out) <= _MAX_CACHE_MARKS
@@ -172,7 +161,7 @@ def test_apply_prompt_cache_respects_the_breakpoint_budget():
 def test_apply_prompt_cache_rolling_history_grows_with_the_dialogue():
     """The history breakpoint tracks the LAST message each turn, so a longer
     multi-turn dialogue caches more of itself — the multi-turn sales win."""
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "u1"},
@@ -188,7 +177,7 @@ def test_apply_prompt_cache_history_end_marked_even_after_a_late_system():
     but the rolling history breakpoint is the LAST message overall — so a
     system message that appears late still gets the history mark (it's the end
     of the conversation), while the mid-dialogue user turn stays untouched."""
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "head"},
         {"role": "user", "content": "hi"},
@@ -199,7 +188,7 @@ def test_apply_prompt_cache_history_end_marked_even_after_a_late_system():
 
 
 def test_apply_prompt_cache_skips_nonstr_and_empty_in_head():
-    from aibroker.providers.litellm_adapter import apply_prompt_cache
+    from aibroker.providers.prompt_cache import apply_prompt_cache
     listy = {"role": "system", "content": [{"type": "text", "text": "x"}]}
     out = apply_prompt_cache("anthropic/x", [
         {"role": "system", "content": "  "},   # empty → untouched
@@ -211,7 +200,7 @@ def test_apply_prompt_cache_skips_nonstr_and_empty_in_head():
 
 
 def test_cache_tokens_reads_anthropic_and_openai_shapes():
-    from aibroker.providers.litellm_adapter import _cache_tokens
+    from aibroker.providers.prompt_cache import _cache_tokens
     assert _cache_tokens({"cache_read_input_tokens": 900,
                           "cache_creation_input_tokens": 100}) == (900, 100)
     # OpenAI-shape nested cached_tokens
@@ -244,8 +233,8 @@ def test_model_for_unknown_capability_returns_none():
 
 
 def test_default_model_has_voyage_embedding():
-    assert "voyage" in DEFAULT_MODEL
-    assert "embedding" in DEFAULT_MODEL["voyage"]
+    assert "voyage" in default_models()
+    assert "embedding" in default_models()["voyage"]
 
 
 def test_deepseek_is_on_v41_flash_everywhere():
@@ -259,11 +248,11 @@ def test_deepseek_is_on_v41_flash_everywhere():
     model DeepSeek's /models lists on our keys, v4-flash is a temporary alias)
     and it gained a vision lane. The thinking guard for the new name is
     test_deepseek_flash_v41_is_treated_as_the_same_hybrid_family."""
-    for cap, model in DEFAULT_MODEL["deepseek"].items():
+    for cap, model in default_models()["deepseek"].items():
         assert model == "deepseek/deepseek-flash", cap
-    assert "vision" in DEFAULT_MODEL["deepseek"]
-    assert "deepseek-chat" not in str(DEFAULT_MODEL["deepseek"])
-    assert "v4-pro" not in str(DEFAULT_MODEL["deepseek"])
+    assert "vision" in default_models()["deepseek"]
+    assert "deepseek-chat" not in str(default_models()["deepseek"])
+    assert "v4-pro" not in str(default_models()["deepseek"])
 
 
 def test_deepseek_flash_is_priced_off_peak_base():
@@ -287,7 +276,7 @@ def test_gemini_rotations_are_measured_sets():
     was exhausted on every key while 3 sibling buckets sat idle) and
     3.5-flash joined chat. 3.6-flash is deliberately NOT in vision — one of
     three measured calls took 29s against a 60s cloud vision timeout."""
-    from aibroker.providers.litellm_adapter import rotation_for
+    from aibroker.providers.registry import rotation_for
     assert set(rotation_for("gemini", "vision")) == {
         "gemini/gemini-3.5-flash-lite", "gemini/gemini-3.5-flash",
         "gemini/gemini-3.1-flash-lite"}
@@ -364,7 +353,7 @@ async def test_call_llm_happy_path_object_response():
         )],
         usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 AsyncMock(return_value=fake_resp)):
         text, meta = await call_llm(
             model="cerebras/gpt-oss-120b",
@@ -388,7 +377,7 @@ async def test_call_llm_dict_message_response():
         )],
         usage={"prompt_tokens": 5, "completion_tokens": 2},
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 AsyncMock(return_value=fake_resp)):
         text, meta = await call_llm(
             model="x/y", messages=[{"role": "user", "content": "x"}],
@@ -402,7 +391,7 @@ async def test_call_llm_empty_choices():
     fake_resp = SimpleNamespace(
         choices=[], usage={"prompt_tokens": 1, "completion_tokens": 0},
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 AsyncMock(return_value=fake_resp)):
         text, meta = await call_llm(
             model="x/y", messages=[{"role": "user", "content": "hi"}],
@@ -425,7 +414,7 @@ async def test_call_llm_passes_response_format_kwarg():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         await call_llm(
             model="x/y", messages=[{"role": "user", "content": "x"}],
@@ -454,7 +443,7 @@ async def test_call_llm_hands_the_capability_to_the_adapter():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         await call_llm(
             model="anthropic/claude-sonnet-5",
@@ -479,7 +468,7 @@ async def test_call_llm_unwraps_the_anthropic_tool_envelope():
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=enveloped):
         text, _meta = await call_llm(
             model="anthropic/claude-sonnet-5",
@@ -488,7 +477,7 @@ async def test_call_llm_unwraps_the_anthropic_tool_envelope():
     assert json.loads(text) == {"reply": "halo", "move": "ask_budget"}
 
     # a NON-anthropic provider returning the same shape is left alone
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=enveloped):
         text, _meta = await call_llm(
             model="deepseek/deepseek-v4-flash",
@@ -526,7 +515,7 @@ async def test_call_llm_forwards_json_schema_verbatim():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         await call_llm(
             model="gemini/gemini-2.5-flash",
@@ -549,7 +538,7 @@ async def test_call_llm_disables_gemini_thinking_for_json():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         await call_llm(
             model="gemini/gemini-2.5-flash",
@@ -570,7 +559,7 @@ async def test_call_llm_thinking_disable_is_gemini_only():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         # non-gemini (cerebras) → never gets reasoning_effort, even on JSON
         await call_llm(model="cerebras/gpt-oss-120b",
@@ -597,7 +586,7 @@ async def test_call_llm_extra_kwargs_passed_through():
             usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
         )
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 side_effect=fake_acompletion):
         await call_llm(
             model="x/y", messages=[{"role": "user", "content": "x"}],
@@ -617,7 +606,7 @@ async def test_call_llm_missing_usage_safe():
         )],
         usage=None,
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 AsyncMock(return_value=fake_resp)):
         _, meta = await call_llm(
             model="x/y", messages=[{"role": "user", "content": "x"}],
@@ -640,7 +629,7 @@ async def test_call_llm_timeout_is_enforced_independently_of_litellm():
         await asyncio.sleep(10)
         raise AssertionError("should have been cancelled by wait_for before this")
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion",
+    with patch("aibroker.providers.litellm_client.litellm.acompletion",
                 _never_returns), pytest.raises(TimeoutError):
         await call_llm(
             model="zai/glm-4.5-flash", messages=[{"role": "user", "content": "x"}],
@@ -656,7 +645,7 @@ async def test_embed_happy_path_dict_data():
         data=[{"embedding": [0.1, 0.2, 0.3]}, {"embedding": [0.4, 0.5]}],
         usage={"prompt_tokens": 5},
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+    with patch("aibroker.providers.litellm_client.litellm.aembedding",
                 AsyncMock(return_value=fake_resp)):
         vectors, meta = await embed(
             model="voyage/voyage-3",
@@ -674,7 +663,7 @@ async def test_embed_happy_path_object_data():
         data=[SimpleNamespace(embedding=[0.1, 0.2])],
         usage=SimpleNamespace(prompt_tokens=3),
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+    with patch("aibroker.providers.litellm_client.litellm.aembedding",
                 AsyncMock(return_value=fake_resp)):
         vectors, _ = await embed(
             model="voyage/voyage-3", texts=["x"], api_key="k",
@@ -688,7 +677,7 @@ async def test_embed_falls_back_to_vector_key():
         data=[{"vector": [0.7, 0.8]}],
         usage={"total_tokens": 2},
     )
-    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+    with patch("aibroker.providers.litellm_client.litellm.aembedding",
                 AsyncMock(return_value=fake_resp)):
         vectors, meta = await embed(
             model="voyage/voyage-3", texts=["x"], api_key="k",
@@ -699,7 +688,7 @@ async def test_embed_falls_back_to_vector_key():
 
 async def test_embed_empty_data_returns_empty_vectors():
     fake_resp = SimpleNamespace(data=[], usage={"prompt_tokens": 0})
-    with patch("aibroker.providers.litellm_adapter.litellm.aembedding",
+    with patch("aibroker.providers.litellm_client.litellm.aembedding",
                 AsyncMock(return_value=fake_resp)):
         vectors, _ = await embed(
             model="voyage/voyage-3", texts=[], api_key="k",
@@ -717,7 +706,7 @@ def test_model_for_transcription():
 
 async def test_transcribe_object_response():
     fake_resp = SimpleNamespace(text="  привет мир  ")
-    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+    with patch("aibroker.providers.litellm_client.litellm.atranscription",
                 AsyncMock(return_value=fake_resp)):
         text, meta = await transcribe(
             model="groq/whisper-large-v3-turbo",
@@ -729,7 +718,7 @@ async def test_transcribe_object_response():
 
 
 async def test_transcribe_dict_response():
-    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+    with patch("aibroker.providers.litellm_client.litellm.atranscription",
                 AsyncMock(return_value={"text": "hello"})):
         text, _ = await transcribe(
             model="groq/whisper-large-v3-turbo",
@@ -747,7 +736,7 @@ async def test_transcribe_passes_filename_as_buffer_name():
         captured["model"] = model
         return SimpleNamespace(text="ok")
 
-    with patch("aibroker.providers.litellm_adapter.litellm.atranscription",
+    with patch("aibroker.providers.litellm_client.litellm.atranscription",
                 side_effect=fake_atranscription):
         await transcribe(model="groq/whisper-large-v3-turbo",
                          audio=b"data", filename="voice.ogg", api_key="k")
@@ -767,7 +756,7 @@ async def test_transcribe_local_asr_success(monkeypatch):
         status_code=200,
         json=lambda: {"text": "  привет  ", "duration_s": 2.1, "language": "ru"},
     )
-    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+    with patch("aibroker.providers.local_asr._post_local_asr",
                 AsyncMock(return_value=fake_resp)):
         text, meta = await transcribe(
             model="local/whisper", audio=b"oggbytes", filename="v.ogg", api_key="unused",
@@ -788,7 +777,7 @@ async def test_transcribe_local_asr_requests_language_auto(monkeypatch):
         captured["url"] = url
         return SimpleNamespace(status_code=200, json=lambda: {"text": "ok"})
 
-    with patch("aibroker.providers.litellm_adapter._post_local_asr", side_effect=fake_post):
+    with patch("aibroker.providers.local_asr._post_local_asr", side_effect=fake_post):
         await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
     assert "language=auto" in captured["url"]
 
@@ -804,7 +793,7 @@ async def test_transcribe_local_asr_connection_error_becomes_timeout(monkeypatch
     (cools the key) — classify_provider_error gives a generic error NO
     cooldown at all, which would hammer a dead endpoint every call."""
     monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
-    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+    with patch("aibroker.providers.local_asr._post_local_asr",
                 AsyncMock(side_effect=httpx.ConnectError("refused"))), \
          pytest.raises(TimeoutError):
         await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
@@ -813,7 +802,7 @@ async def test_transcribe_local_asr_connection_error_becomes_timeout(monkeypatch
 async def test_transcribe_local_asr_5xx_becomes_timeout(monkeypatch):
     monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
     fake_resp = SimpleNamespace(status_code=500, text="model still loading")
-    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+    with patch("aibroker.providers.local_asr._post_local_asr",
                 AsyncMock(return_value=fake_resp)), \
          pytest.raises(TimeoutError):
         await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
@@ -824,7 +813,7 @@ async def test_transcribe_local_asr_4xx_stays_plain_error(monkeypatch):
     'the service is down, back off' one — must not cool the key like a 5xx."""
     monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr-local:8000")
     fake_resp = SimpleNamespace(status_code=413, text="audio > 25MB")
-    with patch("aibroker.providers.litellm_adapter._post_local_asr",
+    with patch("aibroker.providers.local_asr._post_local_asr",
                 AsyncMock(return_value=fake_resp)), \
          pytest.raises(RuntimeError) as exc_info:
         await transcribe(model="local/whisper", audio=b"x", filename="a.ogg", api_key="k")
@@ -851,7 +840,7 @@ async def test_gemini_asr_parses_audio_transcription_and_body():
         return _asr_ok([{"audioTranscription": {"text": "привет "}},
                         {"audioTranscription": {"text": "мир"}}])
 
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr", side_effect=fake_post):
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr", side_effect=fake_post):
         text, meta = await transcribe(model=_ASR, audio=b"oggbytes",
                                       filename="v.ogg", api_key="K")
     assert text == "привет мир"
@@ -868,15 +857,15 @@ async def test_gemini_asr_parses_audio_transcription_and_body():
 
 
 async def test_gemini_asr_falls_back_to_plain_text_part():
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=_asr_ok([{"text": "hello"}]))):
         text, _ = await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
     assert text == "hello"
 
 
 async def test_gemini_asr_empty_transcript_raises():
-    from aibroker.providers.litellm_adapter import _transcribe_via_gemini_asr
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    from aibroker.providers.gemini_asr import _transcribe_via_gemini_asr
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=_asr_ok([]))), \
          pytest.raises(RuntimeError, match="empty transcript"):
         await _transcribe_via_gemini_asr(model=_ASR, audio=b"x",
@@ -884,10 +873,10 @@ async def test_gemini_asr_empty_transcript_raises():
 
 
 async def test_gemini_asr_429_is_classified_rate_limit():
-    from aibroker.providers.litellm_adapter import _transcribe_via_gemini_asr
+    from aibroker.providers.gemini_asr import _transcribe_via_gemini_asr
     from aibroker.providers.provider_errors import classify_provider_error
     fake = SimpleNamespace(status_code=429, text='{"status":"RESOURCE_EXHAUSTED"}')
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=fake)), \
          pytest.raises(RuntimeError) as ei:
         await _transcribe_via_gemini_asr(model=_ASR, audio=b"x",
@@ -898,9 +887,9 @@ async def test_gemini_asr_429_is_classified_rate_limit():
 async def test_transcribe_dispatch_asr_model_skips_chat_path():
     chat = AsyncMock()
     ok = _asr_ok([{"audioTranscription": {"text": "ok"}}])
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=ok)), \
-         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat):
+         patch("aibroker.providers.gemini_asr._transcribe_via_chat", chat):
         await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
     chat.assert_not_called()
 
@@ -908,9 +897,9 @@ async def test_transcribe_dispatch_asr_model_skips_chat_path():
 async def test_gemini_asr_failure_falls_back_to_flash_chat():
     fake = SimpleNamespace(status_code=429, text="RESOURCE_EXHAUSTED")
     chat = AsyncMock(return_value=("из чата", {"model": "gemini/gemini-2.5-flash"}))
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=fake)), \
-         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat):
+         patch("aibroker.providers.gemini_asr._transcribe_via_chat", chat):
         text, _ = await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
     assert text == "из чата"
     assert chat.await_args.kwargs["model"] == "gemini/gemini-2.5-flash"
@@ -919,9 +908,9 @@ async def test_gemini_asr_failure_falls_back_to_flash_chat():
 async def test_gemini_asr_auth_error_does_not_fall_back():
     fake = SimpleNamespace(status_code=403, text="API key not valid")
     chat = AsyncMock()
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=fake)), \
-         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat), \
+         patch("aibroker.providers.gemini_asr._transcribe_via_chat", chat), \
          pytest.raises(RuntimeError, match="403"):
         await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
     chat.assert_not_called()
@@ -930,27 +919,24 @@ async def test_gemini_asr_auth_error_does_not_fall_back():
 async def test_gemini_asr_both_fail_raises_fallback_error_chained():
     fake = SimpleNamespace(status_code=500, text="boom")
     chat = AsyncMock(side_effect=RuntimeError("chat 429"))
-    with patch("aibroker.providers.litellm_adapter._post_gemini_asr",
+    with patch("aibroker.providers.gemini_asr._post_gemini_asr",
                AsyncMock(return_value=fake)), \
-         patch("aibroker.providers.litellm_adapter._transcribe_via_chat", chat), \
+         patch("aibroker.providers.gemini_asr._transcribe_via_chat", chat), \
          pytest.raises(RuntimeError, match="chat 429") as ei:
         await transcribe(model=_ASR, audio=b"x", filename="a.ogg", api_key="K")
     assert "gemini-asr 500" in str(ei.value.__cause__)
 
 
 def test_gemini_asr_priced_per_minute():
-    from aibroker.providers.litellm_adapter import (
-        estimate_transcription_cost,
-        whisper_cost,
-    )
+    from aibroker.providers.cost import estimate_transcription_cost, whisper_cost
     assert whisper_cost(_ASR, 60) == pytest.approx(0.005)
     assert estimate_transcription_cost(_ASR, 4000) > 0   # 1 s of assumed 32 kbps
 
 
 def test_models_for_returns_primary_first_then_rotation():
-    """The primary from DEFAULT_MODEL must stay first so a provider with no
+    """The primary from default_models() must stay first so a provider with no
     rotation configured behaves exactly as it did with plain model_for."""
-    from aibroker.providers.litellm_adapter import model_for, models_for
+    from aibroker.providers.registry import model_for, models_for
 
     got = models_for("gemini", "chat:sales")
     assert got[0] == model_for("gemini", "chat:sales")
@@ -959,7 +945,7 @@ def test_models_for_returns_primary_first_then_rotation():
 
 
 def test_models_for_is_a_noop_without_rotation():
-    from aibroker.providers.litellm_adapter import model_for, models_for
+    from aibroker.providers.registry import model_for, models_for
 
     assert models_for("mistral", "chat:smart") == [model_for("mistral", "chat:smart")]
     assert models_for("nosuch", "chat:smart") == []
@@ -971,9 +957,9 @@ def test_gemini_rotation_never_uses_a_latest_alias():
     a 400 — it resolves to a 3.7-class model that rejects
     reasoning_effort='disable', and the alias also slips past _GeminiAdapter's
     version-prefix check, so the adapter cannot pick the right value for it."""
-    from aibroker.providers.litellm_adapter import MODEL_ROTATION
+    from aibroker.providers.registry import REGISTRY
 
-    for cap, models in MODEL_ROTATION["gemini"].items():
+    for cap, models in REGISTRY["gemini"].rotation.items():
         for m in models:
             assert not m.endswith("-latest"), (cap, m)
 
@@ -997,7 +983,7 @@ async def test_call_llm_reports_deepseek_v41_for_the_family_alias():
     async def fake(**_kw):
         return _chat_resp("deepseek-flash")
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion", side_effect=fake):
+    with patch("aibroker.providers.litellm_client.litellm.acompletion", side_effect=fake):
         _text, meta = await call_llm(
             model="deepseek/deepseek-flash",
             messages=[{"role": "user", "content": "x"}], api_key="k")
@@ -1011,7 +997,7 @@ async def test_call_llm_echoing_provider_adds_no_served_model():
     async def fake(**_kw):
         return _chat_resp("gemini-2.5-flash")
 
-    with patch("aibroker.providers.litellm_adapter.litellm.acompletion", side_effect=fake):
+    with patch("aibroker.providers.litellm_client.litellm.acompletion", side_effect=fake):
         _text, meta = await call_llm(
             model="gemini/gemini-2.5-flash",
             messages=[{"role": "user", "content": "x"}], api_key="k")
@@ -1019,7 +1005,7 @@ async def test_call_llm_echoing_provider_adds_no_served_model():
 
 
 def test_reported_model_reads_objects_and_dicts_and_ignores_junk():
-    from aibroker.providers.litellm_adapter import _reported_model
+    from aibroker.providers.litellm_client import _reported_model
     assert _reported_model(SimpleNamespace(model="m1")) == "m1"
     assert _reported_model({"model": "m2"}) == "m2"
     assert _reported_model(SimpleNamespace()) is None

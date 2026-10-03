@@ -59,7 +59,7 @@ guards the invariant.
 `chains.usable_scopes_for_provider(provider)` is the single source of truth for
 "could this key ever be used for that scope": the broker only reaches a provider
 for a capability it is BOTH chained for (`CAPABILITY_CHAINS`) and has a model for
-(`DEFAULT_MODEL`), so any other scope on its key is **inert**. The dashboard's key
+(`ProviderSpec.defaults`), so any other scope on its key is **inert**. The dashboard's key
 forms grey out (and refuse to submit) those scopes — 2026-07-15 an anthropic key
 was scoped to `llm:vision` + `llm:audio` in the belief it would serve images and
 voice: Claude has no speech-to-text at all, and anthropic was dropped from the

@@ -131,3 +131,12 @@ async def decide(
         "latency_ms": latency_ms,
         "model_served": body.get("model"),
     }
+
+
+class OpenRouterDecisions:
+    """DecideTransport for OpenRouter's decisions endpoint (not a litellm route)."""
+
+    async def decide(
+        self, *, model: str, state: str, questions: dict[str, Any], api_key: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return await decide(model=model, state=state, questions=questions, api_key=api_key)

@@ -1,190 +1,110 @@
-"""Chat/embed orchestration.
+"""Chat / embed / decision / transcribe orchestration — the WALKS.
 
-Routes stay thin (validate → call → shape response). Everything about picking a
-key, checking caps, calling the provider, classifying the error, recording usage
-and walking to the next provider in the chain lives here.
+Routes stay thin (validate → call → shape response). This module decides WHICH
+(provider, model, key) to try next and when to stop; what happens to a single
+key attempt (reserve → call → release → gate → record → affinity, with one error
+path) is services/attempt.py, shared by every capability. Dated tuning history
+for the constants below: docs/history/llm-service-tuning.md.
 """
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 — kept for callers patching svc.asyncio
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from enum import Enum, auto
+from datetime import datetime
 from typing import Any
 
-from aibroker.crypto import decrypt
-from aibroker.db.engine import get_session
-from aibroker.db.models import ApiKeyRow, ProjectRow
-from aibroker.providers import call_llm
-from aibroker.providers.adapters import is_deepseek_big_json_prompt
+from aibroker.db.models import ProjectRow
+from aibroker.providers.adapters import extra_for_provider, is_deepseek_big_json_prompt
+from aibroker.providers.catalog import PinTarget, UnknownModel, resolve_pin
 from aibroker.providers.context_limits import (
     MIN_LEARNABLE_CEILING,
     estimate_prompt_tokens,
     fits_context,
-    is_too_large_error,
 )
+from aibroker.providers.cost import estimate_llm_cost, estimate_transcription_cost
 from aibroker.providers.decisions import (
     DECISION_FALLBACK_MODEL,
     JEV_INPUT_USD_PER_TOKEN,
-    decide,
     estimate_tokens,
 )
-from aibroker.providers.litellm_adapter import (
-    embed,
-    estimate_llm_cost,
-    estimate_transcription_cost,
-    extra_for_provider,
-    model_for,
-    rotation_for,
-    transcribe,
-)
-from aibroker.providers.observations import learned_ceilings, record_too_large
+from aibroker.providers.observations import learned_ceilings
 from aibroker.providers.peak_pricing import peak_multiplier
+from aibroker.providers.prompt_cache import cache_key_for
 
 # Re-exported: tests and services/__init__ import classify_provider_error from here.
-from aibroker.providers.provider_errors import (
-    classify_provider_error,
-    http_status_of,
-    is_model_unavailable,
-    is_timeout,
+from aibroker.providers.provider_errors import classify_provider_error
+from aibroker.providers.registry import (
+    max_keys_for,
+    model_for,
+    paid_providers,
+    rotation_for,
+    spec_or_default,
 )
+from aibroker.providers.transport import call_llm, decide, embed, transcribe, transport_for
 from aibroker.routing import (
     CostGuardError,
+    affinity,
     chain_for,
     circuit,
     deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     pick_and_reserve,
-    release_cost,
-    reserve_cost,
     scope_for,
 )
-from aibroker.routing.chains import free_first_walk, provider_of_model
-from aibroker.routing.model_cooldown import cooled_models, mark_model_cooldown
-from aibroker.routing.selector import (
-    mark_cooldown,
-    mark_dead,
-    note_affinity_shared,
-    record_usage,
-)
+from aibroker.routing.chains import free_first_walk
+from aibroker.routing.model_cooldown import cooled_models
 from aibroker.services import response_cache
+from aibroker.services.attempt import Attempt, AttemptResult, Flow, Rejection, run_attempt
 from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
-from aibroker.telemetry import audit
+
+__all__ = [
+    "BUDGET_EXHAUSTED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
+    "EmbedOutcome", "EmbedRequestInvalid", "TranscribeFailed", "TranscribeOutcome", "classify_provider_error",
+    "run_chat", "run_decision", "run_embed", "run_transcribe",
+]
 
 log = logging.getLogger(__name__)
 
-_COOLDOWN = timedelta(minutes=5)
-# Keys tried per provider before falling through to the next provider in the
-# chain (like a direct client looping a provider's keys). Free keys rate-limit
-# constantly, so a few retries pay off — but gemini (tiny per-project daily cap,
-# ~20/day/model on free tier) and cerebras (rolling RPM) rate-limit their keys
-# in lockstep: when the first two 429, a third rarely helps, and 5 tries is just
-# added latency before the chain moves on. Cap those two lower; everyone else
-# keeps the full breadth.
-_MAX_KEYS_PER_PROVIDER = 5
-_MAX_KEYS_BY_PROVIDER: dict[str, int] = {"gemini": 3, "cerebras": 3}
+# Keys tried per provider before the walk moves on: ProviderSpec.max_keys
+# (default 5; gemini/cerebras 3 — they rate-limit their keys in lockstep).
 # Empty/whitespace JSON bodies: retry the same provider at most this many times
-# before treating it as a real miss and moving on.
-#
-# Was 1, on the premise that a big-prompt DeepSeek empty is DETERMINISTIC
-# ("empty on every key/call") and retrying only burns the provider. Measured
-# 2026-07-31 over 6h of live chat:sales on deepseek-v4-pro, that premise is
-# false — it is a coin flip, not a dead end:
-#     ok         185   avg_in 31247   avg_out 810   cache_read 30722
-#     EmptyBody  179   avg_in 31299   avg_out 518   cache_read 30916
-# Same model, same key, same prompt size, same cache behaviour — only the
-# outcome differs, so nothing in the request lets us predict or avoid it.
-# Against a ~49% independent miss rate the retry count IS the fix: 2 attempts
-# leave 24% unanswered, 4 leave 6%.
-#
-# Retries are cheap here specifically because they land on the SAME key —
-# pick_and_reserve does not exclude keys already tried in this request, and
-# DeepSeek's prompt cache is per-key, so a retry re-reads the warm 31k-token
-# prefix at ~1/120th of miss price (measured 98.2% cache-read on key 110).
-# The cost is latency: ~15s per extra attempt, far inside the 18-min walk
-# deadline and the 60s per-call timeout.
-#
-# Still capped (not "try every key"): _max_keys("deepseek") is 5, and a genuine
-# provider-wide outage must not spend all of them before the chain fails over.
+# before treating it as a real miss. An empty body is a ~coin flip on big JSON
+# prompts (measured 49% on deepseek-v4-pro, same key/prompt/cache), so the retry
+# count IS the fix; retries land on the SAME key and re-read its warm cache.
 _MAX_EMPTY_RETRIES = 3
 
-# Distinct keys of one provider that must return an empty body inside the
-# breaker window before we treat it as a provider-side degradation and try the
-# free tier ahead of it. 2 keys (not 1) so a single flaky key doesn't reorder
-# the chain — an empty body is billed but not fatal, and the provider still
-# answers most calls.
+# Distinct keys of one provider that must return an empty body inside the breaker
+# window before we try the free tier ahead of it (one flaky key must not reorder).
 _EMPTY_STORM_MIN_KEYS = 2
 
-# Absolute runaway backstop on provider-call attempts for a single request.
-# The real budget is dynamic — sum of per-provider key allowances across the
-# actual chain (see `_attempt_budget`), so every provider (incl. the paid tail)
-# is reachable before we 503. This flat ceiling only guards against a
-# pathological chain; it must stay ABOVE the longest real chain's key sum so it
-# never starves the tail. Was a flat 12 — but chat:fast grew to 14 providers,
-# so 12 could be consumed by early free providers and the paid tail
-# (deepseek/anthropic/openai) was never reached: long dialogs 503'd during the
-# 2026-07-07 incident precisely because of this. 2026-07-10: 60 → 100 — the
-# chat:fast key sum had reached 61 (13 providers, cerebras/gemini 3 each + the
-# rest 5), so 60 clipped the last attempt; 100 restores real headroom.
+# Absolute runaway backstop on provider-call attempts per request; the real budget
+# is the sum of per-provider key allowances over the chain (see `_attempt_budget`)
+# and this must stay ABOVE the longest real chain's key sum.
 _MAX_ATTEMPTS_ABS = 100
 
-# Per-provider-call timeout (seconds). A safety net against a hung upstream —
-# normal calls finish in ~1-8s; this only cuts a genuine hang so the chain can
-# fail over instead of blocking until the client's read timeout. chat:deep is
-# the exception: nemotron legitimately runs minutes (it's an async job;
-# job_queue._requeue_stale_running reclaims rows stuck `running` past its
-# 25-min stale window), so it gets a long ceiling that still fires before the
-# job is treated as stale.
-#
-# 2026-07-07: raised 45s -> 60s (explicit ask, applies to every key/provider).
-# Trade-off worth knowing: Stepan2's own client read timeout for chat:fast is
-# also 60s (llm_read_timeout_s) — a single hung attempt at this ceiling can
-# now consume that entire budget, leaving no time for the chain to fail over
-# to the next provider before the CLIENT gives up (a 504/abort instead of a
-# clean 503). chat:smart's 90s client budget still has headroom for one hang
-# + a fallback attempt. Not tightened here since the ask was explicit; flagging
-# so a future chat:fast timeout tightening is an informed choice, not a
-# surprise discovery.
+# Per-provider-call timeout (seconds): a safety net against a hung upstream, not a
+# latency budget. chat:deep legitimately runs minutes, so it gets a long ceiling
+# that still fires before the job queue's 25-min stale-reclaim window.
 _CALL_TIMEOUT_S = 60.0
 _DEEP_CALL_TIMEOUT_S = 19 * 60.0
 
-# Overall wall-clock budget for a NON-deep run_chat walk. Checked BEFORE
-# starting each new attempt, NEVER mid-call (an aborted call = wasted tokens —
-# policy). Kept comfortably under job_queue's 25-min _STALE_RUNNING_S reclaim
-# window so a slow storm walk finishes and writes its result before a second
-# worker could reclaim the row and re-execute it (double-execution/double-
-# spend). 2026-07-16.
+# Overall wall-clock budget for a NON-deep walk, kept under job_queue's 25-min
+# reclaim so a slow storm walk finishes before a second worker could re-execute it.
 _CHAT_WALL_DEADLINE_S = 18 * 60.0
 
-# chat:deep's single nemotron call legitimately runs up to _DEEP_CALL_TIMEOUT_S
-# (~19min), so it can't share the 18-min budget — but it was previously EXEMPT
-# from any deadline, and _attempt_budget lets it try up to 5 nvidia keys. Two
-# hung keys = ~38min > the 25-min stale window → the row got reclaimed and
-# double-executed (double nvidia spend). Fast key-rotation in the first few
-# minutes stays allowed; only stacking multiple 19-min timeouts is prevented
-# (2026-07-19 review). 5 + 19 = 24 < 25.
+# chat:deep's single call is ~19 min, so only fast key rotation in the first
+# minutes is allowed (5 + 19 = 24 < 25).
 _DEEP_WALL_DEADLINE_S = 5 * 60.0
 
-# The gate is a FINISH-BY deadline, not a start deadline (2026-09-12).
-# PREVENTIVE — no incident: over 7 days no vision job ran past 312s, well under
-# the 25-min reclaim. But the start gate's premise ("whatever I start now ends
-# in ~60s") stopped being true when local vision's ceiling reached
-# VISION_LOCAL_TIMEOUT_S + VISION_LOCAL_QUEUE_WAIT_S + 30 = 570s: an attempt
-# started at 17:59 may legally run to 27:29, past the reclaim, and the job
-# would then be executed twice. Today that cannot happen only because exactly
-# ONE local key carries llm:vision, so the single 570s attempt is always the
-# first of the walk — a safety margin resting on a key's scope list, not on
-# anything stated. Asking instead whether the attempt can FINISH in time
-# (`_now() + _call_timeout(capability, provider) > finish_by → stop`) removes
-# that dependency: a longer timeout or a second local key can no longer create
-# a double-execution. For 60s cloud calls this is the old behaviour one minute
-# earlier; for chat:deep the finish-by of 5 + 19 = 24 min reproduces the start
-# gate above exactly.
+# The gate is a FINISH-BY deadline: "can this attempt finish in time" (now + its
+# call timeout <= finish_by), not "may it start" — a longer timeout or a second
+# local key can then never create a double-execution.
 _DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S
+
+_CAP_MESSAGE = "daily budget cap reached — retry after 00:00 UTC"
 
 
 def _now() -> float:
@@ -193,62 +113,408 @@ def _now() -> float:
 
 
 def _max_keys(provider: str) -> int:
-    return _MAX_KEYS_BY_PROVIDER.get(provider, _MAX_KEYS_PER_PROVIDER)
+    return max_keys_for(provider)
 
 
 def _attempt_budget(chain: list[str]) -> int:
-    """Total provider-call attempts allowed for a request over `chain`: the sum
-    of every provider's key allowance ("try every key we have before giving
-    up"), bounded by the absolute runaway backstop. Guarantees each provider —
-    including the paid tail — is reached before a 503, since a saturated
-    provider returns no key and costs 0 attempts."""
+    """Total attempts allowed over `chain`: the sum of every provider's key
+    allowance, bounded by the runaway backstop — so each provider (incl. the paid
+    tail) is reachable before a 503; a saturated provider costs 0 attempts."""
     return min(_MAX_ATTEMPTS_ABS, sum(_max_keys(p) for p in chain))
 
 
 def _call_timeout(capability: str, provider: str | None = None) -> float:
-    """Per-call ceiling. Depends on the PROVIDER as well as the capability
-    since 2026-08-31: self-hosted `local` vision runs a 4B model on this box's
-    CPU at ~69s for a chat screenshot and up to ~192s for a dense document —
-    the flat 60s would abort every single call, cool the key, and fall through
-    to the cloud providers that are rate-limited in the first place, burning
-    CPU for nothing. Cloud vision is unchanged at 60s; only the local provider,
-    which cannot rack up a bill by being slow, gets the longer rope."""
+    """Per-call ceiling: chat:deep gets the long rope; otherwise the provider's
+    transport may ask for its own (self-hosted vision runs minutes on CPU and
+    cannot rack up a bill by being slow); default 60s."""
     if capability == "chat:deep":
         return _DEEP_CALL_TIMEOUT_S
-    if provider == "local":
-        # Deliberately above the adapter's own httpx timeout
-        # (VISION_LOCAL_TIMEOUT_S) so the HTTP client times out FIRST and
-        # raises a labelled TimeoutError, instead of asyncio.wait_for cutting
-        # the coroutine with no provider context to log.
-        from aibroker.config import get_settings
-
-        s = get_settings()
-        # + the bounded wait for the single local slot (2026-09-12): the
-        # semaphore wait happens inside call_llm, so the wall ceiling must
-        # cover queue + model time or asyncio.wait_for would cut a healthy,
-        # merely queued request.
-        return s.VISION_LOCAL_TIMEOUT_S + s.VISION_LOCAL_QUEUE_WAIT_S + 30.0
-    return _CALL_TIMEOUT_S
+    model = model_for(provider, capability) if provider else None
+    own = transport_for(model).call_timeout(capability) if model else None
+    return own if own is not None else _CALL_TIMEOUT_S
 
 
-# Key-shaped substrings a provider may echo back in an error body. The
-# dashboard renders `last_error` verbatim and it lands in every DB backup, so
-# scrub BEFORE persisting — docs/security.md promises provider keys are never
-# logged, and until 2026-09-07 this path could quietly break that promise.
-_SECRET_PATTERNS = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"),          # openai/anthropic/deepseek-style
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"),         # google
-    re.compile(r"\bgsk_[A-Za-z0-9]{16,}"),             # groq
-    re.compile(r"\bcsk-[A-Za-z0-9]{16,}"),             # cerebras
-    re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"),
-    re.compile(r"(?i)(api[_-]?key|token|key)=[^&\s\"']{8,}"),
-)
+def _wants_json(response_format: dict[str, Any] | None) -> bool:
+    return bool(response_format) and response_format.get("type") in (
+        "json_object", "json_schema"
+    )
+
+
+def _is_valid_json(text: str) -> bool:
+    try:
+        json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+# ─── Outcomes ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ChatOutcome:
+    text: str
+    provider: str
+    model: str
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+    request_id: int
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    # The EXACT model that answered when it says more than `model` (the routing
+    # name) does — see providers/model_identity.py. None when they are the same.
+    model_served: str | None = None
+    # Vision extras: populated only by the self-hosted `local` provider, which
+    # classifies the image on the same pass; `text` keeps its meaning for EVERY
+    # provider so a mid-chain fallback cannot change the response shape.
+    vision_type: str | None = None
+    vision_format: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
+
+
+class _BudgetExhausted:
+    """Sentinel run_chat returns when a PROJECT/GLOBAL daily cap is spent — a
+    distinct outcome from None (no provider had capacity), so the caller can fail
+    the job honestly and stop retrying (more retries can't create budget)."""
+    __slots__ = ()
+
+
+BUDGET_EXHAUSTED = _BudgetExhausted()
+
+
+# ─── Chat ───────────────────────────────────────────────────────────────────
+
+
+def _chat_gate(
+    *, provider: str, key_id: int, response_format: dict[str, Any] | None,
+    tools: list[dict[str, Any]] | None, tool_choice: Any,
+):
+    """The chat quality gate: native-tool contract, untrusted-empty providers, and
+    the deterministic JSON check (an unparseable body is billed but a failure)."""
+    spec = spec_or_default(provider)
+
+    def check(text: str, meta: dict[str, Any]) -> Rejection | None:
+        if tools and (failure := validate_result(text, meta, tools, tool_choice)):
+            return Rejection(failure, Flow.NEXT_PROVIDER, http_status=502)
+        if spec.empty_is_failure and not (text or "").strip():
+            # Never a real answer (a 4B model on CPU produced nothing): escalate to
+            # the next PROVIDER — re-asking a one-key local provider is deterministic.
+            return Rejection("EmptyBody", Flow.NEXT_PROVIDER, http_status=502, bill=False,
+                             log_message=f"{provider} returned an empty body — escalating")
+        if _wants_json(response_format) and not _is_valid_json(text):
+            # EMPTY = transient provider throttle (retry the same provider);
+            # non-empty-but-malformed = a MODEL property (next provider).
+            if not (text or "").strip():
+                return Rejection("EmptyBody", Flow.NEXT_KEY_EMPTY,
+                                 note=lambda: circuit.note_empty_body(provider, key_id))
+            return Rejection(
+                "InvalidJSON", Flow.NEXT_PROVIDER,
+                log_message=f"provider {provider} returned unparseable JSON, next provider")
+        return None
+
+    return check
+
+
+async def _size_filtered(full_chain: list[str], est_tokens: int, capability: str) -> list[str]:
+    # Drop providers whose single-request ceiling can't fit this prompt (a
+    # guaranteed 413). Ceilings never drop below MIN_LEARNABLE_CEILING, so a smaller
+    # prompt fits EVERY provider — skip the DB round-trip on the small-prompt path.
+    # Falls back to the full chain if every provider is size-skipped.
+    if est_tokens < MIN_LEARNABLE_CEILING:
+        return full_chain
+    learned = await learned_ceilings()
+    sized_chain = [
+        p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
+    ]
+    if len(sized_chain) < len(full_chain):
+        log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
+                 capability, est_tokens,
+                 [p for p in full_chain if p not in sized_chain])
+    return sized_chain or full_chain
+
+
+@dataclass(frozen=True)
+class _Step:
+    """One leg of a walk: a provider, optionally a fixed model (a pin) and an
+    optional key-tier restriction (free pass / paid pass of a pinned walk)."""
+    provider: str
+    model: str | None = None
+    tier: str | None = None
+    key_id: int | None = None      # route-affinity leg: exactly this key, one attempt
+    free_only: bool = False        # affinity leg must not spend where free-first walks
+
+
+def _pinned_steps(targets: list[PinTarget], *, paid_only: bool) -> list[_Step]:
+    """Deterministic walk for a pinned model: FREE-tier keys of every candidate
+    first (providers in fixed rank order), then paid keys — never shuffled."""
+    paid = paid_providers()
+    free_pass = [] if paid_only else [
+        _Step(t.provider, t.model, "free") for t in targets if t.provider not in paid]
+    return free_pass + [_Step(t.provider, t.model, "paid") for t in targets]
+
+
+async def _with_affinity(
+    steps: list[_Step], project_id: int, workflow: str | None, capability: str,
+    pinned: str | None, *, paid_only: bool,
+) -> list[_Step]:
+    """Put the request family's affine (provider, model, key) in front of the walk.
+
+    The leg is a single attempt on exactly that key; when it is cooling / capped /
+    errored the normal walk follows and the success re-pins (see
+    routing/affinity.py). Only a target the walk would allow anyway is promoted —
+    it must still be one of the shaped steps (tools / size / JSON / pin filters
+    already applied) — and a paid target never jumps a free head."""
+    if not steps:
+        return steps
+    target = await affinity.lookup_route(project_id, workflow, capability, pinned)
+    if target is None or not affinity.may_promote(target, steps[0].provider,
+                                                  paid_only=paid_only):
+        return steps
+    if not any(s.provider == target.provider and (not s.model or s.model == target.model)
+               for s in steps):
+        return steps
+    free_head = not paid_only and steps[0].provider not in paid_providers()
+    return [_Step(target.provider, target.model, "paid" if paid_only else None,
+                  key_id=target.key_id, free_only=free_head), *steps]
+
+
+def _shape_chain(
+    chain: list[str], *, capability: str, paid_only: bool,
+    response_format: dict[str, Any] | None, messages: list[dict[str, Any]],
+    at: datetime | None,
+) -> list[str]:
+    """Order the capability chain for this request (free-first walk, JSON
+    reliability, deepseek savings)."""
+    chain = free_first_walk(capability, chain, paid_only=paid_only)
+    # JSON requests: JSON-reliable providers first, incapable ones dropped — cuts
+    # InvalidJSON at the source, not after the wasted call.
+    if _wants_json(response_format):
+        chain = deprioritize_for_json(chain)
+    # Savings: chat:smart anchors on deepseek, but not during its peak-pricing hours
+    # (2x), on a big-JSON prompt that empties its body, or in a provider-side
+    # empty-body storm — free providers get first shot and deepseek stays the
+    # fallback (deferral, not a skip).
+    should_defer_deepseek = (
+        peak_multiplier("deepseek", at) > 1.0
+        or is_deepseek_big_json_prompt(response_format, messages)
+        or "deepseek" in circuit.providers_in_empty_storm(_EMPTY_STORM_MIN_KEYS)
+    )
+    return deprioritize_deepseek_for_savings(chain, should_defer=should_defer_deepseek)
+
+
+def _chat_outcome(provider: str, key_label: str, res: AttemptResult) -> ChatOutcome:
+    meta = res.meta
+    return ChatOutcome(
+        text=res.payload, provider=provider, model=meta["model"],
+        model_served=meta.get("model_served"),
+        tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
+        cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+        key_label=key_label, request_id=res.usage_id or 0,
+        cache_read_tokens=meta.get("cache_read_tokens", 0),
+        cache_write_tokens=meta.get("cache_write_tokens", 0),
+        vision_type=meta.get("vision_type"), vision_format=meta.get("vision_format"),
+        tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
+        refusal=meta.get("refusal"),
+    )
+
+
+async def run_chat(
+    *,
+    project: ProjectRow,
+    capability: str,
+    messages: list[dict[str, Any]],
+    model: str | None,
+    max_tokens: int,
+    temperature: float,
+    response_format: dict[str, Any] | None,
+    workflow: str | None,
+    paid_only: bool = False,
+    at: datetime | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+) -> ChatOutcome | _BudgetExhausted | None:
+    """Walk the capability chain; return the first provider that succeeds, else None.
+
+    `model` pins EXACTLY that model (a routing id or a bare canonical name — see
+    providers/catalog.resolve_pin; UnknownModel if it is not in the catalog): the
+    walk is then deterministic — free-tier keys of every provider serving it first,
+    then paid keys, providers in fixed rank order, no rotation, no reshuffling.
+
+    `at` overrides the clock for deepseek's peak-hour check (tests pin it).
+    `paid_only=True` demands a paid-tier key on every pick (the job queue's
+    final-retry escalation). Returns `BUDGET_EXHAUSTED` (not None) when a
+    project/global daily cap is spent, so the job fails honestly instead of
+    burning retries that cannot create budget.
+    """
+    pinned_tool_provider = tool_model_provider(model) if tools else None
+    scope = scope_for(capability)
+
+    # Exact-match cache for deterministic capabilities (translate/prefilter).
+    cached = (None if tools else response_cache.get(capability, messages, model=model,
+                                 max_tokens=max_tokens, temperature=temperature,
+                                 project_id=project.id,
+                                 response_format=response_format))
+    if cached is not None:
+        return ChatOutcome(
+            text=cached, provider="cache", model="cache",
+            tokens_in=0, tokens_out=0, cost_usd=0.0, latency_ms=0,
+            key_label="cache", request_id=0,
+        )
+
+    est_tokens = estimate_prompt_tokens(messages)
+    if model:
+        targets = resolve_pin(model, capability, chain_for(capability))
+        if tools:
+            targets = [t for t in targets if t.provider in TOOL_PROVIDERS
+                       and (pinned_tool_provider is None or t.provider == pinned_tool_provider)]
+        if _wants_json(response_format):
+            capable = set(deprioritize_for_json([t.provider for t in targets]))
+            targets = [t for t in targets if t.provider in capable]
+        wanted = await _size_filtered([t.provider for t in targets], est_tokens, capability)
+        steps = _pinned_steps([t for t in targets if t.provider in wanted], paid_only=paid_only)
+    else:
+        chain = _shape_chain(chain_for(capability), capability=capability,
+                             paid_only=paid_only, response_format=response_format,
+                             messages=messages, at=at)
+        if tools:
+            chain = [p for p in chain if p in TOOL_PROVIDERS
+                     and (pinned_tool_provider is None or p == pinned_tool_provider)]
+        chain = await _size_filtered(chain, est_tokens, capability)
+        steps = [_Step(p) for p in chain]
+    if tools:
+        est_tokens += len(json.dumps(tools, ensure_ascii=False)) // 3 + 1
+
+    steps = await _with_affinity(steps, project.id, workflow, capability, model,
+                                 paid_only=paid_only)
+    attempt_cap = _attempt_budget([s.provider for s in steps])
+    base_tier = "paid" if paid_only else None
+    degraded_free = False   # a spent paid budget downgrades the REST of the walk
+    # Every capability gets a wall-clock deadline so a storm walk can't outlast the
+    # job's stale-reclaim window and get re-executed by another worker.
+    finish_by = _now() + (
+        _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
+    attempts = 0
+    for step in steps:
+        provider = step.provider
+        require_tier = "free" if (degraded_free and step.tier is None) else (
+            step.tier or base_tier)
+        empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch
+        # Starting offset into the provider's model pool, fixed ONCE from the first
+        # key we get: varying it per key id spreads which model burns its daily
+        # quota first, then advancing by attempt_in_provider guarantees consecutive
+        # attempts hit DIFFERENT models.
+        rotation_base: int | None = None
+        for attempt_in_provider in range(1 if step.key_id else _max_keys(provider)):
+            if attempts >= attempt_cap:
+                log.warning("chat:%s hit per-request attempt cap (%d) — 503",
+                            capability, attempt_cap)
+                return None
+            call_timeout = _call_timeout(capability, provider)
+            if _now() + call_timeout > finish_by:
+                log.warning("chat:%s — a %ds %s attempt would end past the "
+                            "finish-by deadline mid-walk; stop starting attempts "
+                            "so the job finishes before stale-reclaim "
+                            "(no double-execution)",
+                            capability, int(call_timeout), provider)
+                return None
+            primary = model_for(provider, capability)
+            pool = _model_pool(provider, capability, primary, step.model)
+            key = await pick_and_reserve(provider, scope=scope,
+                                          require_tier=require_tier,
+                                          project_id=project.id,
+                                          models=pool or None,
+                                          **({"only_key_id": step.key_id}
+                                             if step.key_id else {}))
+            if key is not None and step.free_only and key.tier != "free":
+                key = None   # free-first is policy: a warm paid cache is not worth a bill
+            if key is None:
+                break  # no (more) available key for this provider → next step
+            attempts += 1
+            # Rotate across the provider's models instead of hammering one: Google
+            # meters its free tier PER MODEL per key, so a 429 on the primary says
+            # nothing about the others. Offsetting by key.id and attempt spreads the
+            # load and stays deterministic per key. A PIN never rotates.
+            if step.model:
+                use_model = step.model
+            elif primary is None:
+                use_model = None
+            else:
+                if rotation_base is None:
+                    rotation_base = key.id
+                use_model = await _rotate_model(
+                    pool, key.id, (rotation_base + attempt_in_provider) % len(pool))
+            if not use_model:
+                break  # provider can't serve this capability → next step
+            ck = cache_key_for(project.id, workflow or "", capability, model or "")
+            res = await run_attempt(Attempt(
+                key=key, project=project, provider=provider, model=use_model,
+                capability=capability, workflow=workflow, est_tokens=est_tokens,
+                # Worst-case cost (full max_tokens generated) reserved BEFORE the
+                # call; free-tier keys never estimate/reserve.
+                estimated_cost=(0.0 if key.tier == "free"
+                                else estimate_llm_cost(use_model, est_tokens, max_tokens)),
+                call=_chat_call(
+                    provider=provider, key=key, model=use_model, messages=messages,
+                    max_tokens=max_tokens, temperature=temperature,
+                    response_format=response_format, capability=capability,
+                    timeout=call_timeout, tools=tools, tool_choice=tool_choice,
+                    cache_key=ck),
+                check=_chat_gate(provider=provider, key_id=key.id,
+                                 response_format=response_format, tools=tools,
+                                 tool_choice=tool_choice),
+                pinned_model=model,
+            ))
+            flow = res.flow
+            if flow is Flow.SUCCESS:
+                # Cache deterministic (translate/prefilter) successes for repeats.
+                if not tools:
+                    response_cache.put(capability, messages, res.payload, model=model,
+                                        max_tokens=max_tokens, temperature=temperature,
+                                        project_id=project.id,
+                                        response_format=response_format)
+                return _chat_outcome(provider, key.label, res)
+            if flow is Flow.BUDGET_EXHAUSTED:
+                if paid_only:
+                    log.warning("chat:%s — paid tail budget-capped, no free "
+                                "fallback (final retry)", capability)
+                    return BUDGET_EXHAUSTED
+                if step.tier is not None:
+                    # Pinned walk: the free pass already ran before the paid one.
+                    return BUDGET_EXHAUSTED
+                # A project/global COST cap blocks only PAID keys — $0 free keys are
+                # exempt — so a cap-block must NOT abort the walk: downgrade to
+                # free-only for the rest of it and retry THIS provider free-only
+                # (gemini is MIXED: 1 paid + 7 free keys; the same loop is bounded by
+                # _max_keys and pick_and_reserve now filters to free).
+                if require_tier != "free":
+                    require_tier = "free"
+                    degraded_free = True
+                    log.info("chat:%s paid budget-capped — walking free-only tail",
+                             capability)
+                    continue
+                break
+            if flow is Flow.NEXT_KEY_EMPTY:
+                if empty_retries < _MAX_EMPTY_RETRIES:
+                    empty_retries += 1
+                    log.warning("provider %s returned empty body — retrying next key", provider)
+                    continue
+                log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
+                break
+            if flow is Flow.NEXT_PROVIDER:
+                break
+            # Flow.NEXT_KEY — walk to this provider's next key
+    return None
 
 
 def _model_pool(provider: str, capability: str, primary: str | None,
                 pinned: str | None) -> list[str]:
     """Every model a chat attempt on `provider` may use: the caller's pin alone,
-    else primary + MODEL_ROTATION extras ([] when the provider has no model)."""
+    else primary + rotation extras ([] when the provider has no model)."""
     if pinned:
         return [pinned]
     if primary is None:
@@ -274,694 +540,24 @@ async def _rotate_model(pool: list[str], api_key_id: int, start: int) -> str:
     return pool[start]
 
 
-async def _release_reservation(key: ApiKeyRow, estimated_cost: float) -> None:
-    """Refund a reserve_cost reservation. Shielded from cancellation (a client
-    disconnect cancelling the request mid-refund must still finish it) and never
-    raises: a failed refund only leaves the daily counter conservatively high —
-    it must not mask the real outcome of the attempt it is cleaning up after.
-
-    Every path that called reserve_cost must reach this exactly once, INCLUDING
-    asyncio.CancelledError (a BaseException that `except Exception` misses) and
-    a failure between the reserve and the provider call such as decrypt()
-    (2026-10-03 review: both leaked the reservation until midnight)."""
-    try:
-        await asyncio.shield(release_cost(api_key=key, estimated_cost=estimated_cost))
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001
-        log.exception("release_cost failed for key %s — reservation of $%.4f leaks "
-                      "until the daily reset", key.id, estimated_cost)
-
-
-def _scrub_secrets(text: str) -> str:
-    """Replace anything that looks like a credential with a fixed marker."""
-    for pat in _SECRET_PATTERNS:
-        text = pat.sub("[redacted]", text)
-    return text
-
-
-async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = None,
-                    model: str | None = None) -> str:
-    """Cooldown on rate-limit, mark dead on auth error. Returns the error kind.
-    `capability` scopes the timeout circuit-breaker (see routing/circuit).
-    `model` is the model the failed call used: a quota that is metered per
-    (key, model) (gemini's per-day free tier) parks only that pair, not the
-    whole key — see routing/model_cooldown."""
-    kind = classify_provider_error(exc, key.provider)
-    # Short, human-readable reason surfaced on the dashboard (2026-07-05) — the
-    # dashboard used to show only "мёртв"/"пауза" with no way to tell "no
-    # money" from "rate limited" apart, or when a cooldown actually ends.
-    reason = _scrub_secrets(str(exc))[:200]
-    timed_out = is_timeout(exc)
-    if timed_out:
-        # Feed the selection-side circuit-breaker so a bulk-timing-out provider
-        # is soft-skipped and this hung key isn't re-pinned by affinity.
-        circuit.note_timeout(key.provider, key.id,
-                             scope=scope_for(capability) if capability else None)
-    if kind == "rate_limit":
-        # 2026-06-29: cooldown resolved by the provider's own signal —
-        # retry-after hint > daily-quota (until UTC midnight) > adaptive
-        # backoff. Stops the retry storm where a daily-exhausted key
-        # (cerebras "tokens per day limit exceeded") got a 60 s cooldown,
-        # recovered, got hammered, re-failed — looping until midnight.
-        # 2026-07-16: one session for the whole penalty — the adaptive COUNT
-        # and the cooldown UPDATE used to each open their own session, pure
-        # pool churn on a path that fires on every failed attempt.
-        from aibroker.routing.cooldown import cooldown_until, is_model_scoped_quota
-        model_scoped = bool(model) and is_model_scoped_quota(key.provider, str(exc))
-        async with get_session() as s:
-            try:
-                until = await cooldown_until(key.id, key.provider, str(exc),
-                                             session=s, is_timeout=timed_out)
-            except Exception:
-                # A failed statement aborts the tx on Postgres — roll back so
-                # the fallback UPDATE below can still land in this session.
-                await s.rollback()
-                until = datetime.now(UTC) + _COOLDOWN
-            if model_scoped:
-                await mark_model_cooldown(key.id, model, until, reason, session=s)
-            else:
-                await mark_cooldown(key.id, until, reason, session=s)
-    elif kind == "auth":
-        await mark_dead(key.id, reason)
-        # Traffic-side deaths were untraceable (2026-09-07 review): the only
-        # paid gemini key was found dead with `last_error` still holding the
-        # monitor's earlier "rate limit" hint, and nothing said what killed it.
-        # The monitor alerts on ITS deaths; this path books its own.
-        await audit(actor="system:llm_service", action="key.dead",
-                    target=f"key:{key.id}",
-                    metadata={"provider": key.provider, "label": key.label,
-                              "capability": capability, "reason": reason})
-    return kind
-
-
-# classify_provider_error verdict -> usage_log.status (init.sql vocabulary).
-_STATUS_BY_KIND = {"rate_limit": "rate_limit", "auth": "auth_fail"}
-
-
-async def _record_error(
-    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
-    capability: str, workflow: str | None, exc: Exception,
-) -> None:
-    """Book a failed attempt in usage_log. Shared by run_chat/run_embed/
-    run_transcribe — the shape is identical; only the capability differs.
-
-    A failed attempt always books cost_usd=0. Two incidents pull opposite ways
-    and this is the reconciliation:
-      - 2026-07-12 ($122 gap): a paid gemini TIMEOUT was billed upstream while
-        we recorded $0 — real spend UNDERcounted. That fix charged the reserved
-        estimate on a timeout so the per-key cost cap could see it.
-      - 2026-07-16 (storm, $0.50/day cap): with a tiny cap, a handful of
-        ANSWERLESS timeouts booked at the estimate exhausted the whole day's
-        ADMISSION budget on ZERO answers — starving the answers the owner
-        actually reserves that budget for.
-    For ADMISSION-cap purposes an answerless call must not consume budget
-    reserved for ANSWERS: the reservation is fully released (release_cost, in
-    _run_attempt) and the row is booked at $0. Real upstream timeout spend is
-    reconciled against the provider invoice, out-of-band — not via the admission
-    counter that gates whether the NEXT answer is allowed to run.
-
-    `http_status` is the status the provider REALLY returned (None when the
-    exception carries none: timeouts, network errors). It used to be FABRICATED
-    from our classification (rate_limit -> 429, auth -> 401) so that
-    adaptive_cooldown could count `http_status = 429` rows to escalate its
-    backoff (fix 2026-07-10); that corrupted reporting - a timeout, a mistral
-    monthly-401 and a cohere 500 all showed as "429". The escalation signal now
-    rides the separate `status` column, in the vocabulary init.sql always
-    declared (ok|rate_limit|auth_fail|error): cooldown._recent_throttle_count
-    counts `status = 'rate_limit'` rows (plus legacy http_status=429 rows)."""
-    kind = classify_provider_error(exc, provider)
-    await record_usage(
-        api_key_id=key.id, project_id=project.id, lease_id=None,
-        provider=provider, model=model, capability=capability,
-        workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-        latency_ms=None, status=_STATUS_BY_KIND.get(kind, "error"),
-        error_kind=type(exc).__name__, http_status=http_status_of(exc),
-    )
-
-
-def _wants_json(response_format: dict[str, Any] | None) -> bool:
-    return bool(response_format) and response_format.get("type") in (
-        "json_object", "json_schema"
-    )
-
-
-def _is_valid_json(text: str) -> bool:
-    try:
-        json.loads(text)
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
-def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
-    """What we actually owe the provider for this call.
-
-    `estimate_llm_cost` (LiteLLM's pricing map) prices by MODEL — it has no
-    concept of "this specific key is on a free plan". A free-tier key calling
-    e.g. gemini-2.5-flash gets the same nominal per-token price a paid caller
-    would pay, even though the free plan absorbs it at $0 real cost to us.
-    Free-tier keys always bill $0; the `tier` column is the source of truth.
-
-    voyage history (2026-07-07): a voyage carve-out here used to bill real
-    cost unconditionally, because `voyage-3` had a ZERO free-token allocation
-    on our accounts (real invoices arrived while we tracked $0). We have since
-    moved the default embedding model to `voyage-4`, which grants 200M free
-    tokens/month — genuinely $0 under our ~61M/mo run-rate — so a voyage
-    free-tier key is now correctly $0 like any other free key, and the
-    carve-out is gone. If a voyage account ever exhausts its 200M monthly free
-    allocation, flip that specific key to `tier='paid'` and it bills the real
-    per-token cost from then on (the same mechanism every paid key uses).
-    """
-    return 0.0 if key.tier == "free" else meta["cost_usd"]
-
-
-@dataclass
-class ChatOutcome:
-    text: str
-    provider: str
-    model: str
-    tokens_in: int
-    tokens_out: int
-    cost_usd: float
-    latency_ms: int
-    key_label: str
-    request_id: int
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    # The EXACT model that answered, when it says more than `model` (the
-    # routing name) does — `DeepSeek-V4.1-Flash` behind
-    # `deepseek/deepseek-flash`, the loaded gguf behind `local/qwen3vl`. None
-    # when the routing name is already the exact model id (most cloud models),
-    # so a client that only reads `model` sees no change.
-    # See providers/model_identity.py.
-    model_served: str | None = None
-    # Vision extras (2026-08-31). Populated only by the self-hosted `local`
-    # provider, which classifies the image on the same grammar-constrained pass
-    # that answers the caller. None everywhere else — `text` keeps its meaning
-    # for EVERY provider so a fallback from local to gemini mid-chain can't
-    # change the response shape under the caller.
-    vision_type: str | None = None
-    vision_format: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-    finish_reason: str | None = None
-    refusal: str | None = None
-
-
-class _BudgetExhausted:
-    """Sentinel run_chat returns when a PROJECT/GLOBAL daily cap is spent — a
-    distinct outcome from None (no provider had free capacity). Lets the caller
-    give the job an honest 'budget cap' error and stop retrying (more retries
-    can't create budget) instead of the misleading 'no provider available'."""
-    __slots__ = ()
-
-
-BUDGET_EXHAUSTED = _BudgetExhausted()
-
-
-class _Flow(Enum):
-    """Verdict of one key attempt — how run_chat's chain walk proceeds."""
-    NEXT_KEY = auto()
-    NEXT_KEY_EMPTY = auto()  # empty JSON body — retry same provider, bounded by run_chat
-    NEXT_PROVIDER = auto()
-    BUDGET_EXHAUSTED = auto()  # project/global cap spent — abort the whole walk
-    SUCCESS = auto()
-
-
-async def _handle_call_error(
-    *, exc: Exception, key: ApiKeyRow, project: ProjectRow, provider: str,
-    use_model: str, capability: str, workflow: str | None,
-    est_tokens: int,
-) -> _Flow:
-    """Classify a failed call_llm, penalize/book it, return the walk verdict."""
-    # Model gone/unprovisioned (404) — it's a MODEL problem, not a
-    # KEY one: this key's OTHER models still work, and sibling keys
-    # of this provider run the same dead model. Do NOT penalize the
-    # key; break straight to the next provider. (Interim model-level
-    # fix — see is_model_unavailable / roadmap §3.1.)
-    if is_model_unavailable(exc):
-        await _record_error(
-            key=key, project=project, provider=provider,
-            model=use_model, capability=capability, workflow=workflow, exc=exc,
-        )
-        log.warning("provider %s model %s unavailable (%s) — next provider",
-                    provider, use_model, type(exc).__name__)
-        return _Flow.NEXT_PROVIDER  # not next key of the same dead model
-    kind = await _penalize(key, exc, capability=capability, model=use_model)
-    # Self-learn the size ceiling: if the provider rejected the
-    # prompt for being too big, remember it so we skip this
-    # provider for prompts ≥ this size next time (no hardcoded cap).
-    if is_too_large_error(exc):
-        await record_too_large(provider, est_tokens)
-        log.info("learned: %s rejects ~%d tok prompts",
-                 provider, est_tokens)
-        return _Flow.NEXT_PROVIDER  # bigger keys won't help
-    # Every failed attempt books $0 (see _record_error) — a timeout's real
-    # upstream spend is reconciled off the provider invoice, NOT charged to the
-    # admission cap the owner reserves for answers (fix 2026-07-16). The
-    # reservation is fully released in _run_attempt, so an answerless timeout
-    # leaves daily_cost_used_usd untouched.
-    await _record_error(
-        key=key, project=project, provider=provider,
-        model=use_model, capability=capability, workflow=workflow, exc=exc,
-    )
-    log.warning("provider %s key %s failed (%s): %s",
-                provider, key.label, kind, exc)
-    return _Flow.NEXT_KEY
-
-
-async def _record_json_miss(
-    *, key: ApiKeyRow, project: ProjectRow, provider: str, use_model: str,
-    capability: str, workflow: str | None, text: str, meta: dict[str, Any],
-) -> _Flow:
-    """Book a billed-but-unusable JSON body, return the walk verdict."""
-    # An EMPTY/whitespace body is a TRANSIENT provider throttle, not a
-    # model JSON defect: DeepSeek's json_object mode intermittently
-    # returns a blank string on large prompts under load (verified
-    # 2026-07-10 — ~24% on Stepan's 52k-char follow-up prompt, random
-    # per call, unrelated to the key). A retry of the SAME provider
-    # almost always returns valid JSON, so retry within the provider
-    # rather than burning the whole chain. Non-empty-but-malformed is
-    # still a MODEL property (cerebras gpt-oss mangles the same prompt
-    # on every key) → skip straight to the next provider.
-    empty = not (text or "").strip()
-    await record_usage(
-        api_key_id=key.id, project_id=project.id, lease_id=None,
-        provider=provider, model=use_model, capability=capability,
-        workflow=workflow, tokens_in=meta["tokens_in"],
-        tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-        cache_read_tokens=meta.get("cache_read_tokens", 0),
-        cache_write_tokens=meta.get("cache_write_tokens", 0),
-        latency_ms=meta["latency_ms"], status="error",
-        error_kind="EmptyBody" if empty else "InvalidJSON",
-        http_status=200,
-    )
-    if empty:
-        # Feed the selection-side breaker: an empty body is BILLED (input
-        # charged, no answer), so a provider emitting them across several keys
-        # is a degradation worth routing around — run_chat tries the FREE tier
-        # first while it lasts (see circuit.providers_in_empty_storm for why
-        # this defers rather than hard-skips).
-        circuit.note_empty_body(provider, key.id)
-        return _Flow.NEXT_KEY_EMPTY  # run_chat bounds this via _MAX_EMPTY_RETRIES
-    log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
-    return _Flow.NEXT_PROVIDER  # next provider, not next key of the same model
-
-
-async def _run_attempt(
-    *, key: ApiKeyRow, project: ProjectRow, provider: str, use_model: str,
-    capability: str, messages: list[dict[str, Any]], model: str | None,
-    max_tokens: int, temperature: float, response_format: dict[str, Any] | None,
-    workflow: str | None, est_tokens: int, call_timeout: float,
-    tools: list[dict[str, Any]] | None = None, tool_choice: Any = None,
-) -> tuple[_Flow, ChatOutcome | None]:
-    """One chat key attempt: reserve cost → call → book the result → verdict."""
-    # Worst-case cost estimate (assumes the full max_tokens budget is
-    # generated) reserved BEFORE the call — see reserve_cost's
-    # docstring for why this closes a real concurrent-overspend race
-    # that a plain pre-loaded-object comparison couldn't. Free-tier
-    # keys always cost $0 (_billed_cost) — never estimate/reserve for
-    # them, matching reserve_cost's own free-tier skip.
-    estimated_cost = (
-        0.0 if key.tier == "free"
-        else estimate_llm_cost(use_model, est_tokens, max_tokens)
-    )
-    try:
-        await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
-    except CostGuardError as e:
-        await audit(actor=f"project:{project.name}", action="cap_block",
-                    target=f"provider={provider}", metadata={"reason": str(e)})
-        # Book the block in usage_log exactly like every other failed attempt
-        # (status=error, error_kind=CapBlock, http 402, $0) — the audit_log alone
-        # used to record it, so ~8800 cap-blocked picks in 2h vanished from the
-        # usage view and jobs died invisibly as "no provider available" (prod
-        # 2026-07-16). 402 Payment Required is the honest, greppable signal.
-        await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability=capability,
-            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-            latency_ms=None, status="error", error_kind="CapBlock",
-            http_status=402,
-        )
-        # A project/global cap blocks EVERY paid provider identically, so walking
-        # to the next paid key is futile spend — abort the whole walk. A per-key
-        # cap is local (other keys/providers may still have room) → next provider.
-        if e.kind in ("project", "global"):
-            return _Flow.BUDGET_EXHAUSTED, None
-        return _Flow.NEXT_PROVIDER, None
-    try:
-        # decrypt INSIDE the try: it runs after reserve_cost, so a failure here
-        # must release the reservation like any other attempt failure.
-        plain = decrypt(key.token_encrypted)
-        text, meta = await call_llm(
-            model=use_model, messages=messages, api_key=plain,
+def _chat_call(*, provider: str, key, model: str, messages: list[dict[str, Any]],
+               max_tokens: int, temperature: float,
+               response_format: dict[str, Any] | None, capability: str,
+               timeout: float, tools: list[dict[str, Any]] | None, tool_choice: Any,
+               cache_key: str):
+    async def call(plain: str):
+        return await call_llm(
+            model=model, messages=messages, api_key=plain,
             max_tokens=max_tokens, temperature=temperature,
             response_format=response_format,
             extra=extra_for_provider(provider, getattr(key, "account_id", None)),
-            timeout=call_timeout,
-            capability=capability,
+            timeout=timeout, capability=capability, cache_key=cache_key,
             **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
         )
-        meta["cost_usd"] = _billed_cost(key, meta)
-    except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
-        # Attempt is over (however it ends) — fully release the reservation so
-        # an answerless call (incl. a paid timeout) consumes NO admission budget;
-        # _record_error books the row at $0. BaseException so a cancelled
-        # request (CancelledError) releases too; it is re-raised untouched.
-        await _release_reservation(key, estimated_cost)
-        if not isinstance(e, Exception):
-            raise
-        return await _handle_call_error(
-            exc=e, key=key, project=project, provider=provider,
-            use_model=use_model, capability=capability, workflow=workflow,
-            est_tokens=est_tokens,
-        ), None
-
-    # Call resolved (successfully) — release the reservation; record_usage
-    # below books the REAL final cost (meta["cost_usd"]) on top, so the
-    # key ends up debited by exactly the real cost, never the estimate.
-    await _release_reservation(key, estimated_cost)
-
-    if tools and (failure := validate_result(text, meta, tools, tool_choice)):
-        await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability=capability,
-            workflow=workflow, tokens_in=meta["tokens_in"],
-            tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-            latency_ms=meta["latency_ms"], status="error", error_kind=failure,
-            http_status=502,
-        )
-        return _Flow.NEXT_PROVIDER, None
-
-    # An empty body from `local` is never a real answer — it is a 4B model on
-    # CPU that produced nothing. Returning it as success would hand the caller
-    # a 200 with no description and it would never retry, exactly the silent-
-    # drop that run_transcribe guards against for local whisper. Escalate to
-    # the next PROVIDER, not the next key: local has one key and one process,
-    # so re-asking it is deterministic. (The generic empty-body path below is
-    # unreachable here — it is gated on _wants_json, and vision callers send
-    # no response_format.)
-    if provider == "local" and not (text or "").strip():
-        await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model, capability=capability,
-            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-            latency_ms=meta.get("latency_ms"), status="error",
-            error_kind="EmptyBody", http_status=502,
-        )
-        log.warning("local %s returned empty body — escalating to next provider",
-                    capability)
-        return _Flow.NEXT_PROVIDER, None
-
-    # Deterministic JSON quality gate: an unparseable JSON body (gemini
-    # truncated, deepseek rogue) is billed but treated as a failure.
-    if _wants_json(response_format) and not _is_valid_json(text):
-        return await _record_json_miss(
-            key=key, project=project, provider=provider, use_model=use_model,
-            capability=capability, workflow=workflow, text=text, meta=meta,
-        ), None
-
-    request_id = await record_usage(
-        api_key_id=key.id, project_id=project.id, lease_id=None,
-        provider=provider, model=use_model,
-        model_served=meta.get("model_served"), capability=capability,
-        workflow=workflow, tokens_in=meta["tokens_in"],
-        tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-        cache_read_tokens=meta.get("cache_read_tokens", 0),
-        cache_write_tokens=meta.get("cache_write_tokens", 0),
-        latency_ms=meta["latency_ms"], status="ok", error_kind=None,
-        http_status=200,
-    )
-    # Cache deterministic (translate/prefilter) successes for verbatim repeats.
-    if not tools:
-        response_cache.put(capability, messages, text, model=model,
-                            max_tokens=max_tokens, temperature=temperature,
-                            project_id=project.id, response_format=response_format)
-    # A success pins this (project, provider) to this key so the NEXT pick
-    # lands where the provider-side prompt cache is already warm.
-    await note_affinity_shared(project.id, provider, key.id)
-    return _Flow.SUCCESS, ChatOutcome(
-        text=text, provider=provider, model=meta["model"],
-        model_served=meta.get("model_served"),
-        tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
-        cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-        key_label=key.label, request_id=request_id,
-        cache_read_tokens=meta.get("cache_read_tokens", 0),
-        cache_write_tokens=meta.get("cache_write_tokens", 0),
-        vision_type=meta.get("vision_type"),
-        vision_format=meta.get("vision_format"),
-        tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
-        refusal=meta.get("refusal"),
-    )
+    return call
 
 
-async def _size_filtered(full_chain: list[str], est_tokens: int, capability: str) -> list[str]:
-    # Size-aware provider filter: drop providers whose single-request token
-    # ceiling can't fit this prompt (e.g. groq getting a 24k Coach prompt — a
-    # guaranteed 413). Ceilings never drop below MIN_LEARNABLE_CEILING, so a
-    # smaller prompt fits EVERY provider — skip the learned_ceilings() DB
-    # round-trip entirely on the high-volume small-prompt path (chat:fast,
-    # translate). Above the floor, filter as before (fall back to the full
-    # chain if every provider is size-skipped, so we never starve).
-    if est_tokens < MIN_LEARNABLE_CEILING:
-        return full_chain
-    learned = await learned_ceilings()
-    sized_chain = [
-        p for p in full_chain if fits_context(p, est_tokens, learned.get(p))
-    ]
-    if len(sized_chain) < len(full_chain):
-        log.info("chat:%s prompt ~%d tok — skipping over-ceiling providers: %s",
-                 capability, est_tokens,
-                 [p for p in full_chain if p not in sized_chain])
-    return sized_chain or full_chain
-
-
-async def run_chat(
-    *,
-    project: ProjectRow,
-    capability: str,
-    messages: list[dict[str, Any]],
-    model: str | None,
-    max_tokens: int,
-    temperature: float,
-    response_format: dict[str, Any] | None,
-    workflow: str | None,
-    paid_only: bool = False,
-    at: datetime | None = None,
-    tools: list[dict[str, Any]] | None = None,
-    tool_choice: Any = None,
-) -> ChatOutcome | _BudgetExhausted | None:
-    """Walk the capability chain; return the first provider that succeeds, else None.
-
-    `at` overrides the clock used for deepseek's peak-hour savings check
-    (`peak_multiplier`) — tests pin it so the chain order isn't flaky
-    depending on when they happen to run; production passes None (= now, UTC).
-
-    Within a provider, try up to `_MAX_KEYS_PER_PROVIDER` keys (the selector hands
-    out a fresh LRU key each time and `_penalize` cools failed ones) before falling
-    through — so one rate-limited free key doesn't sink the whole request.
-
-    `paid_only=True` demands a paid-tier key on every pick (the job queue's
-    final-retry escalation): the same chain walk, but free keys are invisible,
-    so the request lands on the paid tail or honestly returns None.
-
-    Returns `BUDGET_EXHAUSTED` (not None) when a project/global daily cap is
-    spent — the caller can then fail the job honestly instead of masking it as
-    "no provider available" and burning retries that can't create budget.
-    """
-    pinned_tool_provider = tool_model_provider(model) if tools else None
-    scope = scope_for(capability)
-
-    # Exact-match cache for deterministic capabilities (translate/prefilter):
-    # the same inputs recur verbatim, so a cached answer is correct and skips
-    # the whole LLM round-trip. No-op for chat/* (not deterministic).
-    cached = (None if tools else response_cache.get(capability, messages, model=model,
-                                 max_tokens=max_tokens, temperature=temperature,
-                                 project_id=project.id,
-                                 response_format=response_format))
-    if cached is not None:
-        return ChatOutcome(
-            text=cached, provider="cache", model="cache",
-            tokens_in=0, tokens_out=0, cost_usd=0.0, latency_ms=0,
-            key_label="cache", request_id=0,
-        )
-
-    est_tokens = estimate_prompt_tokens(messages)
-    full_chain = free_first_walk(capability, chain_for(capability), paid_only=paid_only)
-    # A model pinned as `provider/name` may only be tried on THAT provider —
-    # otherwise LiteLLM routes by the model's prefix while carrying another
-    # provider's key, and the resulting 401 marks that healthy key dead
-    # (see chains.provider_of_model). An empty result is honest: the pinned
-    # provider does not serve this capability, so the walk ends in a 503
-    # instead of sending the request somewhere it cannot work.
-    if (pinned_provider := provider_of_model(model)) is not None:
-        full_chain = [p for p in full_chain if p == pinned_provider]
-        if not full_chain:
-            log.warning("chat:%s pinned model %s belongs to provider %s, which "
-                        "does not serve this capability — 503", capability, model,
-                        pinned_provider)
-    if tools:
-        full_chain = [provider for provider in full_chain if provider in TOOL_PROVIDERS
-                      and (pinned_tool_provider is None or provider == pinned_tool_provider)]
-        est_tokens += len(json.dumps(tools, ensure_ascii=False)) // 3 + 1
-    # JSON requests: try JSON-reliable providers first (gpt-oss/cohere sink to
-    # the back) so a structured call doesn't lead with a model that mangles
-    # JSON — cuts InvalidJSON at the source, not after the wasted call.
-    if _wants_json(response_format):
-        full_chain = deprioritize_for_json(full_chain)
-    # Savings: chat:smart puts deepseek at the head (cache-warm anchor) even
-    # though gemini/sambanova already serve the same JSON for $0 — fine most
-    # of the time, but not during deepseek's own peak-pricing hours (2x, see
-    # peak_pricing.py) or on a big-JSON prompt that would otherwise force the
-    # deepseek empty-body failure mode (see adapters.py). 2026-07-22: v4-pro
-    # was 92.6% of stepan2's whole daily spend, and 63.8% of that day's
-    # deepseek cost landed in its own peak hours (fewer calls than off-peak,
-    # yet more cost) — free providers already validated on the same big
-    # prompts, so give them first shot and only escalate to deepseek when
-    # free genuinely fails. No reliability cost: deepseek stays the fallback.
-    # Third trigger (2026-07-22): a provider-side EMPTY-BODY degradation. Empty
-    # bodies are billed for no answer, and DeepSeek's evening degradation ran
-    # hours (0% empty 11:00-19:00 UTC, then 34-46% on BOTH v4 models while a
-    # trivial short prompt still answered — long-context generation buckling
-    # under provider load). Free providers were serving the same traffic fine
-    # throughout (sambanova: 111 successes at $0 during the storm), so try them
-    # first while it lasts. Deferral, not a skip — see providers_in_empty_storm.
-    should_defer_deepseek = (
-        peak_multiplier("deepseek", at) > 1.0
-        or is_deepseek_big_json_prompt(response_format, messages)
-        or "deepseek" in circuit.providers_in_empty_storm(_EMPTY_STORM_MIN_KEYS)
-    )
-    full_chain = deprioritize_deepseek_for_savings(
-        full_chain, should_defer=should_defer_deepseek)
-    chain = await _size_filtered(full_chain, est_tokens, capability)
-
-    # Dynamic per-request attempt budget = "try every key we have across the
-    # whole chain before giving up", so the paid tail is always reached before
-    # a 503 (a saturated provider yields no key → 0 attempts, so the chain
-    # falls through to it fast). Bounded by the absolute runaway backstop.
-    attempt_cap = _attempt_budget(chain)
-    require_tier = "paid" if paid_only else None
-    # Every capability gets a wall-clock deadline so a storm walk can't outlast
-    # the job's stale-reclaim window and get re-executed by another worker.
-    # chat:deep gets a SHORTER start-deadline (its single call is ~19min, so it
-    # must stop starting attempts early enough that the last one still lands
-    # under the 25-min reclaim — see _DEEP_WALL_DEADLINE_S).
-    finish_by = _now() + (
-        _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
-    attempts = 0
-    for provider in chain:
-        empty_retries = 0  # bounded per provider — see the NEXT_KEY_EMPTY branch below
-        # Starting offset into the provider's model pool, fixed ONCE per
-        # provider from the first key we actually get. Varying it per key id
-        # (LRU order differs between requests) spreads which model burns its
-        # daily quota first; advancing by attempt_in_provider alone then
-        # guarantees consecutive attempts hit DIFFERENT models. Mixing both
-        # into one modulo did not: key 21/attempt 0 and key 25/attempt 2 both
-        # land on index 0 with a 3-model pool.
-        rotation_base: int | None = None
-        for attempt_in_provider in range(_max_keys(provider)):
-            if attempts >= attempt_cap:
-                log.warning("chat:%s hit per-request attempt cap (%d) — 503",
-                            capability, attempt_cap)
-                return None
-            call_timeout = _call_timeout(capability, provider)
-            if _now() + call_timeout > finish_by:
-                log.warning("chat:%s — a %ds %s attempt would end past the "
-                            "finish-by deadline mid-walk; stop starting attempts "
-                            "so the job finishes before stale-reclaim "
-                            "(no double-execution)",
-                            capability, int(call_timeout), provider)
-                return None
-            primary = model_for(provider, capability)
-            pool = _model_pool(provider, capability, primary, model)
-            key = await pick_and_reserve(provider, scope=scope,
-                                          require_tier=require_tier,
-                                          project_id=project.id,
-                                          models=pool or None)
-            if key is None:
-                break  # no (more) available key for this provider → next provider
-            attempts += 1
-            # Rotate across the provider's models instead of hammering one.
-            # Google meters its free tier PER MODEL per key (20/day on our
-            # projects), so a 429 on the primary says nothing about the
-            # others — see MODEL_ROTATION. Offsetting by key.id as well as
-            # by attempt spreads the load over model x key pairs instead of
-            # marching every key through the same exhausted model, and keeps
-            # the choice deterministic for a given key (testable, and stable
-            # for a provider's prompt cache). Providers without a rotation
-            # get a one-element list, so this is a no-op for them.
-            if model:
-                use_model = model            # caller pinned it — no rotation
-            elif primary is None:
-                use_model = None
-            else:
-                if rotation_base is None:
-                    rotation_base = key.id
-                use_model = await _rotate_model(
-                    pool, key.id, (rotation_base + attempt_in_provider) % len(pool))
-            if not use_model:
-                break  # provider can't serve this capability → next provider
-            flow, outcome = await _run_attempt(
-                key=key, project=project, provider=provider, use_model=use_model,
-                capability=capability, messages=messages, model=model,
-                max_tokens=max_tokens, temperature=temperature,
-                response_format=response_format, workflow=workflow,
-                est_tokens=est_tokens,
-                call_timeout=call_timeout,
-                tools=tools, tool_choice=tool_choice,
-            )
-            if flow is _Flow.SUCCESS:
-                return outcome
-            if flow is _Flow.BUDGET_EXHAUSTED:
-                if paid_only:
-                    log.warning("chat:%s — paid tail budget-capped, no free "
-                                "fallback (final retry)", capability)
-                    return BUDGET_EXHAUSTED
-                # A project/global COST cap blocks only PAID keys — $0 free keys
-                # are exempt in cost_guard, so a cap-block must NOT abort the
-                # walk: healthy free providers later in the chain still serve for
-                # free. deprioritize_for_json sinks cerebras/cohere/openrouter
-                # BELOW the paid tail on JSON requests, so aborting here starved
-                # the whole free tail once Stepan's $0.50 paid cap filled — jobs
-                # died "budget cap reached" beside 14 idle cerebras keys
-                # (2026-07-17). Downgrade to free-only for the rest of the walk:
-                # the identically-capped paid providers now yield no key (pick
-                # returns None, no re-booked CapBlock) and the sunk free
-                # providers get their turn.
-                if require_tier != "free":
-                    require_tier = "free"
-                    log.info("chat:%s paid budget-capped — walking free-only tail",
-                             capability)
-                    # Retry THIS provider free-only before moving on. It used
-                    # to break straight to the next provider, which was fine
-                    # while every provider was all-paid or all-free. gemini is
-                    # MIXED (1 paid key + 7 free), and once the paid one gained
-                    # llm:chat a single CapBlock on it disqualified the whole
-                    # provider: measured 2026-08-26 on stepan2 with its project
-                    # cap spent, 25 consecutive attempts were CapBlock and the
-                    # free gemini keys were never tried at all. The retry is
-                    # bounded by the same _max_keys loop, and pick_and_reserve
-                    # now filters to free, so no second CapBlock can be booked.
-                    continue
-                break
-            if flow is _Flow.NEXT_KEY_EMPTY:
-                if empty_retries < _MAX_EMPTY_RETRIES:
-                    # Retry the SAME provider — an empty body is a ~coin-flip on
-                    # big JSON prompts (see _MAX_EMPTY_RETRIES), so another draw
-                    # is the only lever we have; nothing in the request predicts
-                    # it. With one active key the retry re-picks that same key,
-                    # keeping its warm prompt cache. Still bounded: after the cap
-                    # this is treated like any other JSON miss and the walk moves
-                    # to the next provider rather than spending every key.
-                    empty_retries += 1
-                    log.warning("provider %s returned empty body — retrying next key", provider)
-                    continue
-                log.warning("provider %s returned unparseable/empty JSON, next provider", provider)
-                break  # next provider, not next key of the same model
-            if flow is _Flow.NEXT_PROVIDER:
-                break
-            # _Flow.NEXT_KEY — walk to this provider's next key
-    return None
+# ─── Embedding ──────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -974,49 +570,7 @@ class EmbedOutcome:
     latency_ms: int
     key_label: str
     request_id: int
-    # The EXACT model that answered, when it says more than `model` (the
-    # routing name) does — `DeepSeek-V4.1-Flash` behind `deepseek/deepseek-flash`,
-    # the loaded gguf behind `local/qwen3vl`. None when the routing name is
-    # already the exact model id (most cloud models). See
-    # providers/model_identity.py.
     model_served: str | None = None
-
-
-
-class _CapBlocked(Exception):
-    """A cost-guard rejection on the embed/transcribe paths. `fatal` means the
-    PROJECT or GLOBAL cap is spent — every paid key is blocked identically, so
-    the walk must stop; a per-key cap only blocks this key."""
-
-    def __init__(self, fatal: bool) -> None:
-        super().__init__("daily budget cap reached — retry after 00:00 UTC")
-        self.fatal = fatal
-
-
-async def _reserve_or_block(
-    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
-    capability: str, workflow: str | None, estimated_cost: float,
-) -> None:
-    """reserve_cost + the same bookkeeping _run_attempt does on a block.
-
-    Until 2026-09-07 run_embed and run_transcribe never reserved at all —
-    reserve_cost had exactly one caller, inside the chat path — so the project
-    and global daily caps were simply not evaluated for /v1/embed and
-    /v1/transcribe. A project could spend past its cap through either. Free
-    keys still cost $0 and are exempt inside reserve_cost, as on the chat path."""
-    try:
-        await reserve_cost(api_key=key, project=project, estimated_cost=estimated_cost)
-    except CostGuardError as e:
-        await audit(actor=f"project:{project.name}", action="cap_block",
-                    target=f"provider={provider}", metadata={"reason": str(e)})
-        await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=model, capability=capability,
-            workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-            latency_ms=None, status="error", error_kind="CapBlock",
-            http_status=402,
-        )
-        raise _CapBlocked(fatal=e.kind in ("project", "global")) from e
 
 
 class EmbedFailed(Exception):
@@ -1028,18 +582,6 @@ class EmbedRequestInvalid(ValueError):
     provider) — route maps this to HTTP 400. Nothing was sent anywhere."""
 
 
-async def _handle_attempt_failure(
-    *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
-    capability: str, workflow: str | None, exc: Exception,
-) -> None:
-    """Shared embed/transcribe failure tail: penalize the key, book the error row."""
-    await _penalize(key, exc, capability=capability, model=model)
-    await _record_error(
-        key=key, project=project, provider=provider, model=model,
-        capability=capability, workflow=workflow, exc=exc,
-    )
-
-
 async def run_embed(
     *,
     project: ProjectRow,
@@ -1048,90 +590,78 @@ async def run_embed(
     model: str | None,
     workflow: str | None,
 ) -> EmbedOutcome | None:
-    """Embed `inputs` via `provider`, retrying up to `_max_keys(provider)` keys
-    of that SAME provider on failure. None → no key at all (503); EmbedFailed →
-    every key tried and failed (502).
+    """Embed `inputs` via `provider`, retrying up to `max_keys(provider)` keys of
+    that SAME provider. None → no key at all (503); EmbedFailed → every key tried
+    and failed (502).
 
-    Deliberately does NOT fall back to a different provider (unlike
-    run_chat/run_transcribe walking their capability chain): voyage-3 and
-    cohere embed-english-v3 are different vector spaces with no guaranteed
-    cross-compatible dimensionality. Silently switching provider mid-batch
-    would poison a vector index with incomparable embeddings. `provider` is
-    the caller's explicit choice — the broker only rotates KEYS within it.
-
-    (Real-world driver: voyage APIConnectionError — 100% of 7d embedding
-    failures — is a transient network blip, not a bad key or a dead
-    provider; a fresh key retry turns most of these into a normal success.)
+    Deliberately does NOT fall back to another provider: voyage and cohere embed
+    into different vector spaces, so silently switching mid-batch would poison a
+    vector index. `provider` is the caller's explicit choice — the broker only
+    rotates KEYS within it. (Voyage APIConnectionError is a transient blip: a
+    fresh key retry turns most of them into a success.)
     """
     # Same guard chat has had since 2026-09-26: LiteLLM routes by the model's OWN
-    # prefix, so `?provider=voyage` + `model="cohere/embed-…"` would send a
-    # voyage key to cohere (a 401 → mark_dead on a healthy key). Reject up front.
-    pinned_provider = provider_of_model(model)
-    if pinned_provider is not None and pinned_provider != provider:
-        raise EmbedRequestInvalid(
-            f"model {model!r} belongs to provider {pinned_provider!r}, not "
-            f"provider={provider!r}")
-    use_model = model or model_for(provider, "embedding") or "voyage/voyage-4"
+    # prefix, so `?provider=voyage` + `model="cohere/embed-..."` would send a
+    # voyage key to cohere (a 401 -> mark_dead on a healthy key). The catalog
+    # resolves the pin against [provider] only, so a foreign model is rejected here.
+    if model:
+        try:
+            use_model = resolve_pin(model, "embedding", [provider])[0].model
+        except UnknownModel as e:
+            raise EmbedRequestInvalid(str(e)) from e
+    else:
+        use_model = model_for(provider, "embedding") or "voyage/voyage-4"
     any_key_seen = False
-    last_exc: Exception | None = None
+    last_error: str | None = None
     for _ in range(_max_keys(provider)):
         key = await pick_and_reserve(provider, scope=scope_for("embedding"),
                                       project_id=project.id, models=[use_model])
         if key is None:
             break  # no (more) available key for this provider
         any_key_seen = True
-        estimated_cost = (
-            0.0 if key.tier == "free"
-            else estimate_llm_cost(use_model, sum(len(t) for t in inputs) // 4, 0)
-        )
-        try:
-            await _reserve_or_block(
-                key=key, project=project, provider=provider, model=use_model,
-                capability="embedding", workflow=workflow, estimated_cost=estimated_cost)
-        except _CapBlocked as e:
-            last_exc = e
-            if e.fatal:
-                raise EmbedFailed(str(e)) from e
-            continue  # this key's own cap — a sibling key may still have room
-        try:
-            plain = decrypt(key.token_encrypted)  # after the reserve → inside the try
-            vectors, meta = await embed(model=use_model, texts=inputs, api_key=plain)
-            meta["cost_usd"] = _billed_cost(key, meta)
-        except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
-            await _release_reservation(key, estimated_cost)
-            if not isinstance(e, Exception):
-                raise  # CancelledError etc.: reservation released, propagate
-            last_exc = e
-            await _handle_attempt_failure(
-                key=key, project=project, provider=provider,
-                model=use_model, capability="embedding", workflow=workflow, exc=e,
+        res = await run_attempt(Attempt(
+            key=key, project=project, provider=provider, model=use_model,
+            capability="embedding", workflow=workflow,
+            estimated_cost=(0.0 if key.tier == "free" else
+                            estimate_llm_cost(use_model, sum(len(t) for t in inputs) // 4, 0)),
+            call=_embed_call(use_model, inputs),
+            cap_flow=Flow.NEXT_KEY,    # a key's own cap — a sibling may have room
+            pinned_model=model,
+        ))
+        if res.flow is Flow.SUCCESS:
+            vectors, meta = res.payload, res.meta
+            return EmbedOutcome(
+                model_served=meta.get("model_served"),
+                embeddings=vectors, provider=provider, model=use_model,
+                tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
+                latency_ms=meta["latency_ms"], key_label=key.label,
+                request_id=res.usage_id or 0,
             )
-            log.warning("provider %s key %s embed failed, trying next key: %s",
-                        provider, key.label, e)
-            continue
-        # Reservation was the worst case; record_usage books the real cost. A
-        # $0 estimate reserved nothing (reserve_cost's own free-tier skip), so
-        # there is nothing to release — and no DB round trip for free keys.
-        await _release_reservation(key, estimated_cost)
-        request_id = await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=use_model,
-            model_served=meta.get("model_served"), capability="embedding",
-            workflow=workflow, tokens_in=meta["tokens_in"], tokens_out=0,
-            cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            status="ok", error_kind=None, http_status=200,
-        )
-        await note_affinity_shared(project.id, provider, key.id)
-        return EmbedOutcome(
-            model_served=meta.get("model_served"),
-            embeddings=vectors, provider=provider, model=use_model,
-            tokens_in=meta["tokens_in"], cost_usd=meta["cost_usd"],
-            latency_ms=meta["latency_ms"], key_label=key.label,
-            request_id=request_id,
-        )
+        last_error = _failure_text(res)
+        if res.flow is Flow.BUDGET_EXHAUSTED:
+            raise EmbedFailed(_CAP_MESSAGE)
+        if res.flow is Flow.NEXT_PROVIDER:
+            break  # model gone / too large: the other keys would fail identically
     if not any_key_seen:
         return None
-    raise EmbedFailed(str(last_exc) if last_exc else "all keys failed")
+    raise EmbedFailed(last_error or "all keys failed")
+
+
+def _embed_call(model: str, inputs: list[str]):
+    async def call(plain: str):
+        return await embed(model=model, texts=inputs, api_key=plain)
+    return call
+
+
+def _failure_text(res: AttemptResult) -> str:
+    """Message for a failed attempt: the cap message for any cap block, else the
+    provider error text."""
+    if isinstance(res.error, CostGuardError):
+        return _CAP_MESSAGE
+    return str(res.error) if res.error else "attempt failed"
+
+
+# ─── Typed decisions ────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -1163,118 +693,81 @@ async def run_decision(
     """Typed decisions via OpenRouter, rotating PAID keys only.
 
     None → no paid key carries llm:decision (503); DecisionFailed → every key
-    tried and failed (502). Paid-only so the spend lands on the account that
-    holds the prepaid credit and its spend limit. The free OpenRouter keys are
-    NOT refused by this model (measured 2026-09-23: a $0 free-tier key got
-    200 OK with a cost booked), and how those accounts settle it is unverified
-    — routing billed traffic onto them would spread it where no limit is set.
+    tried and failed (502). Paid-only so the spend lands on the account that holds
+    the prepaid credit and its spend limit (a $0 free-tier key is NOT refused by
+    this model, so routing billed traffic there would spread it where no limit is
+    set). The reservation is sized from our own per-token price — litellm has no
+    entry for this model and would reserve $0.
 
-    Same reserve → call → book shape as run_embed, so the project and global
-    daily caps are enforced here exactly as on the chat path. The reservation
-    is sized from our own per-token price — LiteLLM has no entry for this
-    model and would reserve $0, letting a project spend past its cap.
-
-    Fallback (2026-10-03): when the caller did not pin `model` and the primary
-    attempt on a key fails (provider error or a cap block), the free
-    DECISION_FALLBACK_MODEL is tried on that same key, unreserved ($0). A
-    pinned model never falls back.
+    Fallback: when the caller did not pin `model` and the primary attempt on a key
+    fails (provider error or cap block), the free DECISION_FALLBACK_MODEL is tried
+    on that same key, unreserved ($0) and never penalizing the key. A pinned model
+    never falls back.
     """
     provider = "openrouter"
     capability = "decision"
-    use_model = model or model_for(provider, capability) or "openrouter/typesafe/jev-1.13"
-    # A caller-pinned model is honoured as-is: no silent swap to another model.
+    use_model = (resolve_pin(model, capability, [provider])[0].model if model
+                 else model_for(provider, capability) or "openrouter/typesafe/jev-1.13")
     use_fallback = model is None and use_model != DECISION_FALLBACK_MODEL
     estimated_cost = estimate_tokens(state, questions) * JEV_INPUT_USD_PER_TOKEN
     any_key_seen = False
-    last_exc: Exception | None = None
+    last_error: str | None = None
     for _ in range(_max_keys(provider)):
         key = await pick_and_reserve(provider, scope=scope_for(capability),
                                       require_tier="paid", project_id=project.id)
         if key is None:
             break
         any_key_seen = True
-        plain = decrypt(key.token_encrypted)
-        primary_exc: Exception | None = None
-        try:
-            await _reserve_or_block(
-                key=key, project=project, provider=provider, model=use_model,
-                capability=capability, workflow=workflow, estimated_cost=estimated_cost)
-        except _CapBlocked as e:
-            primary_exc = e
-        else:
-            try:
-                answers, meta = await decide(model=use_model, state=state,
-                                             questions=questions, api_key=plain)
-                meta["cost_usd"] = _billed_cost(key, meta)
-                served_model = use_model
-            except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
-                await _release_reservation(key, estimated_cost)
-                if not isinstance(e, Exception):
-                    raise  # CancelledError etc.: reservation released, propagate
-                primary_exc = e
-                await _handle_attempt_failure(
-                    key=key, project=project, provider=provider,
-                    model=use_model, capability=capability, workflow=workflow, exc=e,
-                )
-                log.warning("provider %s key %s decision failed, trying next key: %s",
-                            provider, key.label, e)
+        res = await run_attempt(Attempt(
+            key=key, project=project, provider=provider, model=use_model,
+            capability=capability, workflow=workflow, estimated_cost=estimated_cost,
+            call=_decide_call(use_model, state, questions),
+            cap_flow=Flow.NEXT_KEY, pinned_model=model,
+        ))
+        used_model = use_model
+        last_error = _failure_text(res) if res.flow is not Flow.SUCCESS else last_error
+        if res.flow is not Flow.SUCCESS and use_fallback:
+            # Same key: we already hold it (it may be cooled in the DB after the
+            # failure above). $0 by construction, so reserve=False — a spent cap
+            # must not refuse a free call.
+            fb = await run_attempt(Attempt(
+                key=key, project=project, provider=provider,
+                model=DECISION_FALLBACK_MODEL, capability=capability,
+                workflow=workflow,
+                call=_decide_call(DECISION_FALLBACK_MODEL, state, questions),
+                reserve=False, penalize=False,
+            ))
+            if fb.flow is Flow.SUCCESS:
+                log.warning("provider %s key %s: %s unavailable (%s), answered by %s",
+                            provider, key.label, use_model, last_error,
+                            DECISION_FALLBACK_MODEL)
+                res, used_model = fb, DECISION_FALLBACK_MODEL
             else:
-                await _release_reservation(key, estimated_cost)
-        if primary_exc is not None:
-            last_exc = primary_exc
-            fallback_ok = False
-            if use_fallback:
-                # Same key: we already hold it, and after a failure above it may
-                # be cooled in the DB so pick_and_reserve would not return it.
-                # $0 by construction, so NO _reserve_or_block — a spent cap must
-                # not refuse a free call. Whatever cost the response reports is
-                # still booked below.
-                try:
-                    answers, meta = await decide(model=DECISION_FALLBACK_MODEL,
-                                                 state=state, questions=questions,
-                                                 api_key=plain)
-                    meta["cost_usd"] = _billed_cost(key, meta)
-                    served_model = DECISION_FALLBACK_MODEL
-                    fallback_ok = True
-                    log.warning("provider %s key %s: %s unavailable (%s), answered by %s",
-                                provider, key.label, use_model, primary_exc,
-                                DECISION_FALLBACK_MODEL)
-                except Exception as e:  # noqa: BLE001 — record, then next key
-                    last_exc = e
-                    # Book the row, never penalise the key for the FALLBACK's
-                    # failure: Mercury's free quota (20 RPM) is separate from
-                    # Jev's, and this is the only decision key — cooling it for a
-                    # free-model 429 would also lock out the paid primary.
-                    await _record_error(
-                        key=key, project=project, provider=provider,
-                        model=DECISION_FALLBACK_MODEL, capability=capability,
-                        workflow=workflow, exc=e)
-                    log.warning("provider %s key %s fallback decision failed: %s",
-                                provider, key.label, e)
-            if not fallback_ok:
-                if isinstance(primary_exc, _CapBlocked) and primary_exc.fatal:
-                    raise DecisionFailed(str(primary_exc)) from primary_exc
-                continue
-        request_id = await record_usage(
-            api_key_id=key.id, project_id=project.id, lease_id=None,
-            provider=provider, model=served_model,
-            model_served=meta.get("model_served"), capability=capability,
-            workflow=workflow, tokens_in=meta["tokens_in"],
-            tokens_out=meta["tokens_out"], cost_usd=meta["cost_usd"],
-            latency_ms=meta["latency_ms"], status="ok", error_kind=None,
-            http_status=200,
-        )
-        await note_affinity_shared(project.id, provider, key.id)
+                last_error = _failure_text(fb)
+        if res.flow is not Flow.SUCCESS:
+            if res.flow is Flow.BUDGET_EXHAUSTED:
+                raise DecisionFailed(_CAP_MESSAGE)
+            continue
+        meta = res.meta
         return DecisionOutcome(
-            answers=answers, provider=provider, model=served_model,
+            answers=res.payload, provider=provider, model=used_model,
             tokens_in=meta["tokens_in"], tokens_out=meta["tokens_out"],
             cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-            key_label=key.label, request_id=request_id,
+            key_label=key.label, request_id=res.usage_id or 0,
             model_served=meta.get("model_served"),
         )
     if not any_key_seen:
         return None
-    raise DecisionFailed(str(last_exc) if last_exc else "all keys failed")
+    raise DecisionFailed(last_error or "all keys failed")
+
+
+def _decide_call(model: str, state: str, questions: dict[str, Any]):
+    async def call(plain: str):
+        return await decide(model=model, state=state, questions=questions, api_key=plain)
+    return call
+
+
+# ─── Transcription ──────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -1286,11 +779,6 @@ class TranscribeOutcome:
     latency_ms: int
     key_label: str
     request_id: int
-    # The EXACT model that answered, when it says more than `model` (the
-    # routing name) does — `DeepSeek-V4.1-Flash` behind `deepseek/deepseek-flash`,
-    # the loaded gguf behind `local/qwen3vl`. None when the routing name is
-    # already the exact model id (most cloud models). See
-    # providers/model_identity.py.
     model_served: str | None = None
 
 
@@ -1314,19 +802,14 @@ _LOCAL_ASR_CORRECTION_PROMPT = (
 async def _correct_local_transcript(
     *, project: ProjectRow, text: str, workflow: str | None,
 ) -> str:
-    """local ASR trades accuracy for a tiny CPU footprint (small model,
-    int8, 1 thread — see litellm_adapter._transcribe_via_local_asr) to fit
-    the shared host. Clean its output with one cheap chat:fast pass before
-    handing it back. Best-effort: any failure (no provider, budget cap,
-    exception) falls back to the raw transcript — a proofreading step must
-    never cost the caller a working answer."""
+    """Local ASR trades accuracy for a tiny CPU footprint — clean its output with
+    one cheap chat:fast pass. Best-effort: any failure (no provider, budget cap,
+    exception) falls back to the raw transcript — a proofreading step must never
+    cost the caller a working answer."""
     if not text.strip():
         return text
-    # Size the proofread budget to the transcript. A fixed 800-token cap
-    # TRUNCATED long voice notes: the correction hit max_tokens, lost the tail,
-    # and — being non-empty — was returned as the "corrected" text, dropping
-    # the ending. Scale to the input with headroom, capped so a pathological
-    # transcript can't run away.
+    # Size the proofread budget to the transcript: a fixed cap TRUNCATED long voice
+    # notes and, being non-empty, the cut-off text was returned as "corrected".
     budget = min(
         _LOCAL_ASR_CORRECTION_TOKEN_CAP,
         max(_LOCAL_ASR_CORRECTION_MAX_TOKENS,
@@ -1347,14 +830,36 @@ async def _correct_local_transcript(
     if not isinstance(outcome, ChatOutcome):
         return text
     corrected = outcome.text.strip()
-    # Backstop the budget: if the proofread still came back far shorter than the
-    # raw (it was truncated, or the model over-trimmed), a COMPLETE raw
-    # transcript beats a cut-off "corrected" one — never lose the tail.
+    # If the proofread came back far shorter than the raw (truncated / over-trimmed),
+    # a COMPLETE raw transcript beats a cut-off "corrected" one.
     if corrected and len(corrected) < _LOCAL_ASR_CORRECTION_MIN_KEEP_RATIO * len(text):
         log.warning("local ASR correction returned %d chars vs %d raw — likely "
                     "truncated; keeping raw transcript", len(corrected), len(text))
         return text
     return corrected or text
+
+
+def _transcribe_gate(provider: str):
+    spec = spec_or_default(provider)
+
+    def check(text: str, meta: dict[str, Any]) -> Rejection | None:
+        # A provider whose empty output is untrusted (local's small model + VAD can
+        # clip a REAL message to "") must not return a successful "" — that would
+        # silently DROP the voice. Book it and escalate; a cloud provider's empty
+        # is genuinely-silent audio (kept).
+        if spec.empty_is_failure and not text.strip():
+            return Rejection("EmptyBody", Flow.NEXT_PROVIDER, http_status=502, bill=False,
+                             log_message=f"{provider} ASR returned empty transcript — "
+                                         "escalating to the next transcription provider")
+        return None
+
+    return check
+
+
+def _transcribe_call(model: str, audio: bytes, filename: str):
+    async def call(plain: str):
+        return await transcribe(model=model, audio=audio, filename=filename, api_key=plain)
+    return call
 
 
 async def run_transcribe(
@@ -1364,99 +869,53 @@ async def run_transcribe(
     filename: str,
     workflow: str | None,
 ) -> TranscribeOutcome | None:
-    """Audio → text, walking the 'transcription' chain (local → groq → gemini
-    → openai), rotating keys within each provider.
-
-    None → no key anywhere (503); TranscribeFailed → every provider errored (502).
-    An empty transcript from `local` is treated as a failure and escalated (its
-    small model + VAD can clip a real message to ""), so a voice is never
-    silently dropped as a successful empty string.
-    """
+    """Audio → text, walking the 'transcription' chain, rotating keys within each
+    provider. None → no key anywhere (503); TranscribeFailed → every provider
+    errored (502)."""
     scope = scope_for("transcription")
-    last_exc: Exception | None = None
+    last_error: str | None = None
     any_key_seen = False
 
     for provider in chain_for("transcription"):
         # Rotate KEYS within the provider before moving on — one transient 429/
-        # timeout on the picked key must not skip the whole provider while
-        # healthy sibling keys sit idle (mirrors run_embed/run_chat).
+        # timeout must not skip the provider while healthy sibling keys sit idle.
         for _ in range(_max_keys(provider)):
-            key = await pick_and_reserve(
-                provider, scope=scope, project_id=project.id,
-                models=[m] if (m := model_for(provider, "transcription")) else None)
+            use_model = model_for(provider, "transcription")
+            key = await pick_and_reserve(provider, scope=scope, project_id=project.id,
+                                          models=[use_model] if use_model else None)
             if key is None:
                 break  # no (more) available key for this provider → next provider
             any_key_seen = True
-            use_model = model_for(provider, "transcription")
             if not use_model:
                 break
-            estimated_cost = (
-                0.0 if key.tier == "free"
-                else estimate_transcription_cost(use_model, len(audio))
-            )
-            try:
-                await _reserve_or_block(
-                    key=key, project=project, provider=provider, model=use_model,
-                    capability="transcription", workflow=workflow,
-                    estimated_cost=estimated_cost)
-            except _CapBlocked as e:
-                last_exc = e
-                if e.fatal:
-                    raise TranscribeFailed(str(e)) from e
-                continue  # this key's own cap — try the provider's next key
-            try:
-                plain = decrypt(key.token_encrypted)  # after the reserve → inside the try
-                text, meta = await transcribe(
-                    model=use_model, audio=audio, filename=filename, api_key=plain,
+            res = await run_attempt(Attempt(
+                key=key, project=project, provider=provider, model=use_model,
+                capability="transcription", workflow=workflow,
+                estimated_cost=(0.0 if key.tier == "free"
+                                else estimate_transcription_cost(use_model, len(audio))),
+                call=_transcribe_call(use_model, audio, filename),
+                check=_transcribe_gate(provider),
+                cap_flow=Flow.NEXT_KEY,
+            ))
+            if res.flow is Flow.SUCCESS:
+                text = res.payload
+                if spec_or_default(provider).refine_transcript:
+                    text = await _correct_local_transcript(
+                        project=project, text=text, workflow=workflow)
+                meta = res.meta
+                return TranscribeOutcome(
+                    text=text, provider=provider, model=use_model,
+                    model_served=meta.get("model_served"),
+                    cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
+                    key_label=key.label, request_id=res.usage_id or 0,
                 )
-                meta["cost_usd"] = _billed_cost(key, meta)
-            except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
-                await _release_reservation(key, estimated_cost)
-                if not isinstance(e, Exception):
-                    raise  # CancelledError etc.: reservation released, propagate
-                last_exc = e
-                await _handle_attempt_failure(
-                    key=key, project=project, provider=provider,
-                    model=use_model, capability="transcription", workflow=workflow, exc=e,
-                )
-                continue  # next key of the same provider
-            await _release_reservation(key, estimated_cost)
-            # local's small model + aggressive VAD can clip a REAL message to an
-            # empty string. Returning that as a successful "" silently DROPS the
-            # voice (caller sees 200 with no text, never retries). An empty from
-            # local is untrusted → book it and escalate to a reliable cloud
-            # whisper; a cloud provider's empty is genuinely-silent audio (kept).
-            if provider == "local" and not text.strip():
-                await record_usage(
-                    api_key_id=key.id, project_id=project.id, lease_id=None,
-                    provider=provider, model=use_model, capability="transcription",
-                    workflow=workflow, tokens_in=0, tokens_out=0, cost_usd=0.0,
-                    latency_ms=meta.get("latency_ms"), status="error",
-                    error_kind="EmptyBody", http_status=502,
-                )
-                log.warning("local ASR returned empty transcript — escalating "
-                            "to the next transcription provider")
-                break  # deterministic for this audio → next provider, not next local key
-            if provider == "local":
-                text = await _correct_local_transcript(
-                    project=project, text=text, workflow=workflow,
-                )
-            request_id = await record_usage(
-                api_key_id=key.id, project_id=project.id, lease_id=None,
-                provider=provider, model=use_model,
-                model_served=meta.get("model_served"), capability="transcription",
-                workflow=workflow, tokens_in=0, tokens_out=0,
-                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-                status="ok", error_kind=None, http_status=200,
-            )
-            await note_affinity_shared(project.id, provider, key.id)
-            return TranscribeOutcome(
-                text=text, provider=provider, model=use_model,
-                model_served=meta.get("model_served"),
-                cost_usd=meta["cost_usd"], latency_ms=meta["latency_ms"],
-                key_label=key.label, request_id=request_id,
-            )
+            if res.error is not None:
+                last_error = _failure_text(res)
+            if res.flow is Flow.BUDGET_EXHAUSTED:
+                raise TranscribeFailed(_CAP_MESSAGE)
+            if res.flow is Flow.NEXT_PROVIDER:
+                break  # deterministic for this audio/model → next provider
 
     if not any_key_seen:
         return None
-    raise TranscribeFailed(str(last_exc) if last_exc else "all providers failed")
+    raise TranscribeFailed(last_error or "all providers failed")

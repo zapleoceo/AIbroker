@@ -5,15 +5,18 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
 from aibroker.routes import admin, dashboard, health, landing, proxy
 from aibroker.services.job_queue import dispatcher_loop
+from aibroker.telemetry.request_context import new_request_id, request_scope, sanitize_request_id
 
 
 def _configure_logging() -> None:
@@ -87,6 +90,37 @@ async def _security_headers(
         response.headers.setdefault(name, value)   # never override a route's own
     return response
 
+
+class _RequestIdMiddleware:
+    """Pure-ASGI (no BaseHTTPMiddleware task hop): bind a request id for the whole
+    request so every usage_log attempt row carries it, and return it as
+    `X-Request-Id`. A route that already set the header (job endpoints answer with
+    `job-<id>`) keeps its own value."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        supplied = next((v.decode("latin-1") for k, v in scope["headers"]
+                         if k == b"x-request-id"), None)
+        rid = sanitize_request_id(supplied) or new_request_id()
+
+        async def send_with_id(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                if not any(k.lower() == b"x-request-id" for k, _ in headers):
+                    headers.append((b"x-request-id", rid.encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        with request_scope(rid):
+            await self.app(scope, receive, send_with_id)
+
+
+app.add_middleware(_RequestIdMiddleware)
 
 app.include_router(landing.router)
 app.include_router(health.router)

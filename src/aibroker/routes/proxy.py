@@ -12,12 +12,14 @@ import base64
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.providers import catalog
+from aibroker.providers.catalog import UnknownModel
 from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
-from aibroker.routing import scope_for
+from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
     DecisionFailed,
     EmbedFailed,
@@ -34,6 +36,7 @@ from aibroker.services import (
 from aibroker.services.deep_jobs import AUDIO_FIELD
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.vision_payload import inline_image_problem
+from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 
 # Capabilities the generic /v1/jobs endpoint serves — everything run_chat
 # handles, i.e. everything whose payload is chat messages. embed is
@@ -176,6 +179,22 @@ def _require_capability_scope(ctx: ProjectCtx, scope: str) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"project lacks scope: {scope}")
 
 
+def _validate_pin(model: str | None, capability: str, chain: list[str] | None = None) -> None:
+    """A pinned model must exist in the catalog and serve the capability: a typo
+    is a 400 with suggestions HERE, not a job that burns eight retries."""
+    if not model:
+        return
+    try:
+        catalog.resolve_pin(model, capability, chain if chain is not None else chain_for(capability))
+    except UnknownModel as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+
+class ModelsResponse(BaseModel):
+    object: str = "list"
+    data: list[dict[str, Any]]
+
+
 # ─── Endpoints ──────────────────────────────────────────────────────────────
 
 
@@ -203,6 +222,7 @@ async def embed_endpoint(
     ctx: ProjectCtx = Depends(require_project),
 ) -> EmbedResponse:
     _require_capability_scope(ctx, scope_for("embedding"))
+    _validate_pin(body.model, "embedding", [provider])
 
     try:
         outcome = await run_embed(
@@ -242,6 +262,7 @@ async def decisions_endpoint(
         validate_questions(body.questions)
     except DecisionRequestInvalid as e:
         raise HTTPException(422, str(e)) from e
+    _validate_pin(body.model, "decision", ["openrouter"])
     try:
         outcome = await run_decision(
             project=ctx.project, state=body.state, questions=body.questions,
@@ -397,12 +418,14 @@ class DeepJobResponse(BaseModel):
 @router.post("/deep", response_model=DeepSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
 async def deep_submit(
     body: DeepRequest,
+    response: Response,
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepSubmitResponse:
     """Submit a chat:deep (long-context/reasoning, 1M-token nemotron) request.
     Returns immediately with a job_id — poll GET /v1/deep/{job_id} for the
     result. Real latency has been observed up to ~8 minutes."""
     _require_capability_scope(ctx, scope_for("chat:deep"))
+    _validate_pin(body.model, "chat:deep")
     # submit_deep_job needs a real autoincrementing BIGSERIAL id — SQLite
     # doesn't do that for BigInteger, so this whole path is exercised only by
     # the Postgres-only test_deep_submit_creates_job_and_runs_in_background.
@@ -412,6 +435,7 @@ async def deep_submit(
         model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
         workflow=body.workflow,
     )
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return DeepSubmitResponse(  # pragma: no cover
         job_id=job_id, poll_url=f"/v1/deep/{job_id}", poll_after_s=5,
     )
@@ -454,11 +478,13 @@ def _job_response(row: Any) -> DeepJobResponse:
 @router.get("/deep/{job_id}", response_model=DeepJobResponse)
 async def deep_poll(
     job_id: int,
+    response: Response,
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return _job_response(row)  # pragma: no cover
 
 
@@ -480,6 +506,7 @@ class JobSubmitResponse(BaseModel):
 @router.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
 async def jobs_submit(
     body: ChatRequest,
+    response: Response,
     capability: str = Query("chat:fast"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse:
@@ -494,6 +521,7 @@ async def jobs_submit(
             f"{sorted(_JOB_CAPABILITIES)}",
         )
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    _validate_pin(body.model, capability)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
     if capability == "vision" and (problem := inline_image_problem(messages)):
         # A file no provider can decode must fail HERE, permanently — not walk
@@ -508,6 +536,7 @@ async def jobs_submit(
         extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
                 "tool_choice": body.tool_choice} if body.tools else None),
     )
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return JobSubmitResponse(  # pragma: no cover
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
     )
@@ -516,6 +545,7 @@ async def jobs_submit(
 @router.post("/transcribe/jobs", response_model=JobSubmitResponse,
              status_code=status.HTTP_202_ACCEPTED)
 async def transcribe_submit(
+    response: Response,
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
     ctx: ProjectCtx = Depends(require_project),
@@ -540,6 +570,7 @@ async def transcribe_submit(
         extra={AUDIO_FIELD: base64.b64encode(audio).decode(),
                "filename": file.filename or "audio.ogg"},
     )
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover — same
     return JobSubmitResponse(  # pragma: no cover — same
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
     )
@@ -548,9 +579,25 @@ async def transcribe_submit(
 @router.get("/jobs/{job_id}", response_model=DeepJobResponse)
 async def jobs_poll(
     job_id: int,
+    response: Response,
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return _job_response(row)  # pragma: no cover
+
+
+# ─── Model catalog ──────────────────────────────────────────────────────────
+
+
+@router.get("/models", response_model=ModelsResponse)
+async def list_models(ctx: ProjectCtx = Depends(require_project)) -> ModelsResponse:
+    """Every model a caller can pin via `model` (any authenticated project key).
+
+    Built from the provider registry — see providers/catalog.py. Pin either an
+    `id` (`gemini/gemini-2.5-flash`) or a bare `name` (`gpt-oss-120b`); a name
+    served by several providers resolves deterministically (free-tier keys first,
+    then fixed provider rank)."""
+    return ModelsResponse(data=catalog.listing())

@@ -19,13 +19,22 @@ src/aibroker/
     cost_guard.py      Three-tier cap check
     cooldown.py        Adaptive backoff from the provider's own signal
     shared_state.py    Redis-shared affinity + saturation (fail-open)
+    affinity.py        key pin + route pin (project, workflow, capability, pin)
   services/
-    llm_service.py     run_chat/run_embed/run_transcribe orchestration
+    llm_service.py     run_chat/run_embed/run_decision/run_transcribe — the WALKS
+    attempt.py         the ONE key-attempt template (reserve→call→release→gate→record→affinity)
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup
     response_cache.py  exact-match LRU+TTL for translate/prefilter
   providers/
-    litellm_adapter.py LLM SDK wrapper
+    registry.py        ProviderSpec/ModelSpec + views (leaf; data in specs.py)
+    specs.py           ONE build_provider(...) entry per provider
+    catalog.py         pin-able models, resolve_pin, GET /v1/models rows
+    transport.py       Chat/Embed/Transcribe/Decide Protocols + dispatch facades
+    litellm_client.py  litellm chat/embed/whisper transport
+    local_vision.py / local_asr.py / gemini_asr.py   raw-HTTP transports
+    cost.py            pricing (litellm map + registry overrides, per-minute audio)
+    prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
     health_probes.py   Cheapest call per provider
   routes/

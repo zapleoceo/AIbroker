@@ -122,7 +122,7 @@ async def test_transient_error_does_not_disable_model_served_for_the_process(mon
 
     from aibroker.routing import selector
 
-    monkeypatch.setattr(selector, "_model_served_available", True)
+    monkeypatch.setattr(selector, "_missing_usage_cols", set())
     calls = {"n": 0}
     real_get_session = selector.get_session
 
@@ -136,7 +136,7 @@ async def test_transient_error_does_not_disable_model_served_for_the_process(mon
     monkeypatch.setattr("aibroker.db.resilience._BASE_DELAY_S", 0.0)
     kid = await _add_key()
     usage_id = await _record(kid, model_served="exact-model")
-    assert selector._model_served_available is True   # blip did not flip it
+    assert "model_served" not in selector._missing_usage_cols   # blip did not flip it
     async with get_session() as s:
         row = await s.get(UsageLogRow, usage_id)
     assert row.model_served == "exact-model"
@@ -147,10 +147,32 @@ async def test_missing_column_still_degrades_and_writes_the_row(monkeypatch):
 
     from aibroker.routing import selector
 
-    monkeypatch.setattr(selector, "_model_served_available", True)
+    monkeypatch.setattr(selector, "_missing_usage_cols", set())
     async with get_session() as s:
         await s.execute(text("ALTER TABLE usage_log DROP COLUMN model_served"))
     kid = await _add_key()
     usage_id = await _record(kid, model_served="x")
     assert isinstance(usage_id, int)
-    assert selector._model_served_available is False
+    assert "model_served" in selector._missing_usage_cols
+
+async def test_record_usage_stores_the_request_id():
+    """Every attempt row of one client request shares request_id (the fallback
+    trail), so the rows of a request can be grouped."""
+    kid = await _add_key()
+    a = await _record(kid, request_id="req-trace-0001", status="error", error_kind="RateLimitError")
+    b = await _record(kid, request_id="req-trace-0001")
+    c = await _record(kid)                                  # no request scope: NULL
+    async with get_session() as s:
+        rows = {r: (await s.get(UsageLogRow, r)).request_id for r in (a, b, c)}
+    assert rows == {a: "req-trace-0001", b: "req-trace-0001", c: None}
+
+
+def test_insert_sql_drops_only_the_columns_the_schema_lacks():
+    from aibroker.routing.selector import _insert_sql
+
+    full = _insert_sql()
+    assert "model_served" in full and "request_id" in full and ":rq" in full
+    no_trace = _insert_sql(missing=frozenset({"request_id"}))
+    assert "request_id" not in no_trace and "model_served" in no_trace
+    neither = _insert_sql(missing=frozenset({"request_id", "model_served"}))
+    assert "model_served" not in neither and "request_id" not in neither

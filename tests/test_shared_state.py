@@ -60,11 +60,11 @@ def fake(monkeypatch) -> FakeRedis:
 
 
 async def test_affinity_round_trip_and_ttl(fake):
-    await shared_state.set_affinity(1, "deepseek", 42)
+    await shared_state.set_affinity(1, "deepseek", 42, 7200.0)
     assert await shared_state.get_affinity(1, "deepseek") == 42
     assert await shared_state.get_affinity(1, "gemini") is None
     assert await shared_state.get_affinity(2, "deepseek") is None
-    assert fake.ttls["aib:aff:1:deepseek"] == int(shared_state.AFFINITY_TTL_S)
+    assert fake.ttls["aib:aff:1:deepseek"] == 7200
 
 
 async def test_saturated_round_trip_json(fake):
@@ -92,7 +92,7 @@ async def test_disabled_without_redis_url():
     assert shared_state._get_client() is None
     assert await shared_state.get_affinity(1, "deepseek") is None
     assert await shared_state.get_saturated() is None
-    await shared_state.set_affinity(1, "deepseek", 42)  # no-op, must not raise
+    await shared_state.set_affinity(1, "deepseek", 42, 60.0)  # no-op, must not raise
     await shared_state.set_saturated(frozenset({1}), 15.0)
     assert shared_state._client is None  # never constructed
 
@@ -116,7 +116,7 @@ async def test_error_trips_store_and_retry_window(monkeypatch, caplog):
     # Inside the window: short-circuits without touching the client.
     clock["now"] += 30.0
     assert await shared_state.get_affinity(1, "deepseek") is None
-    await shared_state.set_affinity(1, "deepseek", 42)
+    await shared_state.set_affinity(1, "deepseek", 42, 60.0)
     assert boom.calls == 1
 
     # After the window: retries, fails again, re-arms — but warns only once.

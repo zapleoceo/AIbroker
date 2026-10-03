@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import pytest
 
+from aibroker.providers.registry import providers_with_json
 from aibroker.routing.chains import (
     CAPABILITY_CHAINS,
     CAPABILITY_SCOPE,
-    JSON_INCAPABLE_PROVIDERS,
-    JSON_UNRELIABLE_PROVIDERS,
     chain_for,
     deprioritize_deepseek_for_savings,
     deprioritize_for_json,
@@ -15,6 +14,9 @@ from aibroker.routing.chains import (
     is_known_capability,
     scope_for,
 )
+
+JSON_INCAPABLE_PROVIDERS = providers_with_json("incapable")
+JSON_UNRELIABLE_PROVIDERS = providers_with_json("unreliable")
 
 KNOWN_PAID = {"deepseek", "openai", "anthropic"}
 KNOWN_FREE = {"cerebras", "groq", "gemini", "openrouter", "sambanova",
@@ -102,7 +104,7 @@ def test_chat_smart_rotates_only_gemini_anthropic_and_deepseek_models():
     deepseek quality at $0 (it carried the lane through DeepSeek's own
     2026-07-22 empty-body degradation). If that model is ever re-pointed at a
     non-DeepSeek one, this test must fail rather than silently widen the lane."""
-    from aibroker.providers.litellm_adapter import model_for
+    from aibroker.providers.registry import model_for
     allowed_vendors = {"gemini", "anthropic", "deepseek"}
     for provider in chain_for("chat:smart"):
         model = model_for(provider, "chat:smart") or ""
@@ -200,7 +202,7 @@ def test_mistral_is_chained_nowhere():
     `x-ratelimit-limit-req-minute: 0` — the account's free tier is switched
     OFF, not busy (7 days: 0 ok / 2174 errors). A dead provider in five chains
     is pure wasted latency and attempt budget, so it is chained nowhere until
-    the owner re-activates La Plateforme. The DEFAULT_MODEL entry stays."""
+    the owner re-activates La Plateforme. The default_models() entry stays."""
     for capability, chain in CAPABILITY_CHAINS.items():
         assert "mistral" not in chain, capability
 
@@ -317,16 +319,16 @@ def test_is_known_capability():
 
 
 def test_every_chained_provider_has_a_model_config():
-    """Every provider referenced in a capability chain must have a DEFAULT_MODEL
+    """Every provider referenced in a capability chain must have a default_models()
     entry — a chain pointing at a provider with no configured model is a dead
     route that silently always fails over. (Replaces a vacuous `for dead in ():`
     guard that could never fail; this actually asserts the invariant, so adding
     a provider to a chain without wiring its model trips it.)"""
-    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+    from aibroker.providers.registry import default_models
     for cap, chain in CAPABILITY_CHAINS.items():
         for provider in chain:
-            assert provider in DEFAULT_MODEL, \
-                f"{provider} is routed in {cap} but has no DEFAULT_MODEL entry"
+            assert provider in default_models(), \
+                f"{provider} is routed in {cap} but has no default_models() entry"
 
 
 # ─── deprioritize_for_json — JSON-reliable ordering ──────────────────────────
@@ -458,7 +460,7 @@ def test_chat_sales_leads_with_anthropic_sonnet():
     Stepan's real 135k-char prompt at N=8, deepseek truncated 2 of 8 replies
     mid-JSON at 18.4s median while gemini went 8/8 clean at 1.4s — so the FREE
     provider is now the first fallback and the paid one backs it up."""
-    from aibroker.providers.litellm_adapter import model_for
+    from aibroker.providers.registry import model_for
     chain = chain_for("chat:sales")
     assert chain[0] == "anthropic"
     assert model_for("anthropic", "chat:sales") == "anthropic/claude-sonnet-5"
@@ -540,12 +542,12 @@ def test_dead_providers_pruned_2026_10_02():
 def test_cerebras_gemma_lanes_removed_2026_10_02():
     """Cerebras deleted gemma-4-31b on 2026-09-03; it must not be chained or
     configured for prefilter/translate. gpt-oss lanes stay."""
-    from aibroker.providers.litellm_adapter import DEFAULT_MODEL, model_for
+    from aibroker.providers.registry import default_models, model_for
 
     for cap in ("prefilter", "translate"):
         assert "cerebras" not in chain_for(cap), cap
         assert model_for("cerebras", cap) is None, cap
-    assert not any("gemma-4-31b" in m for m in DEFAULT_MODEL["cerebras"].values())
+    assert not any("gemma-4-31b" in m for m in default_models()["cerebras"].values())
     assert model_for("cerebras", "chat:fast") == "cerebras/gpt-oss-120b"
     # re-adding cohere is one line: its models stay configured
     assert model_for("cohere", "structured") == "cohere/command-r7b-12-2024"

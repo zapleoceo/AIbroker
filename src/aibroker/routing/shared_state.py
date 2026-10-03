@@ -17,10 +17,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Single source of truth for the affinity TTL — selector's in-process fallback
-# map imports it, so the Redis and dict entries expire in step. ≈ provider
-# prompt-cache retention windows (deepseek/gemini), see selector's rationale.
-AFFINITY_TTL_S = 30 * 60.0
+# The affinity TTL is a setting (AFFINITY_TTL_S, default 2h) read through
+# routing/affinity.ttl_s() so the Redis and in-process entries expire in step.
 
 # After a Redis error the store stays off for this window instead of paying a
 # connect timeout on EVERY pick — the selector hot path must not stall on a
@@ -80,27 +78,44 @@ def _get_client() -> Any:
     return _client
 
 
-async def get_affinity(project_id: int, provider: str) -> int | None:
-    """Shared (project, provider) → api_key_id pin; None = miss or disabled."""
+async def get_json(key: str) -> Any | None:
+    """Generic fail-open JSON read; None = miss, corrupt payload or disabled."""
     client = _get_client()
     if client is None:
         return None
     try:
-        raw = await client.get(_aff_key(project_id, provider))
+        raw = await client.get(key)
     except Exception as e:
         _trip(e)
         return None
-    return int(raw) if raw is not None else None
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError) as e:
+        log.warning("shared_state: corrupt %s payload (%s) — treating as miss", key, e)
+        return None
 
 
-async def set_affinity(project_id: int, provider: str, key_id: int) -> None:
+async def set_json(key: str, value: Any, ttl_s: float) -> None:
+    """Generic fail-open JSON write with a TTL."""
     client = _get_client()
     if client is None:
         return
     try:
-        await client.setex(_aff_key(project_id, provider), int(AFFINITY_TTL_S), key_id)
+        await client.setex(key, max(1, int(ttl_s)), json.dumps(value))
     except Exception as e:
         _trip(e)
+
+
+async def get_affinity(project_id: int, provider: str) -> int | None:
+    """Shared (project, provider) → api_key_id pin; None = miss or disabled."""
+    value = await get_json(_aff_key(project_id, provider))
+    return int(value) if value is not None else None
+
+
+async def set_affinity(project_id: int, provider: str, key_id: int, ttl_s: float) -> None:
+    await set_json(_aff_key(project_id, provider), key_id, ttl_s)
 
 
 async def get_saturated() -> frozenset[int] | None:

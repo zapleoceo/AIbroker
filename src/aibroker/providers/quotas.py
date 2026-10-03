@@ -9,7 +9,7 @@ A key can be capped on four independent axes per day:
 For each axis the effective limit is resolved by priority:
   1. manual_*      — operator-set override (e.g. corporate Gemini 3M in / 80k out)
   2. discovered_*  — parsed from provider response headers at key creation
-  3. PROVIDER_QUOTAS default — static guess from provider docs
+  3. ProviderSpec.quota default — static guess from provider docs
 
 Whichever axis is closest to its cap drives the dashboard bar and the
 selector's saturation skip. Sourced from provider docs as of 2026-06-28;
@@ -17,90 +17,14 @@ verify in the provider console — defaults drift, manual override is exact.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from aibroker.providers.registry import Quota, spec_or_default
 
-
-@dataclass(frozen=True, slots=True)
-class Quota:
-    """Effective per-day caps. None on an axis ⇒ that axis is uncapped."""
-    req_per_day: int | None = None
-    tok_per_day: int | None = None       # total in+out
-    tok_in_per_day: int | None = None
-    tok_out_per_day: int | None = None
-    doc: str = ""
-
-
-# Static provider defaults (req + total-tokens only; in/out split is rare in
-# free-tier docs, so left None — manual override fills it for corp keys).
-PROVIDER_QUOTAS: dict[str, Quota] = {
-    # cerebras enforces the free tier on TOKENS/day, not requests/day: a single
-    # gpt-oss-120b key logged 4,866 req against its 2,400 req-day header without
-    # a 429 — the request header isn't a hard cap, so it's not a saturation
-    # signal. req axis dropped (None); auto-discover no longer ingests it either.
-    "cerebras": Quota(tok_per_day=1_000_000,
-                       doc="https://inference-docs.cerebras.ai/support/rate-limits"),
-    "groq": Quota(req_per_day=14_400, tok_per_day=500_000,
-                   doc="https://console.groq.com/docs/rate-limits"),
-    "gemini": Quota(req_per_day=1_500,
-                     doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
-    # mistral publishes only PER-MINUTE headers (x-ratelimit-limit-req-minute=50,
-    # x-ratelimit-limit-tokens-minute=50000, confirmed live 2026-07-02) — no
-    # per-day cap at all. The old req/tok_per_day=86_400/500_000 seed was an
-    # invented daily figure never backed by evidence; real keys sustain
-    # 1.3-1.7M tok/day (99.96% ok, one transient RateLimitError) at ~260% of
-    # the fake 500k cap, so the dashboard showed them fully red while alive.
-    # Dropped both axes — we have no per-minute axis to represent the real
-    # constraint, and extrapolating minute→day isn't backed by an observed cap.
-    "mistral": Quota(doc="https://docs.mistral.ai/deployment/laplateforme/tier/"),
-    "cohere": Quota(req_per_day=1_000,
-                     doc="https://docs.cohere.com/v2/docs/rate-limits"),
-    "openrouter": Quota(req_per_day=200,
-                         doc="https://openrouter.ai/docs/api-reference/limits"),
-    # voyage-4's 200M free tokens is a per-MONTH allocation, not a daily rate
-    # cap — representing it as tok_per_day=200M mislabelled the axis (30x too
-    # loose, the dashboard bar could never fill). We have no honest daily axis
-    # to show here: voyage's real short-term throttle is RPM/TPM (handled as a
-    # cooldown via classify_provider_error's "reduced rate limits" sign), and
-    # the 200M monthly budget isn't a daily quota. Dropped the axis (same
-    # reasoning as mistral's per-minute-only limits above).
-    "voyage": Quota(doc="https://docs.voyageai.com/docs/pricing"),
-    "deepseek":  Quota(doc="https://api-docs.deepseek.com/quick_start/pricing"),
-    "anthropic": Quota(doc="https://docs.claude.com/en/docs/about-claude/usage-limits"),
-    "openai":    Quota(doc="https://platform.openai.com/docs/guides/rate-limits"),
-    # Confirmed live 2026-07-04: x-ratelimit-limit-requests-day: 20,
-    # x-ratelimit-reset-requests-day ~24h out. Real daily reset, not a
-    # one-time trial grant — but a hard 20 req/day per key.
-    "sambanova": Quota(req_per_day=20,
-                        doc="https://docs.sambanova.ai/cloud/docs/get-started/rate-limits"),
-    # Confirmed live 2026-07-04, but genuinely uncappable from here: NVIDIA
-    # exposes NO rate-limit headers at all (only nvcf-status: fulfilled), and
-    # the free tier is 1,000 ONE-TIME inference credits (not a daily/monthly
-    # renewal) that silently convert to real pay-as-you-go billing once spent
-    # — no error, no visible signal. No axis here would mean anything; the
-    # only real guard is each key's manual daily_limit (request count), kept
-    # deliberately low. See chains.py chat:deep for why only nemotron is wired.
-    "nvidia": Quota(doc="https://build.nvidia.com/settings/api-keys"),
-    # Confirmed live 2026-07-04. Genuinely renewing daily (no card on file at
-    # all — unlike nvidia, there's no path to silent billing), but the free
-    # tier is "10,000 neurons/day", a compute-unit budget that varies per
-    # model — not a request count, so no req_per_day axis would be honest.
-    "cloudflare": Quota(doc="https://developers.cloudflare.com/workers-ai/platform/pricing/"),
-    # Confirmed live 2026-07-05 (glm-4.5-flash only — bigger models 429 with
-    # "Insufficient balance", no free package on this account). No
-    # rate-limit headers exposed at all, and no documented per-account daily
-    # cap found — no invented axis (same reasoning as mistral above).
-    "zai": Quota(doc="https://docs.z.ai/guides/overview/quick-start"),
-    # Self-hosted faster-whisper (vera3's asr-local, same host) — no external
-    # rate limit at all, so no axis is honest here. The real constraint is
-    # local: a single asyncio.Lock serializes every call on 1 CPU thread (see
-    # vera3/docs/asr-local.md) — throughput, not a quota.
-    "local": Quota(doc="https://github.com/zapleoceo/muai/blob/master/vera3/docs/asr-local.md"),
-}
+# Static provider defaults live on ProviderSpec.quota (providers/specs.py).
 
 
 def quota_for(provider: str) -> Quota:
     """Static provider default; empty Quota for unknown providers."""
-    return PROVIDER_QUOTAS.get(provider, Quota())
+    return spec_or_default(provider).quota
 
 
 def quota_for_key(key) -> Quota:
@@ -108,7 +32,7 @@ def quota_for_key(key) -> Quota:
     `key` is any object exposing the column attrs (ApiKeyRow in prod;
     SimpleNamespace in tests)."""
     base = quota_for(getattr(key, "provider", ""))
-    # PROVIDER_QUOTAS seeds are FREE-tier limits; a paid key isn't bound by them
+    # ProviderSpec.quota seeds are FREE-tier limits; a paid key isn't bound by them
     # (its real caps are orders higher), so a paid gemini key must not read as
     # 212% of the 1,500 free RPD. Drop the seed for paid keys — only explicit
     # manual/discovered axes remain; the $/day cost cap is a separate column.

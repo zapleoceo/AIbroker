@@ -89,11 +89,14 @@ CREATE TABLE IF NOT EXISTS usage_log (
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   -- migration 011 (2026-10-02: was missing here, so a fresh DB broke the
   -- dashboard project drill-down that SELECTs u.model_served)
-  model_served VARCHAR(120)
+  model_served VARCHAR(120),
+  -- migration 015: groups the attempts of one client request (X-Request-Id)
+  request_id VARCHAR(64)
 );
 CREATE INDEX IF NOT EXISTS ix_usage_project_date ON usage_log(project_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_usage_key_date ON usage_log(api_key_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_usage_provider_date ON usage_log(provider, created_at);
+CREATE INDEX IF NOT EXISTS ix_usage_request_id ON usage_log(request_id) WHERE request_id IS NOT NULL;
 
 -- ─── Audit log (every admin op, every key checkout) ─────────────────────────
 CREATE TABLE IF NOT EXISTS audit_log (

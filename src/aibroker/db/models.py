@@ -156,11 +156,15 @@ class UsageLogRow(Base):
     # name) says — see providers/model_identity.py. NULL when the routing name
     # is already the exact model id, and on every row predating migration 011.
     model_served: Mapped[str | None] = mapped_column(String(120))
+    # Groups every attempt row of ONE client request (its fallback trail);
+    # returned to the client as X-Request-Id. NULL on rows predating migration
+    # 015 and on attempts made outside a request scope (monitor probes).
+    request_id: Mapped[str | None] = mapped_column(String(64))
     capability: Mapped[str | None] = mapped_column(String(30))
     workflow: Mapped[str | None] = mapped_column(String(50))
     tokens_in: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # Prompt-cache tokens (currently anthropic only — see providers/litellm_adapter.py
+    # Prompt-cache tokens (currently anthropic only — see providers/prompt_cache.py
     # apply_prompt_cache). 0 for providers/calls that never touch the cache.
     cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

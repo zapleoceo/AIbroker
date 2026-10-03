@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -19,6 +19,7 @@ async def test_audit_writes_row():
     await audit(actor="dashboard", action="key.disable", target="id=42",
                  metadata={"label": "test"}, ip="1.2.3.4")
     from sqlalchemy import text
+
     from aibroker.db import get_session
     async with get_session() as s:
         rows = (await s.execute(

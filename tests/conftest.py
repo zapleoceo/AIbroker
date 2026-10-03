@@ -82,6 +82,16 @@ def _reset_circuit():
     circuit.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_affinity():
+    """Cache-affinity pins are per-process module state — a pin noted in one test
+    must not steer the walk of the next (the DB reuses key ids per test)."""
+    from aibroker.routing import affinity
+    affinity.reset()
+    yield
+    affinity.reset()
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def db():
     """Fresh schema per test. Postgres when DATABASE_URL targets it, else SQLite.

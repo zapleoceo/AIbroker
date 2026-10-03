@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     # Self-hosted transcription (this repo's own services/asr-local) — empty
     # = the "local" provider is unreachable and every transcription request
     # falls straight through to groq/openai (see routing/chains.py).
+    # How long a request family stays pinned to the (provider, model, key) whose
+    # provider-side prompt cache is warm (routing/affinity.py). Default 2h.
+    AFFINITY_TTL_S: float = 7200.0
     ASR_LOCAL_URL: str = ""
     # 2026-07-18: 90s -> 180s. Model is `small` int8 on 1 CPU thread with
     # beam_size=5 (large-v3-turbo/medium were both OOM-killed on this shared

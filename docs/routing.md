@@ -1,5 +1,58 @@
 # Routing, scopes & cost guard
 
+> **2026-10-03 (core refactor — read this first).** The dated notes below were
+> written against the old scattered tables. They are history; the *current* homes are:
+>
+> | old name in the notes below | now |
+> |---|---|
+> | `DEFAULT_MODEL`, `MODEL_ROTATION`, `models_for`, `model_for` | `ProviderSpec.defaults` / `.rotation` (`providers/registry.py`, data in `providers/specs.py`) |
+> | `COOLDOWN_BASE_S` | `ProviderSpec.cooldown_base_s` |
+> | `PROVIDER_QUOTAS` | `ProviderSpec.quota` |
+> | `SEED_MAX_REQUEST_TOKENS` | `ProviderSpec.max_request_tokens` |
+> | `_PROBES` (health_probes) | `ProviderSpec.probe` (`ProbeSpec`) |
+> | `_PROVIDER_RATE_LIMIT_SIGNS` / `_AUTH_` / `_MONTHLY_` | `ProviderSpec.rate_limit_signs` / `.auth_signs` / `.monthly_signs` |
+> | `JSON_UNRELIABLE_PROVIDERS`, `JSON_INCAPABLE_PROVIDERS` | `ProviderSpec.json_reliability` |
+> | `PAID_PROVIDERS` | `ProviderSpec.paid` (`registry.paid_providers()`) |
+> | `_CACHE_STICKY_PROVIDERS` | `ProviderSpec.cache_sticky` |
+> | `_MAX_KEYS_BY_PROVIDER` | `ProviderSpec.max_keys` |
+> | `litellm_adapter.py` | split: `litellm_client.py`, `cost.py`, `prompt_cache.py`, `local_vision.py`, `local_asr.py`, `gemini_asr.py`, dispatch in `transport.py` |
+> | `_run_attempt`, `_reserve_or_block`, `_handle_attempt_failure`, `_penalize`, `_record_error` | the one template in `services/attempt.py` |
+> | the old prefix-based pin resolver / "a pinned model stays on its own provider" | exact pinning via `providers/catalog.py` (below) |
+> | `selector._affinity`, `note_affinity_shared` | `routing/affinity.py` |
+>
+> What did NOT change: chain order (`routing/chains.py` is still the policy), the cost
+> guard, cooldown resolution, circuit breakers, the JSON gate, the paid-tail escalation.
+> The incident history that used to live in code comments is in
+> [history/provider-choices.md](history/provider-choices.md) and
+> [history/llm-service-tuning.md](history/llm-service-tuning.md). Adding a provider/model:
+> [how-to-add-provider.md](how-to-add-provider.md).
+
+> **2026-10-03 (exact pinning).** A pinned `model` now resolves through the catalog
+> (`providers/catalog.resolve_pin`): routing id or bare canonical name -> the ordered
+> `(provider, model)` targets that serve it (ranked: free providers by `ProviderSpec.rank`,
+> paid last). `run_chat` walks them as `_pinned_steps`: **free-tier keys of every candidate
+> first, then paid keys**, one fixed order, no rotation, no reshuffle. Unknown model or a
+> lane it cannot serve -> `UnknownModel` -> **HTTP 400 with suggestions** at submit (a job
+> queued before a registry change fails terminally instead of retrying). This replaces the
+> 2026-09-26 behaviour below ("a pinned model stays on its own provider": qualified ids
+> restricted the walk, bare names were applied to whatever the chain reached, unknown ids
+> were forwarded to the provider). The 2026-09-26 incident stays the reason a pin never
+> crosses a provider's key.
+
+> **2026-10-03 (cache affinity for all capabilities).** `routing/affinity.py` extends the
+> per-(project, provider) key pin (kept, same TTL) with a ROUTE pin: `(project_id, workflow
+> or '', capability, pinned model or '') -> (provider, model, key_id)`, TTL
+> `AFFINITY_TTL_S` (default 7200 s), stored through `shared_state` (Redis, fail-open) with an
+> in-process fallback. `run_chat` puts a one-attempt "affine leg" (`pick_and_reserve(...,
+> only_key_id=...)`, same availability filters) in front of the walk; if that key is cooling /
+> capped / errored the normal walk follows and the success re-pins both layers
+> (`attempt.run_attempt` -> `affinity.note_success`). Guards: the target must still be one of
+> the walk's shaped steps (tool/size/JSON/pin filters applied), a PAID target never jumps a
+> free head (this keeps the 2026-07-12 "provider-level affinity — deliberately NOT built"
+> concern about free-tier economics intact for exactly that case) and the leg refuses a paid
+> key where the walk heads with a free provider. A stable `prompt_cache_key` derived from the
+> same family is sent where documented (`ProviderSpec.cache_key_param`).
+
 > **2026-07-16 (dashboard: hard-capped keys show "day cap", not "alive")**: a
 > key whose per-key day cost cap (`daily_cost_used_usd ≥ daily_cost_cap_usd`)
 > or day request limit (`daily_used ≥ daily_limit > 0`) is spent rendered as
@@ -1124,7 +1177,7 @@ returns the scope the **project** must hold and the **key** must carry.
 > provider per the JSON quality gate — now demoted behind the JSON-reliable
 > providers on any JSON-format request instead of being tried first.
 
-## A pinned model stays on its own provider (2026-09-26)
+## A pinned model stays on its own provider (2026-09-26 — superseded by exact pinning, see top)
 
 `model` in the request body overrides the chain's default model. It does NOT
 choose the key — `run_chat` walks the capability's chain as always and hands
@@ -1144,7 +1197,7 @@ in 07:10-07:20 and vera lost 10 `structured` jobs in the window. The first
 version of this paragraph said the bug had never triggered — that was wrong,
 the audit log (`action='key.dead'`) showed it.
 
-`chains.provider_of_model` now resolves the owning provider and `run_chat`
+The (since removed) prefix-based pin resolver resolved the owning provider and `run_chat`
 keeps the walk inside it:
 
 | `model` in the request | effect |

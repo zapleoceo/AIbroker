@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from aibroker.services.attempt import Flow
 from aibroker.services.llm_service import classify_provider_error
 
 # Pinned off-peak instant (deepseek's peak hours are UTC 1-3, 6-9 — see
@@ -75,7 +76,7 @@ def test_classify_credits_depleted_429_is_auth_not_rate_limit():
 
 def test_classify_timeout_is_rate_limit():
     """REGRESSION (2026-07-07): our own call-timeout backstop
-    (litellm_adapter.call_llm's asyncio.wait_for) raises a bare TimeoutError
+    (litellm_client.litellm_chat's asyncio.wait_for) raises a bare TimeoutError
     with no message — no string sign can ever match it, so it fell to generic
     'error' (no cooldown) and an overloaded key got hit again immediately with
     zero backoff. Confirmed live: a zai key was taking 90-180s per call, well
@@ -257,12 +258,12 @@ async def test_run_chat_model_unavailable_skips_provider_without_penalty(monkeyp
         return 1
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
     monkeypatch.setattr(svc, "model_for",
                         lambda p, c: "dead/model" if p == "deadprov" else "good/model")
@@ -367,14 +368,14 @@ async def test_run_chat_learns_ceiling_on_too_large_error(monkeypatch):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
-    monkeypatch.setattr(svc, "record_too_large", fake_record_too_large)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.record_too_large", fake_record_too_large)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "mistral"])
 
     big = [{"role": "user", "content": "x" * 60_000}]   # ~15k tokens
@@ -420,13 +421,11 @@ async def _capture_deepseek_model(monkeypatch, messages, response_format):
         return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", _n)
-    monkeypatch.setattr(svc, "release_cost", _n)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", _n)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", _n)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
-    monkeypatch.setattr(svc, "_record_json_miss",
-                        lambda **kw: _wrap(svc._Flow.NEXT_PROVIDER))
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "model_for",
                         lambda p, c: "deepseek/deepseek-flash")
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
@@ -437,10 +436,6 @@ async def _capture_deepseek_model(monkeypatch, messages, response_format):
         response_format=response_format, workflow="stepan",
     )
     return seen
-
-
-async def _wrap(flow):
-    return flow, None
 
 
 async def test_run_chat_never_rewrites_the_deepseek_model(monkeypatch):
@@ -628,13 +623,13 @@ async def test_run_chat_caps_gemini_retries(monkeypatch):
         return "rate_limit"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
 
     out = await svc.run_chat(
@@ -676,9 +671,9 @@ def _cap_block_env(monkeypatch, kind: str, chain: list[str]):
         return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    monkeypatch.setattr(svc, "audit", fake_audit)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_reserve)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    monkeypatch.setattr("aibroker.services.attempt.audit", fake_audit)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.001)
     monkeypatch.setattr(svc, "chain_for", lambda cap: list(chain))
@@ -734,9 +729,9 @@ async def test_project_cap_downgrades_walk_to_free_not_abort(monkeypatch):
         return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    monkeypatch.setattr(svc, "audit", fake_audit)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_reserve)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    monkeypatch.setattr("aibroker.services.attempt.audit", fake_audit)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.001)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "cerebras"])
@@ -818,12 +813,12 @@ async def test_run_chat_invalid_json_skips_provider_not_key(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras", "gemini"])
     # isolate break-behaviour from the JSON reorder — keep the given order
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
@@ -870,12 +865,12 @@ async def test_run_chat_empty_body_retries_same_provider(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
     monkeypatch.setattr(svc, "_max_keys", lambda p: 3)
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
@@ -1041,12 +1036,12 @@ async def test_run_chat_translate_caches_success(monkeypatch):
                           "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
 
     msgs = [{"role": "user", "content": "Terima kasih"}]
@@ -1083,12 +1078,12 @@ async def test_run_chat_does_not_cache_chat_capability(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
 
     msgs = [{"role": "user", "content": "hi"}]
@@ -1214,13 +1209,13 @@ async def test_run_chat_stops_at_absolute_backstop(monkeypatch):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     # 20-provider chain (default 5 keys each = 100 attempts without the cap).
     monkeypatch.setattr(svc, "chain_for",
                          lambda cap: [f"p{i}" for i in range(20)])
@@ -1264,17 +1259,17 @@ async def test_run_chat_reaches_paid_tail_when_free_providers_saturated(monkeypa
         return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
 
     async def fake_record(**kw):
         return 1
 
-    monkeypatch.setattr(svc, "record_usage", fake_record)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
     monkeypatch.setattr(svc, "chain_for", lambda cap: chain)
 
     out = await svc.run_chat(
@@ -1354,7 +1349,7 @@ def test_billed_cost_zeroes_free_tier():
     nothing."""
     from types import SimpleNamespace
 
-    from aibroker.services.llm_service import _billed_cost
+    from aibroker.services.attempt import _billed_cost
 
     free_key = SimpleNamespace(tier="free", provider="gemini")
     paid_key = SimpleNamespace(tier="paid", provider="anthropic")
@@ -1370,11 +1365,11 @@ def test_billed_cost_voyage_free_tier_is_zero_on_voyage4():
     moved the default embedding model to voyage-4 (200M free tokens/month,
     genuinely $0 under our run-rate), so a voyage free-tier key is now $0 like
     any other free key — the carve-out is gone. (voyage-4 now HAS a price —
-    litellm_adapter registers $0.06/M at import, 2026-07-16 — so this tier
+    providers/cost registers $0.06/M at import, 2026-07-16 — so this tier
     check is exactly what keeps a free voyage key at $0.)"""
     from types import SimpleNamespace
 
-    from aibroker.services.llm_service import _billed_cost
+    from aibroker.services.attempt import _billed_cost
 
     free_voyage_key = SimpleNamespace(tier="free", provider="voyage")
     paid_voyage_key = SimpleNamespace(tier="paid", provider="voyage")
@@ -1542,10 +1537,11 @@ async def test_run_transcribe_empty_local_escalates_never_dropped(monkeypatch):
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr(svc, "transcribe", fake_transcribe)
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    monkeypatch.setattr(svc, "note_affinity_shared", _noop)
-    monkeypatch.setattr(svc, "_handle_attempt_failure", _noop)
-    monkeypatch.setattr(svc, "decrypt", lambda _x: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    monkeypatch.setattr("aibroker.services.attempt.affinity.note_success", _noop)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", _noop)
+    monkeypatch.setattr("aibroker.services.attempt._record_error", _noop)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda _x: "plain")
     # local-first here on purpose: this asserts the empty-local ESCALATION,
     # not the production order (groq leads since 2026-07-26).
     monkeypatch.setattr(svc, "chain_for", lambda _cap: ["local", "groq"])
@@ -1608,12 +1604,12 @@ async def test_run_chat_records_zero_cost_for_free_tier_key(monkeypatch):
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
 
     out = await svc.run_chat(
@@ -1650,12 +1646,12 @@ async def test_run_chat_keeps_real_cost_for_paid_tier_key(monkeypatch):
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
 
     out = await svc.run_chat(
@@ -1698,12 +1694,12 @@ async def test_run_chat_passes_cache_tokens_to_record_usage_and_outcome(monkeypa
         return _noop()
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["anthropic"])
 
     out = await svc.run_chat(
@@ -1739,12 +1735,12 @@ async def test_run_chat_defaults_cache_tokens_when_meta_omits_them(monkeypatch):
                           "tokens_out": 50, "cost_usd": 0.0, "latency_ms": 100}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_caps)
-    monkeypatch.setattr(svc, "release_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_caps)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_caps)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["cerebras"])
 
     out = await svc.run_chat(
@@ -1791,11 +1787,11 @@ async def test_run_embed_retries_next_key_on_transient_failure(monkeypatch):
                               "tokens_out": 0, "cost_usd": 0.0001, "latency_ms": 50}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "embed", fake_embed)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
 
     out = await svc.run_embed(
         project=SimpleNamespace(id=1, name="vera"), provider="voyage",
@@ -1824,11 +1820,11 @@ async def test_run_embed_raises_after_exhausting_all_keys(monkeypatch):
         raise RuntimeError("APIConnectionError: connection reset")
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "embed", fake_embed)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
 
     with pytest.raises(svc.EmbedFailed):
         await svc.run_embed(
@@ -1859,11 +1855,11 @@ async def test_run_embed_never_falls_back_to_a_different_provider(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "embed", fake_embed)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
 
     with pytest.raises(svc.EmbedFailed):
         await svc.run_embed(
@@ -1913,8 +1909,8 @@ async def test_run_embed_succeeds_first_try_records_usage(monkeypatch):
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr(svc, "embed", fake_embed)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "voyage/voyage-3")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
 
     out = await svc.run_embed(
         project=SimpleNamespace(id=1, name="vera"), provider="voyage",
@@ -1932,14 +1928,14 @@ async def test_record_error_books_rate_limit_status_without_inventing_http_statu
     while http_status carries only what the provider really returned."""
     from types import SimpleNamespace
 
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     captured: dict = {}
 
     async def fake_record(**kw):
         captured.update(kw)
 
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    await svc._record_error(
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    await att._record_error(
         key=SimpleNamespace(id=1, provider="cerebras"), project=SimpleNamespace(id=2),
         provider="cerebras", model="m", capability="chat:fast", workflow=None,
         exc=RuntimeError("RateLimitError - Tokens per day limit exceeded"),
@@ -1951,14 +1947,14 @@ async def test_record_error_books_rate_limit_status_without_inventing_http_statu
 async def test_record_error_books_none_for_generic_error(monkeypatch):
     from types import SimpleNamespace
 
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     captured: dict = {}
 
     async def fake_record(**kw):
         captured.update(kw)
 
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    await svc._record_error(
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    await att._record_error(
         key=SimpleNamespace(id=1, provider="x"), project=SimpleNamespace(id=2),
         provider="x", model="m", capability="chat:fast", workflow=None,
         exc=RuntimeError("some unclassifiable failure"),
@@ -2014,26 +2010,27 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
     async def fake_penalize(k, e, **_kw):
         return "rate_limit"
 
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
-    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
-    monkeypatch.setattr(svc, "release_cost", fake_release)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_reserve)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_release)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0123)
 
     key = SimpleNamespace(id=1, provider="gemini", label="g", tier="paid",
                           token_encrypted="x", account_id=None)
     project = SimpleNamespace(id=2, name="stepan")
-    flow, outcome = await svc._run_attempt(
-        key=key, project=project, provider="gemini",
-        use_model="gemini/gemini-2.5-flash", capability="chat:fast",
-        messages=[{"role": "user", "content": "hi"}], model=None,
-        max_tokens=128, temperature=0.7, response_format=None,
-        workflow=None, est_tokens=1000, call_timeout=60.0,
-    )
-    assert flow is svc._Flow.NEXT_KEY
-    assert outcome is None
+    async def timing_out(plain):
+        raise TimeoutError()
+
+    from aibroker.services.attempt import Attempt, run_attempt
+    res = await run_attempt(Attempt(
+        key=key, project=project, provider="gemini", model="gemini/gemini-2.5-flash",
+        capability="chat:fast", workflow=None, call=timing_out,
+        est_tokens=1000, estimated_cost=0.0123))
+    flow = res.flow
+    assert flow is Flow.NEXT_KEY
     assert booked["cost_usd"] == 0.0                       # $0 to the admission cap
     assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
 
@@ -2071,12 +2068,12 @@ async def test_run_chat_empty_body_retry_rescues_same_provider(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
@@ -2119,12 +2116,12 @@ async def test_run_chat_empty_body_capped_then_next_provider(monkeypatch):
                       "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek", "gemini"])
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
@@ -2170,7 +2167,7 @@ async def test_penalize_rate_limit_opens_exactly_one_session(monkeypatch):
     import aibroker.db.engine as engine_mod
     import aibroker.routing.cooldown as cooldown_mod
     import aibroker.routing.selector as selector_mod
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow
 
@@ -2184,11 +2181,11 @@ async def test_penalize_rate_limit_opens_exactly_one_session(monkeypatch):
         async with real() as s:
             yield s
 
-    monkeypatch.setattr(svc, "get_session", counting)
+    monkeypatch.setattr(att, "get_session", counting)
     monkeypatch.setattr(cooldown_mod, "get_session", counting)
     monkeypatch.setattr(selector_mod, "get_session", counting)
 
-    kind = await svc._penalize(key, RuntimeError("429 Too Many Requests"))
+    kind = await att._penalize(key, RuntimeError("429 Too Many Requests"))
 
     assert kind == "rate_limit"
     assert opened["n"] == 1
@@ -2203,12 +2200,12 @@ async def test_penalize_timeout_feeds_circuit_breaker():
     """A timeout penalty records the key in the selection-side circuit-breaker,
     so the selector can soft-skip a bulk-timing-out provider and won't re-pin
     cache-affinity to the hung key (2026-07-16 storm)."""
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     from aibroker.routing import circuit
 
     circuit.reset()
     key = await _seed_key()
-    kind = await svc._penalize(key, TimeoutError())
+    kind = await att._penalize(key, TimeoutError())
     assert kind == "rate_limit"
     assert key.id in circuit.recent_timeout_key_ids()
     circuit.reset()
@@ -2220,7 +2217,7 @@ async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypa
     from datetime import UTC, datetime
 
     import aibroker.routing.cooldown as cooldown_mod
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     from aibroker.db import get_session
     from aibroker.db.models import ApiKeyRow
 
@@ -2230,7 +2227,7 @@ async def test_penalize_falls_back_to_flat_cooldown_when_resolver_fails(monkeypa
         raise RuntimeError("resolver down")
 
     monkeypatch.setattr(cooldown_mod, "cooldown_until", boom)
-    kind = await svc._penalize(key, RuntimeError("429 Too Many Requests"))
+    kind = await att._penalize(key, RuntimeError("429 Too Many Requests"))
 
     assert kind == "rate_limit"
     async with get_session() as s:
@@ -2263,18 +2260,18 @@ async def test_run_chat_rotates_models_within_a_provider(monkeypatch):
         raise RuntimeError("429 rate limit")   # force the walk to keep going
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
     monkeypatch.setattr(svc, "rotation_for",
                         lambda p, c: ("gemini/alt-a", "gemini/alt-b"))
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
-    monkeypatch.setattr(svc, "_penalize", lambda *a, **k: _noop())
+    monkeypatch.setattr("aibroker.services.attempt._penalize", lambda *a, **k: _noop())
 
     await svc.run_chat(
         project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
@@ -2306,25 +2303,25 @@ async def test_run_chat_honours_a_pinned_model_over_rotation(monkeypatch):
         raise RuntimeError("429 rate limit")
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_noop)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
     monkeypatch.setattr(svc, "rotation_for", lambda p, c: ("gemini/alt-a",))
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.0)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
-    monkeypatch.setattr(svc, "_penalize", lambda *a, **k: _noop())
+    monkeypatch.setattr("aibroker.services.attempt._penalize", lambda *a, **k: _noop())
 
     await svc.run_chat(
         project=SimpleNamespace(id=1, name="stepan"), capability="chat:sales",
-        messages=[{"role": "user", "content": "hi"}], model="gemini/pinned",
+        messages=[{"role": "user", "content": "hi"}], model="gemini/gemini-3.1-flash-lite",
         max_tokens=128, temperature=0.7, response_format=None, workflow=None,
         at=OFF_PEAK_AT,
     )
-    assert set(seen) == {"gemini/pinned"}
+    assert set(seen) == {"gemini/gemini-3.1-flash-lite"}
 
 
 async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch):
@@ -2361,17 +2358,17 @@ async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch
                                 "cache_read_tokens": 0, "cache_write_tokens": 0}
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
-    monkeypatch.setattr(svc, "release_cost", fake_noop)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_reserve)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_noop)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
     monkeypatch.setattr(svc, "model_for", lambda p, c: "gemini/gemini-2.5-flash")
     monkeypatch.setattr(svc, "rotation_for", lambda p, c: ())
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", lambda **kw: _noop())
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.01)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini", "sambanova"])
     monkeypatch.setattr(svc, "deprioritize_for_json", lambda c: c)
-    monkeypatch.setattr(svc, "audit", lambda **kw: _noop())
+    monkeypatch.setattr("aibroker.services.attempt.audit", lambda **kw: _noop())
 
     out = await svc.run_chat(
         project=SimpleNamespace(id=4, name="stepan2"), capability="chat:smart",
@@ -2549,12 +2546,12 @@ async def test_run_chat_records_and_returns_the_served_model(monkeypatch):
         return None
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", _n)
-    monkeypatch.setattr(svc, "release_cost", _n)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", _n)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", _n)
     monkeypatch.setattr(svc, "call_llm", fake_call_llm)
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "record_usage", fake_record_usage)
-    monkeypatch.setattr(svc, "note_affinity_shared", lambda *a, **k: _n())
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record_usage)
+    monkeypatch.setattr("aibroker.services.attempt.affinity.note_success", lambda *a, **k: _n())
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["deepseek"])
     monkeypatch.setattr(svc, "model_for", lambda p, c: "deepseek/deepseek-flash")
 

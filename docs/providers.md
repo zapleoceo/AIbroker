@@ -3,9 +3,11 @@
 LiteLLM SDK does the per-provider HTTP. Our config maps capabilities to
 default models.
 
-Source: `src/aibroker/providers/litellm_adapter.py:DEFAULT_MODEL`.
+Source: the provider registry — `src/aibroker/providers/specs.py` (`ProviderSpec.defaults` /
+`.rotation`); `GET /v1/models` lists the resulting catalog. Dated incident history for
+every choice: [history/provider-choices.md](history/provider-choices.md).
 
-`litellm.drop_params = True` is set at adapter import: the broker sends every
+`litellm.drop_params = True` is set at import of `providers/litellm_client.py`: the broker sends every
 provider the same kwargs (`temperature`, `response_format`, …) and LiteLLM
 strips the ones a given provider doesn't support instead of 400-ing. Fixes
 cohere, which rejected `response_format`/`temperature` with
@@ -98,7 +100,7 @@ computed and discarded:
 - **deepseek → `deepseek-flash`** (DeepSeek-V4.1-Flash, 09-10): the only flash
   model DeepSeek lists on our keys; v4-pro is retired 09-14. Half the price,
   native vision — deepseek is now the paid tail of `vision`. Pricing is
-  registered in `litellm_adapter` (litellm's map lacks the name) at the
+  registered from the registry (`providers/cost.py`; litellm's map lacks the name) at the
   off-peak rate; peak pricing is now weekdays only. The v4-pro big-JSON
   escalation is removed (pro empties the same way on the real prompt).
 - **sambanova → `gemma-4-31B-it`** on chat:fast / prefilter / vision: the only
@@ -202,14 +204,7 @@ routing name in the tooltip.
 
 ## Adding a new provider
 
-1. Verify LiteLLM supports it (`pip install litellm` then
-   `litellm.providers.list_providers()`).
-2. Add a row to `DEFAULT_MODEL` with the capabilities you want.
-3. Add the provider to `routing.chains.CAPABILITY_CHAINS` where it fits.
-4. Add a health probe in `providers/health_probes.py` (smallest possible
-   call — usually `max_tokens=1`).
-5. Update [routing.md](./routing.md) with the new chain.
-6. POST `/admin/keys` with the new provider + label + token.
+One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).
 
 ## Health probes
 

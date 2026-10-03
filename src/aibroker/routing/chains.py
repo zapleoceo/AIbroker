@@ -4,11 +4,22 @@ Single source of truth for two questions:
   - "for capability X, in what order do we try providers?"  → CAPABILITY_CHAINS
   - "which scope must a key carry to serve capability X?"     → CAPABILITY_SCOPE
 
+This is POLICY (order). Provider FACTS (models, JSON reliability, paid or not,
+quotas…) live in the provider registry — providers/registry.py. Dated rationale
+for every ordering decision: docs/history/provider-choices.md.
+
 Routes and the selector import from here; never duplicate these tables.
 """
 from __future__ import annotations
 
 from typing import Literal
+
+from aibroker.providers.registry import (
+    model_for,
+    paid_providers,
+    providers_with_json,
+    spec_or_default,
+)
 
 Capability = Literal[
     "chat:fast",
@@ -28,264 +39,35 @@ Capability = Literal[
 
 
 CAPABILITY_CHAINS: dict[Capability, list[str]] = {
-    # 2026-07-05: strict free-first — paid (deepseek/anthropic/openai) moved
-    # to the tail of every chat:* chain, after ALL free providers including
-    # github/sambanova/zai. Was: deepseek sat ahead of openrouter/github/
-    # sambanova/zai "for backfill speed" — but that meant a paid call fired
-    # the moment the first 5 free providers were saturated, even though 3+
-    # more free providers (all confirmed live) were still untried further
-    # down the chain. Explicit choice: slow-but-free beats fast-but-paid.
-    # 2026-09-12: mistral REMOVED from every chain it was in (chat:fast,
-    # chat:code, structured, prefilter, translate). All 7 free keys answer
-    # every call with 429 code 1300 "Rate limit exceeded" and the response
-    # header `x-ratelimit-limit-req-minute: 0` — the account's free tier has a
-    # ZERO requests-per-minute allowance, i.e. it is switched off, not busy.
-    # 7 days of usage_log: 0 ok / 2174 errors, ~150ms of dead latency each,
-    # and 5 wasted attempts per JSON walk. DEFAULT_MODEL keeps its entry
-    # ("known but not chained", like cloudflare vision) so re-adding is a
-    # one-line change once the owner re-activates La Plateforme's free tier.
-    # 2026-10-02: cohere REMOVED from chat:fast, structured, prefilter and
-    # translate (kept in `embedding`, where it is voyage's fallback). Cohere
-    # command-r7b-12-2024, 7d of usage_log: chat:fast 1 ok / 66 err
-    # (APIConnectionError 49 - the trial keys sit at their 1000 calls/month
-    # cap - InvalidJSON 17); structured 9 ok / 1136 err (InvalidJSON 802,
-    # APIConnectionError 334). 30d: chat:fast 12 / 509, structured 38 / 2422.
-    # prefilter/translate had no cohere rows at all. DEFAULT_MODEL["cohere"]
-    # keeps its entries ("known but not chained", like mistral) so re-adding
-    # is a one-line change once the keys are paid.
-    # 2026-10-02: openrouter REMOVED from chat:fast and structured (kept in
-    # vision, chat:code, decision). google/gemma-4-31b-it:free, 7d: chat:fast
-    # 0 ok / 101 err (all 429), structured 0 / 1744 (RateLimit 1739).
-    # OpenRouter caps :free models at 50 req/day per ACCOUNT (1000/day only
-    # after >= $10 lifetime purchases, openrouter.ai/docs), so 7 keys never had
-    # the volume - extra keys on one account add no quota.
-    "chat:fast": [
-        "cerebras", "groq", "gemini",
-        "sambanova", "zai",
-        # 2026-07-07: cloudflare (gpt-oss-120b) — confirmed live with the
-        # real strict Vera triage json_schema, valid JSON, ~1.6s. Previously
-        # idle capacity (only vision was wired).
-        "cloudflare",
-        # 2026-07-10: nvidia REMOVED from chat:fast (kimi-k2.6 → 404 "Function
-        # not found for account"; stays in chat:deep with nemotron).
-        # 2026-07-21: chat:fast is now FREE-ONLY — the whole paid tail
-        # (deepseek/anthropic/openai) removed (owner: don't burn the scarce
-        # deepseek on the fast lane). fast = triage / simple followups, which
-        # tolerate a retry when the free pool is momentarily dry, unlike the
-        # smart money-lane. On chat:fast the paid tail was ONLY ever deepseek
-        # (anthropic/openai: 0 calls/7d — never reached); removing just deepseek
-        # would have shifted those ~2969 calls/wk to anthropic-haiku (~$1.27/M
-        # vs deepseek's $0.15/M, ~6x), so the entire paid tail is gone and every
-        # paid dollar is reserved for chat:smart. All 9 free providers saturated
-        # → fast returns None and the job retries.
-    ],
-    # 2026-07-17: deepseek MOVED TO THE HEAD of chat:smart — the one deliberate
-    # exception to strict free-first, owner-approved (cap raised $0.50→$1 for
-    # it). chat:smart is Stepan's money lane (sales replies): quality beats
-    # price there, and routing every reply to ONE strong model (v4-flash)
-    # instead of whichever free key happens to be uncooled gives (a) stable
-    # answer quality, (b) a warm per-account prompt cache on every call —
-    # cache-hit input is $0.0028/M (50×), measured 80-99% hit on repeat reply
-    # prompts — so a reply costs ~$0.0003-0.0005, ~$0.4/day at current volume,
-    # and (c) independence from the free-pool storms that killed reply latency.
-    # Free providers stay as the fallback tail (deepseek flake/EmptyBody on
-    # ~50k-char prompts walks over to them; budget-downgrade walks there when
-    # the $1 cap is spent). Also pre-positions the lane for 2026-08-17 when
-    # cerebras' free tier dies (was ~70% of Stepan's tokens).
-    # 2026-07-21: pruned to ONLY providers that give GOOD smart answers (owner
-    # request). 7-day quality audit on Stepan's sales-reply JSON:
-    #   REMOVED mistral (0 successful smart calls in 7d, keys in AuthError),
-    #   cohere command-r7b (25 InvalidJSON / 4 ok = 86% garbage — 7B can't do the
-    #   structured reply), openrouter gemma-4-31b (0 ok / 114 rate-limited, ever).
-    # 2026-07-21 (later): gpt-oss-120b (cerebras/groq/cloudflare) REMOVED from
-    # chat:smart entirely (owner call — its sales replies read weak, "тупит").
-    # A model check confirmed those providers have NOTHING smarter to swap in
-    # (cerebras=gpt-oss/gemma/glm only; groq=llama-70b/qwen-27b smaller;
-    # cloudflare llama-4 broken via litellm, nemotron-120b 35s). So smart now
-    # runs ONLY genuinely-smart models: deepseek (anchor + sticky cache) →
-    # gemini-2.5-flash (free) → sambanova DeepSeek-V3.2 (FREE deepseek-quality)
-    # → paid anthropic/openai tail. Tradeoff owner accepted: losing the free
-    # gpt-oss safety net means that once deepseek's $1 cap + gemini/sambanova
-    # free quota are spent, smart lands on the paid tail (higher cost) rather
-    # than a cheap-but-weak gpt-oss reply. gpt-oss stays PRIMARY on chat:fast.
-    # nvidia stays out (2026-07-10: v4-pro 91s timeouts; nemotron only chat:deep).
-    # 2026-07-24 (owner): rotate ONLY gemini, anthropic and DeepSeek-family
-    # models here — openai (gpt-5) removed. It was the last-resort tail and
-    # essentially never earned its place: by the time the chain got past
-    # deepseek + free gemini/sambanova + anthropic, the honest outcome is to
-    # retry rather than reach for the priciest model in the pool. sambanova
-    # STAYS because its chat:smart model IS a DeepSeek model
-    # (sambanova/DeepSeek-V3.2) served on a free tier — deepseek-quality at $0,
-    # which is exactly the capacity that carried the lane during DeepSeek's own
-    # 2026-07-22 empty-body degradation (111 successes at $0).
-    # 2026-08-26: gemini moved AHEAD of deepseek in both money lanes, on a
-    # measurement against Stepan's REAL 135k-char sales prompt (N=8, replayed
-    # from a pending deep_jobs row, JSON mode, his own max_tokens=2000):
-    #                          ok    invalid  truncated  out avg  median  p90
-    #   deepseek-v4-flash     6/8      2       2 (length)   2035   18413ms 26054
-    #   gemini-3.1-flash-lite 8/8      0       0             113    1405ms  1579
-    #   gemini-3.5-flash-lite 8/8      0       0              84    1366ms  1661
-    #   gemini-3.6-flash      8/8      0       0              81    9676ms 14632
-    # DeepSeek averaged 2035 output tokens against a 2000 ceiling: its thinking
-    # pass eats the budget and one reply in four stops mid-JSON with
-    # finish_reason=length. Raising the headroom is not the fix — 4000 was
-    # measured WORSE on 2026-07-21. Gemini answers the same prompt in ~90
-    # tokens, 13x faster, never truncates, and is FREE. So the free provider
-    # is not a downgrade here, it is strictly better on the workload that
-    # matters, and it stops paying DeepSeek's post-2026-08-16 4x rates for
-    # broken JSON. deepseek stays as the paid fallback behind it.
-    "chat:smart": [
-        "gemini",
-        "deepseek",
-        "sambanova",
-        "anthropic",
-    ],
-    # 2026-07-23: Stepan2's "smart LLM, no rigid script" sales mode. Owner-
-    # approved deliberate exception to free-first (like deepseek in chat:smart):
-    # ANTHROPIC SONNET LEADS because it's the strongest model for open-ended
-    # persuasive replies, and it is billed on its own $5/day key. deepseek is
-    # the cheap paid fallback if Sonnet's cap is spent; gemini/sambanova are the
-    # free tail after that. openai deliberately NOT wired here (owner: reserve
-    # the paid budget for Sonnet, not a second premium tier). anthropic keeps
-    # its lead through deprioritize_for_json (it's JSON-reliable, never sunk)
-    # AND deprioritize_deepseek_for_savings (which only ever moves deepseek and
-    # the free tail — providers AHEAD of deepseek are never touched). Prompt
-    # caching pays off here: apply_prompt_cache marks the (large, stable) system
-    # prefix and _CACHE_STICKY_PROVIDERS already pins anthropic per-project so
-    # the cache stays warm across replies.
-    "chat:sales": [
-        "anthropic",
-        "gemini",      # free AND measurably better than deepseek here
-        "deepseek",
-        "sambanova",
-    ],
-    "chat:code": [
-        "cerebras", "groq", "openrouter", "gemini",
-        "sambanova",
-        "cloudflare",
-        # 2026-07-10: anthropic re-added (balance topped up).
-        "anthropic", "deepseek", "openai",
-    ],
-    # Coach editor (Stepan): JSON-reliable providers ONLY. gemini first
-    # (thinking disabled → JSON fits), deepseek the paid fallback that stays
-    # available when gemini's quota is exhausted (validate-retry guards its
-    # occasional bad JSON), anthropic last (top JSON quality, trial credits).
-    # 2026-07-01: narrowed back from [gemini, mistral, cohere, deepseek,
-    # anthropic]. mistral-small / cohere-r7b returned Bahasa-drifted and torn
-    # JSON when gemini was on cooldown, breaking Coach; the free breadth isn't
-    # worth a malformed edit. cerebras/groq/openrouter stay excluded for the
-    # same reason.
-    # 2026-07-10: anthropic re-added (balance topped up) — Coach's top-quality
-    # JSON fallback after gemini (free, thinking-disabled) and deepseek.
+    # chat:fast is FREE-ONLY (triage / simple follow-ups tolerate a retry when the
+    # free pool is dry); every paid dollar is reserved for the money lanes.
+    "chat:fast": ["cerebras", "groq", "gemini", "sambanova", "zai", "cloudflare"],
+    # Money lane: free gemini first (measured faster, never truncates), deepseek as
+    # the paid cache-warm fallback, free DeepSeek-V3.2 on sambanova, anthropic last.
+    "chat:smart": ["gemini", "deepseek", "sambanova", "anthropic"],
+    # Smart-LLM sales: Sonnet leads on its own daily-capped key (owner-approved
+    # exception to free-first); deepseek cheap paid fallback; free tail after.
+    "chat:sales": ["anthropic", "gemini", "deepseek", "sambanova"],
+    "chat:code": ["cerebras", "groq", "openrouter", "gemini", "sambanova",
+                  "cloudflare", "anthropic", "deepseek", "openai"],
+    # Coach editor: JSON-reliable providers ONLY (a malformed edit breaks Coach).
     "chat:edit": ["gemini", "deepseek", "anthropic"],
-    # 2026-07-04: long-context / async reasoning lane. nvidia's Nemotron 3
-    # Ultra (nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b) is a 550B MoE with a
-    # real 1M-token context (95% RULER@1M) and strong agentic benchmarks
-    # (91% PinchBench), but is SLOW (~27s for 5 output tokens on the free,
-    # oversubscribed pool in a live test) — unfit for any latency-sensitive
-    # chain above. Gated behind its own scope (llm:deep) so it's never reached
-    # by normal chat traffic; callers who don't need 1M context or can't
-    # tolerate long waits should keep using chat:smart. Single-provider chain
-    # (no other free provider offers this context length) — a miss here falls
-    # straight to a 503, by design.
+    # Long-context / async reasoning (1M ctx Nemotron); single provider by design.
     "chat:deep": ["nvidia"],
-    # 2026-07-16: zai removed — prefilter requests are ALWAYS JSON and zai has
-    # zero response_format support (see JSON_INCAPABLE_PROVIDERS), so every
-    # zai prefilter attempt was a guaranteed billed-but-unusable InvalidJSON.
-    # 2026-10-02: cerebras removed from prefilter AND translate - its only
-    # model for those lanes, gemma-4-31b, was deleted by Cerebras on
-    # 2026-09-03 (their deprecations page), and all 14 cerebras keys are
-    # inactive anyway (the free tier became a 30-day $5 trial). cohere removed
-    # too (see the 2026-10-02 note at the top of this table).
-    "prefilter": [
-        "groq", "gemini",
-        "openrouter",
-        "sambanova",
-        "cloudflare",
-    ],
-    # Trivial utility task (message translation): does NOT need premium/reasoning
-    # models. Put SMALL FAST non-reasoning models FIRST — cerebras/groq gpt-oss is a
-    # REASONING model that "thinks" for ~16s even on one short phrase (starved the
-    # 15s client timeout → translate button failed). cohere-r7b / mistral-small /
-    # gemini-flash answer in ~1-2s. Also uses the models the bot's reply chains reach
-    # LAST, so translation barely competes with live replies for keys.
-    # 2026-07-10: cerebras (gemma-4-31b) added FIRST — a fast non-reasoning model
-    # (unlike cerebras gpt-oss, which was excluded here for its ~16s think time)
-    # at cerebras speed, free. Translate is low-volume so cerebras' 5 RPM is fine.
-    "translate": [
-        "gemini", "groq",
-    ],
-    # 2026-07-01: cerebras dropped. Its gpt-oss returns HTTP-200 but malformed
-    # JSON on structured requests (~4.6k/wk InvalidJSON) — every one wasted a
-    # pick and fell through. groq (same model) does not exhibit this at volume,
-    # so it stays.
-    "structured": [
-        "groq", "gemini",
-        # 2026-07-10: anthropic re-added (balance topped up).
-        "anthropic", "openai",
-    ],
-    # 2026-07-01: anthropic dropped from vision. gemini's free tier is
-    # RPM-capped, so vision fell to anthropic ~1.4k/wk — every call 400'd with
-    # "Unable to download the file": Vera passes image URLs anthropic's fetcher
-    # can't reach (gemini could). The key/model are fine (chat/structured work);
-    # this is a vision image-passing issue. Re-add anthropic here once the
-    # caller sends images as base64 rather than a fetch-gated URL. openai is the
-    # working paid fallback when gemini is exhausted.
-    # 2026-07-04: cloudflare (llava-1.5-7b) tried as tail fallback, then
-    # REMOVED same day — a garbage-bytes probe returned 200 (proving
-    # auth+connectivity work), but a real base64 data-URL image (the format
-    # gemini/openai actually receive here) 400'd with "Unsupported image
-    # data": {"code":3010}. Workers AI's llava wants raw byte-array image
-    # input, not an OpenAI-style image_url — LiteLLM doesn't convert between
-    # them for cloudflare. Would be dead weight in the chain (always fails)
-    # until that conversion is written. DEFAULT_MODEL/quotas/cooldown/probe
-    # entries stay (same "known but not chained" treatment as github before
-    # its own prod key test — see docs/routing.md).
-    # 2026-08-31: "local" (self-hosted Qwen3-VL-4B via llama.cpp on this host)
-    # put FIRST. The opposite call to transcription below, and for the opposite
-    # reason: there, local whisper was ~150x SLOWER than groq, which is also
-    # free, so leading with it burned the timeout before falling through. Here
-    # there is no fast free alternative — vision ran an 8% success rate over 14
-    # days (1762 ok against ~20000 CapBlock/RateLimit errors), so the cloud
-    # providers are the ones that aren't answering. Local is ~69s per image and
-    # unmetered; the cloud tail stays for overflow in the 00:00 UTC peak hour
-    # (162 images arrive in one hour, ~3x what one serialized worker clears)
-    # and for anything local can't take, e.g. an image passed by remote URL
-    # rather than inline base64.
-    # 2026-09-12: sambanova (free gemma-4-31B-it, 9 keys x 20/day, verified on
-    # a real inline image) slotted after gemini as a second free cloud pool,
-    # and deepseek (deepseek-flash, native vision, ~$0.0002/image off-peak)
-    # added as the paid tail AHEAD of openai — openai has never had a vision
-    # key here, so until now the "paid fallback" was a no-op and the chain
-    # ended at openrouter's 50/day account cap. Order stays free-first;
-    # deepseek spends from the same per-key daily caps as chat.
+    # Always JSON -> no zai (no response_format); cerebras' only model was deleted.
+    "prefilter": ["groq", "gemini", "openrouter", "sambanova", "cloudflare"],
+    # Small fast NON-reasoning models first (gpt-oss "thinks" ~16s on one phrase).
+    "translate": ["gemini", "groq"],
+    "structured": ["groq", "gemini", "anthropic", "openai"],
+    # Self-hosted Qwen3-VL first (no fast free cloud alternative exists), then the
+    # free cloud pools; paid tail is final-retry only (see FREE_WALK_CAPABILITIES).
     "vision": ["local", "gemini", "sambanova", "openrouter", "deepseek", "openai"],
-    # 2026-07-18: "local" (self-hosted faster-whisper on this host) was put
-    # FIRST — free, private, no external rate limit, so a request never waits on
-    # groq's daily Whisper quota. 2026-07-26: MOVED BEHIND groq. On this box it
-    # is not a fast path at all:
-    #   local  131-168 SECONDS per transcription, 35 timeouts vs 23 successes/24h
-    #   groq   753-1150 ms — ~150x faster, also free
-    # It runs on WHISPER_CPU_THREADS=1 / cpus=1.0 because the host has only 2
-    # cores at load ~1.7 (raising that OOM'd before — see docs/deploy-ops.md), so
-    # the slowness is structural, not tunable. Leading with it meant every
-    # request burned up to the 180s ASR timeout BEFORE falling through, and those
-    # fall-throughs are what drained groq's daily quota — after which nothing was
-    # left and callers got no answer at all (Stepan, 2026-07-26: local cooling +
-    # groq quota-exhausted until 00:00 UTC + gemini rate-limited, and openai
-    # unreachable since no key carries llm:audio).
-    # Order now: fast-and-free first, local as the backstop for when groq's daily
-    # quota IS exhausted — which is exactly the case it was added for.
+    # groq ~150x faster than local whisper on this host, also free; local is the
+    # backstop for when groq's daily quota is spent.
     "transcription": ["groq", "local", "gemini", "openai"],
-    # voyage stays primary; cohere as fallback for embed when voyage is down.
+    # voyage primary; cohere is the fallback when voyage is down.
     "embedding": ["voyage", "cohere"],
-    # 2026-09-23: typed decisions (TypeSafe Jev) — a choice/score/yes-no
-    # answer with calibrated probabilities, not generated text. OpenRouter
-    # is the only host. Served on PAID keys only (run_decision passes
-    # require_tier="paid"): the spend must land on the account that holds the
-    # prepaid credit and its spend limit. NB a $0 free-tier key is NOT refused
-    # (measured 2026-09-23: 200 OK, cost booked) — so this is a routing
-    # choice, not a workaround for errors. See providers/decisions.py.
+    # Typed decisions: OpenRouter is the only host, PAID keys only (see run_decision).
     "decision": ["openrouter"],
 }
 
@@ -296,14 +78,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
 CAPABILITY_SCOPE: dict[Capability, str] = {
     "chat:fast": "llm:chat",
     "chat:smart": "llm:chat",
-    # chat:sales reuses llm:chat rather than a dedicated scope: every provider in
-    # its chain (anthropic/deepseek/gemini/sambanova) already carries llm:chat,
-    # and stepan2 already holds it — so the lane works with ZERO key/project
-    # re-scoping and no risk of a mis-scoped key silently dropping out of the
-    # chain. Client picks the lane per-request via ?capability=chat:sales; cost
-    # is bounded by the Sonnet key's own daily cap, not by scope gating. (If a
-    # truly reserved/gated lane is ever wanted, swap this to a new "llm:sales"
-    # scope and add it to stepan2 + each chain key's scopes.)
+    # chat:sales reuses llm:chat: every provider in its chain already carries it,
+    # so the lane works with zero re-scoping; cost is bounded by the key's own cap.
     "chat:sales": "llm:chat",
     "chat:code": "llm:chat",
     "chat:edit": "llm:edit",
@@ -314,76 +90,26 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "vision": "llm:vision",
     "transcription": "llm:audio",
     "embedding": "llm:embed",
-    # Its own scope, not llm:chat: the lane is paid and a project must
-    # opt in explicitly — holding llm:chat must not silently grant it.
+    # Its own scope: the lane is paid and a project must opt in explicitly.
     "decision": "llm:decision",
 }
 
 
 def usable_scopes_for_provider(provider: str) -> frozenset[str]:
     """Scopes this provider can ACTUALLY serve — it must be in the capability's
-    chain AND have a model wired for it. Any other scope on its key is inert:
-    the broker never reaches that provider for that capability, so the checkbox
-    only misleads the operator (anthropic + `llm:audio` — Claude has no
-    speech-to-text at all; anthropic + `llm:vision` — it HAS a vision model but
-    was dropped from the vision chain after 400-ing on image URLs, 2026-07-01).
-    Imported lazily: chains is a leaf table module and must not drag litellm in
-    at import time — only the dashboard calls this."""
-    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
-    models = DEFAULT_MODEL.get(provider, {})
+    chain AND have a model wired for it. Any other scope on its key is inert and
+    only misleads the operator (anthropic + `llm:audio`, ...)."""
     return frozenset(
         CAPABILITY_SCOPE[cap]
         for cap, chain in CAPABILITY_CHAINS.items()
-        if provider in chain and cap in models
+        if provider in chain and model_for(provider, cap)
     )
 
 
-# Providers billed per-token (a paid-tier key). The job queue's final-retry
-# paid_only escalation is only meaningful for a capability whose chain reaches
-# one of these with a wired model — otherwise (e.g. chat:deep is nvidia-only)
-# demanding a paid key is a guaranteed no-op.
-PAID_PROVIDERS: frozenset[str] = frozenset({"deepseek", "anthropic", "openai"})
-
-
 # Capabilities whose regular walk is FREE providers only; the paid tail is
-# reachable solely through the job queue's final-retry paid_only escalation.
-# 2026-09-12 (owner: "пусть будет долго, но бесплатно"): vision is vera's
-# bulk backfill — hundreds of images a day that nobody waits on. A busy local
-# slot or a rate-limited free pool must mean "wait and retry", never "pay
-# deepseek now"; the paid tail exists so the 8th attempt still gets an
-# answer, not so the 1st one does. chat:smart/sales keep their paid anchors
-# — those are money lanes with a person waiting.
+# reachable solely through the job queue's final-retry paid_only escalation
+# (vision is a bulk backfill nobody waits on: slow-but-free beats fast-but-paid).
 FREE_WALK_CAPABILITIES: frozenset[str] = frozenset({"vision"})
-
-
-def provider_of_model(model: str | None) -> str | None:
-    """The provider a caller-pinned model belongs to, or None when the model
-    carries no provider prefix we know.
-
-    SAFETY, not convenience (2026-09-26). A pinned model does NOT pin the key:
-    `run_chat` walks the capability's chain as usual and hands the pinned string
-    to whichever provider it picks. LiteLLM then routes by the model's OWN
-    prefix, so `model="openrouter/…"` reached OpenRouter carrying a groq or
-    gemini key — a 401, which `_penalize` classifies as `auth` and answers with
-    `mark_dead`. One client request pinning an openrouter model could therefore
-    kill every healthy groq/gemini/cohere key ahead of openrouter in the chain
-    (~20 keys on the chat:fast chain) before the walk ever reached the right
-    one. Callers pin models legitimately (a specific gemini version, an
-    OpenRouter router model), so the fix is to keep the walk inside the owning
-    provider instead of forbidding the pin.
-
-    Deliberately NOT reusing tool_contract.tool_model_provider: that one raises
-    for anything it cannot qualify because a native tool call must never
-    cross-route. Here an unqualified string is normal — a bare model name
-    ("gemini-2.5-flash") means "this model on whatever provider the chain
-    picks", which is how pinning behaved before this existed."""
-    if not model:
-        return None
-    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
-    provider, separator, name = model.partition("/")
-    if separator and name.strip() and provider in DEFAULT_MODEL:
-        return provider
-    return None
 
 
 def free_first_walk(capability: str, chain: list[str], *, paid_only: bool) -> list[str]:
@@ -391,17 +117,17 @@ def free_first_walk(capability: str, chain: list[str], *, paid_only: bool) -> li
     this is not the final paid_only attempt; otherwise `chain` unchanged."""
     if paid_only or capability not in FREE_WALK_CAPABILITIES:
         return chain
-    return [p for p in chain if p not in PAID_PROVIDERS]
+    paid = paid_providers()
+    return [p for p in chain if p not in paid]
 
 
 def has_paid_tail(capability: Capability) -> bool:
     """True if `capability`'s chain reaches a paid provider with a wired model —
     the only case where the job queue's final-retry paid_only escalation can do
-    anything. Imported lazily (leaf table module must not drag litellm in at
-    import time)."""
-    from aibroker.providers.litellm_adapter import model_for
+    anything."""
+    paid = paid_providers()
     return any(
-        p in PAID_PROVIDERS and model_for(p, capability)
+        p in paid and model_for(p, capability)
         for p in CAPABILITY_CHAINS.get(capability, [])
     )
 
@@ -424,94 +150,37 @@ def scope_for(capability: Capability) -> str:
     return CAPABILITY_SCOPE[capability]
 
 
-# Providers whose default model emits malformed JSON at a meaningful rate on
-# structured/JSON requests: cerebras gpt-oss (~4.6k/wk InvalidJSON before it was
-# pulled from `structured`), cohere command-r7b, and openrouter's gpt-oss:free.
-# groq runs the same gpt-oss but shows ~0 InvalidJSON at volume (grammar-
-# constrained JSON mode), so it stays reliable. mistral-small is borderline but
-# is our free workhorse (≈0 on chat), so it's not demoted. Kept in the chain as
-# a last resort (a maybe-malformed retry still beats a 503) but pushed behind
-# the JSON-reliable providers whenever the caller asks for JSON.
-#
-# 2026-09-07: groq ADDED. The note above ("~0 InvalidJSON at volume, grammar-
-# constrained JSON mode") was true when written and is now the problem: groq's
-# grammar mode rejects the request server-side with 400 "Failed to validate
-# JSON. Please adjust your prompt" — a BadRequestError, so it never showed up
-# as InvalidJSON in our gate. Measured over 7 days on all four groq keys:
-#   structured  553 ok / 383 BadRequestError   (41% of attempts wasted)
-#   chat:fast  2203 ok / 258 BadRequestError
-# 641 guaranteed-failed attempts a week, each costing latency before the walk
-# moves on. Plain-text groq traffic is unaffected — this only reorders JSON
-# requests, exactly like cohere/openrouter.
-JSON_UNRELIABLE_PROVIDERS: frozenset[str] = frozenset(
-    {"cerebras", "cohere", "openrouter", "groq"}
-)
-
-# Providers with ZERO response_format support — not "often malformed" but
-# structurally incapable of a JSON instruction, so a JSON request to them is a
-# 100%-guaranteed billed-but-unusable body. These are EXCLUDED from the
-# effective chain on JSON requests (unlike JSON_UNRELIABLE_PROVIDERS, which
-# are merely deprioritized — a maybe-malformed retry still beats a 503; a
-# certainly-malformed one never does).
-#
-# 2026-07-05: zai — confirmed via
-# `litellm.get_supported_openai_params(model="glm-4.5-flash",
-# custom_llm_provider="zai")`: no `response_format` in the supported list at
-# all. litellm.drop_params=True (broker-wide) SILENTLY strips it on every
-# call, so the model never even receives an instruction to emit JSON.
-# Confirmed live (request #871336): 200 OK, unparseable body.
-# 2026-07-16: deprioritizing wasn't enough — measured 44 InvalidJSON/45min
-# from zai as JSON traffic overflowed to the chain tail, each one a wasted
-# billed call. Promoted from deprioritize to exclude.
-JSON_INCAPABLE_PROVIDERS: frozenset[str] = frozenset({"zai"})
-
-
 def deprioritize_for_json(chain: list[str]) -> list[str]:
-    """Shape `chain` for a JSON request: drop the JSON_INCAPABLE_PROVIDERS
-    (they can never return usable JSON), then stable-partition the rest —
-    JSON-reliable providers first (original order), JSON_UNRELIABLE_PROVIDERS
-    after (original order). Cuts InvalidJSON waste at the source instead of
-    after the wasted call. Plain-text requests never come through here, so
-    incapable providers still serve those."""
-    capable = [p for p in chain if p not in JSON_INCAPABLE_PROVIDERS]
-    reliable = [p for p in capable if p not in JSON_UNRELIABLE_PROVIDERS]
-    unreliable = [p for p in capable if p in JSON_UNRELIABLE_PROVIDERS]
-    return reliable + unreliable
+    """Shape `chain` for a JSON request: drop providers that can never return
+    usable JSON (json_reliability="incapable"), then stable-partition the rest —
+    reliable first, "unreliable" after (a maybe-malformed retry still beats a
+    503). Plain-text requests never come through here."""
+    incapable = providers_with_json("incapable")
+    unreliable = providers_with_json("unreliable")
+    capable = [p for p in chain if p not in incapable]
+    return ([p for p in capable if p not in unreliable]
+            + [p for p in capable if p in unreliable])
 
 
 def deprioritize_deepseek_for_savings(chain: list[str], *, should_defer: bool) -> list[str]:
     """Sink deepseek behind any FREE provider that already follows it in
     `chain`, when `should_defer` is True — the caller decides why (deepseek's
-    own DeepSeek-announced peak-hour 2x surcharge, see providers/peak_pricing.
-    py, and/or a big-JSON prompt of the size that empties DeepSeek's body, see
-    providers/adapters.is_deepseek_big_json_prompt). Only
-    `chat:smart` puts deepseek at the HEAD of the chain (its cache-warm-anchor
-    design, 2026-07-17) — every other chain already positions deepseek after
-    its free tier, so this is a no-op there by construction (checked via "does
-    any free provider currently sit after deepseek", not a capability check).
-
-    2026-07-22: deepseek-v4-pro was 92.6% of stepan2's entire daily spend, and
-    63.8% of TODAY's deepseek cost landed in its own peak-pricing hours (UTC
-    01-04/06-10 — unfortunately WIB 08-11/13-17, Jakarta's real lead-inquiry
-    hours) despite fewer calls there than off-peak. Free JSON-capable
-    providers (gemini, sambanova's DeepSeek-V3.2) already serve the same big
-    prompts for $0 in testing — giving them first shot before paying either
-    surcharge, escalating to deepseek only when free genuinely fails, is pure
-    savings with no reliability cost (deepseek stays the fallback anchor, not
-    removed).
-
-    Only deepseek and the providers AFTER it move: anything deliberately placed
-    AHEAD of deepseek (chat:sales leads with anthropic Sonnet) keeps its lead —
-    the free tail is promoted past deepseek, deepseek sinks below it, and the
-    prefix is untouched. So this is safe to apply to every chain: it can never
-    demote a leading premium provider, only reorder deepseek vs the free tail
-    that already trailed it."""
+    peak-hour 2x surcharge, a big-JSON prompt that empties its body, or a
+    provider-side empty-body storm). Only deepseek and the providers AFTER it
+    move: anything deliberately placed AHEAD of deepseek (chat:sales leads with
+    anthropic Sonnet) keeps its lead, so this is safe to apply to every chain."""
     if not should_defer or "deepseek" not in chain:
         return chain
     idx = chain.index("deepseek")
     prefix, suffix = chain[:idx], chain[idx + 1:]
-    free_after = [p for p in suffix if p not in PAID_PROVIDERS]
+    paid = paid_providers()
+    free_after = [p for p in suffix if p not in paid]
     if not free_after:
         return chain  # no free provider follows deepseek — nothing to gain
-    paid_after = [p for p in suffix if p in PAID_PROVIDERS]
+    paid_after = [p for p in suffix if p in paid]
     return [*prefix, *free_after, "deepseek", *paid_after]
+
+
+def provider_rank(provider: str) -> int:
+    """Fixed provider order for tie-breaking (ProviderSpec.rank)."""
+    return spec_or_default(provider).rank

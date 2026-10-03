@@ -6,7 +6,7 @@ Sending it is a guaranteed wasted call that just delays the request until
 the chain falls through to a provider that can handle it.
 
 Design (no hardcoded sole-source):
-  - SEED_MAX_REQUEST_TOKENS is a bootstrap guess used ONLY until the provider
+  - ProviderSpec.max_request_tokens is a bootstrap guess used ONLY until the provider
     teaches us its real ceiling.
   - When a provider rejects a request as "too large" (413 / context length /
     request-too-large), `is_too_large_error` flags it and the orchestrator
@@ -22,20 +22,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# Bootstrap seeds — used only until a real rejection is observed per provider.
-# None ⇒ no known ceiling (large-context providers: cerebras, gemini, mistral…).
-SEED_MAX_REQUEST_TOKENS: dict[str, int | None] = {
-    "groq": 8_000,        # free TPM ≈ 8k → a single bigger request always 413/429
-    "cerebras": None,
-    "gemini": None,
-    "mistral": None,
-    "cohere": None,
-    "openrouter": None,
-    "deepseek": None,
-    "anthropic": None,
-    "openai": None,
-    "voyage": None,
-}
+from aibroker.providers.registry import spec_or_default
+
+# Bootstrap seeds live on ProviderSpec.max_request_tokens (None = no known ceiling).
 
 # Safety margin so a prompt that just barely fits doesn't overflow once the
 # model's own output + overhead is added.
@@ -130,7 +119,7 @@ def effective_ceiling(provider: str, learned: int | None) -> int | None:
     """min(learned, seed) — whichever is the tighter known ceiling.
     None ⇒ no ceiling known from either source (provider handles large
     context fine)."""
-    seed = SEED_MAX_REQUEST_TOKENS.get(provider)
+    seed = spec_or_default(provider).max_request_tokens
     candidates = [c for c in (learned, seed) if c is not None]
     return min(candidates) if candidates else None
 

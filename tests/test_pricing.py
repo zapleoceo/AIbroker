@@ -9,33 +9,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from aibroker.providers import litellm_adapter as a
+from aibroker.providers import cost as a
+from aibroker.providers import litellm_client
 from aibroker.providers.pricing import (
     audio_surcharge,
     is_priced,
     reported_cost,
 )
+from aibroker.providers.registry import all_models, model_spec
 
 
 def _routable_models() -> set[str]:
-    models: set[str] = set()
-    for per_cap in a.DEFAULT_MODEL.values():
-        models.update(per_cap.values())
-    for per_cap in a.MODEL_ROTATION.values():
-        for rotation in per_cap.values():
-            models.update(rotation)
-    return models
+    return {m.id for m in all_models() if m.capabilities}
 
 
 @pytest.mark.parametrize("model", sorted(_routable_models()))
 def test_every_routable_model_has_a_price(model):
-    """Adding a model to DEFAULT_MODEL/MODEL_ROTATION without a price (LiteLLM
+    """Adding a model to a ProviderSpec without a price (LiteLLM
     map, a register_model entry, or the per-minute ASR table) blinds the cost
     caps for it. Free models must be registered at 0.0, not left out."""
-    if model.split("/", 1)[0] == "local":
-        return  # self-hosted: no external bill
-    if model in a._WHISPER_USD_PER_MIN:
-        return  # priced per audio minute
+    spec = model_spec(model)
+    if spec.pricing in ("local", "per_minute"):
+        return  # self-hosted, or priced per audio minute (ModelSpec.usd_per_minute)
     assert is_priced(model), f"{model} has no pricing - register it (see docs/pricing.md)"
 
 
@@ -64,7 +59,7 @@ def test_groq_whisper_bills_ten_second_minimum():
 
 def test_gemini_transcribe_rate_is_input_plus_output_per_minute():
     # $0.003/min audio in + $0.002/min text out (ai.google.dev pricing, 2026-10-03)
-    assert a._WHISPER_USD_PER_MIN["gemini/gemini-3.5-transcribe"] == pytest.approx(0.003 + 0.002)
+    assert model_spec("gemini/gemini-3.5-transcribe").usd_per_minute == pytest.approx(0.003 + 0.002)
 
 
 def test_audio_tokens_priced_at_audio_rate_from_override_table():
@@ -91,6 +86,6 @@ def test_reported_cost_shapes():
 
 
 def test_prefer_reported_cost_only_for_openrouter():
-    assert a._prefer_reported_cost("openrouter/x/y", {"cost": 0.5}, 0.1) == 0.5
-    assert a._prefer_reported_cost("openrouter/x/y", {}, 0.1) == 0.1
-    assert a._prefer_reported_cost("groq/x", {"cost": 0.5}, 0.1) == 0.1
+    assert litellm_client._prefer_reported_cost("openrouter/x/y", {"cost": 0.5}, 0.1) == 0.5
+    assert litellm_client._prefer_reported_cost("openrouter/x/y", {}, 0.1) == 0.1
+    assert litellm_client._prefer_reported_cost("groq/x", {"cost": 0.5}, 0.1) == 0.1

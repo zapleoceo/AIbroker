@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import time
 
-from aibroker.providers.quotas import PROVIDER_QUOTAS
+from aibroker.providers.registry import quotas
+
+PROVIDER_QUOTAS = quotas()
 from aibroker.routing import selector
 from aibroker.routing.selector import (
-    _affinity_for,
-    _note_affinity,
     _quota_values_sql,
     _recover_set_sql,
     _saturation_order_params,
@@ -29,59 +29,6 @@ def test_recover_sql_empty_on_error_status():
 
 def test_recover_sql_empty_when_error_kind_set_despite_ok():
     assert _recover_set_sql("ok", "InvalidJSON") == ""
-
-
-# ─── cache-affinity map (_note_affinity / _affinity_for) ──────────────────────
-
-
-def test_affinity_round_trip():
-    selector._affinity.clear()
-    _note_affinity(1, "deepseek", 42)
-    assert _affinity_for(1, "deepseek") == 42
-    assert _affinity_for(1, "gemini") is None       # other provider — no pin
-    assert _affinity_for(2, "deepseek") is None     # other project — no pin
-    assert _affinity_for(None, "deepseek") is None  # callers without a project
-
-
-def test_affinity_last_success_wins():
-    selector._affinity.clear()
-    _note_affinity(1, "deepseek", 42)
-    _note_affinity(1, "deepseek", 43)
-    assert _affinity_for(1, "deepseek") == 43
-
-
-def test_affinity_expires_after_ttl(monkeypatch):
-    selector._affinity.clear()
-    _note_affinity(7, "gemini", 9)
-    monkeypatch.setattr(selector, "_AFFINITY_TTL_S", -1.0)
-    assert _affinity_for(7, "gemini") is None
-    assert (7, "gemini") not in selector._affinity  # expired entries are dropped
-
-
-# ─── shared (Redis-backed) wrappers — in-process fallback path ────────────────
-
-
-async def test_shared_wrappers_fall_back_in_process(monkeypatch):
-    monkeypatch.setenv("REDIS_URL", "")  # shared store disabled
-    selector._affinity.clear()
-    await selector.note_affinity_shared(1, "deepseek", 42)
-    assert await selector._affinity_for_shared(1, "deepseek") == 42
-    assert await selector._affinity_for_shared(None, "deepseek") is None
-    assert await selector._affinity_for_shared(2, "deepseek") is None
-
-
-async def test_shared_affinity_wins_over_in_process(monkeypatch):
-    selector._affinity.clear()
-    _note_affinity(1, "deepseek", 42)
-
-    async def fake_get(project_id: int, provider: str) -> int | None:
-        return 99 if (project_id, provider) == (1, "deepseek") else None
-
-    monkeypatch.setattr(selector.shared_state, "get_affinity", fake_get)
-    assert await selector._affinity_for_shared(1, "deepseek") == 99
-    # Shared miss (other project) still falls through to the local dict.
-    _note_affinity(2, "deepseek", 7)
-    assert await selector._affinity_for_shared(2, "deepseek") == 7
 
 
 # ─── saturation-cache helpers ────────────────────────────────────────────────

@@ -7,6 +7,8 @@ import re
 
 import httpx
 
+from aibroker.providers.registry import spec_or_default
+
 log = logging.getLogger(__name__)
 
 
@@ -36,11 +38,11 @@ async def probe_with_headers(
     last_error wiped), so it flapped pick→fail→dead→revive forever
     (cloudflare, caught 2026-07-16). "skip" tells the monitor to leave the
     key's state exactly as real traffic left it."""
-    cfg = _PROBES.get(provider)
+    cfg = spec_or_default(provider).probe
     if cfg is None:
         return "skip", 0, "no probe configured", {}
 
-    req = cfg(plain_key, account_id)
+    req = cfg.build(plain_key, account_id)
     if req is None:
         return "skip", 0, "unprobeable key (missing account_id)", {}
     method, url, headers, body = req
@@ -150,15 +152,15 @@ def extract_quota_headers(
     Returns (None, None) when the provider doesn't expose these. Per-provider
     header names cribbed from each provider's docs as of 2026-06-28.
     """
-    if provider == "anthropic":
+    if spec_or_default(provider).quota_headers == "anthropic":
         return (
             _read_int(headers, "anthropic-ratelimit-requests-limit"),
             _read_int(headers, "anthropic-ratelimit-tokens-limit"),
         )
     # OpenAI-compat family (groq, openai, deepseek, mistral, openrouter, cerebras,
     # sambanova — confirmed same x-ratelimit-limit-requests-day header live 2026-07-04)
-    if provider in ("cerebras", "groq", "openai", "deepseek",
-                     "mistral", "openrouter", "sambanova"):
+    spec = spec_or_default(provider)
+    if spec.quota_headers == "openai":
         req = _read_int(headers, "x-ratelimit-limit-requests-day",
                           "x-ratelimit-limit-requests-1d")
         if req is None:
@@ -172,130 +174,14 @@ def extract_quota_headers(
         # cerebras' requests-day header (2400 for gpt-oss-120b) isn't a hard
         # cap — a single key logged 4,866 req without a 429. It meters on
         # tokens, so drop the req axis to avoid a false >100% on the dashboard.
-        if provider == "cerebras":
+        if not spec.trust_req_header:
             req = None
         return req, tok
     # gemini / cohere / voyage — no documented daily-limit headers
     return None, None
 
 
-def _bearer(k: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {k}", "content-type": "application/json"}
-
-
-# FREE-QUOTA probes (2026-10-03 review). A generation probe spends one of the
-# key's metered calls on every sweep — and dead/in-cooldown keys are probed
-# EVERY sweep (auto-revive depends on it). Gemini's free tier is 20 requests/day
-# PER MODEL, so a generateContent probe on gemini-2.5-flash ate a real slice of
-# the same quota production traffic needs; cohere's trial is 1000 calls/MONTH
-# and mistral's plan allowance is monthly. Those providers (and openrouter's
-# :free pool, ~20-50/day) are probed through their free key-validation/list
-# endpoints instead: they authenticate the key but are not metered.
-# NOT switched, deliberately: PAID providers (anthropic/openai/deepseek) — a
-# list endpoint 200s for an out-of-credit key, so the monitor would revive a
-# billing-dead key every sweep (flap) where a 1-token generation detects it;
-# sambanova (its quota headers feed key-create discovery from the chat probe),
-# cloudflare/nvidia/zai/voyage/groq/cerebras (token- or neuron-metered, 1-token
-# probes are negligible).
-def _gemini_list_probe(k: str, _acc=None):
-    # Key in the x-goog-api-key header, NOT the URL query string — a key in the
-    # URL can leak into any proxy/exception that renders the request URL.
-    return ("GET", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
-            {"x-goog-api-key": k}, None)
-
-
-_PROBES = {
-    "cerebras": lambda k, _acc=None: ("POST", "https://api.cerebras.ai/v1/chat/completions",
-                            _bearer(k),
-                            {"model": "gpt-oss-120b",
-                             "messages": [{"role": "user", "content": "."}],
-                             "max_tokens": 1}),
-    "groq": lambda k, _acc=None: ("POST", "https://api.groq.com/openai/v1/chat/completions",
-                        _bearer(k),
-                        {"model": "openai/gpt-oss-120b",
-                         "messages": [{"role": "user", "content": "."}],
-                         "max_tokens": 1}),
-    # /auth/key validates the key and returns its limits — free, unmetered
-    # (the :free pool's ~20-50 requests/day must not be spent on liveness).
-    "openrouter": lambda k, _acc=None: ("GET", "https://openrouter.ai/api/v1/auth/key",
-                              _bearer(k), None),
-    # deepseek-v4-flash (matches DEFAULT_MODEL; deepseek-chat is deprecated
-    # 2026-07-24). thinking disabled to mirror production calls — the v4
-    # default is thinking mode, which at max_tokens=1 burns the whole budget
-    # on hidden reasoning (see _DeepseekAdapter).
-    "deepseek": lambda k, _acc=None: ("POST", "https://api.deepseek.com/chat/completions",
-                            _bearer(k),
-                            {"model": "deepseek-flash",  # V4.1, 2026-09-12
-                             "messages": [{"role": "user", "content": "."}],
-                             "max_tokens": 1,
-                             "thinking": {"type": "disabled"}}),
-    "anthropic": lambda k, _acc=None: ("POST", "https://api.anthropic.com/v1/messages",
-                             {"x-api-key": k, "anthropic-version": "2023-06-01",
-                              "content-type": "application/json"},
-                             {"model": "claude-haiku-4-5", "max_tokens": 1,
-                              "messages": [{"role": "user", "content": "."}]}),
-    "gemini": _gemini_list_probe,
-    # voyage-4, NOT voyage-3: the voyage-3 family has zero free-token allocation
-    # (real $ from token 1 — see litellm_adapter migration 2026-07-07), so a
-    # probe on voyage-3 billed real money every monitor sweep. voyage-4 has the
-    # 200M/month free allocation.
-    "voyage": lambda k, _acc=None: ("POST", "https://api.voyageai.com/v1/embeddings",
-                          _bearer(k),
-                          {"model": "voyage-4", "input": "."}),
-    "mistral": lambda k, _acc=None: ("GET", "https://api.mistral.ai/v1/models",
-                           _bearer(k), None),
-    # Cohere trial = 1000 calls/month: list models instead of a chat call.
-    "cohere": lambda k, _acc=None: ("GET", "https://api.cohere.com/v1/models?page_size=1",
-                          _bearer(k), None),
-    # 2026-07-04: confirmed live — 200 OK + x-ratelimit-limit-requests-day header.
-    "sambanova": lambda k, _acc=None: ("POST", "https://api.sambanova.ai/v1/chat/completions",
-                             _bearer(k),
-                             # 2026-09-12: gemma-4-31B-it — the Llama pool
-                             # 429s "high demand" on every call (see
-                             # DEFAULT_MODEL); probe what we actually route to.
-                             {"model": "gemma-4-31B-it",
-                              "messages": [{"role": "user", "content": "."}],
-                              "max_tokens": 1}),
-    # openai — probe with the cheapest current model. A revoked key 401s
-    # (correctly dead); a live key returns 200/429 (alive).
-    "openai": lambda k, _acc=None: ("POST", "https://api.openai.com/v1/chat/completions",
-                          _bearer(k),
-                          {"model": "gpt-4o-mini",
-                           "messages": [{"role": "user", "content": "."}],
-                           "max_tokens": 1}),
-    # Probe with nemotron — the ONLY confirmed-live nvidia model (it's the
-    # chat:deep default). It used to probe kimi-k2.6, but that model now 404s
-    # "Function not found for account" (removed from routing 2026-07-10), and a
-    # 404 fell through to the "alive/uncertain" catch-all — so a genuinely
-    # revoked nvidia key read as alive and never got flagged. nemotron is slow
-    # to GENERATE (~27s), but a revoked key 401s on auth *before* generation, so
-    # dead keys are still detected fast; only a live key's probe runs long.
-    "nvidia": lambda k, _acc=None: ("POST", "https://integrate.api.nvidia.com/v1/chat/completions",
-                          _bearer(k),
-                          {"model": "nvidia/nemotron-3-ultra-550b-a55b",
-                           "messages": [{"role": "user", "content": "."}],
-                           "max_tokens": 1}),
-    # 2026-07-05: confirmed live — 200 OK on glm-4.5-flash (the only free
-    # model on this account; glm-4.5/glm-4.5-air 429 with "Insufficient
-    # balance", so the probe deliberately targets the confirmed-free model).
-    "zai": lambda k, _acc=None: ("POST", "https://api.z.ai/api/paas/v4/chat/completions",
-                        _bearer(k),
-                        {"model": "glm-4.5-flash",
-                         "messages": [{"role": "user", "content": "."}],
-                         "max_tokens": 1}),
-    # cloudflare needs the account-scoped URL (same reason as the adapter's
-    # api_base — the account ID rides in the path, not a header). Without a
-    # probe here, probe_with_headers' old force-"alive" default resurrected
-    # dead cloudflare keys every sweep (2026-07-16). A key with no account_id
-    # can't be called at all → None → "skip" verdict, state left unchanged.
-    "cloudflare": lambda k, acc=None: None if not acc else (
-        "POST",
-        f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/v1/chat/completions",
-        _bearer(k),
-        {"model": "@cf/openai/gpt-oss-120b",
-         "messages": [{"role": "user", "content": "."}],
-         "max_tokens": 1}),
-}
+# Probe request shapes live on ProviderSpec.probe (providers/specs.py).
 
 
 async def probe_all(

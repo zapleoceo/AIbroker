@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from aibroker.providers.registry import spec_or_default
+
 # Substrings (lower-cased) that mean a provider throttled us — covers the
 # many shapes: '429', 'rate_limit' (underscore), 'ratelimiterror' (CamelCase
 # from litellm/cerebras), Google's 'resource_exhausted', and the quota
@@ -73,51 +75,9 @@ _BILLING_DEPLETED_SIGNS = (
     "insufficient balance",
 )
 
-# Provider-SCOPED signatures: applied ONLY when the failing key belongs to that
-# provider. These are narrow, provider-specific error strings we caught live;
-# putting them in the global lists risked mis-penalising an unrelated
-# provider's healthy key on a superficially-similar message (e.g. a request we
-# built wrong eliciting "invalid api parameter" would have mark_dead'd that
-# provider's key). Scoping keeps each fix surgical.
-_PROVIDER_RATE_LIMIT_SIGNS: dict[str, tuple[str, ...]] = {
-    # DeepSeek "This response_format type is unavailable now" — confirmed live
-    # (2026-07-05), hit every deepseek key identically (a provider-side feature
-    # outage, not one bad key), ~2510 wasted attempts/day. Not literally a rate
-    # limit, but the wanted behaviour (throttle, don't mark_dead — the
-    # credential is fine) is rate_limit's.
-    "deepseek": ("response_format type is unavailable",),
-    # Voyage "no payment method on file … reduced rate limits of 3 RPM and 10K
-    # TPM" — confirmed live (2026-07-07). The account is throttled to a lower
-    # ceiling, not dead/unauthorized: cooldown, don't mark_dead.
-    "voyage": ("reduced rate limits",),
-    # Mistral bare 401 "Unauthorized" — on OUR 7 accounts this is the monthly
-    # Vibe-plan call allowance being exhausted, NOT a revoked key (confirmed
-    # 2026-07 via Mistral's admin console; the API text is indistinguishable
-    # from a real revocation, so we treat every mistral 401 as monthly). Was
-    # classified `auth` → mark_dead (dashboard: "мёртв/auth failed") when the
-    # key is actually fine and returns on the billing-cycle reset. As a
-    # rate_limit it cools instead; `cooldown.cooldown_until` resolves it to
-    # next-month (see the provider-monthly rule there), and the key stays
-    # is_alive — the honest state: "monthly quota, resets DATE", not dead.
-    "mistral": ("unauthorized",),
-    # Cloudflare Workers AI free tier: "you have used up your daily free
-    # allocation of 10,000 neurons" — confirmed live 2026-07-12, minutes after
-    # the provider first became reachable (account_id fix): the daily quota is
-    # tiny and litellm wraps the 429-ish body in a generic APIConnectionError,
-    # so the classifier fell through and the key was marked dead ("мёртв") for
-    # what is a DAILY quota that resets at 00:00 UTC. rate_limit + the
-    # daily-quota cooldown rule park it until midnight, keeping the key alive.
-    "cloudflare": ("daily free allocation", "neurons"),
-}
-_PROVIDER_AUTH_SIGNS: dict[str, tuple[str, ...]] = {
-    # zai "Invalid API parameter, please check the documentation" — confirmed
-    # live during the 2026-07-07 incident: key "eatmeat" hit it on 3141 of
-    # ~3189 attempts (98.5%) while every other zai key succeeded normally. A
-    # persistent per-account config problem, not transient: mark_dead stops
-    # real traffic; the monitor's probe auto-revives it once fixed. Scoped to
-    # zai so a request-construction bug on another provider can't kill its key.
-    "zai": ("invalid api parameter",),
-}
+# Provider-SCOPED signatures (narrow strings that must not penalise another
+# provider's key) live on ProviderSpec: rate_limit_signs / auth_signs /
+# monthly_signs - see providers/specs.py; history in docs/history/provider-choices.md.
 
 
 # HTTP status as it appears in provider/litellm message bodies: "Error code:
@@ -208,7 +168,7 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
     # (auth) state, NOT a throttle; it must not fall through to rate_limit below.
     if any(s in emsg for s in _BILLING_DEPLETED_SIGNS):
         return "auth"
-    if provider and any(s in emsg for s in _PROVIDER_RATE_LIMIT_SIGNS.get(provider, ())):
+    if provider and any(s in emsg for s in spec_or_default(provider).rate_limit_signs):
         return "rate_limit"
     names = _exc_names(exc)
     attr = _attr_status(exc)
@@ -224,7 +184,7 @@ def classify_provider_error(exc: Exception, provider: str | None = None) -> str:
             return "rate_limit"
         if _AUTH_WORD_RE.search(emsg):
             return "auth"
-    if provider and any(s in emsg for s in _PROVIDER_AUTH_SIGNS.get(provider, ())):
+    if provider and any(s in emsg for s in spec_or_default(provider).auth_signs):
         return "auth"
     return "error"
 
@@ -317,12 +277,3 @@ _MONTHLY_QUOTA_MARKERS = (
     "calls / month",
     "monthly limit",
 )
-
-# Provider-scoped monthly signatures: strings that mean "monthly quota" for one
-# provider but nothing generic. mistral's bare 401 "Unauthorized" is its
-# monthly Vibe-plan exhaustion on our accounts (see
-# _PROVIDER_RATE_LIMIT_SIGNS["mistral"] above) — indistinguishable from a
-# revoked key in the API text, so scoped to mistral only.
-_PROVIDER_MONTHLY_SIGNS: dict[str, tuple[str, ...]] = {
-    "mistral": ("unauthorized",),
-}

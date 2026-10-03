@@ -14,10 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import aibroker.providers.decisions as dec
+import aibroker.services.attempt as att
 import aibroker.services.llm_service as svc
 from aibroker.main import app
 from aibroker.providers.provider_errors import classify_provider_error
 from aibroker.routing.chains import CAPABILITY_CHAINS, scope_for
+from aibroker.routing.cost_guard import CostGuardError
 from tests.test_routes_proxy import _make_project
 
 client = TestClient(app)
@@ -124,6 +126,10 @@ async def test_http_error_keeps_the_provider_body(monkeypatch):
 # ─── run_decision ────────────────────────────────────────────────────────
 
 
+def _project_cap():
+    return CostGuardError("project", 1.0, 1.0, 0.1)
+
+
 def _paid_key(kid=1):
     return SimpleNamespace(id=kid, label=f"paid{kid}", tier="paid",
                            provider="openrouter", token_encrypted="x")
@@ -139,13 +145,13 @@ def _wire(monkeypatch, *, picks, decide, record=None, reserve=None):
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
     monkeypatch.setattr(svc, "decide", decide)
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
-    monkeypatch.setattr(svc, "_reserve_or_block", reserve or AsyncMock(return_value=None))
-    monkeypatch.setattr(svc, "release_cost", AsyncMock(return_value=None))
-    monkeypatch.setattr(svc, "_penalize", AsyncMock(return_value="error"))
-    monkeypatch.setattr(svc, "_record_error", AsyncMock(return_value=None))
-    monkeypatch.setattr(svc, "note_affinity_shared", AsyncMock(return_value=None))
-    monkeypatch.setattr(svc, "record_usage", record or AsyncMock(return_value=77))
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", reserve or AsyncMock(return_value=None))
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", AsyncMock(return_value=None))
+    monkeypatch.setattr("aibroker.services.attempt._penalize", AsyncMock(return_value="error"))
+    monkeypatch.setattr("aibroker.services.attempt._record_error", AsyncMock(return_value=None))
+    monkeypatch.setattr("aibroker.services.attempt.affinity.note_success", AsyncMock(return_value=None))
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", record or AsyncMock(return_value=77))
     return calls
 
 
@@ -228,7 +234,7 @@ async def test_spent_project_cap_stops_before_the_provider_is_called(monkeypatch
     provider = AsyncMock()
 
     async def blocked(**kw):
-        raise svc._CapBlocked(fatal=True)
+        raise _project_cap()
     _wire(monkeypatch, picks=[_paid_key()], decide=provider, reserve=blocked)
     with pytest.raises(svc.DecisionFailed, match="budget cap"):
         await svc.run_decision(project=SimpleNamespace(id=1, name="vera"),
@@ -285,22 +291,22 @@ async def test_jev_failure_falls_back_on_the_same_key(monkeypatch):
     assert out.model == _FB and out.cost_usd == 0.0 and out.key_label == "paid1"
     assert out.model_served == "inception/mercury-decide-20260930"
     # one error row for Jev, one ok row for the fallback
-    assert svc._record_error.await_count == 1
-    assert svc._record_error.await_args.kwargs["model"] == _JEV
+    assert att._record_error.await_count == 1
+    assert att._record_error.await_args.kwargs["model"] == _JEV
     assert record.await_args.kwargs["model"] == _FB
     assert record.await_args.kwargs["status"] == "ok"
-    assert svc._penalize.await_count == 1  # Jev's failure only
+    assert att._penalize.await_count == 1  # Jev's failure only
 
 
 async def test_fatal_cap_block_still_gets_a_free_answer(monkeypatch):
     fake, seen = _decide_by_model()
-    reserve = AsyncMock(side_effect=svc._CapBlocked(fatal=True))
+    reserve = AsyncMock(side_effect=_project_cap())
     _wire(monkeypatch, picks=[_paid_key()], decide=fake, reserve=reserve)
     out = await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
                                  model=None, workflow=None)
     assert seen == [_FB] and out.model == _FB
     assert reserve.await_count == 1  # Jev only; the $0 fallback is never reserved
-    assert reserve.await_args.kwargs["model"] == _JEV
+    assert reserve.await_args.kwargs["estimated_cost"] > 0
 
 
 async def test_jev_and_fallback_both_failing_raises_decision_failed(monkeypatch):
@@ -312,8 +318,8 @@ async def test_jev_and_fallback_both_failing_raises_decision_failed(monkeypatch)
                                model=None, workflow=None)
     assert seen == [_JEV, _FB, _JEV, _FB]
     # Jev row + fallback row per key; the key is penalised once per key, not twice
-    assert svc._record_error.await_count == 4
-    assert svc._penalize.await_count == 2
+    assert att._record_error.await_count == 4
+    assert att._penalize.await_count == 2
 
 
 async def test_fallback_failure_never_penalises_the_decision_key(monkeypatch):
@@ -322,15 +328,15 @@ async def test_fallback_failure_never_penalises_the_decision_key(monkeypatch):
     paid quota for Jev has nothing to do with Mercury's free one. Only a usage
     row is booked; the fatal cap still surfaces as DecisionFailed."""
     fake, seen = _decide_by_model(fb_exc=RuntimeError("429 rate limit"))
-    reserve = AsyncMock(side_effect=svc._CapBlocked(fatal=True))
+    reserve = AsyncMock(side_effect=_project_cap())
     _wire(monkeypatch, picks=[_paid_key()], decide=fake, reserve=reserve)
     with pytest.raises(svc.DecisionFailed):
         await svc.run_decision(project=_PROJ, state="s", questions={"u": NOUL},
                                model=None, workflow=None)
     assert seen == [_FB]
-    assert svc._penalize.await_count == 0
-    assert svc._record_error.await_count == 1
-    assert svc._record_error.await_args.kwargs["model"] == _FB
+    assert att._penalize.await_count == 0
+    assert att._record_error.await_count == 1
+    assert att._record_error.await_args.kwargs["model"] == _FB
 
 
 async def test_pinned_model_never_falls_back(monkeypatch):

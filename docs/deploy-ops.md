@@ -143,6 +143,14 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+Migration 015 (2026-10-03, core refactor) adds `usage_log.request_id VARCHAR(64)` and a
+partial index `ix_usage_request_id` — the request trace behind the `X-Request-Id`
+header. `record_usage` degrades gracefully (drops only the column the live schema lacks,
+warns once) if the code lands first, but apply it before deploying so the trail is
+recorded from the first request. The index line should be run separately with
+`CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
+`AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —
@@ -293,7 +301,7 @@ provides everything the asr-local wrapper had to hand-roll: an OpenAI-shaped
 idle unload, `/health` that is exempt from the idle timer (so the compose
 healthcheck cannot keep the model awake), and `response_format: json_schema`
 for grammar-constrained output. All broker-side logic lives in
-`providers/litellm_adapter._describe_via_local_vision`.
+`providers/local_vision._describe_via_local_vision`.
 
 **Model is MOUNTED, not baked into an image.** Deploys build on the production
 host inside a 10-minute CI step (`/usr/local/bin/aibroker-deploy`); pulling

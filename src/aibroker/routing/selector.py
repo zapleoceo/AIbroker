@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
 from aibroker.db.resilience import retry_terminal_write
+from aibroker.providers.registry import cache_sticky_providers
 from aibroker.routing import circuit, shared_state
+from aibroker.routing.affinity import _affinity_for_shared
 
 log = logging.getLogger(__name__)
 
@@ -28,15 +30,8 @@ log = logging.getLogger(__name__)
 # another ~60s answerless call (2026-07-16 free-pool timeout storm).
 _TIMEOUT_STORM_MIN_KEYS = 2
 
-# Providers whose prompt cache is PER-KEY (per-account) AND that carry a paid,
-# high-throughput API with no tight per-key RPM limit. For these, keeping ALL of
-# a project's traffic on ONE key (a warm cache-hit input is ~50x cheaper on
-# deepseek) beats the LRU spread the normal pick does — so the sticky fast path
-# pins to the affinity key directly instead of letting SKIP-LOCKED scatter a
-# burst across keys (each a cold cache). Free/RPM-limited providers (cerebras,
-# groq, …) are excluded: concentrating them would hit rate limits and their
-# cache gives no token discount anyway.
-_CACHE_STICKY_PROVIDERS = frozenset({"deepseek", "anthropic"})
+# Cache-sticky providers (per-key prompt cache + paid high-throughput API) are a
+# ProviderSpec flag — see registry.cache_sticky_providers().
 
 
 class SelectionError(Exception):
@@ -81,53 +76,7 @@ _INF = "999999999999"
 _SATURATION_TTL_S = 15.0
 _saturated: dict[str, Any] = {"ids": frozenset(), "fetched_at": float("-inf")}
 
-# Provider prompt caches (deepseek auto prefix-cache, gemini implicit) live
-# per ACCOUNT/key — pure random() rotation fragmented a project's stable
-# prompt prefix across every key, wasting hits (deepseek measured 56%, could
-# be much higher). Map (project_id, provider) → last successful key so repeat
-# traffic lands where the prefix is already warm. TTL ≈ provider cache
-# retention windows. Since 2026-07-16 the map is shared across workers/nodes
-# via routing/shared_state (Redis, fail-open); this dict stays as the
-# fallback for single-node / Redis-down / SQLite-test runs. TTL constant
-# lives in shared_state so both layers expire in step.
-_AFFINITY_TTL_S = shared_state.AFFINITY_TTL_S
-_affinity: dict[tuple[int, str], tuple[int, float]] = {}
-
-
-def _note_affinity(project_id: int, provider: str, api_key_id: int) -> None:
-    """Pin the key that just successfully served (project, provider).
-    Internal — services go through note_affinity_shared so the pin also
-    reaches the cross-worker store."""
-    _affinity[(project_id, provider)] = (api_key_id, time.monotonic())
-
-
-async def note_affinity_shared(project_id: int, provider: str, api_key_id: int) -> None:
-    """_note_affinity + publish the pin to the cross-worker store (fail-open)."""
-    _note_affinity(project_id, provider, api_key_id)
-    await shared_state.set_affinity(project_id, provider, api_key_id)
-
-
-async def _affinity_for_shared(project_id: int | None, provider: str) -> int | None:
-    """Cross-worker pin first; in-process dict as the fallback/miss path."""
-    if project_id is None:
-        return None
-    shared = await shared_state.get_affinity(project_id, provider)
-    if shared is not None:
-        return shared
-    return _affinity_for(project_id, provider)
-
-
-def _affinity_for(project_id: int | None, provider: str) -> int | None:
-    if project_id is None:
-        return None
-    entry = _affinity.get((project_id, provider))
-    if entry is None:
-        return None
-    api_key_id, noted_at = entry
-    if time.monotonic() - noted_at > _AFFINITY_TTL_S:
-        del _affinity[(project_id, provider)]
-        return None
-    return api_key_id
+# Cache affinity (key pin + route pin) lives in routing/affinity.py.
 
 
 def invalidate_saturation_cache() -> None:
@@ -136,14 +85,14 @@ def invalidate_saturation_cache() -> None:
 
 def _quota_values_sql() -> str:
     """VALUES rows for the defaults CTE — one (provider, req, tok) per seed."""
-    from aibroker.providers.quotas import PROVIDER_QUOTAS
+    from aibroker.providers.registry import quotas
 
     def q(v: int | None) -> str:
         return str(int(v)) if v else "NULL"
 
     return ",\n          ".join(
         f"('{p}', {q(quota.req_per_day)}, {q(quota.tok_per_day)})"
-        for p, quota in PROVIDER_QUOTAS.items()
+        for p, quota in quotas().items()
     )
 
 
@@ -219,6 +168,7 @@ async def pick_and_reserve(
     require_tier: str | None = None,
     project_id: int | None = None,
     models: Sequence[str] | None = None,
+    only_key_id: int | None = None,
 ) -> ApiKeyRow | None:
     """Pick the best available key for `provider` that supports `scope`.
 
@@ -236,6 +186,10 @@ async def pick_and_reserve(
     (api_key_model_cooldowns, see routing/model_cooldown) for ALL of them — one
     exhausted gemini model no longer parks the whole key, only the key that has
     no model left to try. Omit to ignore per-model cooldowns.
+
+    `only_key_id` asks for exactly that key (the route-affinity attempt: the key a
+    request family last succeeded on) — same availability filters, no rotation;
+    None when that key is unavailable, so the caller falls back to a normal pick.
 
     The returned row already has last_used_at advanced — so concurrent picks
     in another replica will see a different LRU order.
@@ -284,6 +238,13 @@ async def pick_and_reserve(
 
     where = " AND ".join(conds)
 
+    if only_key_id is not None:  # pragma: no cover — Postgres-only, exercised by test_selector.py
+        exact = text("UPDATE api_keys AS k SET last_used_at = now() "
+                     f"WHERE k.id = :only AND ({where}) RETURNING *")
+        async with get_session() as s:
+            erow = (await s.execute(exact, {**params, "only": only_key_id})).mappings().first()
+        return _hydrate_key_row(erow) if erow is not None else None
+
     # Cache-sticky fast path (2026-07-20): for deepseek/anthropic, pin ALL of the
     # project's traffic to the affinity key so its PER-KEY prompt cache stays hot.
     # The normal SKIP-LOCKED pick below scatters a concurrent burst across keys
@@ -294,7 +255,7 @@ async def pick_and_reserve(
     # limit). Falls through to the normal pick when the pinned key is unavailable
     # (cooled, or per-key cost cap spent). Excluded for require_tier="free": these
     # are paid-tier keys.
-    if provider in _CACHE_STICKY_PROVIDERS and affinity_id is not None and require_tier != "free":  # pragma: no cover — Postgres-only, exercised by test_selector.py
+    if provider in cache_sticky_providers() and affinity_id is not None and require_tier != "free":  # pragma: no cover — Postgres-only, exercised by test_selector.py
         sticky = text(f"UPDATE api_keys AS k SET last_used_at = now() "  # pragma: no cover
                       f"WHERE k.id = :aff AND ({where}) RETURNING *")  # pragma: no cover
         async with get_session() as s:  # pragma: no cover
@@ -420,48 +381,61 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
     return ""
 
 
-def _insert_sql(*, with_model_served: bool) -> str:
-    """The usage_log INSERT, with or without the migration-011 column."""
-    cols = "api_key_id, project_id, lease_id, provider, model, capability, workflow, "
-    vals = ":k, :p, :l, :pr, :m, :c, :w, "
-    if with_model_served:
-        cols = cols.replace("model, capability", "model, model_served, capability")
-        vals = vals.replace(":m, :c", ":m, :ms, :c")
-    return (
-        f"INSERT INTO usage_log ({cols}"
-        " tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
-        " cost_usd, latency_ms, status, error_kind, http_status) "
-        f"VALUES ({vals}:ti, :to, :cr, :cw, :co, :lm, :s, :e, :h) "
-        "RETURNING id"
-    )
+# usage_log columns added by later migrations. Each is (column, bind param); a
+# column the live schema does not have yet is dropped from the INSERT (the row
+# still HAS to be written — it feeds the daily cost caps) and warned about once.
+_OPTIONAL_USAGE_COLS: tuple[tuple[str, str], ...] = (
+    ("model_served", "ms"),     # migration 011
+    ("request_id", "rq"),       # migration 015
+)
 
 
-# Flips False the first time an INSERT hits a missing usage_log.model_served
-# (code deployed before migration 011). The row still HAS to be written — it
-# feeds the daily cost caps — so the insert is retried without the column and
-# the miss is warned about once. Same degradation shape as deep_jobs'
-# payload_hash (services/deep_jobs.py).
-_model_served_available = True
+def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
+    """The usage_log INSERT, minus any optional column the schema lacks."""
+    cols = ["api_key_id", "project_id", "lease_id", "provider", "model"]
+    vals = [":k", ":p", ":l", ":pr", ":m"]
+    for col, param in _OPTIONAL_USAGE_COLS:
+        if col not in missing:
+            cols.append(col)
+            vals.append(f":{param}")
+    cols += ["capability", "workflow", "tokens_in", "tokens_out", "cache_read_tokens",
+             "cache_write_tokens", "cost_usd", "latency_ms", "status", "error_kind",
+             "http_status"]
+    vals += [":c", ":w", ":ti", ":to", ":cr", ":cw", ":co", ":lm", ":s", ":e", ":h"]
+    return (f"INSERT INTO usage_log ({', '.join(cols)}) "
+            f"VALUES ({', '.join(vals)}) RETURNING id")
+
+
+# Optional columns found missing at runtime (code deployed before the migration).
+_missing_usage_cols: set[str] = set()
 
 
 _UNDEFINED_COLUMN_SQLSTATE = "42703"
 
 
-def _is_missing_model_served(exc: BaseException) -> bool:
-    """True only for "usage_log.model_served does not exist". Postgres reports
-    SQLSTATE 42703 (undefined_column); SQLAlchemy exposes it as `orig.sqlstate`/
-    `pgcode` (or on the asyncpg error in `__cause__`). SQLite has no SQLSTATE,
-    so there the "no such column" text is the only signal. Everything else
-    (connection loss, lock timeout, a different missing column) is transient or
-    a different bug and must not flip the process-lifetime flag."""
+def _missing_optional_columns(exc: BaseException) -> set[str]:
+    """Which OPTIONAL usage_log columns an INSERT error says are missing; empty
+    for anything else. Postgres reports SQLSTATE 42703 (undefined_column) on
+    `orig.sqlstate`/`pgcode` (or the asyncpg error in `__cause__`); SQLite has no
+    SQLSTATE, so there the "no such column" text is the only signal. Connection
+    loss, lock timeouts, a different missing column are transient / other bugs and
+    must not flip the process-lifetime flag."""
     orig = getattr(exc, "orig", None) or exc
+    msg = str(orig).lower()
+    cols = {col for col, _ in _OPTIONAL_USAGE_COLS}
     for src in (orig, getattr(orig, "__cause__", None)):
         code = getattr(src, "sqlstate", None) or getattr(src, "pgcode", None)
         if code:
-            return code == _UNDEFINED_COLUMN_SQLSTATE
-    msg = str(orig).lower()
-    return "model_served" in msg and any(
-        s in msg for s in ("no such column", "undefined column", "has no column named"))
+            if code != _UNDEFINED_COLUMN_SQLSTATE:
+                return set()
+            return {c for c in cols if c in msg} or cols
+    if any(s in msg for s in ("no such column", "undefined column", "has no column named")):
+        return {c for c in cols if c in msg}
+    return set()
+
+
+def _is_missing_model_served(exc: BaseException) -> bool:
+    return "model_served" in _missing_optional_columns(exc)
 
 
 @retry_terminal_write
@@ -473,6 +447,7 @@ async def record_usage(
     provider: str,
     model: str | None,
     model_served: str | None = None,
+    request_id: str | None = None,
     capability: str | None,
     workflow: str | None,
     tokens_in: int,
@@ -488,7 +463,7 @@ async def record_usage(
     """Insert usage_log row + update counters on the api_key.
 
     cache_read_tokens/cache_write_tokens default to 0 — only anthropic chat
-    calls populate them today (see providers/litellm_adapter.py
+    calls populate them today (see providers/prompt_cache.py
     apply_prompt_cache); every other call site (embed, transcribe)
     /v1/usage self-report) has no cache concept and leaves them at 0.
 
@@ -498,7 +473,7 @@ async def record_usage(
     logs / this dashboard's project detail table."""
     params = {
         "k": api_key_id, "p": project_id, "l": lease_id, "pr": provider,
-        "m": model, "ms": model_served, "c": capability, "w": workflow,
+        "m": model, "ms": model_served, "rq": request_id, "c": capability, "w": workflow,
         "ti": tokens_in, "to": tokens_out,
         "cr": cache_read_tokens, "cw": cache_write_tokens,
         "co": cost_usd, "lm": latency_ms,
@@ -514,9 +489,10 @@ async def record_usage(
         f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
         "WHERE k.id = :k"
     )
-    async def _write(with_model_served: bool) -> int:
-        insert_sql = _insert_sql(with_model_served=with_model_served)
-        p = params if with_model_served else {k: v for k, v in params.items() if k != "ms"}
+    async def _write(missing: frozenset[str]) -> int:
+        insert_sql = _insert_sql(missing=missing)
+        dropped = {param for col, param in _OPTIONAL_USAGE_COLS if col in missing}
+        p = {k: v for k, v in params.items() if k not in dropped}
         async with get_session() as s:
             if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
                 # One round-trip: data-modifying CTE folds the INSERT and the
@@ -537,23 +513,23 @@ async def record_usage(
                 await s.execute(text(update_sql), p)
         return int(usage_id)
 
-    global _model_served_available
-    if not _model_served_available:
-        return await _write(with_model_served=False)
+    missing = frozenset(_missing_usage_cols)
     try:
-        return await _write(with_model_served=True)
+        return await _write(missing)
     except (ProgrammingError, OperationalError) as e:
-        if not _is_missing_model_served(e):
+        named = _missing_optional_columns(e)
+        if not named:
             # A transient blip (dropped connection, deadlock, statement timeout)
-            # must NOT permanently disable the column for the process lifetime —
+            # must NOT permanently disable a column for the process lifetime —
             # let it reach retry_terminal_write's backoff instead.
             raise
-        # Migration 011 not applied. This row funds the daily cost caps, so it
-        # must still be written — drop the column and warn once.
-        _model_served_available = False
+        # A later migration (011 model_served / 015 request_id) is not applied.
+        # This row funds the daily cost caps, so it must still be written: drop
+        # the missing optional columns and warn once.
+        _missing_usage_cols.update(named)
         log.warning(
-            "usage_log.model_served missing (%s) — recording without the exact "
-            "served model; apply infra/sql/migrations/"
-            "011_usage_log_model_served.sql (stays off until process restart)", e,
+            "usage_log optional column(s) %s missing (%s) — recording without them; "
+            "apply infra/sql/migrations/011 and 015 (stays off until process restart)",
+            sorted(_missing_usage_cols), e,
         )
-        return await _write(with_model_served=False)
+        return await _write(frozenset(_missing_usage_cols))

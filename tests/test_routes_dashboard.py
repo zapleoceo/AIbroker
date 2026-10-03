@@ -2000,9 +2000,9 @@ def test_scope_checkboxes_escape_the_provider_in_the_tooltip():
 
 
 def test_is_known_provider_uses_the_adapter_table():
-    from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+    from aibroker.providers.registry import default_models
     from aibroker.routes.dashboard_scopes import _is_known_provider
-    assert all(_is_known_provider(p) for p in DEFAULT_MODEL)
+    assert all(_is_known_provider(p) for p in default_models())
     assert not _is_known_provider("evil<script>")
 
 

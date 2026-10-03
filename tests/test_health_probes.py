@@ -99,7 +99,8 @@ def test_cloudflare_probe_uses_account_scoped_api_base():
     """The cloudflare probe URL must embed the key's account_id (Workers AI has
     no account header — the ID rides in the path, same as the adapter's
     api_base) and probe the same gpt-oss-120b the chat lanes use."""
-    from aibroker.providers.health_probes import _PROBES
+    from aibroker.providers.registry import REGISTRY
+    _PROBES = {n: sp.probe.build for n, sp in REGISTRY.items() if sp.probe}
     method, url, headers, body = _PROBES["cloudflare"]("SECRET", "acct-123")
     assert method == "POST"
     assert "api.cloudflare.com" in url
@@ -113,7 +114,8 @@ def test_probe_models_are_live_not_dead_or_paid():
     """REGRESSION (2026-07-10): probes must target live/free models. voyage-3
     billed real $ (zero free allocation) and nvidia's kimi-k2.6 404s (removed
     from routing), which made a revoked nvidia key read as alive."""
-    from aibroker.providers.health_probes import _PROBES
+    from aibroker.providers.registry import REGISTRY
+    _PROBES = {n: sp.probe.build for n, sp in REGISTRY.items() if sp.probe}
     _, _, _, voyage_body = _PROBES["voyage"]("k")
     assert voyage_body["model"] == "voyage-4"
     _, _, _, nvidia_body = _PROBES["nvidia"]("k")
@@ -127,7 +129,8 @@ def test_probe_models_are_live_not_dead_or_paid():
 def test_gemini_probe_key_in_header_not_url():
     """REGRESSION: the gemini key must ride the x-goog-api-key header, never the
     URL query string (a URL key can leak into logged request URLs)."""
-    from aibroker.providers.health_probes import _PROBES
+    from aibroker.providers.registry import REGISTRY
+    _PROBES = {n: sp.probe.build for n, sp in REGISTRY.items() if sp.probe}
     _, url, headers, _ = _PROBES["gemini"]("SECRET_KEY")
     assert "SECRET_KEY" not in url
     assert "key=" not in url

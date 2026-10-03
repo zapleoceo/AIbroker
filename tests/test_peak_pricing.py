@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from aibroker.providers.litellm_adapter import estimate_llm_cost
+from aibroker.providers.cost import estimate_llm_cost
 from aibroker.providers.peak_pricing import DEEPSEEK_PEAK_FROM, peak_multiplier
 
 

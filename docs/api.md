@@ -66,6 +66,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
+| `GET` | `/v1/models` | — | `{object:"list", data:[model…]}` — every model a caller can pin (see "Pinning a model") |
 
 ### Chat is async-only (2026-07-10)
 
@@ -410,7 +411,7 @@ broker's routing depends on can't be an casualty of an unrelated project's
 cleanup again.)
 
 Reached over plain HTTP via `_transcribe_via_local_asr` / `_post_local_asr`
-in `providers/litellm_adapter.py` — not through LiteLLM, since it isn't an
+in `providers/local_asr.py` — not through LiteLLM, since it isn't an
 LLM SDK-compatible endpoint. Always requests `language=auto`: broker callers
 are multi-tenant (e.g. Stepan2's mostly-Bahasa leads), so a single fixed
 default language would be wrong for most of them.
@@ -455,7 +456,18 @@ visible as its own line in the dashboard's per-project workflow breakdown,
 not folded into the caller's own tag. Only applied to the `local` provider —
 groq/gemini/openai's transcripts already come from full-size hosted models.
 
-### `request_id` — correlating a call across both sides
+### `X-Request-Id` — grouping every attempt of one request (2026-10-03)
+
+Every response carries `X-Request-Id`. Each provider attempt of the request (every key
+tried, every fallback hop, every dispatcher retry of a queued job) is written to
+`usage_log` with that id in `usage_log.request_id` (migration 015), so a fallback trail
+(`groq 429 → gemini ok`) groups with one `WHERE request_id = …`. Sync endpoints get a fresh
+32-hex id (a sane client-supplied `X-Request-Id` of 8-64 `[A-Za-z0-9._-]` characters is
+honoured instead). Queued jobs use `job-<job_id>` — returned on submit AND on every poll —
+and it is shared by all retries of the job. The body field `request_id` below is a
+different thing: the `usage_log.id` of the winning attempt's row (unchanged).
+
+### `request_id` (body) — correlating a call across both sides
 
 A completed chat `JobResponse` and `EmbedResponse`/`TranscribeResponse`
 all carry `request_id` — the `usage_log.id` for that exact call. Log it on
@@ -503,23 +515,67 @@ Present on `GET /v1/jobs/{id}` / `GET /v1/deep/{id}` (done jobs), `POST
 alias is not always the model that ran. The dashboard's "Recent 50 calls"
 shows `model_served` when present, with the routing name in the cell tooltip.
 
-## Pinning a model (2026-09-26)
+## Pinning a model (exact, 2026-10-03)
 
-`model` in the body of `POST /v1/jobs` (and `/v1/deep`) overrides the default
-model of the chain. Qualify it with the provider — `"model":
-"openrouter/typesafe/jev-router"` — and the walk is restricted to that
-provider; a bare name (`"gemini-2.5-flash"`) is applied to whichever provider
-the chain reaches, as before. A qualified model whose provider does not serve
-the capability is **not** a 503: `/v1/jobs` answers `202`, nothing is sent to
-any provider, and the job ends `status=error` (`no provider available … gave
-up after N retries`) — see `docs/routing.md`, "A pinned model stays on its own
-provider". The provider
-still needs a key with the capability's scope, and the project still needs the
-scope — pinning grants nothing.
+`model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`)
+pins **exactly that model**. Valid values are the ids and names listed by
+`GET /v1/models` (below): a routing id (`"gemini/gemini-2.5-flash"`) or a bare
+canonical name (`"gpt-oss-120b"`, which several providers serve).
 
-The model actually used comes back in `model` (what was asked for) and, when it
-says more, in `model_served` — e.g. an OpenRouter router model reports the model
-it picked per request.
+| `model` | effect |
+|---|---|
+| absent | normal walk: the chain's providers in policy order, each with its default model and rotation |
+| `gemini/gemini-2.5-flash` | exactly that model on its provider; never another provider, never rotated |
+| `gpt-oss-120b` (served by cerebras, groq, cloudflare) | exactly that model on each provider that serves it, in a **fixed order**: free-tier keys of every provider first (providers by `ProviderSpec.rank`), then paid keys. No shuffling — the same request walks the same way every time |
+| not in the catalog | **`400`** with close-match suggestions, before anything is queued |
+| in the catalog but not a model for that capability, or its provider is not in the capability's chain | **`400`** (`does not serve …` / `not served by any provider of the … chain`) |
+
+Chat lanes are interchangeable for pinning (a model wired for `prefilter` may be pinned
+on `chat:fast`); an embedding model cannot be pinned on chat. The project still needs the
+capability's scope and a key of that provider — pinning grants nothing. The final-retry
+paid escalation keeps the pin and walks the paid pass only. A job queued before a registry
+change whose pin is no longer in the catalog ends `status=error` with the suggestions (no
+retries).
+
+Before this (2026-09-26) a qualified `provider/model` merely restricted the walk to that
+provider and an unqualified name was applied to whatever provider the chain reached;
+unknown names were forwarded and failed at the provider. History: `docs/routing.md`.
+
+The model actually used comes back in `model` (what was asked for) and, when it says more,
+in `model_served`.
+
+### `GET /v1/models` — what can be pinned
+
+Any authenticated project key (no scope needed). Built from the provider registry, so a
+new registry entry shows up here with no other change.
+
+```json
+{"object": "list", "data": [
+  {"id": "cerebras/gpt-oss-120b", "object": "model", "owned_by": "cerebras",
+   "name": "gpt-oss-120b",
+   "capabilities": ["chat:code", "chat:fast", "chat:smart", "structured"],
+   "also_served_by": ["groq/openai/gpt-oss-120b", "cloudflare/@cf/openai/gpt-oss-120b"],
+   "price": {"kind": "litellm", "input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75}}
+]}
+```
+
+`price.kind`: `litellm` (litellm's map), `override` (our list price), `per_minute`
+(`usd_per_minute`), `free`, `local`, or `unknown` (not priced anywhere — a bug the registry
+test catches). Entries are ordered the way a bare name resolves (free providers by rank,
+paid last). Free-tier keys bill $0 whatever the nominal price shows.
+
+### Cache affinity (2026-10-03)
+
+For **every** capability a request family — `(project, workflow, capability, pinned model)` —
+is pinned to the `(provider, model, key)` that last served it, for `AFFINITY_TTL_S`
+(default 2 h; Redis-shared, fail-open). The next request of the family tries that exact key
+first, so the provider-side prompt cache stays warm, and moves on only when it is cooling,
+capped or errored; the walk then re-pins to whatever succeeded. A paid pinned provider is
+never promoted ahead of a free chain head (free-first stays policy), and the affine leg
+never spends a paid key where the walk heads with a free provider. Callers need to do
+nothing; send a stable `workflow` to get a stable family. A stable `prompt_cache_key`
+derived from the family is sent to providers that document one (OpenAI, Mistral, Cerebras:
+`prompt_cache_key`; OpenRouter: `session_id`).
 
 ## Request body limits (2026-10-02)
 

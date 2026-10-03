@@ -14,8 +14,8 @@ from fastapi.responses import HTMLResponse
 
 from aibroker import __version__
 from aibroker.config import get_settings
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL
 from aibroker.providers.quotas import axes_for_key, severity_class
+from aibroker.providers.registry import default_models
 from aibroker.routes.dashboard_assets import _NO_STORE, ASSETS_VERSION
 from aibroker.routes.dashboard_data import _LAT_LABELS, _RANGE_HOURS, _SPARK_BUCKETS
 from aibroker.routes.dashboard_scopes import _KNOWN_SCOPES, _scope_checkboxes
@@ -42,13 +42,14 @@ def _provider_catalogue() -> list[dict[str, Any]]:
             return "llm:deep"
         return "llm:chat"
 
+    models = default_models()
     order = ["cerebras", "groq", "gemini", "mistral", "cohere",
              "openrouter", "deepseek",
              "openai", "anthropic", "voyage",
              "sambanova", "nvidia", "cloudflare", "zai"]
     out = []
     for p in order:
-        caps = list(DEFAULT_MODEL.get(p, {}).keys())
+        caps = list(models.get(p, {}).keys())
         if not caps:
             continue
         out.append({
@@ -58,7 +59,7 @@ def _provider_catalogue() -> list[dict[str, Any]]:
             # What this provider can actually serve — drives the add-form's
             # greyed-out scope checkboxes (same rule as the edit form).
             "scopes": sorted(usable_scopes_for_provider(p)),
-            "models": DEFAULT_MODEL[p],
+            "models": models[p],
         })
     return out
 

@@ -4,11 +4,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from aibroker.providers.quotas import (
-    PROVIDER_QUOTAS,
     quota_for,
     quota_for_key,
     severity_class,
 )
+from aibroker.providers.registry import quotas
+
+PROVIDER_QUOTAS = quotas()
 
 
 def _key(**kw):

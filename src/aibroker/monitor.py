@@ -48,10 +48,11 @@ def _paid_led_capabilities() -> tuple[str, ...]:
     chain) had no paid-tail alert at all. Every free-first lane is excluded on
     purpose: there a paid provider IS the last resort, so losing it is the
     system working as designed, and alerting on it would be noise."""
-    from aibroker.routing.chains import CAPABILITY_CHAINS, PAID_PROVIDERS
+    from aibroker.providers.registry import paid_providers
+    from aibroker.routing.chains import CAPABILITY_CHAINS
     return tuple(
         cap for cap, chain in CAPABILITY_CHAINS.items()
-        if chain and chain[0] in PAID_PROVIDERS and has_paid_tail(cap)
+        if chain and chain[0] in paid_providers() and has_paid_tail(cap)
     )
 
 

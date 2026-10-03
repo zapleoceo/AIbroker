@@ -116,6 +116,47 @@ against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
 quietly break cooldown/failover; upgrades must re-run the integration suite
 deliberately.
 
+## Module map (core refactor 2026-10-03)
+
+One provider = one registry entry; one attempt = one template. Design note:
+[design/core-refactor.md](design/core-refactor.md); how to extend:
+[how-to-add-provider.md](how-to-add-provider.md).
+
+```
+routes/proxy.py            thin: auth → scope → validate pin (400) → delegate; GET /v1/models
+  │
+services/llm_service.py    the WALKS: run_chat (chain / pinned steps / affine leg),
+  │                        run_embed, run_decision, run_transcribe
+  ▼
+services/attempt.py        ONE key attempt: reserve → decrypt → call → release → gate →
+  │                        record usage (+request_id) → re-pin affinity; one error path
+  │   uses
+  ├─ providers/transport.py        Chat/Embed/Transcribe/Decide Protocols; call_llm/embed/
+  │    │                           transcribe/decide dispatch on ModelSpec.transport
+  │    ├─ litellm_client.py        litellm chat / embed / whisper / chat-audio
+  │    ├─ local_vision.py          self-hosted Qwen3-VL (raw HTTP)
+  │    ├─ local_asr.py             self-hosted faster-whisper (raw HTTP)
+  │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
+  │    └─ decisions.py             OpenRouter decisions endpoint
+  ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
+  │    └─ providers/specs.py       the DATA: one build_provider(...) per provider
+  ├─ providers/catalog.py          pin-able models, resolve_pin, /v1/models rows
+  ├─ providers/cost.py             litellm pricing + registry overrides, per-minute audio
+  ├─ providers/prompt_cache.py     anthropic marks, cache-token parsing, stable cache key
+  ├─ providers/adapters.py         per-provider REQUEST quirks (instances live on the specs)
+  ├─ providers/provider_errors.py  sign tables (scoped signs come from the specs) + verdicts
+  ├─ routing/chains.py             capability → provider ORDER + scope (policy)
+  ├─ routing/selector.py           key pick (SKIP LOCKED), record_usage, only_key_id
+  ├─ routing/affinity.py           key pin + route pin (shared_state, fail-open)
+  ├─ routing/cooldown.py, circuit.py, cost_guard.py, shared_state.py
+  └─ telemetry/request_context.py  request_id contextvar (X-Request-Id)
+```
+
+Where each former table went: see the mapping at the top of
+[routing.md](routing.md). Request flow additions: the ASGI middleware binds a request id
+(`job-<id>` for queued jobs); `pick_and_reserve(only_key_id=…)` serves the affine leg;
+pinned models walk `_pinned_steps` (free keys first, then paid, fixed rank order).
+
 ## Request flow (chat is async-only since 2026-07-10)
 
 Routes are thin (`routes/proxy.py`): authenticate, gate scope, delegate to
@@ -155,8 +196,11 @@ claimed chat job:
      never stops the key (fix 2026-07-12: Google billed $122 on the paid gemini
      key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
-   - `litellm_adapter.call_llm` invokes LiteLLM, applying the provider's
-     **adapter** first (see below).
+   - `transport.call_llm` dispatches through the model's transport (litellm for
+     most providers, raw HTTP for `local`/gemini-ASR), applying the provider's
+     **adapter** first (see below). Steps reserve → call → release → gate →
+     record → affinity are ONE template, `services/attempt.run_attempt`, shared
+     by chat, vision, embedding, transcription and decisions.
    - `classify_provider_error`: 429 → cooldown (provider-signal first: the
      retry-after hint, then UTC midnight for daily quotas, then per-provider
      adaptive backoff — `routing/cooldown.py`); 401/403 → mark dead.
@@ -382,7 +426,7 @@ these and stays `no-store`.
 ### Add-key form is provider-driven
 
 The `<select>` for `provider` in the Add-key form is built from
-`_provider_catalogue()`, which reads `providers.litellm_adapter.DEFAULT_MODEL`
+`_provider_catalogue()`, which reads `providers.registry.default_models()` (the provider registry)
 — there is **one source of truth** for "what providers we support."
 Adding a provider/model entry there immediately surfaces it in the
 dashboard dropdown; no separate frontend list to keep in sync.
@@ -476,7 +520,7 @@ the source string; no template engine, no .po files.
 ## Shared selector state (Redis) (2026-07-16)
 
 Two pieces of selector hot state used to live in per-worker dicts: the
-(project, provider) → key **cache-affinity** map (`_affinity`, 30-min TTL —
+(project, provider) → key **cache-affinity** map (`_affinity`, then 30-min TTL —
 the thing that keeps deepseek/gemini prompt caches warm; measured
 $2.30 → $0.50/day on deepseek) and the **saturation verdict**
 (`_saturated`, 15-s TTL — the ≥95%-of-daily-quota key set). Two uvicorn
@@ -488,17 +532,20 @@ lazy singleton `redis.asyncio` client (env `REDIS_URL`; empty/unset =
 disabled). API:
 
 - `get_affinity(project_id, provider)` / `set_affinity(project_id,
-  provider, key_id)` — key `aib:aff:{project_id}:{provider}`, SETEX with
-  the shared `AFFINITY_TTL_S` (the selector's fallback dict imports the
-  same constant, so both layers expire in step).
+  provider, key_id, ttl_s)` — key `aib:aff:{project_id}:{provider}`, SETEX
+  with `AFFINITY_TTL_S` (a setting, default 2 h; `routing/affinity.py` owns
+  both layers so they expire in step). 2026-10-03: `get_json`/`set_json`
+  generalise the same fail-open access; the ROUTE pin (project, workflow,
+  capability, pinned model → provider, model, key) uses key
+  `aib:raff:{project_id}:{hash}` — see `routing/affinity.py`.
 - `get_saturated()` / `set_saturated(ids, ttl)` — key `aib:sat`, a JSON
   int list, SETEX with the saturation TTL. `get_saturated()` returning
   `None` means cache miss → the selector recomputes from the DB and
   publishes the fresh verdict.
 
 The selector consults the shared store FIRST: `pick_and_reserve` resolves
-affinity via an async wrapper (`_affinity_for_shared`) and success paths in
-`llm_service` publish pins via `note_affinity_shared`; `_saturated_key_ids`
+affinity via an async wrapper (`affinity._affinity_for_shared`) and every
+success in `services/attempt` re-pins via `affinity.note_success`; `_saturated_key_ids`
 checks Redis between its local TTL cache and the Postgres aggregate. The
 old in-process dicts are kept — they double as the single-node fallback AND
 the SQLite/test path.
@@ -522,3 +569,28 @@ cross-worker sharing — request serving, tests, and single-node deployments
   Postgres advisory locks.
 - Postgres is the bottleneck. Vertical scaling fine until >1k qps; then
   read-replica for `usage_log` aggregation queries.
+
+## Public symbol index (core refactor 2026-10-03)
+
+Reference for the names the refactor introduced (the deploy gate checks that public
+symbols are documented):
+
+- **Registry** (`providers/registry.py`): `spec_or_default`, `get_spec`, `provider_names`,
+  `all_models`, `model_spec`, `provider_of_model_id`, `max_keys_for`, `cooldown_base_for`,
+  `cache_sticky_providers`, `providers_with_json` — views over the `ProviderSpec` table.
+  `routing/chains.provider_rank` exposes `ProviderSpec.rank`.
+- **Catalog** (`providers/catalog.py`): `PinTarget`, `canonical_name`, `capability_family`,
+  `pinnable_models`, `price_info`, `listing` (rows of `GET /v1/models`, served by
+  `routes/proxy.list_models` with the `ModelsResponse` schema).
+- **Transports** (`providers/transport.py`): `transport_for`; implementations
+  `LiteLLMTransport`, `LiteLLMChatAudioTransport` (`litellm_client.py`, with the functions
+  `litellm_chat`, `litellm_embed`, `litellm_whisper`), `LocalVisionTransport`,
+  `LocalAsrTransport`, `GeminiAsrTransport`, `OpenRouterDecisions`.
+- **Cost / cache** : `register_price_overrides` (`providers/cost.py`), `cache_key_for`,
+  `apply_cache_key` (`providers/prompt_cache.py`).
+- **Attempt template** (`services/attempt.py`): `Flow` (verdict of one attempt),
+  `Rejection` (a quality-gate veto).
+- **Affinity** (`routing/affinity.py`): `AffinityTarget`, `route_key`, `lookup_route`,
+  `note_route`, `may_promote`.
+- **Request trace** (`telemetry/request_context.py`): `new_request_id`, `job_request_id`,
+  `sanitize_request_id`, `current_request_id`, `request_scope`.

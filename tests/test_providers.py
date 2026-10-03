@@ -1,13 +1,10 @@
 """LiteLLM adapter — model resolution & response parsing."""
 from __future__ import annotations
 
-from aibroker.providers.litellm_adapter import (
-    _audio_chat_messages,
-    _audio_mime,
-    estimate_llm_cost,
-    extra_for_provider,
-    model_for,
-)
+from aibroker.providers.adapters import extra_for_provider
+from aibroker.providers.cost import estimate_llm_cost
+from aibroker.providers.litellm_client import _audio_chat_messages, _audio_mime
+from aibroker.providers.registry import model_for
 
 
 def test_audio_mime_maps_extensions():
