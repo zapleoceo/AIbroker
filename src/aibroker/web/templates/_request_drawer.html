@@ -21,7 +21,7 @@
     <h3 id="job-h">{{ t("Queued job", "Задача из очереди") }}</h3>
     <dl class="kv">
       <dt>{{ t("Queued at", "Поставлена") }}</dt><dd>{{ job.created_at|time_tag("full") }}</dd>
-      <dt>{{ t("Waited", "Ждала в очереди") }}</dt><dd>{{ r.wait_ms|ms }}</dd>
+      <dt>{{ t("Waited", "Ждала в очереди") }}</dt><dd>{{ r.wait_ms|ms_t }}</dd>
       <dt>{{ t("Retries", "Повторы") }}</dt><dd>{{ job.retry_count }}</dd>
       {% if job.completed_at %}<dt>{{ t("Finished", "Завершена") }}</dt><dd>{{ job.completed_at|time_tag("full") }}</dd>{% endif %}
       {% if job.error_message %}<dt>{{ t("Final error", "Итоговая ошибка") }}</dt><dd class="bad wrap-any">{{ job.error_message }}</dd>{% endif %}
@@ -42,7 +42,7 @@
             <b class="trunc">{{ a.provider }}</b>
             {% if a.key_label %}<span class="pill">{{ a.key_label }}</span>{% endif %}
             {{ m.call_status(a) }}
-            <span class="muted nowrap" style="margin-left:auto">{{ a.latency_ms|ms }}</span>
+            <span class="muted nowrap" style="margin-left:auto">{{ a.latency_ms|ms_t }}</span>
           </div>
           <span class="muted wrap-any" style="font-size:12.5px">{{ a.model_served or a.model or "—" }} · #{{ a.id }} · {{ a.created_at|time_tag("hm") }}</span>
           <span class="dim wrap-any mono" style="font-size:12px">{{ a.cost_usd|money(6) }} · {{ a.tokens_in|num }} / {{ a.tokens_out|num }} {{ t("tokens", "токенов") }}{% if a.cache_read_tokens or a.cache_write_tokens %} · {{ t("cache", "кэш") }} {{ a.cache_read_tokens|num }} / {{ a.cache_write_tokens|num }}{% endif %}</span>
@@ -59,9 +59,9 @@
     <h3 id="det-h">{{ t("Totals", "Итого") }}</h3>
     <dl class="kv">
       <dt>{{ t("Project", "Проект") }}</dt><dd>{% if r.project_id %}<a href="/dashboard/projects/{{ r.project_id }}">{{ r.project or r.project_id }}</a>{% else %}—{% endif %}</dd>
-      <dt>{{ t("Workflow", "Workflow") }}</dt><dd>{{ r.workflow or "—" }}</dd>
+      <dt>{{ t("Workflow", "Сценарий") }}</dt><dd>{{ r.workflow or "—" }}</dd>
       <dt>{{ t("Capability", "Способность") }}</dt><dd><span class="pill">{{ r.capability or "—" }}</span></dd>
-      <dt>{{ t("Response time", "Время ответа") }}</dt><dd>{{ r.latency_ms|ms if r.tries else "—" }}</dd>
+      <dt>{{ t("Response time", "Время ответа") }}</dt><dd>{% if r.tries %}{{ r.latency_ms|ms_t }}{% else %}—{% endif %}</dd>
       <dt>{{ t("Cost", "Цена") }}</dt><dd>{{ r.cost_usd|money(6) }}</dd>
     </dl>
     <div class="pcard stats" style="padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">

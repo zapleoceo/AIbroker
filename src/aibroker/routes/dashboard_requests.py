@@ -110,6 +110,7 @@ class RequestFilter:
     workflow: str | None = None
     capability: str | None = None
     provider: str | None = None        # any attempt went to this provider
+    model: str | None = None           # any attempt was routed to this model
     status: str | None = None          # ok | failed | pending | running
     kind: str | None = None            # job | direct
     search: str | None = None          # request id (exact)
@@ -129,6 +130,7 @@ class RequestFilter:
             workflow=_opt_str(params.get("workflow")),
             capability=_opt_str(params.get("capability")),
             provider=_opt_str(params.get("provider")),
+            model=_opt_str(params.get("model")),
             status=status if status in STATUSES else None,
             kind=kind if kind in KINDS else None,
             search=_opt_str(params.get("q"), 64),
@@ -142,7 +144,7 @@ class RequestFilter:
         out: dict[str, str] = {}
         for key, val in (("project", self.project_id), ("workflow", self.workflow),
                          ("capability", self.capability), ("provider", self.provider),
-                         ("status", self.status), ("type", self.kind), ("q", self.search)):
+                         ("model", self.model), ("status", self.status), ("type", self.kind), ("q", self.search)):
             if val is not None:
                 out[key] = str(val)
         if self.sort != "time" or not self.desc:
@@ -185,7 +187,7 @@ class RequestFilter:
     def _job_conditions(self, since: datetime | None) -> tuple[list[str], dict[str, Any]] | None:
         """Conditions for jobs WITHOUT attempts (they only exist in deep_jobs),
         or None when this filter can never match one."""
-        if self.provider or self.workflow or self.kind == "direct":
+        if self.provider or self.model or self.workflow or self.kind == "direct":
             return None
         conds, p = _win(self.start if since is None else max(since, self.start or since),
                         self.end, "j.created_at")
@@ -205,6 +207,12 @@ class RequestFilter:
                      f"{_JOB_GK})")
         return conds, p
 
+    def _hit_sql(self) -> str:
+        """Per-attempt test behind the provider / model filters (a request
+        matches when ANY of its attempts does)."""
+        return " AND ".join(c for c, v in (("u.provider = :prov", self.provider),
+                                           ("u.model = :mod", self.model)) if v)
+
     def _outer_conditions(self, since: datetime | None) -> tuple[list[str], dict[str, Any]]:
         conds: list[str] = []
         p: dict[str, Any] = {}
@@ -214,7 +222,7 @@ class RequestFilter:
         if self.status:
             conds.append("r2.state = :state")
             p["state"] = self.status
-        if self.provider:
+        if self._hit_sql():
             conds.append("r2.prov_hit = 1")
         return conds, p
 
@@ -224,11 +232,11 @@ class RequestFilter:
         only requests that started at or after it (see _SLICES)."""
         uc, p = self._usage_conditions(since)
         extra = ""
-        if self.provider:
-            extra = ", MAX(CASE WHEN u.provider = :prov THEN 1 ELSE 0 END) AS prov_hit"
-            p["prov"] = self.provider
+        if hit := self._hit_sql():
+            extra = f", MAX(CASE WHEN {hit} THEN 1 ELSE 0 END) AS prov_hit"
+            p.update({k: v for k, v in (("prov", self.provider), ("mod", self.model)) if v})
         grouped = _GROUPED.format(extra=extra, where=_where(uc), gk=_GK)
-        prov_cols = ", g.prov_hit" if self.provider else ""
+        prov_cols = ", g.prov_hit" if hit else ""
         joined = (
             "SELECT g.gk, g.first_id, g.last_id, g.ok_id, g.tries, g.first_at, "
             "g.project_id, g.capability, g.workflow, g.cost_usd, g.tokens_in, "

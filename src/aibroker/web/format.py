@@ -55,6 +55,33 @@ def ms(v: Any) -> str:
     return f"{m}m {s:02d}s"
 
 
+def ms_ru(v: Any) -> str:
+    """Russian twin of `ms`: 340 мс, 1,2 с, 2 мин 05 с (whole minutes: 2 мин)."""
+    if v is None:
+        return _DASH
+    x = float(v)
+    if x < 1000:
+        return f"{int(x)} мс"
+    if x < 60_000:
+        return f"{x / 1000:.1f}".replace(".", ",") + " с"
+    m, s = divmod(int(x / 1000), 60)
+    return f"{m} мин" if s == 0 else f"{m} мин {s:02d} с"
+
+
+_RU_UNITS = (("с", 1), ("мин", 60), ("ч", 3600), ("д", 86400))
+
+
+def age(dt: datetime | None, now: datetime | None = None, *, ru: bool = False) -> str:
+    """Bare age of a naive-UTC datetime: '36m' / '36 мин' (no 'ago')."""
+    if dt is None:
+        return _DASH
+    secs = max(0, int(((now or datetime.now(UTC).replace(tzinfo=None)) - dt).total_seconds()))
+    if not ru:
+        return _span(secs)
+    unit, size = next(u for u in reversed(_RU_UNITS) if secs >= u[1] or u[1] == 1)
+    return f"{secs // size} {unit}"
+
+
 def ago(dt: datetime | None, now: datetime | None = None) -> str:
     """'5m ago' for a naive-UTC datetime."""
     if dt is None:

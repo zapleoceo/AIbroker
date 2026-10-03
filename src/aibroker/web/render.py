@@ -50,6 +50,16 @@ def _tn(n: int, en1: str, enn: str, ru1: str, ru2: str, ru5: str) -> Markup:
     return _t(fmt.plural_en(n, en1, enn), fmt.plural_ru(n, ru1, ru2, ru5))
 
 
+def _ms_t(v: Any) -> Markup:
+    """Duration in both languages (the page JS swaps it): 1.2 s / 1,2 с."""
+    return _t(fmt.ms(v), fmt.ms_ru(v))
+
+
+def _age_t(dt: Any) -> Markup:
+    """Bare age in both languages: 36m / 36 мин."""
+    return _t(fmt.age(dt), fmt.age(dt, ru=True))
+
+
 def _asset(path: str) -> str:
     from aibroker.routes.dashboard_assets import ASSETS_VERSION
     return f"/dashboard/static/{path}?v={ASSETS_VERSION}"
@@ -64,7 +74,7 @@ def build_env() -> Environment:
     )
     env.filters.update(
         money=fmt.money, num=fmt.num, compact=fmt.compact, pct=fmt.pct, ms=fmt.ms,
-        ago=fmt.ago, time_tag=fmt.time_tag, spark=fmt.spark,
+        ago=fmt.ago, time_tag=fmt.time_tag, spark=fmt.spark, ms_t=_ms_t, age_t=_age_t,
     )
     env.globals.update(t=_t, tn=_tn, ph=_ph, ttl=_ttl, asset=_asset, version=__version__)
     return env

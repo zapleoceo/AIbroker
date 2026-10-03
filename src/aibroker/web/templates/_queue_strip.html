@@ -2,11 +2,7 @@
 {% set oldest = jobs.oldest_pending %}
 <nav id="qstrip" class="qstrip" aria-label="{{ 'Job queue' }}" hx-get="/dashboard/requests/queue{{ '?' ~ poll_qs if poll_qs }}" hx-trigger="every 10s" hx-swap="outerHTML">
   {% for tl in tiles %}
-  <a class="qtile{{ ' on' if tl.active }}{{ ' bad' if tl.bad }}" href="{{ tl.href }}" {% if tl.active %}aria-current="true"{% endif %}>
-    <b>{{ tl.n|num }}</b><span>{{ t(tl.en, tl.ru) }}</span>
-  </a>
+  <a class="qchip{{ ' on' if tl.active }}{{ ' bad' if tl.bad }}" href="{{ tl.href }}" {% if tl.active %}aria-current="true"{% endif %}><b>{{ tl.n|num }}</b> <span>{{ t(tl.en, tl.ru) }}</span></a>
   {% endfor %}
-  <a class="qtile{{ ' bad' if jobs.stuck_pending }}" href="/dashboard/requests?type=job&amp;status=pending&amp;range=all&amp;sort=time&amp;dir=asc">
-    <b>{{ oldest|ago if oldest else "—" }}</b><span>{{ t("Oldest pending", "Старейшая в очереди") }}</span>
-  </a>
+  <a class="qchip{{ ' bad' if jobs.stuck_pending }}" href="/dashboard/requests?type=job&amp;status=pending&amp;range=all&amp;sort=time&amp;dir=asc"><span>{{ t("oldest", "дольше") }}</span> <b>{{ oldest|age_t if oldest else "—" }}</b></a>
 </nav>

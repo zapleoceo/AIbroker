@@ -20,6 +20,14 @@ def test_formatters():
     assert fmt.money(0.00042) == "$0.0004" and fmt.money(12.3456) == "$12.35" and fmt.money(None) == "—"
     assert fmt.compact(1_250_000) == "1.2M" and fmt.compact(999) == "999" and fmt.compact(3000) == "3k"
     assert fmt.ms(340) == "340 ms" and fmt.ms(1250) == "1.2 s" and fmt.ms(125_000) == "2m 05s"
+    assert fmt.ms_ru(340) == "340 мс" and fmt.ms_ru(1250) == "1,2 с" and fmt.ms_ru(60_000) == "1 мин"
+    assert fmt.ms_ru(125_000) == "2 мин 05 с" and fmt.ms_ru(None) == "—"
+    t0 = datetime(2026, 1, 1, 12, 0)
+    assert fmt.age(t0 - timedelta(minutes=36), t0) == "36m" and fmt.age(None) == "—"
+    assert fmt.age(t0 - timedelta(minutes=36), t0, ru=True) == "36 мин"
+    assert fmt.age(t0 - timedelta(seconds=9), t0, ru=True) == "9 с"
+    assert fmt.age(t0 - timedelta(hours=5), t0, ru=True) == "5 ч"
+    assert fmt.age(t0 - timedelta(days=3), t0, ru=True) == "3 д"
     assert fmt.pct(79.94, 1) == "79.9%" and fmt.num(1234) == "1,234" and fmt.num(None) == "—"
     now = datetime(2026, 1, 1, 12, 0)
     assert fmt.ago(now - timedelta(minutes=5), now) == "5m ago" and fmt.ago(None) == "—"

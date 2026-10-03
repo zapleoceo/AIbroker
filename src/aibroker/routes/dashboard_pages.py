@@ -229,15 +229,45 @@ async def requests_csv(request: Request) -> Response:
         "Cache-Control": "no-store"})
 
 
+# (en, ru) vocabulary shared by the filter selects and the active-filter chips.
+_KIND_LABELS = {"job": ("Queue", "Очередь"), "direct": ("Direct", "Прямой")}
+_STATUS_LABELS = {"ok": ("ok", "ок"), "failed": ("failed", "ошибка"),
+                  "pending": ("pending", "ожидает"), "running": ("running", "в работе")}
+_FILTER_NAMES = {"q": ("ID", "ID"), "type": ("Type", "Тип"), "status": ("Status", "Статус"),
+                 "project": ("Project", "Проект"), "workflow": ("Workflow", "Сценарий"),
+                 "capability": ("Capability", "Способность"), "model": ("Model", "Модель"), "provider": ("Provider", "Провайдер")}
+
+
+def _filter_chips(f: rq.RequestFilter, rng: DateRange, projects: list[Any]) -> list[dict[str, Any]]:
+    """One removable chip per active filter; its link is the page without it."""
+    names = {p.id: p.name for p in projects}
+    base = {**f.as_query(), **rng.query}
+    chips = []
+    for key, query_key, val in (
+        ("q", "q", f.search), ("type", "type", f.kind), ("status", "status", f.status),
+        ("project", "project", f.project_id), ("workflow", "workflow", f.workflow),
+        ("capability", "capability", f.capability), ("provider", "provider", f.provider),
+        ("model", "model", f.model),
+    ):
+        if val is None:
+            continue
+        en, ru = {"type": _KIND_LABELS, "status": _STATUS_LABELS}.get(key, {}).get(
+            val, (names.get(val, str(val)),) * 2)
+        chips.append({"name": _FILTER_NAMES[key], "value": (en, ru), "href":
+                      "/dashboard/requests?" + urlencode({k: v for k, v in base.items()
+                                                          if k != query_key})})
+    return chips
+
+
 def _queue_ctx(jobs: dict[str, Any], request: Request) -> dict[str, Any]:
     """The strip's tiles; each is a filter link, the active one is marked."""
     p = request.query_params
     live = {k: p.get(k, "") for k in ("status", "type")}
     tiles = []
     for key, en, ru, n in (
-        ("pending", "Pending", "Ожидают", jobs["by_status"].get("pending", 0)),
-        ("running", "Running", "В работе", jobs["by_status"].get("running", 0)),
-        ("failed", "Failed 24h", "Ошибки за 24ч", jobs["failed_24h"]),
+        ("pending", "pending", "ждут", jobs["by_status"].get("pending", 0)),
+        ("running", "running", "в работе", jobs["by_status"].get("running", 0)),
+        ("failed", "failed 24h", "сбои 24ч", jobs["failed_24h"]),
     ):
         href = "/dashboard/requests?" + urlencode(
             {"type": "job", "status": key, "range": "7d" if key == "failed" else "all"})
@@ -288,7 +318,8 @@ async def requests_page(request: Request) -> Response:
         capabilities=list(CAPABILITY_CHAINS), failed_href=failed_href,
         export_url="/dashboard/requests.csv?" + urlencode(base),
         page=f.page, page_size=rq.REQUEST_PAGE_SIZE, drawer=drawer,
-        row_limit=rq.CSV_EXPORT_LIMIT, statuses=rq.STATUSES,
+        row_limit=rq.CSV_EXPORT_LIMIT, chips=_filter_chips(f, rng, projects),
+        kind_labels=_KIND_LABELS, status_labels=_STATUS_LABELS,
     )
 
 

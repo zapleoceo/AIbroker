@@ -4,9 +4,10 @@
 {% include "_queue_strip.html" %}
 
 <form class="card card-pad stack-sm" method="get" action="/dashboard/requests" aria-label="{{ 'Filters' }}"
-      x-data="{ open: window.innerWidth > 720 || {{ 'true' if n_filters else 'false' }} }"
+      x-data="{ open: window.innerWidth > 720 }"
       hx-boost="true" hx-target="#req-results" hx-select="#req-results" hx-swap="outerHTML" hx-push-url="true">
   {% for k, v in rng.query.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  {% if f.model %}<input type="hidden" name="model" value="{{ f.model }}">{% endif %}
   <div class="only-sm">
     <button type="button" class="btn" @click="open = !open" :aria-expanded="open" aria-controls="req-filters">{{ m.icon("search") }}{{ t("Filters", "Фильтры") }}{% if n_filters %} · {{ n_filters }}{% endif %}</button>
   </div>
@@ -16,14 +17,15 @@
     <div class="field"><label for="f-type">{{ t("Type", "Тип") }}</label>
       <select id="f-type" name="type">
         <option value="">{{ t("All", "Все") }}</option>
-        <option value="job" {{ 'selected' if f.kind == 'job' }}>{{ t("Queued job", "Задача из очереди") }}</option>
-        <option value="direct" {{ 'selected' if f.kind == 'direct' }}>{{ t("Direct call", "Прямой вызов") }}</option>
+        {% for k, lbl in kind_labels.items() %}
+        <option value="{{ k }}" {{ 'selected' if f.kind == k }}>{{ lbl[0] }}</option>
+        {% endfor %}
       </select></div>
     <div class="field"><label for="f-status">{{ t("Status", "Статус") }}</label>
       <select id="f-status" name="status">
         <option value="">{{ t("All", "Все") }}</option>
-        {% for st, en, ru in (("ok", "ok", "ок"), ("failed", "failed", "ошибка"), ("pending", "pending", "ожидает"), ("running", "running", "в работе")) %}
-        <option value="{{ st }}" {{ 'selected' if f.status == st }}>{{ t(en, ru) }}</option>
+        {% for st, lbl in status_labels.items() %}
+        <option value="{{ st }}" {{ 'selected' if f.status == st }}>{{ lbl[0] }}</option>
         {% endfor %}
       </select></div>
     <div class="field"><label for="f-project">{{ t("Project", "Проект") }}</label>
@@ -31,7 +33,7 @@
         <option value="">{{ t("All", "Все") }}</option>
         {% for p in projects %}<option value="{{ p.id }}" {{ 'selected' if f.project_id == p.id }}>{{ p.name }}</option>{% endfor %}
       </select></div>
-    <div class="field"><label for="f-workflow">{{ t("Workflow", "Workflow") }}</label>
+    <div class="field"><label for="f-workflow">{{ t("Workflow", "Сценарий") }}</label>
       <input id="f-workflow" type="text" name="workflow" list="dl-workflow" value="{{ f.workflow or '' }}" {{ ph("any", "любой") }}>
       <datalist id="dl-workflow">{% for w in facets.workflow %}<option value="{{ w }}">{% endfor %}</datalist></div>
     <div class="field"><label for="f-cap">{{ t("Capability", "Способность") }}</label>
@@ -50,6 +52,11 @@
     <a class="btn" style="margin-left:auto" href="{{ export_url }}" hx-boost="false" download>{{ m.icon("download") }}{{ t("Export CSV", "Экспорт CSV") }}</a>
   </div>
 </form>
+{% if chips %}
+<div class="fchips" aria-label="{{ 'Active filters' }}">
+  {% for c in chips %}<a class="fchip" href="{{ c.href }}" hx-boost="false">{{ t(c.name[0], c.name[1]) }}: {{ t(c.value[0], c.value[1]) }} <span aria-hidden="true">✕</span><span class="sr-only">{{ t("remove", "убрать") }}</span></a>{% endfor %}
+</div>
+{% endif %}
 
 <section id="req-results" class="card" aria-label="{{ 'Requests' }}">
   {% if rows %}
@@ -57,7 +64,7 @@
     <table class="table rtable">
       <thead><tr>
         <th scope="col"><a href="{{ sort_links.time }}" {% if f.sort == 'time' %}aria-sort="{{ 'descending' if f.desc else 'ascending' }}"{% endif %}>{{ t("When", "Когда") }}{{ " ↓" if f.sort == 'time' and f.desc }}{{ " ↑" if f.sort == 'time' and not f.desc }}</a></th>
-        <th scope="col">{{ t("Project · workflow", "Проект · workflow") }}</th>
+        <th scope="col">{{ t("Project · workflow", "Проект · сценарий") }}</th>
         <th scope="col">{{ t("Capability", "Способность") }}</th>
         <th scope="col">{{ t("Status", "Статус") }}</th>
         <th scope="col">{{ t("Outcome", "Итог") }}</th>
@@ -72,13 +79,13 @@
             <button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.ref }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" hx-swap="innerHTML"
                     aria-haspopup="dialog" title="{{ r.request_id }}">{{ r.created_at|time_tag("mdhms") }}</button>
           </td>
-          <td data-label="{{ 'Project · workflow' }}" class="cell-wrap s4 nolabel">{{ r.project or "—" }}<span class="dim"> · {{ r.workflow or "—" }}</span>{% if r.is_job %} <span class="pill">{{ t("job", "задача") }}</span>{% endif %}</td>
+          <td data-label="Project · workflow" class="s4 nolabel"><div class="rline"><span class="trunc" title="{{ r.project or '' }}">{{ r.project or "—" }}</span>{% if r.workflow %}<span class="dim trunc" title="{{ r.workflow }}">· {{ r.workflow }}</span>{% endif %}{% if r.is_job %}<span class="pill">{{ t("job", "задача") }}</span>{% endif %}</div></td>
           <td data-label="{{ 'Capability' }}" class="s2 nolabel"><span class="pill">{{ r.capability or "—" }}</span></td>
           <td data-label="{{ 'Status' }}" class="nolabel second status-cell">{{ m.req_status(r) }}</td>
           <td data-label="{{ 'Outcome' }}" class="cell-wrap s6 nolabel">{{ m.req_outcome(r) }}</td>
-          <td data-label="Time" class="num mono s2">{% if r.is_job %}<span class="dim">{{ t("wait", "ждала") }} {{ r.wait_ms|ms }}</span><br>{% endif %}{{ r.latency_ms|ms if r.tries else "—" }}</td>
-          <td data-label="Cost" class="num mono s2 {{ 'dim' if r.cost_usd == 0 }}">{{ r.cost_usd|money(4) }}</td>
-          <td data-label="Tokens" class="num mono s2">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}</td>
+          <td data-label="Time" data-ru-label="Время" class="num mono s2">{% if r.is_job %}<span class="dim">{{ t("wait", "ждала") }} {{ r.wait_ms|ms_t }}</span>{% endif %}{% if r.is_job and r.tries %}<br>{% endif %}{% if r.tries %}{{ r.latency_ms|ms_t }}{% elif not r.is_job %}—{% endif %}</td>
+          <td data-label="Cost" data-ru-label="Цена" class="num mono s2 {{ 'dim' if r.cost_usd == 0 }}">{{ r.cost_usd|money(4) }}</td>
+          <td data-label="Tokens" data-ru-label="Токены" class="num mono s2">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}</td>
         </tr>
         {% endfor %}
       </tbody>

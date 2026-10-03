@@ -125,6 +125,8 @@ def test_result_is_newest_first_and_counts_requests_not_attempts():
     ({"workflow": "describe"}, {"rq-plain"}),
     ({"provider": "cerebras"}, {"rq-walk"}),                 # ANY attempt touched it
     ({"provider": "groq", "status": "ok"}, {"rq-walk", "job-11"}),
+    ({"model": "gemini/gemini-3.5-flash-lite", "provider": "cerebras"}, {"rq-walk"}),
+    ({"model": "no/such"}, set()),
     ({"q": "job-11"}, {"job-11"}),
     ({"q": "10"}, {"job-10"}),
     ({"q": "u-6"}, {"u-6"}),
@@ -240,10 +242,10 @@ def test_queue_strip_counts_links_and_oldest_pending():
     html = _get("/dashboard/requests/queue", headers={"HX-Request": "true"}).text
     assert 'id="qstrip"' in html and 'hx-trigger="every 10s"' in html
     assert "status=pending" in html and "status=running" in html and "status=failed" in html
-    tiles = {t: html.split(t)[0].rsplit("<b>", 1)[1].split("</b>")[0]
-             for t in ("Pending", "Running", "Failed 24h")}
-    assert tiles == {"Pending": "1", "Running": "1", "Failed 24h": "1"}
-    assert "Oldest pending" in html and "5m ago" in html
+    tiles = {lbl: n for n, lbl in re.findall(r"<b>(\d+)</b> <span><span[^>]*>([^<]+)</span>", html)}
+    assert tiles == {"pending": "1", "running": "1", "failed 24h": "1"}
+    assert 'data-ru="ждут"' in html and 'data-ru="сбои 24ч"' in html
+    assert "oldest" in html and 'data-en="5m" data-ru="5 мин"' in html
 
 
 def test_queue_strip_marks_the_active_filter_and_keeps_it_across_polls():
@@ -258,7 +260,7 @@ def test_queue_strip_marks_the_active_filter_and_keeps_it_across_polls():
 def test_queue_strip_flags_a_stuck_queue():
     ds.seed(ds.project(1))
     ds.seed(ds.job(1, "pending", minutes_ago=45))
-    assert 'class="qtile bad"' in _get("/dashboard/requests/queue").text
+    assert 'class="qchip bad"' in _get("/dashboard/requests/queue").text
 
 
 def test_strip_requires_login():
@@ -372,4 +374,63 @@ def test_attention_items_link_to_the_filtered_requests_page():
 def test_responsive_css_hooks_for_the_unified_table_and_strip():
     css = client.get("/dashboard/static/css/app.css").text
     assert ".qstrip" in css and "position: sticky" in css and "td.cell-wrap" in css
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in css
+    assert "@media (hover: hover) { .table tbody tr.clickable:hover td" in css   # no sticky grey on touch
+    assert 'html[lang="ru"] .rtable td[data-ru-label]::before' in css
+
+
+# ─── mobile review: collapsed filters, chips, RU, card cells ────────────────
+
+
+def test_filters_stay_collapsed_on_phones_and_active_ones_become_removable_chips():
+    ds.seed(ds.project(1, "stepan"))
+    body = _get("/dashboard/requests", params={"type": "job", "status": "failed",
+                                              "project": "1", "q": "job-3"}).text
+    assert "open: window.innerWidth > 720 }" in body            # never forced open by a filter
+    chips = body.split('class="fchips"')[1].split("</div>")[0]
+    assert chips.count('class="fchip"') == 4
+    assert 'data-ru="Тип"' in chips and 'data-ru="Очередь"' in chips and "stepan" in chips
+    assert "type=job" not in chips.split('data-ru="Тип"')[0].rsplit("href=", 1)[1]   # its own link drops it
+    assert 'class="fchips"' not in _get("/dashboard/requests").text
+
+
+def test_select_labels_are_short_and_workflow_is_russian():
+    body = _get("/dashboard/requests").text
+    assert ">Queue</option>" in body and ">Direct</option>" in body
+    assert ">Queued job</option>" not in body
+    assert 'data-ru="Сценарий"' in body and 'data-ru-label="Время"' not in body.split("<tbody")[0]
+
+
+def test_cards_are_translated_and_do_not_print_empty_placeholders():
+    ds.seed(ds.project(1, "stepan"), ds.key(1))
+    ds.seed(ds.usage(1, workflow=None, request_id="a" * 32), ds.job(5, "pending"))
+    body = _get("/dashboard/requests", params={"range": "all"}).text
+    assert 'data-ru-label="Время"' in body and 'data-ru-label="Цена"' in body
+    assert 'data-ru-label="Токены"' in body
+    assert "· —" not in body
+    row = [r for r in body.split("<tr class=") if "no attempt yet" in r][0]
+    assert "—</td>" not in row.split('data-label="Time"')[1].split("</td>")[0]   # no lone dash
+    assert 'data-ru="ждала"' in row
+
+
+def test_job_wait_uses_the_bilingual_duration_helper():
+    ds.seed(ds.project(1))
+    ds.seed(ds.job(5, "pending", minutes_ago=1))
+    body = _get("/dashboard/requests", params={"range": "all"}).text
+    assert 'data-ru="1 мин"' in body or 'data-ru="1 мин 0' in body
+    assert "ждала 1m" not in body
+
+
+def test_done_job_joined_by_a_prod_format_id_and_direct_calls_by_uuid_hex():
+    ds.seed(ds.project(1), ds.key(1))
+    uid = "0123456789abcdef0123456789abcdef"
+    ds.seed(ds.usage(1, status="error", request_id="job-533735"),
+            ds.usage(2, request_id="job-533735"), ds.usage(3, request_id=uid))
+    ds.seed(ds.job(533735, "done", minutes_ago=3, started_at=ds.now() - timedelta(minutes=2),
+                   completed_at=ds.now()))
+    ids = _by_id(_rows())
+    assert (ids["job-533735"]["tries"], ids["job-533735"]["state"], ids["job-533735"]["is_job"])         == (2, "ok", True)
+    assert ids[uid]["is_job"] is False and len(ids) == 2
+    assert [r["request_id"] for r in _rows(q=uid)] == [uid]
+    assert [r["request_id"] for r in _rows(q="533735")] == ["job-533735"]
+    html = _get("/dashboard/requests/job-533735", headers={"HX-Request": "true"}).text
+    assert "Queued job" in html and html.count('class="n"') == 2
