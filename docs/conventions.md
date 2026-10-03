@@ -118,6 +118,13 @@ split.
 - In-memory SQLite for unit tests; mark DB-dependent tests with `@pytest.mark.asyncio`.
 - Aim for >85% line coverage on `src/aibroker/` (current gate 85%, stair-step — never drops).
 - Integration tests for routes use FastAPI `TestClient`.
+- **Test database**: tests read only `TEST_DATABASE_URL` (default in-memory SQLite) and
+  never `DATABASE_URL` / `DIRECT_DATABASE_URL` — conftest overwrites those with the test
+  URL. A Postgres test URL must name a database ending in `_test`, else pytest exits.
+  The `db` fixture runs `drop_all`, so **never run pytest in a prod container or against
+  prod** (2026-10-03: `docker compose run api pytest` dropped every prod table).
+  Migration 012 adds a DB-side event trigger blocking `DROP TABLE`/`DROP SCHEMA` unless
+  the session first runs `SET aibroker.allow_destructive_ddl = 'on'`.
 
 ## Pre-commit hooks
 

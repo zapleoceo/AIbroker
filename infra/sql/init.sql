@@ -165,3 +165,28 @@ CREATE TABLE IF NOT EXISTS provider_observations (
 -- CONCURRENTLY because they apply to a live, populated prod table.
 CREATE INDEX IF NOT EXISTS ix_usage_created_at ON usage_log (created_at);
 CREATE INDEX IF NOT EXISTS ix_leases_project_leased_at ON leases (project_id, leased_at);
+
+-- 012 destructive-DDL guard (event trigger); see migrations/012_block_destructive_ddl.sql
+DO $guard$
+BEGIN
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    RAISE NOTICE 'aibroker: not superuser, skipping destructive-DDL event trigger';
+    RETURN;
+  END IF;
+
+  CREATE OR REPLACE FUNCTION aibroker_block_destructive_ddl() RETURNS event_trigger
+  LANGUAGE plpgsql AS $fn$
+  BEGIN
+    IF coalesce(current_setting('aibroker.allow_destructive_ddl', true), '') <> 'on' THEN
+      RAISE EXCEPTION '% blocked by aibroker guard: SET aibroker.allow_destructive_ddl = ''on'' in this session to proceed', tg_tag;
+    END IF;
+  END;
+  $fn$;
+
+  DROP EVENT TRIGGER IF EXISTS aibroker_block_destructive_ddl;
+  CREATE EVENT TRIGGER aibroker_block_destructive_ddl
+    ON ddl_command_start
+    WHEN TAG IN ('DROP TABLE', 'DROP SCHEMA')
+    EXECUTE FUNCTION aibroker_block_destructive_ddl();
+END
+$guard$;

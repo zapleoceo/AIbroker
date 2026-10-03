@@ -64,7 +64,7 @@ jobs:
         env:
           ADMIN_KEY: admin_test_key_for_ci_only
           INTERNAL_SECRET: internal_test_secret
-          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          TEST_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           OWNER_TELEGRAM_ID: "169510539"
           SESSION_SECRET: test-session-secret-not-for-prod
         run: |
@@ -112,7 +112,7 @@ jobs:
         env:
           ADMIN_KEY: admin_test_key_for_ci_only
           INTERNAL_SECRET: internal_test_secret
-          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test"
+          TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/aibroker_test"
           OWNER_TELEGRAM_ID: "169510539"
           SESSION_SECRET: test-session-secret-not-for-prod
         run: |
@@ -202,7 +202,7 @@ jobs:
         env:
           ADMIN_KEY: admin_test_key_for_ci_only
           INTERNAL_SECRET: internal_test_secret
-          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          TEST_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
           OWNER_TELEGRAM_ID: "169510539"
           SESSION_SECRET: test-session-secret-not-for-prod
         run: |

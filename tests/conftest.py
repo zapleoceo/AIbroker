@@ -3,7 +3,7 @@
 Default: in-memory SQLite (fast, no deps) — used for everything except the
 Postgres-only selector tests, which `skipif` themselves off SQLite.
 
-CI integration job sets DATABASE_URL to a real Postgres; then this fixture
+CI integration job sets TEST_DATABASE_URL (db name ending `_test`) to a real Postgres; then this fixture
 binds the engine to it and the Postgres-only tests run for real.
 """
 from __future__ import annotations
@@ -11,11 +11,39 @@ from __future__ import annotations
 import os
 import tempfile
 
-# Test-time defaults for env-driven settings (BEFORE any aibroker import).
-# Default DATABASE_URL to SQLite so a bare `pytest` doesn't run the Postgres-only
-# tests against SQLite (their ON_SQLITE/skipif guards read this var). CI overrides
-# it with a real Postgres URL to exercise those tests.
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+# Tests NEVER read DATABASE_URL / DIRECT_DATABASE_URL from the environment: on
+# 2026-10-03 pytest ran in a prod container, picked up the prod DATABASE_URL and
+# the `db` fixture's drop_all wiped every table. Only TEST_DATABASE_URL counts
+# (default: in-memory SQLite) and it is forced into the vars the app reads.
+from sqlalchemy.engine import make_url
+
+
+def _assert_safe_test_db_url(url: str) -> None:
+    """Raise ValueError unless `url` is SQLite or a Postgres db named *_test."""
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite":
+        return
+    if parsed.get_backend_name() == "postgresql":
+        name = parsed.database or ""
+        if name.endswith("_test"):
+            return
+        raise ValueError(
+            f"refusing to run tests against Postgres database {name!r}: "
+            "TEST_DATABASE_URL must name a database ending in '_test'"
+        )
+    raise ValueError(f"unsupported TEST_DATABASE_URL backend: {parsed.get_backend_name()!r}")
+
+
+_TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+try:
+    _assert_safe_test_db_url(_TEST_DB_URL)
+except ValueError as _exc:
+    import pytest as _pytest
+
+    _pytest.exit(f"tests/conftest.py: {_exc}. Never run pytest in a prod container.", returncode=2)
+
+os.environ["DATABASE_URL"] = _TEST_DB_URL
+os.environ["DIRECT_DATABASE_URL"] = _TEST_DB_URL
 os.environ.setdefault("SESSION_SECRET", "test-session-secret-not-for-prod")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "169510539")
 # The notifier's throttle-state dir defaults to /var/lib/aibroker — not
@@ -31,8 +59,15 @@ from sqlalchemy.pool import NullPool
 import aibroker.db.engine as engine_mod
 from aibroker.db.engine import Base
 
-_DB_URL = os.environ["DATABASE_URL"]
+_DB_URL = _TEST_DB_URL
 _IS_PG = "postgres" in _DB_URL or "asyncpg" in _DB_URL
+
+
+async def _allow_ddl(conn) -> None:
+    """Lift the migration-012 DROP guard for this (already `_test`-checked) connection."""
+    from sqlalchemy import text
+
+    await conn.execute(text("SET LOCAL aibroker.allow_destructive_ddl = 'on'"))
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +96,7 @@ async def db():
         e = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with e.begin() as conn:
         if _IS_PG:
+            await _allow_ddl(conn)
             await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     engine_mod._engine = e
@@ -68,6 +104,7 @@ async def db():
     yield
     if _IS_PG:
         async with e.begin() as conn:
+            await _allow_ddl(conn)
             await conn.run_sync(Base.metadata.drop_all)
     await e.dispose()
     engine_mod._engine = None
