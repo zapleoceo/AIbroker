@@ -22,8 +22,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from aibroker.providers.registry import spec_or_default
-
 # Bootstrap seeds live on ProviderSpec.max_request_tokens (None = no known ceiling).
 
 # Safety margin so a prompt that just barely fits doesn't overflow once the
@@ -119,6 +117,9 @@ def effective_ceiling(provider: str, learned: int | None) -> int | None:
     """min(learned, seed) — whichever is the tighter known ceiling.
     None ⇒ no ceiling known from either source (provider handles large
     context fine)."""
+    # Lazy: registry -> adapters -> context_limits (content_chars) would cycle.
+    from aibroker.providers.registry import spec_or_default
+
     seed = spec_or_default(provider).max_request_tokens
     candidates = [c for c in (learned, seed) if c is not None]
     return min(candidates) if candidates else None

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import aibroker.services.attempt as att
 import aibroker.services.llm_service as svc
 
 PROJECT = SimpleNamespace(id=1, name="p")
@@ -53,10 +54,10 @@ def ledger(monkeypatch):
         return "error"
 
     monkeypatch.setattr(svc, "pick_and_reserve", fake_pick)
-    monkeypatch.setattr(svc, "reserve_cost", fake_reserve)
-    monkeypatch.setattr(svc, "release_cost", fake_release)
-    monkeypatch.setattr(svc, "record_usage", noop)
-    monkeypatch.setattr(svc, "_penalize", fake_penalize)
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", fake_reserve)
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", fake_release)
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", noop)
+    monkeypatch.setattr("aibroker.services.attempt._penalize", fake_penalize)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
     monkeypatch.setattr(svc, "model_for", lambda p, c: f"{p}/model")
     monkeypatch.setattr(svc, "estimate_llm_cost", lambda *a, **k: 0.5)
@@ -90,7 +91,7 @@ async def _transcribe():
 
 @pytest.mark.parametrize("runner", [_chat, _embed, _transcribe])
 async def test_decrypt_failure_after_reserve_releases_the_reservation(monkeypatch, ledger, runner):
-    monkeypatch.setattr(svc, "decrypt", _boom_decrypt)
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", _boom_decrypt)
     monkeypatch.setattr(svc, "chain_for", lambda cap: ["mistral"])
     with contextlib.suppress(svc.EmbedFailed, svc.TranscribeFailed):
         await runner()  # the walk giving up is fine — the point is the ledger
@@ -103,7 +104,7 @@ async def test_decrypt_failure_after_reserve_releases_the_reservation(monkeypatc
 ])
 async def test_cancellation_releases_the_reservation_and_propagates(
         monkeypatch, ledger, runner, target):
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, target, _cancelled)
     with pytest.raises(asyncio.CancelledError):
         await runner()
@@ -112,7 +113,7 @@ async def test_cancellation_releases_the_reservation_and_propagates(
 
 
 async def test_decision_cancellation_releases_the_reservation(monkeypatch, ledger):
-    monkeypatch.setattr(svc, "decrypt", lambda t: "plain")
+    monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "decide", _cancelled)
     monkeypatch.setattr(svc, "estimate_tokens", lambda *a, **k: 10)
     monkeypatch.setattr(svc, "scope_for", lambda c: "llm:decision")
@@ -126,5 +127,5 @@ async def test_release_failure_never_masks_the_attempt_outcome(monkeypatch):
     async def bad_release(**kw):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(svc, "release_cost", bad_release)
-    await svc._release_reservation(_paid_key(), 0.5)  # must not raise
+    monkeypatch.setattr("aibroker.services.attempt.release_cost", bad_release)
+    await att._release_reservation(_paid_key(), 0.5)  # must not raise

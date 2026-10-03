@@ -166,7 +166,8 @@ def test_every_probe_builds_a_request():
         req = spec.probe.build("KEY", "acct" if spec.probe.needs_account_id else None)
         assert req is not None, name
         method, url, headers, body = req
-        assert method == "POST" and url.startswith("https://") and "{" not in url
+        assert method in ("POST", "GET") and url.startswith("https://") and "{" not in url
+        assert (method == "GET") == (body is None)
         assert any("KEY" in v for v in headers.values()), name
 
 

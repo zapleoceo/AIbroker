@@ -68,11 +68,11 @@ async def test_cooled_models_ignores_expired_rows():
 
 
 async def test_penalize_gemini_daily_quota_cools_the_model_not_the_key():
-    from aibroker.services import llm_service as svc
+    import aibroker.services.attempt as att
 
     await _add_key(9)
     key = SimpleNamespace(id=9, provider="gemini", label="k")
-    kind = await svc._penalize(key, RuntimeError(_GEMINI_DAILY),
+    kind = await att._penalize(key, RuntimeError(_GEMINI_DAILY),
                                capability="chat:fast", model="gemini/gemini-3.5-flash")
     assert kind == "rate_limit"
     assert await cooled_models(9) == {"gemini/gemini-3.5-flash"}
@@ -83,11 +83,11 @@ async def test_penalize_gemini_daily_quota_cools_the_model_not_the_key():
 
 
 async def test_penalize_gemini_rpm_429_still_cools_the_whole_key():
-    from aibroker.services import llm_service as svc
+    import aibroker.services.attempt as att
 
     await _add_key(10)
     key = SimpleNamespace(id=10, provider="gemini", label="k")
-    await svc._penalize(key, RuntimeError(_GEMINI_RPM),
+    await att._penalize(key, RuntimeError(_GEMINI_RPM),
                         capability="chat:fast", model="gemini/gemini-3.5-flash")
     assert await cooled_models(10) == set()
     async with get_session() as s:

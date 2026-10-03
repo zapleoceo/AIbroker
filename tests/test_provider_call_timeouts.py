@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from aibroker.config import get_settings
-from aibroker.providers import litellm_adapter as la
+from aibroker.providers import gemini_asr, litellm_client, transport
 from aibroker.providers.provider_errors import classify_provider_error, is_timeout
 
 
@@ -22,30 +22,30 @@ async def _hang(*_a, **_kw):
 
 async def test_embed_has_a_hard_timeout(monkeypatch):
     monkeypatch.setattr(get_settings(), "EMBED_TIMEOUT_S", 0.05)
-    with patch.object(la.litellm, "aembedding", _hang), pytest.raises(TimeoutError) as ei:
-        await la.embed(model="voyage/voyage-4", texts=["x"], api_key="k")
+    with patch.object(litellm_client.litellm, "aembedding", _hang), pytest.raises(TimeoutError) as ei:
+        await transport.embed(model="voyage/voyage-4", texts=["x"], api_key="k")
     assert "embedding voyage/voyage-4" in str(ei.value)
     assert is_timeout(ei.value) and classify_provider_error(ei.value, "voyage") == "rate_limit"
 
 
 async def test_whisper_transcription_has_a_hard_timeout(monkeypatch):
     monkeypatch.setattr(get_settings(), "TRANSCRIBE_TIMEOUT_S", 0.05)
-    with patch.object(la.litellm, "atranscription", _hang), pytest.raises(TimeoutError):
-        await la.transcribe(model="groq/whisper-large-v3-turbo", audio=b"x",
+    with patch.object(litellm_client.litellm, "atranscription", _hang), pytest.raises(TimeoutError):
+        await transport.transcribe(model="groq/whisper-large-v3-turbo", audio=b"x",
                             filename="a.ogg", api_key="k")
 
 
 async def test_chat_transcription_has_a_hard_timeout(monkeypatch):
     monkeypatch.setattr(get_settings(), "TRANSCRIBE_TIMEOUT_S", 0.05)
-    with patch.object(la.litellm, "acompletion", _hang), pytest.raises(TimeoutError):
-        await la._transcribe_via_chat(model="gemini/gemini-2.5-flash", audio=b"x",
+    with patch.object(litellm_client.litellm, "acompletion", _hang), pytest.raises(TimeoutError):
+        await litellm_client._transcribe_via_chat(model="gemini/gemini-2.5-flash", audio=b"x",
                                       filename="a.ogg", api_key="k")
 
 
 async def test_gemini_asr_post_has_a_hard_timeout_despite_httpx_phase_timeouts(monkeypatch):
     monkeypatch.setattr(get_settings(), "GEMINI_ASR_TIMEOUT_S", 0.05)
-    with patch.object(la, "_post_gemini_asr", _hang), pytest.raises(TimeoutError) as ei:
-        await la._transcribe_via_gemini_asr(
+    with patch.object(gemini_asr, "_post_gemini_asr", _hang), pytest.raises(TimeoutError) as ei:
+        await gemini_asr._transcribe_via_gemini_asr(
             model="gemini/gemini-3.5-transcribe", audio=b"x", filename="a.ogg", api_key="k")
     assert "gemini-asr" in str(ei.value)
 

@@ -2570,14 +2570,14 @@ async def test_run_chat_records_and_returns_the_served_model(monkeypatch):
 async def _booked(monkeypatch, exc, provider="x"):
     from types import SimpleNamespace
 
-    import aibroker.services.llm_service as svc
+    import aibroker.services.attempt as att
     captured: dict = {}
 
     async def fake_record(**kw):
         captured.update(kw)
 
-    monkeypatch.setattr(svc, "record_usage", fake_record)
-    await svc._record_error(
+    monkeypatch.setattr("aibroker.services.attempt.record_usage", fake_record)
+    await att._record_error(
         key=SimpleNamespace(id=1, provider=provider), project=SimpleNamespace(id=2),
         provider=provider, model="m", capability="chat:fast", workflow=None, exc=exc)
     return captured
