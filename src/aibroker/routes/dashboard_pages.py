@@ -289,9 +289,14 @@ async def render_projects(request: Request, *, new_key: str | None = None,
         _fetch_projects(), q.project_range_stats(rng.start, rng.end, rng.bucket),
         _fetch_range_and_proj_spend(*_range_where(today, today, tz)))
     cards = views.build_project_cards(projects, proj_stats, today_spend[1])
+    n_signup = sum(1 for c in cards if c["project"].self_signup)
+    only_signup = request.query_params.get("signup") == "1"
+    if only_signup:
+        cards = [c for c in cards if c["project"].self_signup]
     return render(
         "projects.html", **_ctx(request, "projects", ("Projects", "Проекты"), rng=rng),
         cards=cards, new_key=new_key, new_key_project=new_key_project,
+        only_signup=only_signup, n_signup=n_signup,
         scope_boxes=_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes"),
     )
 
@@ -338,6 +343,7 @@ async def render_project_detail(request: Request, project_id: int, *,
         "project_detail.html",
         **_ctx(request, "projects", (project.name, project.name), rng=rng, keep={"tab": tab}),
         project=project, d=d, tot=t, tab=tab, new_key=new_key,
+        req=views.request_cap_view(project),
         today_spend=spent_today, cap=cap,
         cap_pct=min(100, int(spent_today / cap * 100)) if cap else None,
         scope_boxes=_scope_checkboxes(project.allowed_scopes, "allowed_scopes"),

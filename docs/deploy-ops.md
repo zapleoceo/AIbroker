@@ -136,7 +136,9 @@ docker exec -i aibroker-postgres psql -U aibroker aibroker \
 ```
 
 Apply a migration BEFORE merging the code that depends on it (the deploy
-pipeline ships code only). `infra/sql/init.sql` mirrors every migration for
+pipeline ships code only). Migration 016 (`016_projects_self_signup.sql`) adds
+`projects.total_request_cap`, `total_requests_used`, `self_signup` and `signup_ip` for self-signup -
+the ORM selects them on every authenticated request, so it MUST be applied before the code lands. `infra/sql/init.sql` mirrors every migration for
 fresh-DB bootstrap (enforced by `tests/test_init_sql_mirrors_migrations.py`;
 it now includes migration 011, `usage_log.model_served`). Migration 010 (2026-07-16) adds `deep_jobs.payload_hash`
 plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
@@ -690,6 +692,10 @@ docker compose up -d
 | `TELEGRAM_BOT_USERNAME` | for embedding the widget on `/login` |
 | `OWNER_TELEGRAM_ID` | only this Telegram user can log into dashboard |
 | `GLOBAL_DAILY_CAP_USD` | global daily spend cap |
+| `SIGNUP_ENABLED` | kill switch for `POST /v1/signup` (default `true`) |
+| `SIGNUP_PER_IP_PER_DAY` / `SIGNUP_PER_DAY` | self-signup rate limits (defaults 3 / 50, rolling 24h) |
+| `SIGNUP_REQUEST_CAP` | lifetime request cap given to a new self-signup project (default 100) |
+| `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG |
 

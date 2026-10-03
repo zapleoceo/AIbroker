@@ -19,6 +19,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
+from sqlalchemy.sql import expression as sa_expr
 
 # JSONB on Postgres, plain JSON on SQLite (for tests). Same Python API.
 JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
@@ -35,7 +36,7 @@ from aibroker.db.engine import Base
 class ProjectRow(Base):
     __tablename__ = "projects"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     owner_email: Mapped[str | None] = mapped_column(String(255))
     project_key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -43,6 +44,15 @@ class ProjectRow(Base):
     allowed_scopes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     daily_cost_cap_usd: Mapped[float | None] = mapped_column(Float)
     monthly_cost_cap_usd: Mapped[float | None] = mapped_column(Float)
+    # Lifetime client-request cap (NULL = unlimited, every pre-existing project)
+    # and its atomic counter — see services/request_cap.py.
+    total_request_cap: Mapped[int | None] = mapped_column(Integer)
+    total_requests_used: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False)
+    # Created through the public POST /v1/signup (services/signup.py).
+    self_signup: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_expr.false(), nullable=False)
+    signup_ip: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

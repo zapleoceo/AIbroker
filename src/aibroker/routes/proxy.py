@@ -34,6 +34,7 @@ from aibroker.services import (
     submit_job,
 )
 from aibroker.services.deep_jobs import AUDIO_FIELD
+from aibroker.services.request_cap import admit_request
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.vision_payload import inline_image_problem
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
@@ -223,6 +224,7 @@ async def embed_endpoint(
 ) -> EmbedResponse:
     _require_capability_scope(ctx, scope_for("embedding"))
     _validate_pin(body.model, "embedding", [provider])
+    await admit_request(ctx.project)
 
     try:
         outcome = await run_embed(
@@ -263,6 +265,7 @@ async def decisions_endpoint(
     except DecisionRequestInvalid as e:
         raise HTTPException(422, str(e)) from e
     _validate_pin(body.model, "decision", ["openrouter"])
+    await admit_request(ctx.project)
     try:
         outcome = await run_decision(
             project=ctx.project, state=body.state, questions=body.questions,
@@ -336,6 +339,7 @@ async def transcribe_endpoint(
     fallback might serve — see that route."""
     _require_capability_scope(ctx, scope_for("transcription"))
     audio = await _read_audio_upload(file)
+    await admit_request(ctx.project)
 
     try:
         outcome = await run_transcribe(
@@ -426,6 +430,7 @@ async def deep_submit(
     result. Real latency has been observed up to ~8 minutes."""
     _require_capability_scope(ctx, scope_for("chat:deep"))
     _validate_pin(body.model, "chat:deep")
+    await admit_request(ctx.project)
     # submit_deep_job needs a real autoincrementing BIGSERIAL id — SQLite
     # doesn't do that for BigInteger, so this whole path is exercised only by
     # the Postgres-only test_deep_submit_creates_job_and_runs_in_background.
@@ -528,6 +533,7 @@ async def jobs_submit(
         # the chain, retry eight times and be resubmitted by the client (see
         # services/vision_payload.py for the 8-passes-in-24h case behind this).
         raise HTTPException(400, problem)
+    await admit_request(ctx.project)
     job_id = await submit_job(  # pragma: no cover
         project=ctx.project, capability=capability,
         messages=messages,
@@ -563,6 +569,7 @@ async def transcribe_submit(
     that prefer one round-trip."""
     _require_capability_scope(ctx, scope_for("transcription"))
     audio = await _read_audio_upload(file)
+    await admit_request(ctx.project)
     job_id = await submit_job(  # pragma: no cover — needs the real queue (Postgres)
         project=ctx.project, capability="transcription",
         messages=[], model=None, max_tokens=0, temperature=0.0,

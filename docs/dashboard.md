@@ -19,8 +19,8 @@ templates; `build_env` builds the Jinja environment; formatters live in web/form
 | Overview | `/dashboard` (`overview`) | KPI strip with sparklines and delta vs previous period, stacked usage-by-model chart (spend/calls), "needs attention" list, provider health grid, top projects, job queue summary |
 | Requests | `/dashboard/requests` (`requests_page`) | filters (project, workflow, capability, provider, model, status, min cost/latency, request id), server-side sort, "load more", CSV export `/dashboard/requests.csv` (`requests_csv`, capped, formula-injection safe) |
 | Request drawer | `/dashboard/requests/{id}` (`request_drawer`) | tokens in/out/cache, cost, latency, error label, `model_served`, attempt trail; `?open=<id>` deep-links |
-| Projects | `/dashboard/projects` (`projects_page`) | cards: today's spend vs daily cap, cache-hit badge, sparkline; "New project" drawer (`project_new_form`) |
-| Project detail | `/dashboard/projects/{id}?tab=usage\|models\|keys\|settings` (`project_detail`, `render_project_detail`; `render_projects` re-renders the list after create) | settings: edit, rotate token, delete |
+| Projects | `/dashboard/projects` (`projects_page`) | cards: today's spend vs daily cap, lifetime-request meter (`request_cap_view`, only when a cap is set), cache-hit badge, sparkline, a **self-signup** badge for projects created via `POST /v1/signup` and a `?signup=1` filter chip; "New project" drawer (`project_new_form`) |
+| Project detail | `/dashboard/projects/{id}?tab=usage\|models\|keys\|settings` (`project_detail`, `render_project_detail`; `render_projects` re-renders the list after create) | settings: edit (incl. **lifetime request cap**, blank = unlimited, with a used/limit progress bar), rotate token, delete |
 | Keys & providers | `/dashboard/keys` (`keys_page`) | grouped by provider; status chip, cooldown countdown, quota burn per axis, last success/error; Test / Edit / Enable-Disable / Delete |
 | Add/edit key drawer | `/dashboard/keys/new` (`key_new_form`), `/dashboard/keys/{id}/edit` (`key_edit_form`) | advanced quota overrides collapsed |
 | Models | `/dashboard/models` (`models_page`) | catalogue from `providers/catalog` (`price_info`) and the registry, with the capability chains: capability, provider, id (copy), price in/out per 1M, 7-day p50 latency and success; unrouted models flagged |
@@ -67,6 +67,17 @@ failure's end. Concurrent identical requests can in theory be mixed; the UI says
 chain — mistral is absent), `client_endpoints` (read from the real `/v1` router) and
 `llms_text` (`/llms.txt`). The provider list is deliberately not derived from which
 providers hold active keys (the public pages must not reveal per-provider key state).
+
+## Self-signup projects and the request cap (2026-10-03)
+
+`projects.total_request_cap` (NULL = unlimited, all pre-existing projects) and
+`total_requests_used` back the lifetime cap; `POST /v1/signup` creates projects with `$0/day` and
+100 requests (see [api.md](api.md#quick-start-self-signup)). The project form has a "Lifetime request cap" field;
+`dash_edit_project` only applies it when the form carries the `req_cap_present` marker (FastAPI
+turns a blank form value into "absent", so a blank value alone cannot mean "unlimited" - this also
+keeps an older client from silently lifting a self-signup cap). `_parse_request_cap` accepts a whole
+number >= 0 (0 blocks every request). The daily cost cap stays required on create (`0` = free-only).
+Raising the cap takes effect on the next request (`admit_request` re-reads the live row).
 
 ## Review fixes (2026-10-03)
 

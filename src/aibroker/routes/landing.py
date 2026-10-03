@@ -371,6 +371,19 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
   -H "Content-Type: application/json" \\
   -d '{{ "texts": ["hello world"] }}'</code></pre>
       </div>
+      <div class="mode" id="signup">
+        <div class="mode-head">
+          <h3 data-i18n="how.signup.h" data-en="Get a key in one call" data-ru="Ключ одним запросом"></h3>
+          <span class="mode-tag" data-i18n="how.signup.tag" data-en="No approval" data-ru="Без одобрения"></span>
+        </div>
+        <p data-i18n="how.signup.desc"
+           data-en="Any service can mint its own project key: free providers only ($0/day) and 100 requests in total. Enough to connect and test. Need more? Ask the owner to raise the limits. The key is shown once."
+           data-ru="Любой сервис может сам получить проектный ключ: только бесплатные провайдеры ($0/день) и 100 запросов всего. Достаточно, чтобы подключиться и протестировать. Нужно больше — попросите владельца поднять лимиты. Ключ показывается один раз."></p>
+        <pre><code>curl -X POST https://aib.zapleo.com/v1/signup \
+  -H "Content-Type: application/json" \
+  -d '{{ "name": "my-service", "contact": "me@example.com" }}'
+# → {{"project_key": "aib_prj_...", "limits": {{...}}}}</code></pre>
+      </div>
     </div>
   </div>
 </section>
@@ -519,6 +532,7 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       <div class="api-block">
         <h3 data-i18n="api.public" data-en="Public · no auth" data-ru="Публичные · без авторизации"></h3>
         <div class="endpoints">
+          <div class="ep"><span class="verb post">POST</span><span class="path">/v1/signup</span><span class="note">get a free key</span></div>
           <div class="ep"><span class="verb">GET</span><span class="path">/healthz</span><span class="note">liveness</span></div>
           <div class="ep"><span class="verb">GET</span><span class="path">/v1/health</span><span class="note">provider health</span></div>
           <div class="ep"><span class="verb">GET</span><a class="path" href="/docs">/docs</a><span class="note">Swagger</span></div>
@@ -806,6 +820,9 @@ _LLMS_TXT = """# AIbroker
 - [/openapi.json](https://aib.zapleo.com/openapi.json) — OpenAPI 3 schema
 - [/healthz](https://aib.zapleo.com/healthz) — liveness probe
 - [/v1/health](https://aib.zapleo.com/v1/health) — per-provider key health
+- `POST /v1/signup` — no auth: mint your own project key (free providers only, $0/day,
+  100 requests in total, `llm:chat` + `llm:embed`); body `{"name": "...", "contact": "...", "purpose": "..."}`;
+  the key is returned once. Over the limit: `429 {"error": "request_cap_exhausted"}` — ask the owner to raise it
 - `POST /v1/jobs?capability=...` — submit a chat job, returns a `job_id` (needs `X-Project-Key`)
 - `GET /v1/jobs/{id}` — poll for the job result
 - `POST /v1/embed?provider=voyage` — proxy mode embed

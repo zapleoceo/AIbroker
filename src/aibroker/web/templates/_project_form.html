@@ -23,6 +23,12 @@
       <input id="pf-cap" name="daily_cost_cap_usd" type="number" step="0.01" min="0" required
              value="{{ project.daily_cost_cap_usd if editing and project.daily_cost_cap_usd is not none else ('' if editing else '0.20') }}">
       <small>{{ t("Required. 0 = free providers only; there is no unlimited default.", "Обязательно. 0 = только бесплатные провайдеры; безлимита по умолчанию нет.") }}</small></div>
+    <input type="hidden" name="req_cap_present" value="1">
+    <div class="field"><label for="pf-reqcap">{{ t("Lifetime request cap", "Лимит запросов за всё время") }}</label>
+      <input id="pf-reqcap" name="total_request_cap" type="number" step="1" min="0"
+             value="{{ project.total_request_cap if editing and project.total_request_cap is not none else '' }}"
+             {{ ph("blank = unlimited", "пусто = без лимита") }}>
+      <small>{% if editing and project.total_request_cap is not none %}{{ t("Used " ~ project.total_requests_used ~ " of " ~ project.total_request_cap ~ ". ", "Использовано " ~ project.total_requests_used ~ " из " ~ project.total_request_cap ~ ". ") }}{% endif %}{{ t("Client requests, not provider attempts. Blank = unlimited.", "Клиентские запросы, не попытки провайдеров. Пусто = без лимита.") }}</small></div>
     <div class="field span-2"><span class="lbl" id="pf-scopes">{{ t("Allowed scopes", "Разрешённые права") }}</span>
       <div class="scope-grid" role="group" aria-labelledby="pf-scopes">{{ scope_boxes|safe }}</div></div>
   </div>

@@ -250,6 +250,14 @@ def build_attention(key_rows: Sequence[dict[str, Any]], groups: Sequence[Mapping
 # ─── projects ───────────────────────────────────────────────────────────────
 
 
+def request_cap_view(project: Any) -> dict[str, Any]:
+    """Lifetime request allowance of a project for the dashboard: `cap` None =
+    unlimited (no bar), else used/cap with a percentage and severity class."""
+    cap, used = project.total_request_cap, int(project.total_requests_used or 0)
+    pct = None if cap is None else (100 if cap <= 0 else min(100, int(used / cap * 100)))
+    return {"cap": cap, "used": used, "pct": pct, "cls": severity_class(pct)}
+
+
 def build_project_cards(projects: Iterable[Any], range_stats: Mapping[int, Mapping[str, Any]],
                         today_spend: Mapping[int, float]) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
@@ -263,6 +271,7 @@ def build_project_cards(projects: Iterable[Any], range_stats: Mapping[int, Mappi
             "success": st.get("success"), "cache_hit": st.get("cache_hit"),
             "spark": st.get("spark", []), "today_spend": today, "cap": cap,
             "cap_pct": cap_pct, "cap_cls": severity_class(cap_pct),
+            "req": request_cap_view(p),
         })
     return cards
 

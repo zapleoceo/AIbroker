@@ -16,12 +16,17 @@ CREATE TABLE IF NOT EXISTS projects (
   allowed_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
   daily_cost_cap_usd DOUBLE PRECISION,
   monthly_cost_cap_usd DOUBLE PRECISION,
+  total_request_cap INTEGER,                -- lifetime client-request cap; NULL = unlimited
+  total_requests_used INTEGER NOT NULL DEFAULT 0,
+  self_signup BOOLEAN NOT NULL DEFAULT FALSE,
+  signup_ip VARCHAR(64),
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   notes TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   updated_at TIMESTAMP NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_projects_active ON projects(is_active);
+CREATE INDEX IF NOT EXISTS ix_projects_self_signup_created ON projects(created_at) WHERE self_signup;
 
 -- ─── API keys (the actual provider credentials) ─────────────────────────────
 CREATE TABLE IF NOT EXISTS api_keys (

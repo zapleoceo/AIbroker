@@ -113,6 +113,20 @@ class Settings(BaseSettings):
     # costs nothing, and 240s covers one worst-case document ahead of you.
     VISION_LOCAL_QUEUE_WAIT_S: float = 240.0
 
+    # Public self-signup (POST /v1/signup, services/signup.py). A signed-up project
+    # is free-providers-only ($0/day) with a lifetime request cap; the owner
+    # raises either in the dashboard. SIGNUP_ENABLED is the kill switch.
+    SIGNUP_ENABLED: bool = True
+    SIGNUP_PER_IP_PER_DAY: int = 3
+    SIGNUP_PER_DAY: int = 50
+    SIGNUP_REQUEST_CAP: int = 100
+    # Comma-separated (a plain env var cannot carry a list without JSON).
+    SIGNUP_DEFAULT_SCOPES: str = "llm:chat,llm:embed"
+
+    @property
+    def signup_scopes(self) -> list[str]:
+        return [x.strip() for x in self.SIGNUP_DEFAULT_SCOPES.split(",") if x.strip()]
+
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
 

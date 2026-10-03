@@ -137,6 +137,18 @@ def _back(next_: str, msg: str) -> RedirectResponse:
     return RedirectResponse(_flash_url(msg, _safe_next(next_)), status_code=303)
 
 
+def _parse_request_cap(v: str) -> int | None:
+    """Blank -> None (unlimited lifetime requests); otherwise an integer >= 0
+    (0 = block every request). Junk / negative / fractional raise ValueError."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    n = int(v)
+    if n < 0:
+        raise ValueError("request cap must be >= 0")
+    return n
+
+
 def _parse_cost_cap(v: str) -> float | None:
     """Blank -> None (no cap). Junk, negative, nan and inf raise ValueError:
     float() accepted "nan"/"inf" (a NaN cap never trips `>=`, i.e. no cap at all)
@@ -371,10 +383,16 @@ async def dash_edit_project(
     name: str = Form(...),
     allowed_scopes: Annotated[list[str] | None, Form()] = None,
     daily_cost_cap_usd: str = Form(""),
+    total_request_cap: str = Form(""),
+    req_cap_present: str = Form(""),
     owner_email: str = Form(""),
     next: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
+    # total_request_cap is only applied when the form says it carried the field
+    # (`req_cap_present`; FastAPI turns a blank Form value into "absent", so blank
+    # alone cannot mean "unlimited"). A client that does not know the field can
+    # therefore never silently lift a self-signup cap.
     if len(name) > _MAX_NAME_LEN:
         return _back(next, "!Name too long (max 100)")
     scopes = _validate_scope_list(allowed_scopes or [])
@@ -384,6 +402,10 @@ async def dash_edit_project(
         cap_v = _parse_cost_cap(daily_cost_cap_usd)
     except ValueError:
         return _back(next, "!Bad cost cap")
+    try:
+        req_cap = _parse_request_cap(total_request_cap) if req_cap_present else None
+    except ValueError:
+        return _back(next, "!Bad request cap (whole number >= 0, blank = unlimited)")
     async with get_session() as s:
         row = await s.get(ProjectRow, project_id)
         if not row:
@@ -391,9 +413,13 @@ async def dash_edit_project(
         row.name = name
         row.allowed_scopes = scopes
         row.daily_cost_cap_usd = cap_v
+        if req_cap_present:
+            row.total_request_cap = req_cap
         row.owner_email = owner_email or None
     await audit(actor="dashboard", action="project.edit", target=name,
-                metadata={"scopes": scopes, "cap": cap_v}, ip=client_ip(request))
+                metadata={"scopes": scopes, "cap": cap_v,
+                          "total_request_cap": req_cap if req_cap_present else "unchanged"},
+                ip=client_ip(request))
     return _back(next, f"Project {name} updated")
 
 
@@ -428,6 +454,7 @@ async def dash_create_project(
     owner_email: str = Form(""),
     allowed_scopes: Annotated[list[str] | None, Form()] = None,
     daily_cost_cap_usd: str = Form(""),
+    total_request_cap: str = Form(""),
     next: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> HTMLResponse:
@@ -444,13 +471,17 @@ async def dash_create_project(
         cap = _parse_cost_cap(daily_cost_cap_usd)
     except ValueError:
         return _back(next, "!Bad cost cap")
+    try:
+        req_cap = _parse_request_cap(total_request_cap)
+    except ValueError:
+        return _back(next, "!Bad request cap (whole number >= 0, blank = unlimited)")
     plain = generate_project_key()
     h = hash_project_key(plain)
     async with get_session() as s:
         row = ProjectRow(
             name=name, owner_email=owner_email or None,
             project_key_hash=h, project_key_prefix=plain[:12],
-            allowed_scopes=scopes, daily_cost_cap_usd=cap,
+            allowed_scopes=scopes, daily_cost_cap_usd=cap, total_request_cap=req_cap,
         )
         s.add(row)
         await s.flush()

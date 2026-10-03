@@ -14,13 +14,39 @@
 | Telegram login | Spoofed user_id | Verify HMAC-SHA256 over sorted params with secret = `sha256(bot_token)`. Reject if user_id ≠ `OWNER_TELEGRAM_ID`. Reject if `auth_date > 24h old`. |
 | Cost cap (`daily_cost_cap_usd`) | Concurrent requests race past the per-key cap (TOCTOU) | `reserve_cost`/`release_cost` use a single atomic `UPDATE ... WHERE ... RETURNING` — Postgres row-locking serializes concurrent writers so the cap can never be overshot. See **Cost guard** in [`routing.md`](routing.md). |
 
+## Self-signup abuse limits
+
+`POST /v1/signup` (`routes/signup.py`, logic in `services/signup.py`) is the one route that
+creates credentials without auth, so it is boxed in:
+
+- **Blast radius per key.** A signed-up project has `daily_cost_cap_usd = 0` (free providers only;
+  `cost_guard` refuses any paid estimate) and a lifetime `total_request_cap` (default 100),
+  enforced atomically by `admit_request` in `services/request_cap.py`
+  (`UPDATE ... WHERE used < cap RETURNING`, so concurrent requests cannot overshoot).
+  Exhaustion answers `429 {"error": "request_cap_exhausted"}`.
+- **Signup rate.** `SIGNUP_PER_IP_PER_DAY` (default 3, client IP via `client_ip`, the first
+  `X-Forwarded-For` entry) and `SIGNUP_PER_DAY` (default 50), rolling 24h, counted from the
+  `projects` rows (`self_signup`, `signup_ip`, `created_at`). `SIGNUP_ENABLED=false` is the kill
+  switch (`403 signup_disabled`). The count-then-insert is not serialised across the two workers,
+  so a burst can overshoot a limit by a request or two; the per-key caps bound the spend.
+- **Visibility.** Every signup writes an audit row `project.self_signup` (actor `signup`, with
+  contact, purpose and IP) and sends the owner a Telegram alert (`alert("self_signup")`, throttled
+  to one per 5 minutes). Self-signup projects carry a badge and a filter in the dashboard; delete or
+  disable one like any other project.
+- **Code map.** `signup_endpoint` (body `SignupRequest`, answer `SignupResponse` / `SignupLimits`)
+  calls `self_signup` (returns `SignupResult`); `slugify_name` builds the name. Refusals are the
+  exceptions `SignupDisabled` (403), `SignupRateLimited` (429) and `SignupNameInvalid` (422). The
+  request cap raises `RequestCapExhausted`, which `main.py` turns into the stable 429 body.
+- The `X-Forwarded-For` header is only as trustworthy as the proxy in front; a spoofed header can
+  dodge the per-IP limit (not the global one). Lower `SIGNUP_PER_DAY` or flip the kill switch if abused.
+
 ## Audit log
 
 Every admin op writes a row to `audit_log`:
 
 ```
 actor       — 'admin' | 'project:<name>' | 'tg:<user_id>' | 'dashboard'
-action      — 'project.create' | 'key.create' | 'key.disable' | 'cap_block' | 'login.success' | ...
+action      — 'project.create' | 'project.self_signup' | 'key.create' | 'key.disable' | 'cap_block' | 'login.success' | ...
 target      — what was acted on (e.g. 'cerebras/eatmeat', 'id=12')
 metadata    — JSONB, arbitrary
 ip          — best-effort client IP

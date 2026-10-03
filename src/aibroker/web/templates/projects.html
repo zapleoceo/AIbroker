@@ -11,6 +11,12 @@
 
 <div class="section-title">
   <p>{{ t(cards|length ~ " project(s) · spend and activity for the selected period; the bar is today's spend against the daily cap.", "Проектов: " ~ cards|length ~ " · расходы и активность за период; полоса — сегодняшние расходы относительно дневного лимита.") }}</p>
+  <div class="row">
+    {% if n_signup %}
+    {% if only_signup %}<a class="chip info plain" href="/dashboard/projects?{{ rng.qs }}" aria-pressed="true">{{ t("self-signup only", "только self-signup") }} ({{ n_signup }}) ×</a>
+    {% else %}<a class="chip plain" href="/dashboard/projects?{{ rng.qs }}&amp;signup=1" aria-pressed="false">{{ t("filter: self-signup", "фильтр: self-signup") }} ({{ n_signup }})</a>{% endif %}
+    {% endif %}
+  </div>
   <button type="button" class="btn btn-primary" hx-get="/dashboard/projects/new" hx-target="#drawer-body" hx-swap="innerHTML" aria-haspopup="dialog">{{ m.icon("plus") }}{{ t("New project", "Новый проект") }}</button>
 </div>
 
@@ -21,6 +27,7 @@
   <a class="card pcard" href="/dashboard/projects/{{ p.id }}?{{ rng.qs }}">
     <div class="pcard-top">
       <h3 class="trunc" title="{{ p.name }}">{{ p.name }}</h3>
+      {% if p.self_signup %}<span class="chip info plain" title="{{ t('Created via POST /v1/signup', 'Создан через POST /v1/signup') }}">self-signup</span>{% endif %}
       {% if p.is_active %}<span class="chip ok">{{ t("active", "активен") }}</span>{% else %}<span class="chip off">{{ t("disabled", "отключён") }}</span>{% endif %}
     </div>
     <div class="pills">
@@ -31,6 +38,9 @@
     {% else %}
       <div class="meter"><div class="meter-top"><span>{{ t("Today", "Сегодня") }}</span><b>{{ c.today_spend|money }}</b></div>
         <span class="muted" style="font-size:12px">{{ t("no daily cap", "без дневного лимита") }}</span></div>
+    {% endif %}
+    {% if c.req.cap is not none %}
+      {{ m.meter(t("Lifetime requests", "Запросов всего"), (c.req.used|num) ~ " / " ~ (c.req.cap|num), c.req.pct, c.req.cls) }}
     {% endif %}
     <div class="stats">
       <div class="stat"><b>{{ c.calls|num }}</b><span>{{ t("calls", "вызовов") }}</span></div>

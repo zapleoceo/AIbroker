@@ -8,10 +8,57 @@ Base URL (production): `https://aib.zapleo.com`
 OpenAPI live: [`GET /docs`](https://aib.zapleo.com/docs). Dashboard, admin and
 login routes are excluded from the public `/openapi.json` (2026-10-02).
 
+## Quick start: self-signup
+
+Any service can get itself a working key with one unauthenticated call, no approval:
+
+```bash
+curl -X POST https://aib.zapleo.com/v1/signup \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-service", "contact": "me@example.com", "purpose": "connect + test"}'
+```
+
+```json
+{
+  "name": "my-service",
+  "project_key": "aib_prj_...",
+  "limits": {"daily_cost_cap_usd": 0.0, "total_request_cap": 100,
+             "scopes": ["llm:chat", "llm:embed"]},
+  "docs_url": "https://aib.zapleo.com/docs",
+  "upgrade": "Need more? Contact the owner with your project name to raise the limits."
+}
+```
+
+Send `project_key` as `X-Project-Key` on every other call. **It is shown once** - store it.
+
+- `name` (required) is normalised to a lowercase slug (`My Bot!` -> `my-bot`, 2-60 chars). It must
+  be unique: on a clash a `-<4 hex>` suffix is appended, so always read the returned `name`.
+  `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
+- **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid call is refused; `0` is
+  not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
+  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/transcribe` and
+  `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
+  (`GET /v1/jobs/{id}`), `/v1/models` and requests rejected for scope or body errors are free.
+  A request counts once admitted, even if the provider then fails. Default scopes are `llm:chat` and
+  `llm:embed` (`SIGNUP_DEFAULT_SCOPES`).
+- **Errors.**
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `422` | `invalid_name` | the name has fewer than 2 usable characters (`a-z`, `0-9`) |
+| `403` | `signup_disabled` | the owner turned self-signup off (`SIGNUP_ENABLED=false`) |
+| `429` | `signup_rate_limited` | too many signups: `scope` is `ip` (default 3/day per address) or `global` (default 50/day); `Retry-After` is set |
+| `429` | `request_cap_exhausted` | on any later call: the project spent its lifetime allowance, body `{"error": "request_cap_exhausted", "limit": 100, "used": 100, "message": "..."}` |
+
+- **More limits.** Message the owner with the project `name`; they raise `total_request_cap` and the
+  daily cost cap in the dashboard (project -> Settings; a blank request cap = unlimited). Projects
+  created before this feature have no request cap.
+
 ## Public (no auth)
 
 | Method | Path | Description |
 |---|---|---|
+| `POST` | `/v1/signup` | Self-signup: returns a restricted project key once ($0/day, 100 requests total) - see [Quick start](#quick-start-self-signup) |
 | `GET` | `/` | Public bilingual (EN/RU) landing page — product overview, OG/Twitter/Schema.org metadata |
 | `GET` | `/robots.txt` | Crawler policy — index everything except `/admin/`, `/dashboard`, `/api/` |
 | `GET` | `/sitemap.xml` | XML sitemap with hreflang EN/RU alternates |

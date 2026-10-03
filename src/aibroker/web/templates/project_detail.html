@@ -14,6 +14,7 @@
     <a href="/dashboard/projects?{{ rng.qs }}" class="btn btn-sm btn-ghost">← {{ t("Projects", "Проекты") }}</a>
     {% if project.is_active %}<span class="chip ok">{{ t("active", "активен") }}</span>{% else %}<span class="chip off">{{ t("disabled", "отключён") }}</span>{% endif %}
     <code title="project key prefix">{{ project.project_key_prefix }}…</code>
+    {% if project.self_signup %}<span class="chip info plain" title="{{ t('Created via POST /v1/signup', 'Создан через POST /v1/signup') }}">self-signup</span>{% endif %}
     {% if project.owner_email %}<span class="muted trunc">{{ project.owner_email }}</span>{% endif %}
   </div>
   <form method="post" action="/dashboard/projects/{{ project.id }}/rotate-token" class="inline"
@@ -165,6 +166,9 @@
 <div class="grid-2">
   <section class="card card-pad stack">
     <h2>{{ t("Project settings", "Настройки проекта") }}</h2>
+    {% if req.cap is not none %}
+    {{ m.meter(t("Lifetime requests", "Запросов всего"), (req.used|num) ~ " / " ~ (req.cap|num), req.pct, req.cls) }}
+    {% else %}<p class="muted">{{ t("Lifetime requests: " ~ req.used ~ " used, no cap.", "Запросов всего: " ~ req.used ~ ", без лимита.") }}</p>{% endif %}
     {% set inline = true %}
     {% include "_project_form.html" %}
   </section>

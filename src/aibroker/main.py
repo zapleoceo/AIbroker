@@ -9,13 +9,15 @@ from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
-from aibroker.routes import admin, dashboard, health, landing, proxy
+from aibroker.routes import admin, dashboard, health, landing, proxy, signup
 from aibroker.services.job_queue import dispatcher_loop
+from aibroker.services.request_cap import RequestCapExhausted
 from aibroker.telemetry.request_context import new_request_id, request_scope, sanitize_request_id
 
 
@@ -122,8 +124,22 @@ class _RequestIdMiddleware:
 
 app.add_middleware(_RequestIdMiddleware)
 
+
+@app.exception_handler(RequestCapExhausted)
+async def _request_cap_exhausted(_: Request, exc: RequestCapExhausted) -> JSONResponse:
+    """429 with a stable machine-readable body (not FastAPI's {"detail": ...}) so a
+    client can tell "my lifetime allowance is spent" from a transient rate limit."""
+    return JSONResponse(
+        {"error": "request_cap_exhausted", "limit": exc.limit, "used": exc.used,
+         "message": f"This project has used its lifetime allowance of {exc.limit} requests. "
+                    "Ask the owner to raise total_request_cap."},
+        status_code=429,
+    )
+
+
 app.include_router(landing.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
+app.include_router(signup.router, prefix="/v1")
 app.include_router(admin.router, prefix="/admin")
 app.include_router(dashboard.router)
