@@ -461,3 +461,16 @@ def test_prompt_chars_does_not_count_base64_image_payloads():
     assert not is_deepseek_big_json_prompt({"type": "json_object"}, msgs)
     assert _prompt_chars([{"role": "user", "content": "abc"}]) == 3
     assert _prompt_chars([{"role": "assistant", "content": None}]) == 0
+
+
+def test_gemini_3x_drops_temperature_but_2x_keeps_it():
+    from aibroker.providers.adapters import adapter_for
+
+    for model in ("gemini/gemini-3.5-flash", "gemini/gemini-3.1-flash-lite"):
+        kwargs = {"temperature": 0.7, "max_tokens": 10}
+        adapter_for("gemini").prepare(model, kwargs, "chat:fast")
+        assert "temperature" not in kwargs, model
+        assert kwargs["max_tokens"] == 10
+    kwargs = {"temperature": 0.7}
+    adapter_for("gemini").prepare("gemini/gemini-2.5-flash", kwargs, "chat:fast")
+    assert kwargs["temperature"] == 0.7

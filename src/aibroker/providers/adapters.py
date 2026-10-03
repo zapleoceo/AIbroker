@@ -92,6 +92,12 @@ class _GeminiAdapter(ProviderAdapter):
         kwargs["reasoning_effort"] = (
             "low" if tail.startswith(_GEMINI_NO_DISABLE_PREFIXES) else "disable"
         )
+        # Gemini 3.x is tuned for its default temperature (1.0): Google warns
+        # that lowering it - and litellm warns for any explicit value, incl. our
+        # 0.7 default - can cause looping / degraded reasoning. Drop it so the
+        # model's own default applies (2026-10-03 review). 2.x keeps it.
+        if tail.startswith("gemini-3"):
+            kwargs.pop("temperature", None)
 
 
 # Keys LiteLLM can leave a forced-tool JSON reply wrapped in. Claude has no
