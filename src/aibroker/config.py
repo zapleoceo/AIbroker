@@ -71,21 +71,9 @@ class Settings(BaseSettings):
     TRANSCRIBE_TIMEOUT_S: float = 120.0
     GEMINI_ASR_TIMEOUT_S: float = 60.0
 
-    # Self-hosted transcription (this repo's own services/asr-local) — empty
-    # = the "local" provider is unreachable and every transcription request
-    # falls straight through to groq/openai (see routing/chains.py).
     # How long a request family stays pinned to the (provider, model, key) whose
     # provider-side prompt cache is warm (routing/affinity.py). Default 2h.
     AFFINITY_TTL_S: float = 7200.0
-    ASR_LOCAL_URL: str = ""
-    # 2026-07-18: 90s -> 180s. Model is `small` int8 on 1 CPU thread with
-    # beam_size=5 (large-v3-turbo/medium were both OOM-killed on this shared
-    # host — see services/asr-local/app.py); the slower beam search plus a
-    # possible no-VAD retry pass on an empty first decode means a single
-    # request can run long. Low volume (~10 req/day, no backfill) makes the
-    # wait affordable, and a real timeout beats a false-negative cooldown on a
-    # local, private, free provider that's just still working.
-    ASR_LOCAL_TIMEOUT_S: float = 180.0
 
     # Self-hosted vision (llama.cpp serving Qwen3-VL-4B-Instruct Q4_K_M on
     # CPU) — empty = the "local" provider is unreachable and vision falls
@@ -96,8 +84,8 @@ class Settings(BaseSettings):
     # the same images through the one-shot CLI that reloads the model every
     # call. Documents are the slow end. 300s leaves room for the slowest
     # document plus a cold model load (22s) without cooling the key on a
-    # provider that is simply still working — the same reasoning as
-    # ASR_LOCAL_TIMEOUT_S above.
+    # provider that is simply still working — the same logic as any slow
+    # self-hosted provider that is simply still working.
     VISION_LOCAL_TIMEOUT_S: float = 300.0
     # Longest edge, in pixels, an image is downscaled to before it reaches the
     # model. NOT a nicety: at native resolution the vision encoder does not fit

@@ -52,13 +52,11 @@ def _load() -> dict[str, Any]:
             LiteLLMChatAudioTransport,
             LiteLLMTransport,
         )
-        from aibroker.providers.local_asr import LocalAsrTransport
         from aibroker.providers.local_vision import LocalVisionTransport
         _transports.update({
             "litellm": LiteLLMTransport(),
             "litellm_chat_audio": LiteLLMChatAudioTransport(),
             "local_vision": LocalVisionTransport(),
-            "local_asr": LocalAsrTransport(),
             "gemini_asr": GeminiAsrTransport(),
             "openrouter_decisions": OpenRouterDecisions(),
         })

@@ -89,7 +89,7 @@ def test_registered_overrides_reach_litellm():
 
 
 def test_local_models_are_marked_local_and_use_a_raw_transport():
-    for mid, transport in (("local/whisper", "local_asr"), ("local/qwen3vl", "local_vision")):
+    for mid, transport in (("local/qwen3vl", "local_vision"),):
         m = model_spec(mid)
         assert m.pricing == "local" and m.transport == transport
 
@@ -107,7 +107,6 @@ def test_every_model_transport_exists_and_implements_its_protocol():
     assert isinstance(table["litellm"], t.EmbedTransport)
     assert isinstance(table["litellm"], t.TranscribeTransport)
     assert isinstance(table["local_vision"], t.ChatTransport)
-    assert isinstance(table["local_asr"], t.TranscribeTransport)
     assert isinstance(table["gemini_asr"], t.TranscribeTransport)
     assert isinstance(table["openrouter_decisions"], t.DecideTransport)
 

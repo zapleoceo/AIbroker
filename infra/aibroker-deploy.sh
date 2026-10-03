@@ -69,7 +69,7 @@ for i in $(seq 1 60); do
         echo "all services healthy after $((i * 3))s"
         # Record WHAT is running, so the deploy log answers "which config?"
         # without anyone having to guess from a status column.
-        for c in aibroker-vision-local aibroker-asr-local; do
+        for c in aibroker-vision-local; do
             docker inspect -f "{{.Name}} args={{.Args}}" "$c" 2>/dev/null || true
         done
         exit 0

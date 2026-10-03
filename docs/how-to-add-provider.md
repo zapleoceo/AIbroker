@@ -28,7 +28,7 @@ and in what sequence — stays in `routing/chains.py`.
    in `docs/history/provider-choices.md`, one line in the code.
 
 A model served by a non-litellm endpoint sets `transport` in its `model_meta`
-(`"local_vision"`, `"local_asr"`, `"gemini_asr"`, `"openrouter_decisions"`; see below).
+(`"local_vision"`, `"gemini_asr"`, `"openrouter_decisions"`; see below).
 
 ## Add a new provider
 
@@ -51,7 +51,7 @@ A model served by a non-litellm endpoint sets `transport` in its `model_meta`
    | `cache_sticky`, `explicit_cache`, `cache_key_param` | prompt-cache behaviour — set `cache_key_param` ONLY if the provider documents a stable-cache-key request parameter |
    | `rate_limit_signs` / `auth_signs` / `monthly_signs` | provider-scoped error substrings (narrow; never global) |
    | `max_request_tokens` | bootstrap size ceiling (the learned ceiling overrides it) |
-   | `empty_is_failure`, `refine_transcript` | local-style providers whose empty output is never a real answer |
+   | `empty_is_failure` | local-style providers whose empty output is never a real answer |
 
 3. Give it a slot in `routing/chains.py` (`CAPABILITY_CHAINS`) where it belongs, and make
    sure every `(provider, capability)` pair in a chain has a default model
@@ -67,7 +67,7 @@ scope checkboxes and the model catalog are all views over the registry.
 
 Implement the Protocol(s) it serves from `providers/transport.py` —
 `ChatTransport.chat`, `EmbedTransport.embed`, `TranscribeTransport.transcribe`,
-`DecideTransport.decide` — in its own module (see `local_vision.py`, `local_asr.py`,
+`DecideTransport.decide` — in its own module (see `local_vision.py`,
 `gemini_asr.py`), return `(payload, meta)` with at least `model`, `model_served`,
 `tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, raise errors whose text
 `classify_provider_error` understands (reclassify transport failures as `TimeoutError`

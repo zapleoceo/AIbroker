@@ -44,12 +44,12 @@ def test_other_values_do_not_opt_in():
 
 def test_isolate_env_forces_over_existing_values():
     env = {"REDIS_URL": "redis://prod", "TELEGRAM_BOT_TOKEN": "tok", "OWNER_TELEGRAM_ID": "1",
-           "ASR_LOCAL_URL": "http://x", "VISION_LOCAL_URL": "http://y",
+           "VISION_LOCAL_URL": "http://y",
            "MONITOR_BACKUP_DIR": "/backups", "ALERT_STATE_DIR": "/var/lib/aibroker"}
     isolate_env(env, "/tmp/fresh")
     assert env["OWNER_TELEGRAM_ID"] == FAKE_OWNER_TELEGRAM_ID
     assert env["ALERT_STATE_DIR"] == "/tmp/fresh"
-    for k in ("REDIS_URL", "TELEGRAM_BOT_TOKEN", "ASR_LOCAL_URL", "VISION_LOCAL_URL",
+    for k in ("REDIS_URL", "TELEGRAM_BOT_TOKEN", "VISION_LOCAL_URL",
               "MONITOR_BACKUP_DIR"):
         assert env[k] == ""
 

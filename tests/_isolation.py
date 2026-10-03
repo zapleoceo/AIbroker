@@ -11,9 +11,9 @@ PROD_CWD = "/var/www/aibroker"
 FAKE_OWNER_TELEGRAM_ID = "999000111"
 
 # Forced (not setdefault) so a prod/dev shell env can never reach a real
-# Redis, Telegram, local ASR/vision box or the backup dir during tests.
+# Redis, Telegram, local vision box or the backup dir during tests.
 _BLANKED = (
-    "REDIS_URL", "TELEGRAM_BOT_TOKEN", "ASR_LOCAL_URL", "VISION_LOCAL_URL",
+    "REDIS_URL", "TELEGRAM_BOT_TOKEN", "VISION_LOCAL_URL",
     "MONITOR_BACKUP_DIR",
 )
 

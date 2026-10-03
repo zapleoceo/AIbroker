@@ -78,7 +78,7 @@ computed and discarded:
 
 | Provider | chat:fast | chat:smart | chat:sales | chat:code | vision | embedding |
 |---|---|---|---|---|---|---|
-| local (self-hosted, this host) | — | — | — | — | **Qwen3-VL-4B Q4_K_M via llama.cpp — leads the vision chain** (also faster-whisper for transcription, not in this table) | — |
+| local (self-hosted, this host) | — | — | — | — | **Qwen3-VL-4B Q4_K_M via llama.cpp — leads the vision chain** | — |
 | **cerebras** (keys inactive; no `prefilter`/`translate` since 2026-10-02) | gpt-oss-120b | gpt-oss-120b | — | gpt-oss-120b | — | — |
 | **groq** | openai/gpt-oss-120b | openai/gpt-oss-120b | — | openai/gpt-oss-120b | — | — |
 | **gemini** | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash | gemini-2.5-flash (+ rotation 3.5-flash-lite / 3.5-flash / 3.1-flash-lite, 2026-09-12) | — |

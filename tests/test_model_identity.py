@@ -32,8 +32,6 @@ def test_local_model_comes_from_the_file_llama_server_loaded():
     knowable, and it follows a model swap with no code change."""
     assert served_model(
         "local/qwen3vl", "/models/qwen3-vl-4b-Q4_K_M.gguf") == "qwen3-vl-4b-Q4_K_M"
-    assert served_model(
-        "local/whisper", "/models/faster-whisper-small.bin") == "faster-whisper-small"
 
 
 def test_an_echo_of_the_requested_name_adds_nothing():

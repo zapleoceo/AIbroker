@@ -21,7 +21,7 @@ be a scattered table:
 | `max_keys` | `llm_service._MAX_KEYS_BY_PROVIDER` |
 | `paid`, `rank` | `chains.PAID_PROVIDERS`, new deterministic pin order |
 | `models` (`ModelSpec`), `defaults`, `rotation` | `DEFAULT_MODEL`, `MODEL_ROTATION`, `register_model`, `_WHISPER_USD_PER_MIN` |
-| `empty_is_failure`, `refine_transcript` | `provider == "local"` special cases |
+| `empty_is_failure` | `provider == "local"` special cases |
 
 The old module-level names are gone (callers use accessor functions / views).
 `ModelSpec` carries `transport` (name of the Protocol implementation), the
@@ -34,7 +34,7 @@ explicitly free/local. `chains.py` keeps the capability -> provider *order*
 `providers/transport.py` defines small Protocols (`ChatTransport`,
 `EmbedTransport`, `TranscribeTransport`) and the name -> instance table.
 Implementations: `litellm_client.py` (chat/embed/whisper/chat-transcribe),
-`local_vision.py`, `local_asr.py`, `gemini_asr.py`. Pure helpers moved out:
+`local_vision.py`, `gemini_asr.py`. Pure helpers moved out:
 `cost.py` (pricing), `prompt_cache.py` (anthropic marks, cache-token parsing,
 stable cache-key kwargs). `call_llm`/`embed`/`transcribe` stay as facades that
 dispatch through the registry — no `provider == "local"` anywhere.

@@ -81,44 +81,6 @@ services:
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
-  # Self-hosted faster-whisper — backs the 'local' transcription provider
-  # (see providers/litellm_adapter.py, routing/chains.py). Owned by this repo
-  # (not vera3's — see docs/deploy-ops.md "Local ASR" for why that mattered):
-  # a project boundary must not sit between the broker and a service its own
-  # routing depends on. Same resource ceiling that ran healthy under vera3's
-  # compose for real prod traffic (2026-07-18): the host has 2 cores shared
-  # with Stepan2/Vera, 1 thread avoids thrashing more than it helps.
-  # 2026-07-18: tried bumping small -> large-v3-turbo (then medium as a
-  # fallback) for accuracy — both OOM-killed loading directly on this host,
-  # swap was already 100% full with no headroom for the transient peak
-  # during download+int8 quantization. Stayed on small; beam_size=5 (app.py,
-  # up from greedy) is the accuracy lever that doesn't cost extra RAM.
-  asr-local:
-    build:
-      context: ./services/asr-local
-      dockerfile: Dockerfile
-    container_name: aibroker-asr-local
-    environment:
-      WHISPER_MODEL: ${WHISPER_MODEL:-small}
-      WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-1}
-      # Drop the model after 10 idle minutes; 0 disables. Real traffic is
-      # ~19 transcriptions/day, so it would otherwise hold ~200MB doing
-      # nothing on a host that is already 1.3GB into swap. A cold load is
-      # 4.4s, against calls that take 15-180s anyway.
-      WHISPER_IDLE_UNLOAD_S: ${WHISPER_IDLE_UNLOAD_S:-600}
-    cpus: 1.0
-    mem_limit: 1500m
-    expose:
-      - "8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 180s
-    restart: unless-stopped
-    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
-
   # Self-hosted vision — llama.cpp serving Qwen3-VL-4B-Instruct Q4_K_M on CPU.
   # Backs the 'local' vision provider (providers/litellm_adapter.py,
   # routing/chains.py, where it leads the chain). Added 2026-08-31 because
@@ -267,8 +229,6 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      asr-local:
-        condition: service_started
       vision-local:
         condition: service_started
     environment:
@@ -285,9 +245,6 @@ services:
       GLOBAL_DAILY_CAP_USD: ${GLOBAL_DAILY_CAP_USD:-20.0}
       PUBLIC_HOST: ${PUBLIC_HOST:-aib.zapleo.com}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # Same compose network now (asr-local above) — no more cross-project
-      # network join. Empty/unreachable degrades safely to groq/gemini/openai.
-      ASR_LOCAL_URL: ${ASR_LOCAL_URL:-http://aibroker-asr-local:8000}
       # Empty/unreachable degrades safely to gemini/openrouter/openai.
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
     ports:
@@ -323,10 +280,9 @@ services:
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MONITOR_INTERVAL_S: "600"
-      # The monitor probes the self-hosted services directly (2026-09-07):
-      # api's /healthz stays green while vision-local or asr-local are down,
+      # The monitor probes the self-hosted vision service directly (2026-09-07):
+      # api's /healthz stays green while vision-local is down,
       # because the chain just falls through to the cloud tier silently.
-      ASR_LOCAL_URL: ${ASR_LOCAL_URL:-http://aibroker-asr-local:8000}
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
       # Nightly dumps are made by vera3's /usr/local/bin/vera-backup.sh, not by
       # this stack — aibroker only VERIFIES they keep appearing. Empty disables.

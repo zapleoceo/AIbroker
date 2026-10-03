@@ -202,11 +202,11 @@ container stopped out from under compose. Exit 12.
 
 **Health gate, every service.** Waits up to 180s for all of them, not just
 `api`. Only `monitor` has its healthcheck disabled, so it only has to be
-`running`; postgres, pgbouncer, redis, asr-local, vision-local and api
+`running`; postgres, pgbouncer, redis, vision-local and api
 must be `healthy`. On failure it dumps `compose ps` plus
 the last 30 log lines of each offending service. Exit 11.
 
-On success it prints the resolved `args` of `vision-local` and `asr-local`, so
+On success it prints the resolved `args` of `vision-local`, so
 the deploy log records *which configuration* actually started — the question
 the old script left unanswerable.
 
@@ -253,7 +253,7 @@ in the codebase was the one written for `deep_jobs` after it reached 1.6GB.
 
 | check | alert key | why |
 |---|---|---|
-| `check_local_services` — GET `VISION_LOCAL_URL/health`, `ASR_LOCAL_URL/healthz` | `local:vision`, `local:asr` | api's `/healthz` stays green while either is down; the chain falls through to the cloud tier silently |
+| `check_local_services` — GET `VISION_LOCAL_URL/health` | `local:vision` | api's `/healthz` stays green while it is down; the chain falls through to the cloud tier silently |
 | `check_queue_backlog` — jobs pending/running past `MONITOR_QUEUE_STUCK_MIN` (30) | `queue:backlog` | a wedged dispatcher was invisible until a client complained |
 | `check_backup_freshness` — newest `*.dump` under `MONITOR_BACKUP_DIR` younger than `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` | see below |
 
@@ -297,8 +297,8 @@ against ~20000 errors (12102 `CapBlock`, 3828 gemini `RateLimitError`, 4053
 openrouter `RateLimitError`), essentially all of it one client's traffic at
 240-300 distinct images/day.
 
-**Unlike `asr-local`, we write no service code.** `llama-server` already
-provides everything the asr-local wrapper had to hand-roll: an OpenAI-shaped
+**We write no service code.** `llama-server` already
+provides everything a hand-rolled wrapper would have to build: an OpenAI-shaped
 `/v1/chat/completions` that accepts `image_url`, `--sleep-idle-seconds` for
 idle unload, `/health` that is exempt from the idle timer (so the compose
 healthcheck cannot keep the model awake), and `response_format: json_schema`
@@ -529,98 +529,31 @@ day). One serialized worker clears ~50/hour, so in the peak hour the cloud tail
 of the chain takes the overflow. That is the design, not a failure — `local`
 returning nothing simply walks the chain to `gemini`.
 
-## Local ASR (2026-07-18, moved in-repo same day; model-bump attempted same day, reverted)
+## Local ASR retired (2026-10-04)
 
-`services/asr-local/` — self-hosted `faster-whisper` (`small`, int8, 1 CPU
-thread, `beam_size=5`, 1.5GB cap) — is its own `docker-compose.yml` service
-(`aibroker-asr-local`), built and run alongside `api` on this repo's own
-compose network. `api` reaches it at `ASR_LOCAL_URL` (default
-`http://aibroker-asr-local:8000`); unreachable/unset degrades safely to
-groq/gemini/openai (see `docs/api.md`'s `local` transcription section).
+The self-hosted faster-whisper service (its own compose service, container
+`aibroker-asr-local`) is gone, along with its `local` transcription provider
+and the chat:fast proofreading pass that only served it. After a 15-clip
+bake-off on real voice notes it was the slowest (16-84 s, one 180 s timeout)
+and the worst in quality, while `gemini-3.5-transcribe` (1-3.4 s, most
+faithful) now leads the transcription chain with groq as the fallback — see
+`docs/routing.md`. Only `vision-local` stays self-hosted.
 
-**Idle unload (2026-08-28).** The model is no longer preloaded at startup and
-is dropped after `WHISPER_IDLE_UNLOAD_S` idle seconds (default 600; 0
-disables). `get_model()` was already lazy, so this is only a reaper task plus
-a last-used stamp; the reaper takes the same `_transcribe_lock` the decode
-path uses, so it can never unload mid-request.
-
-Measured on this host that day, in-container:
+**One-time server cleanup after the deploy** (compose does not remove the
+orphan container or image by itself):
 
 ```
-before import        9 MB
-after import        62 MB   <- libraries alone
-model loaded       519 MB   (4.4s)
-after del + gc     252 MB
+cd /opt/aibroker   # the compose project directory
+docker compose rm -sf asr-local || docker rm -f aibroker-asr-local
+docker image rm $(docker images --filter 'reference=*asr-local*' -q | sort -u)
+docker image prune -f
+docker volume ls | grep -i -E 'whisper|asr'   # model cache, if any; docker volume rm <name>
+docker stats --no-stream; free -h             # confirm the ~1.5GB cap / ~200MB resident is back
 ```
 
-The running container sat at ~195MB resident. Against ~19 transcriptions a
-DAY the model is idle ~99% of the time, and the host is 2 cores / 3.7GB with
-1.3GB already in swap — so a permanently resident idle model gets paged out
-anyway and paged back in on the next call. Paying the 4.4s load explicitly on
-a cold request is cheaper and more predictable than that, on calls whose
-measured latency is 15-180s regardless.
-
-`gc.collect()` alone is NOT enough, and measuring only the fresh-start number
-hides it. After a load/unload cycle the process had freed the model but glibc
-kept the arenas, so the host still saw 230MB — a ~50MB saving, not ~210MB.
-`_return_arenas_to_os()` calls `malloc_trim(0)`; measured in-container:
-
-```
-model loaded        508 MB
-after del + gc      241 MB   <- what the host still saw
-after malloc_trim    72 MB   <- what it sees now
-```
-
-It is guarded, so a non-glibc base image just skips it.
-
-**Not changed, and why.** `cpus: 1.0` and `WHISPER_CPU_THREADS=1` stay: the
-host has 2 cores and vera3-postgres was measured pinning ~99% of one, so
-giving ASR a second core would contend with production rather than speed
-anything up. `beam_size=5` stays too — a synthetic-audio benchmark could not
-separate it from fixed overhead (no real speech means the decoder barely
-runs), so there is no measurement supporting a drop, and it was chosen
-deliberately for non-English accuracy.
-**Model size ceiling on this host (2026-07-18).** Tried bumping `small` ->
-`large-v3-turbo` (bigger encoder, better multilingual accuracy — worth it
-since volume is low, ~10 req/day, no backfill, so the model's RAM footprint
-is the only real cost, not throughput). First attempt used a
-non-existent repo id (`Systran/faster-whisper-large-v3-turbo` 401s — Systran
-never published that conversion; the real public one is
-`deepdml/faster-whisper-large-v3-turbo-ct2`) and failed CI's docker build
-fast (~45s) before ever reaching the server. Fixed the repo id, then tested
-loading it **directly on the server** in an isolated, unconstrained
-container (not the real deploy) before trying again — **OOM-killed (exit
-137)**. Tried `medium` as a fallback the same way — also OOM-killed. Swap was
-100% full both times (`free -h`), so there was no headroom for the transient
-peak during download+int8 quantization (meaningfully above the model's final
-resident size). Reverted all three files (Dockerfile, docker-compose.yml,
-app.py default) back to `small`; kept `beam_size=5` (up from greedy) as the
-accuracy lever that costs CPU/latency, not RAM. The failed GitHub Actions
-deploy (`docker compose build` failing) never reached `up -d`, so production
-was unaffected throughout both attempts.
-
-Revisit if this host gets more RAM, or a dedicated host is stood up for
-asr-local — `WHISPER_MODEL` env var is the only thing that needs to change.
-Before trying again: check `free -h` for swap headroom, and load-test the
-candidate model directly on the server in a throwaway container first
-(`docker run --rm -v ...:/test.py python:3.12-slim ...`) rather than finding
-out via a failed deploy.
-
-This briefly lived in vera3's own compose stack instead, reached over a
-cross-project network join (`api` joining `vera3_default` as an external
-network) — reverted same day: a vera3-side refactor deleted that service
-entirely (its own voice pipeline moved to calling this broker uniformly,
-which made its local copy look redundant), not realizing the broker's
-`local` provider was only ever a thin proxy to that exact container, not a
-model of its own. Deleting the one real model host silently took the
-broker-wide feature down with it. Owning the service directly means the
-one thing the broker's own routing depends on can't become collateral
-damage in an unrelated project's cleanup again — no other project's compose
-file needs to keep a network name stable for this to keep working.
-
-Same 2-cores-shared-with-Stepan2/Vera constraint applies regardless of which
-compose file the container lives in — nothing about resource math changed by
-moving it, only the ownership boundary.
+The `local` / `llm:audio` row in `api_keys` is now unused and can be
+deactivated at leisure (`UPDATE api_keys SET is_active=false WHERE
+provider='local' AND scope='llm:audio'`); nothing reads it.
 
 ## Connection scaling
 

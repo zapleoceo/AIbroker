@@ -121,8 +121,6 @@ AIbroker/
 │   ├── services/               # llm_service, job_queue, deep_jobs, …
 │   └── scripts/
 │       └── bootstrap.py        # create admin project
-├── services/
-│   └── asr-local/              # local ASR container
 ├── migrations/README.md        # how schema changes are applied
 ├── tests/
 │   ├── conftest.py

@@ -271,7 +271,7 @@ async def tick(sweep: int = 0) -> None:
 
 # ─── Stack checks beyond key liveness (2026-09-07 review) ────────────────────
 # Three blind spots the review found: api's /healthz stays green while
-# vision-local or asr-local are down (the chain just falls through to the
+# vision-local is down (the chain just falls through to the
 # cloud tier), nothing watches the job queue, and the nightly dump is made by
 # ANOTHER project's script (vera3's vera-backup.sh) that this stack never
 # verified. Each check is keyed for notifier's alert/recover pair, so a fix
@@ -280,7 +280,6 @@ async def tick(sweep: int = 0) -> None:
 _LOCAL_SERVICES = (
     # (alert key, settings attr, health path)
     ("local:vision", "VISION_LOCAL_URL", "/health"),
-    ("local:asr", "ASR_LOCAL_URL", "/healthz"),
 )
 # A job waiting longer than this is a wedged dispatcher, not a slow provider:
 # the chat walk itself is capped at 18 min and stale-running reclaim at 25.

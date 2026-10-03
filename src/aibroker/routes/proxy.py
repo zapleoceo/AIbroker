@@ -559,8 +559,8 @@ async def transcribe_submit(
     """Audio → text, ASYNC: returns a job_id immediately, poll GET /v1/jobs/{id}.
 
     Same chain and result as POST /v1/transcribe; the difference is who waits.
-    The chain's fallback (self-hosted faster-whisper) legitimately takes
-    131-168s on this host, which is past any sane client read timeout — so a
+    A slow provider in the chain (gemini/openai on a long clip) can take
+    tens of seconds, which is past some client read timeouts, so a
     synchronous call simply LOST those transcripts when groq's daily quota was
     spent. Queued, that slow path gets to finish and the caller polls for it,
     with the queue's retries/backpressure/restart-survival on top.

@@ -72,7 +72,7 @@ def test_empty_entries_expire(monkeypatch):
 
 
 def test_timeout_storm_is_per_scope():
-    """REGRESSION (2026-09-07): `local` fronts two unrelated backends — whisper
+    """REGRESSION (2026-09-07): `local` fronted two unrelated backends — whisper
     (llm:audio) and Qwen3-VL (llm:vision) — with one key each. Keyed by
     provider alone, one timeout on each counted as a 2-key storm and skipped
     BOTH for two minutes. Buckets are (provider, scope) now."""

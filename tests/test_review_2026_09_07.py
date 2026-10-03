@@ -57,7 +57,6 @@ def test_estimate_transcription_cost_scales_with_bytes_and_is_free_for_local():
     small = estimate_transcription_cost("openai/whisper-1", 100_000)
     big = estimate_transcription_cost("openai/whisper-1", 1_000_000)
     assert 0 < small < big
-    assert estimate_transcription_cost("local/whisper", 5_000_000) == 0.0
 
 
 # ─── caps on embed / transcribe ─────────────────────────────────────────────

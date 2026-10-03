@@ -52,33 +52,44 @@ async def test_check_backup_freshness_disabled_when_unset(monkeypatch):
     alert.assert_not_awaited()
 
 
-async def test_check_local_services_recovers_on_200_and_alerts_on_error(monkeypatch):
+async def test_check_local_services_recovers_on_200(monkeypatch):
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", "http://vision:8080")
-    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "http://asr:8000")
 
     class _Client:
         def __init__(self, *a, **k): ...
         async def __aenter__(self): return self
         async def __aexit__(self, *a): return False
         async def get(self, url):
-            if "vision" in url:
-                return SimpleNamespace(status_code=200)
-            raise httpx.ConnectError("refused")
+            return SimpleNamespace(status_code=200)
 
     alert, recover = AsyncMock(), AsyncMock()
-    with patch.object(monitor.httpx, "AsyncClient", _Client), \
-         patch.object(monitor, "alert", alert), patch.object(monitor, "recover", recover):
+    with patch.object(monitor.httpx, "AsyncClient", _Client),          patch.object(monitor, "alert", alert), patch.object(monitor, "recover", recover):
         await monitor.check_local_services()
     recover.assert_awaited_once()
     assert recover.await_args.args[0] == "local:vision"
+    alert.assert_not_awaited()
+
+
+async def test_check_local_services_alerts_on_error(monkeypatch):
+    monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", "http://vision:8080")
+
+    class _Client:
+        def __init__(self, *a, **k): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url):
+            raise httpx.ConnectError("refused")
+
+    alert, recover = AsyncMock(), AsyncMock()
+    with patch.object(monitor.httpx, "AsyncClient", _Client),          patch.object(monitor, "alert", alert), patch.object(monitor, "recover", recover):
+        await monitor.check_local_services()
     alert.assert_awaited_once()
-    assert alert.await_args.args[0] == "local:asr"
+    assert alert.await_args.args[0] == "local:vision"
     assert "ConnectError" in alert.await_args.args[1]
 
 
 async def test_check_local_services_skips_unconfigured(monkeypatch):
     monkeypatch.setattr(get_settings(), "VISION_LOCAL_URL", "")
-    monkeypatch.setattr(get_settings(), "ASR_LOCAL_URL", "")
     alert, recover = AsyncMock(), AsyncMock()
     with patch.object(monitor, "alert", alert), patch.object(monitor, "recover", recover):
         await monitor.check_local_services()

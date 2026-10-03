@@ -803,76 +803,6 @@ class TranscribeFailed(Exception):
     """All transcription providers in the chain failed — route maps to 502."""
 
 
-_LOCAL_ASR_CORRECTION_MAX_TOKENS = 800
-_LOCAL_ASR_CORRECTION_TOKEN_CAP = 4000
-_LOCAL_ASR_CORRECTION_MIN_KEEP_RATIO = 0.6
-_LOCAL_ASR_CORRECTION_PROMPT = (
-    "The text below is a raw speech-to-text transcript from a small local ASR "
-    "model and may contain misheard words, missing punctuation, or garbled "
-    "fragments. Fix ONLY obvious transcription errors. Do not translate, "
-    "summarize, add commentary, or change the meaning. Keep the original "
-    "language. Reply with the corrected transcript ONLY.\n\n"
-    "Transcript:\n{text}"
-)
-
-
-async def _correct_local_transcript(
-    *, project: ProjectRow, text: str, workflow: str | None,
-) -> str:
-    """Local ASR trades accuracy for a tiny CPU footprint — clean its output with
-    one cheap chat:fast pass. Best-effort: any failure (no provider, budget cap,
-    exception) falls back to the raw transcript — a proofreading step must never
-    cost the caller a working answer."""
-    if not text.strip():
-        return text
-    # Size the proofread budget to the transcript: a fixed cap TRUNCATED long voice
-    # notes and, being non-empty, the cut-off text was returned as "corrected".
-    budget = min(
-        _LOCAL_ASR_CORRECTION_TOKEN_CAP,
-        max(_LOCAL_ASR_CORRECTION_MAX_TOKENS,
-            int(estimate_prompt_tokens([{"role": "user", "content": text}]) * 1.4)),
-    )
-    tag = f"{workflow}+asr-correct" if workflow else "asr-correct"
-    try:
-        outcome = await run_chat(
-            project=project, capability="chat:fast",
-            messages=[{"role": "user",
-                       "content": _LOCAL_ASR_CORRECTION_PROMPT.format(text=text)}],
-            model=None, max_tokens=budget,
-            temperature=0.0, response_format=None, workflow=tag,
-        )
-    except Exception as e:  # noqa: BLE001 — proofreading must never sink a working transcript
-        log.warning("local ASR correction pass failed: %s — returning raw transcript", e)
-        return text
-    if not isinstance(outcome, ChatOutcome):
-        return text
-    corrected = outcome.text.strip()
-    # If the proofread came back far shorter than the raw (truncated / over-trimmed),
-    # a COMPLETE raw transcript beats a cut-off "corrected" one.
-    if corrected and len(corrected) < _LOCAL_ASR_CORRECTION_MIN_KEEP_RATIO * len(text):
-        log.warning("local ASR correction returned %d chars vs %d raw — likely "
-                    "truncated; keeping raw transcript", len(corrected), len(text))
-        return text
-    return corrected or text
-
-
-def _transcribe_gate(provider: str):
-    spec = spec_or_default(provider)
-
-    def check(text: str, meta: dict[str, Any]) -> Rejection | None:
-        # A provider whose empty output is untrusted (local's small model + VAD can
-        # clip a REAL message to "") must not return a successful "" — that would
-        # silently DROP the voice. Book it and escalate; a cloud provider's empty
-        # is genuinely-silent audio (kept).
-        if spec.empty_is_failure and not text.strip():
-            return Rejection("EmptyBody", Flow.NEXT_PROVIDER, http_status=502, bill=False,
-                             log_message=f"{provider} ASR returned empty transcript — "
-                                         "escalating to the next transcription provider")
-        return None
-
-    return check
-
-
 def _transcribe_call(model: str, audio: bytes, filename: str):
     async def call(plain: str):
         return await transcribe(model=model, audio=audio, filename=filename, api_key=plain)
@@ -911,14 +841,10 @@ async def run_transcribe(
                 estimated_cost=(0.0 if key.tier == "free"
                                 else estimate_transcription_cost(use_model, len(audio))),
                 call=_transcribe_call(use_model, audio, filename),
-                check=_transcribe_gate(provider),
                 cap_flow=Flow.NEXT_KEY,
             ))
             if res.flow is Flow.SUCCESS:
                 text = res.payload
-                if spec_or_default(provider).refine_transcript:
-                    text = await _correct_local_transcript(
-                        project=project, text=text, workflow=workflow)
                 meta = res.meta
                 return TranscribeOutcome(
                     text=text, provider=provider, model=use_model,

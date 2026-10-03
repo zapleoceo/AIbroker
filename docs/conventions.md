@@ -32,7 +32,7 @@ src/aibroker/
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
     transport.py       Chat/Embed/Transcribe/Decide Protocols + dispatch facades
     litellm_client.py  litellm chat/embed/whisper transport
-    local_vision.py / local_asr.py / gemini_asr.py   raw-HTTP transports
+    local_vision.py / gemini_asr.py   raw-HTTP transports
     cost.py            pricing (litellm map + registry overrides, per-minute audio)
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
@@ -135,7 +135,7 @@ split.
   Migration 012 adds a DB-side event trigger blocking `DROP TABLE`/`DROP SCHEMA` unless
   the session first runs `SET aibroker.allow_destructive_ddl = 'on'`.
 - **Test isolation** (`tests/_isolation.py`, applied by conftest before any app import):
-  `REDIS_URL`, `TELEGRAM_BOT_TOKEN`, `ASR_LOCAL_URL`, `VISION_LOCAL_URL`, `MONITOR_BACKUP_DIR`
+  `REDIS_URL`, `TELEGRAM_BOT_TOKEN`, `VISION_LOCAL_URL`, `MONITOR_BACKUP_DIR`
   are forced empty, `OWNER_TELEGRAM_ID` a fake id, `ALERT_STATE_DIR` a fresh temp dir, and
   `Settings` ignores any cwd `.env`. pytest refuses to start if `/.dockerenv` exists or cwd is
   `/var/www/aibroker`, unless `CI=true` or `AIB_TEST_SANDBOX=1` — a deliberate isolated test

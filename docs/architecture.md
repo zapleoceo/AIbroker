@@ -135,7 +135,6 @@ services/attempt.py        ONE key attempt: reserve → decrypt → call → rel
   │    │                           transcribe/decide dispatch on ModelSpec.transport
   │    ├─ litellm_client.py        litellm chat / embed / whisper / chat-audio
   │    ├─ local_vision.py          self-hosted Qwen3-VL (raw HTTP)
-  │    ├─ local_asr.py             self-hosted faster-whisper (raw HTTP)
   │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
   │    └─ decisions.py             OpenRouter decisions endpoint
   ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
@@ -197,7 +196,7 @@ claimed chat job:
      key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
    - `transport.call_llm` dispatches through the model's transport (litellm for
-     most providers, raw HTTP for `local`/gemini-ASR), applying the provider's
+     most providers, raw HTTP for `local` vision/gemini-ASR), applying the provider's
      **adapter** first (see below). Steps reserve → call → release → gate →
      record → affinity are ONE template, `services/attempt.run_attempt`, shared
      by chat, vision, embedding, transcription and decisions.
@@ -589,7 +588,7 @@ symbols are documented):
 - **Transports** (`providers/transport.py`): `transport_for`; implementations
   `LiteLLMTransport`, `LiteLLMChatAudioTransport` (`litellm_client.py`, with the functions
   `litellm_chat`, `litellm_embed`, `litellm_whisper`), `LocalVisionTransport`,
-  `LocalAsrTransport`, `GeminiAsrTransport`, `OpenRouterDecisions`.
+  `GeminiAsrTransport`, `OpenRouterDecisions`.
 - **Cost / cache** : `register_price_overrides` (`providers/cost.py`), `cache_key_for`,
   `apply_cache_key` (`providers/prompt_cache.py`).
 - **Attempt template** (`services/attempt.py`): `Flow` (verdict of one attempt),

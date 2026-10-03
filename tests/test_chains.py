@@ -174,9 +174,8 @@ def test_vision_leads_with_local():
     for peak-hour overflow and for images passed by remote URL, which the local
     provider deliberately does not fetch.
 
-    Contrast with transcription, where `local` sits SECOND on purpose: there,
-    groq is both free and ~150x faster, so leading with local burned the
-    timeout before falling through. No such free-and-fast option exists here."""
+    Transcription has no local tier any more (self-hosted whisper was retired);
+    vision still has no free-and-fast cloud alternative."""
     chain = chain_for("vision")
     assert chain[0] == "local"
     assert chain[1:] == ["gemini", "sambanova", "openrouter", "deepseek", "openai"]
@@ -229,22 +228,12 @@ def test_transcription_has_gemini_fallback():
     assert "gemini" in chain
 
 
-def test_transcription_leads_with_groq_not_local_asr():
-    """REGRESSION (2026-07-26): local asr-local led this chain from 2026-07-18
-    as "free, private, no external rate limit". On this host it is not a fast
-    path at all — measured over 24h: local 131-168 SECONDS per transcription
-    with 35 timeouts vs 23 successes, groq 753-1150 ms for the same work, also
-    free. Leading with local burned up to the 180s ASR timeout on EVERY request
-    before falling through, and those fall-throughs drained groq's daily quota;
-    once it was gone (and gemini rate-limited, and no key carries llm:audio for
-    openai) callers got no answer at all.
-
-    local stays as the backstop for exactly the case it was added for — groq's
-    daily quota being exhausted — just no longer in front of it."""
-    chain = chain_for("transcription")
-    assert chain[0] == "groq"
-    assert chain.index("groq") < chain.index("local")
-    assert "local" in chain          # still the free/private backstop
+def test_transcription_is_gemini_then_groq_then_openai_and_has_no_local():
+    """2026-10-04 bake-off on 15 real voice notes: gemini-3.5-transcribe is the
+    most faithful (15/15, 1-3.4 s); groq is faster but rewrote surzhyk into
+    literary Ukrainian; the self-hosted whisper was slowest and worst (16-84 s,
+    one timeout) and was retired from the chain."""
+    assert chain_for("transcription") == ["gemini", "groq", "openai"]
 
 
 def test_structured_excludes_cerebras():

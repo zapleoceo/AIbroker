@@ -411,7 +411,7 @@ async def test_transcribe_503_when_no_key():
 
 async def test_transcribe_happy_path():
     plain, _ = await _make_project(["llm:audio"])
-    fake_meta = {"model": "local/whisper",
+    fake_meta = {"model": "gemini/gemini-3.5-transcribe",
                  "cost_usd": 0.0, "latency_ms": 120}
 
     with patch("aibroker.services.llm_service.pick_and_reserve",
@@ -433,39 +433,6 @@ async def test_transcribe_happy_path():
     from aibroker.routing.chains import chain_for
     assert data["provider"] == chain_for("transcription")[0]
     assert data["request_id"] == 101
-
-
-async def test_transcribe_local_applies_correction_pass():
-    """The `local` provider's raw ASR text is proofread by chat:fast before it
-    reaches the caller — the corrected text, not the raw transcript, must be
-    what /v1/transcribe returns."""
-    from aibroker.services.llm_service import ChatOutcome
-
-    plain, _ = await _make_project(["llm:audio"])
-    fake_meta = {"model": "local/whisper", "cost_usd": 0.0, "latency_ms": 120}
-    corrected = ChatOutcome(
-        text="Привет, это голосовое сообщение.", provider="gemini", model="gemini-2.5-flash",
-        tokens_in=20, tokens_out=10, cost_usd=0.0, latency_ms=300,
-        key_label="k", request_id=202,
-    )
-    # pin the chain to local: this asserts the LOCAL correction pass, which is
-    # independent of where local sits in the production order (groq leads since
-    # 2026-07-26 — see test_transcription_leads_with_groq_not_local_asr)
-    with patch("aibroker.services.llm_service.chain_for",
-                return_value=["local", "groq"]), \
-         patch("aibroker.services.llm_service.pick_and_reserve",
-                AsyncMock(return_value=_fake_key())), \
-         patch("aibroker.services.llm_service.transcribe",
-                AsyncMock(return_value=("привет ето галасовое сообщение", fake_meta))), \
-         patch("aibroker.services.llm_service.run_chat", AsyncMock(return_value=corrected)), \
-         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=101)):
-        r = client.post(
-            "/v1/transcribe",
-            headers={"X-Project-Key": plain},
-            files={"file": ("v.ogg", b"fakeaudiobytes", "audio/ogg")},
-        )
-    assert r.status_code == 200
-    assert r.json()["text"] == "Привет, это голосовое сообщение."
 
 
 async def test_transcribe_502_when_all_providers_fail():

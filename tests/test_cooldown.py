@@ -49,8 +49,8 @@ def test_unknown_provider_uses_default():
     assert cooldown_seconds("brand-new-llm", 0) == DEFAULT_COOLDOWN_S
 
 
-def test_local_asr_timeout_reprobes_fast_not_10_minutes():
-    """local = self-hosted single-worker whisper: a timeout means the decode
+def test_local_timeout_reprobes_fast_not_10_minutes():
+    """local = self-hosted single-worker service: a timeout means the decode
     lock was busy, not a dead credential. Before it had no base entry → fell to
     DEFAULT 300s → 600s on timeout_bump, parking the free/private voice path
     ~10 min per slow decode. Base 30 keeps re-probe fast."""

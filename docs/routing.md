@@ -15,7 +15,7 @@
 > | `PAID_PROVIDERS` | `ProviderSpec.paid` (`registry.paid_providers()`) |
 > | `_CACHE_STICKY_PROVIDERS` | `ProviderSpec.cache_sticky` |
 > | `_MAX_KEYS_BY_PROVIDER` | `ProviderSpec.max_keys` |
-> | `litellm_adapter.py` | split: `litellm_client.py`, `cost.py`, `prompt_cache.py`, `local_vision.py`, `local_asr.py`, `gemini_asr.py`, dispatch in `transport.py` |
+> | `litellm_adapter.py` | split: `litellm_client.py`, `cost.py`, `prompt_cache.py`, `local_vision.py`, `gemini_asr.py`, dispatch in `transport.py` |
 > | `_run_attempt`, `_reserve_or_block`, `_handle_attempt_failure`, `_penalize`, `_record_error` | the one template in `services/attempt.py` |
 > | the old prefix-based pin resolver / "a pinned model stays on its own provider" | exact pinning via `providers/catalog.py` (below) |
 > | `selector._affinity`, `note_affinity_shared` | `routing/affinity.py` |
@@ -560,19 +560,16 @@
 > ones not answering, while one client kept submitting 240-300 distinct images
 > a day.
 >
-> This is the OPPOSITE call to `transcription`, where `local` deliberately sits
-> SECOND, and for a consistent reason. There, groq is both free AND ~150x
-> faster, so leading with local burned the timeout before falling through and
-> drained groq's daily quota with fall-through traffic. Here there is no
-> free-and-fast alternative: local is ~69s/image and unmetered, the cloud tier
+> Transcription has no self-hosted tier (retired 2026-10-04); here there is no
+> free-and-fast cloud alternative: local is ~69s/image and unmetered, the cloud tier
 > is rate-limited. The cloud tail stays for two jobs — the 00:00 UTC peak hour
 > (162 images arrive in an hour, ~3x what one serialized worker clears) and
 > images passed by remote URL, which the local provider does not fetch.
 >
 > `local` needs its OWN `api_keys` row (`provider='local'`,
 > `label='vision-local'`, scope `llm:vision`) — NOT the `llm:vision` scope added
-> to the existing asr-local key. `cooldown_until`/`is_alive` are per-row, so
-> sharing one would let a vision-side failure cool the working ASR fallback.
+> to a key of another capability. `cooldown_until`/`is_alive` are per-row, so
+> sharing one would let a vision-side failure cool that capability.
 
 > **2026-07-11 (vision free fallback)**: the `vision` chain was `[gemini,
 > openai]`. Under load every gemini key cooled down at once (vision shares the
@@ -940,7 +937,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `translate` | gemini → groq | `llm:chat` | Trivial task: SMALL FAST non-reasoning models first. Now **gemini → groq** — cerebras (gemma-4-31b deleted by Cerebras 2026-09-03), mistral (2026-09-12) and cohere (2026-10-02) were all removed. Reuses `llm:chat` keys but hits models the chat chains reach last. |
 | `structured` | groq → gemini → anthropic → openai | `llm:chat` | cerebras dropped 2026-07-01: HTTP-200 malformed JSON (~4.6k/wk); cohere and openrouter dropped 2026-10-02. Only gemini and openai grammar-constrain JSON; groq is in `JSON_UNRELIABLE_PROVIDERS` (2026-09-07), so on JSON requests it is walked after gemini. |
 | `vision` | **local** → gemini → sambanova → openrouter → deepseek → openai | `llm:vision` | **2026-09-12:** sambanova (free gemma-4-31B-it, verified on a real inline image) is a second free cloud pool after gemini; **deepseek-flash** (V4.1, native vision, ~$0.0002/image off-peak) is the paid tail — the first paid vision provider that actually holds keys (openai never had one). gemini now ROTATES vision across 2.5-flash / 3.5-flash-lite / 3.5-flash / 3.1-flash-lite (per-model free buckets). local leads since 2026-08-31. anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. cloudflare tried and pulled same day 2026-07-04, see below. |
-| `transcription` | **groq** → gemini → local → openai | `llm:audio` | **Reordered 2026-10-04: gemini (`gemini-3.5-transcribe`, free tier) moved ahead of local.** Live check on 5 real voice notes: groq 0.2-2 s, gemini 1-12 s, local ~80 s; local was hit 2 times in 14 days. **Owner rule (2026-10-04): if local whisper is never reached over a long period, the `asr-local` container can be switched off permanently** (first check `usage_log` for provider='local' and capability='transcription', then drop `local` from this chain and stop the service). Earlier history: **Reordered 2026-07-26 — local was chain-first since 07-18 and had to move.** Measured over 24h on this host: local **131-168 SECONDS** per transcription with **35 timeouts vs 23 successes**; groq does the same work in **753-1150 ms**, also free (~150x). local runs `WHISPER_CPU_THREADS=1` / `cpus=1.0` because the box has only 2 cores at load ~1.7 (raising it OOM'd before — see deploy-ops), so the slowness is structural. Leading with it burned up to the 180s `ASR_LOCAL_TIMEOUT_S` on EVERY request before falling through, and those fall-throughs drained groq's daily quota — after which callers got **no answer at all** (Stepan, 2026-07-26: local cooling + groq exhausted till 00:00 UTC + gemini rate-limited + **no key carries `llm:audio` for openai**, so the last resort is unreachable). local stays as the backstop for exactly the case it was added for (groq's daily quota spent), just not in front of it. An empty `local` transcript is still escalated rather than returned as a silent empty success; local output is still cleaned by a chat:fast correction pass. `/v1/transcribe` route. |
+| `transcription` | **gemini** → groq → openai | `llm:audio` | **Reordered 2026-10-04 after a 15-clip bake-off on real voice notes (owner decision): gemini (`gemini-3.5-transcribe`) first, groq fallback; the self-hosted whisper was removed entirely** (chain item, service, provider, settings, proofreading pass). Numbers: gemini 1-3.4 s, 15/15 ok, most faithful / verbatim; groq `whisper-large-v3-turbo` 0.2-0.7 s but it normalizes surzhyk / Ukrainian speech into literary Ukrainian and made meaning errors; self-hosted faster-whisper 16-84 s, worst quality, one 180 s timeout. **Privacy:** on the gemini free tier Google may use submitted audio to improve its products; the paid tier ($0.005/min) does not. Earlier history: the self-hosted whisper led the chain on 2026-07-18 and was moved behind groq on 2026-07-26 after measuring 131-168 s per transcription with 35 timeouts vs 23 successes (groq 753-1150 ms), then behind gemini earlier on 2026-10-04 before its removal. `/v1/transcribe` route. |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 | `decision` | openrouter | `llm:decision` | Typed decision model (TypeSafe Jev) — **paid openrouter keys only**, `POST /v1/decisions` (not a `/v1/jobs` capability; see `docs/api.md`). `run_decision` reserves against the project and global caps. Jev is primary; on a Jev failure or a cap block (caller did not pin `model`), Inception Mercury Decide (`mercury-decide:free`, $0) answers on the same key, unreserved — owner decision 2026-10-03, because in a 2026-10-03 series on real Vera events (mean of 4 runs, 126 + 42 calls) it matched Jev on project (69% vs 66%) but was clearly weaker on importance (exact 30% vs 53%) and slightly on needs_action (76% vs 80%), so it is never the primary. |
 

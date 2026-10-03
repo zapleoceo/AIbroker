@@ -16,7 +16,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | Embeddings | Same map, input tokens only. |
 | Whisper-style ASR | Per audio minute from `ModelSpec.usd_per_minute` (provider registry) x duration. Groq bills at least 10 s per request (`MIN_BILLED_AUDIO_S`). |
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
-| `local/*` (asr-local, Qwen3-VL) | Free, no external bill. |
+| `local/*` (Qwen3-VL) | Free, no external bill. |
 
 ## Cached tokens
 

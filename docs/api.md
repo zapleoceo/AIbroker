@@ -128,17 +128,16 @@ latency for no benefit.
 ### Transcription: sync or async (2026-07-26)
 
 `POST /v1/transcribe` (multipart `file`) still answers synchronously and is the
-right call when the fast path serves — groq returns in ~750 ms.
+right call when a fast provider serves — gemini-3.5-transcribe returns in 1-3.4 s.
 
 `POST /v1/transcribe/jobs` (`transcribe_submit` in `routes/proxy.py`) takes
 the same multipart upload, returns `202` with a
 `job_id` immediately, and is polled with the ordinary `GET /v1/jobs/{id}`.
-Use it whenever a lost transcript is worse than a delayed one: the chain's
-fallback is a self-hosted faster-whisper that legitimately takes **131-168
-seconds** on this host, which is past any sane client read timeout — so the
-synchronous call silently LOST those transcripts whenever groq's daily quota
-was spent. Queued, the slow path finishes and the caller collects it, plus it
-inherits the queue's retries, backpressure and restart-survival.
+Use it whenever a lost transcript is worse than a delayed one: a long clip,
+or a chain that has to walk to its last provider, can outlast a client read
+timeout, and the synchronous call then loses the transcript. Queued, the slow
+path finishes and the caller collects it, plus it inherits the queue's
+retries, backpressure and restart-survival.
 
 The audio is base64'd into the job payload (the queue stores JSONB and cannot
 hold raw bytes) and is **cleared the moment the job reaches a terminal state**,
@@ -406,8 +405,7 @@ Two conditions hand the request straight on to the cloud tail instead:
   deliberately does not.
 - **an empty body** — a 4B model on CPU that produced nothing is not a real
   answer. Booked as `EmptyBody`/502 and escalated to the next provider (not the
-  next key: `local` is one process, so re-asking it is deterministic). Mirrors
-  the same guard on local whisper below.
+  next key: `local` is one process, so re-asking it is deterministic).
 
 **Response shape is unchanged.** `text` carries PROSE for every provider on
 this chain, `local` included — the local model answers under a JSON grammar
@@ -436,72 +434,18 @@ rate-limited cloud providers — burning CPU for nothing.
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
-`?workflow=` query tag. Chain: `groq` whisper-large-v3-turbo (free) → `local`
-(self-hosted faster-whisper, a backstop — slow on this host, see below) →
-`gemini` (chat-based audio, separate quota) → `openai` whisper-1. Returns
+`?workflow=` query tag. Chain (2026-10-04): `gemini` (`gemini-3.5-transcribe`)
+→ `groq` whisper-large-v3-turbo (free fallback) → `openai` whisper-1. Returns
 `{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
 
-#### `local` — self-hosted faster-whisper (2026-07-18, moved in-repo)
-
-Second in the chain, after groq — a free, private backstop with no external
-rate limit, but slow on this host (minutes for long audio). Backed by this repo's own `services/asr-local`
-(`faster-whisper small`, int8, CPU, `beam_size=5`) — its own
-`docker-compose.yml` service (`aibroker-asr-local`), on the same compose
-network as `api`, no cross-project dependency. (2026-07-18 history: this originally lived in
-vera3's own compose stack, reached over a cross-project network join —
-a same-day vera3 refactor deleted that service entirely, since from vera3's
-side "voice/audio now goes through the broker" made its own copy look
-redundant. It wasn't: the broker's `local` provider was only ever a proxy to
-that same container, not its own model — deleting the one real model host
-took the feature down broker-wide too. Moved in-repo so the service the
-broker's routing depends on can't be an casualty of an unrelated project's
-cleanup again.)
-
-Reached over plain HTTP via `_transcribe_via_local_asr` / `_post_local_asr`
-in `providers/local_asr.py` — not through LiteLLM, since it isn't an
-LLM SDK-compatible endpoint. Always requests `language=auto`: broker callers
-are multi-tenant (e.g. Stepan2's mostly-Bahasa leads), so a single fixed
-default language would be wrong for most of them.
-
-Configured via `ASR_LOCAL_URL` (empty = disabled, every request falls
-straight through to groq/gemini/openai) and `ASR_LOCAL_TIMEOUT_S` (default
-180s — asr-local serializes every call behind a single lock on 1 CPU thread,
-so a request can queue behind another one already in flight). A downed or
-slow-past-timeout local service raises `TimeoutError`, which
-`classify_provider_error` cools down like any other rate limit — so it
-degrades to the external chain instead of being retried every call with no
-backoff.
-
-**Model (2026-07-18: tried `large-v3-turbo`, then `medium` — stayed on
-`small`).** Real volume is low (~10 req/day, no backfill), so the model's
-fixed RAM cost — not decode throughput — looked like the only real
-constraint, and 1 CPU thread stays the throughput ceiling either way. In
-practice both bigger sizes **OOM-killed (exit 137) loading directly on this
-host**, tested in an unconstrained throwaway container — swap was already
-100% full at test time, so there was no headroom left for the transient peak
-during model download+int8 quantization, which runs meaningfully above the
-final resident size. Production itself was never affected (the failed
-`docker compose build` step never reached `up -d`, so `aibroker-asr-local`
-stayed on its previous working image throughout). Stayed on `small`.
-`beam_size` bumped 1->5 instead — slower per call (affordable at this
-volume), meaningfully better accuracy than greedy decoding, and costs no
-extra RAM. Revisit the model size if this host gets more RAM or a dedicated
-host is stood up for asr-local; `WHISPER_MODEL` env var is the only thing
-that needs to change.
-
-**Correction pass (2026-07-18).** Every successful `local` transcript is
-still proofread by one `chat:fast` call
-(`services/llm_service._correct_local_transcript`) before it's returned —
-fixes misheard words/punctuation, never translates or changes meaning.
-Matters more with `small` than a bigger model would need, but stays on
-regardless — cheap insurance either way. Best-effort:
-if the correction call has no available provider, hits the project/global
-budget cap, or raises, the raw local transcript is returned unchanged rather
-than losing a working answer. Tagged `workflow=<caller's workflow>+asr-correct`
-(or bare `asr-correct` when the caller sent none) in `usage_log`, so it's
-visible as its own line in the dashboard's per-project workflow breakdown,
-not folded into the caller's own tag. Only applied to the `local` provider —
-groq/gemini/openai's transcripts already come from full-size hosted models.
+**Why gemini leads (2026-10-04 bake-off, 15 real voice notes).** gemini
+1-3.4 s, 15/15 ok, the most faithful and verbatim transcript; groq 0.2-0.7 s
+but it normalizes surzhyk / Ukrainian speech into literary Ukrainian and made
+meaning errors; the self-hosted whisper that used to sit in the chain was
+16-84 s with the worst quality and one 180 s timeout, and was retired
+entirely (no `local` transcription provider, no self-hosted ASR service, no
+proofreading pass). **Privacy:** on the gemini free tier Google may use the
+audio to improve its products; the paid tier ($0.005/min) does not.
 
 ### `X-Request-Id` — grouping every attempt of one request (2026-10-03)
 

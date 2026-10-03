@@ -43,7 +43,7 @@ _VISION_SYSTEM = (
     "content — ответ на запрос пользователя. Числа переписывай точно как на "
     "изображении, не округляй. Не выдумывай того, чего не видно."
 )
-# Guard mirroring asr-local's _MAX_AUDIO_BYTES: a caller must not be able to
+# Guard mirroring the old ASR service's audio cap: a caller must not be able to
 # push an arbitrarily large blob through the resize step.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -208,7 +208,7 @@ async def _describe_via_local_vision(
         resp = await _post_local_vision(
             f"{base}/v1/chat/completions", payload, settings.VISION_LOCAL_TIMEOUT_S)
     except httpx.HTTPError as e:
-        # Same reclassification as asr-local: a plain 'error' gets NO cooldown,
+        # Same reclassification as any self-hosted call: a plain 'error' gets NO cooldown,
         # so every following request would re-hit a dead endpoint with zero
         # backoff. TimeoutError cools the key instead.
         raise TimeoutError(f"vision-local unreachable: {e}") from e
