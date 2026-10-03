@@ -125,6 +125,14 @@ split.
   prod** (2026-10-03: `docker compose run api pytest` dropped every prod table).
   Migration 012 adds a DB-side event trigger blocking `DROP TABLE`/`DROP SCHEMA` unless
   the session first runs `SET aibroker.allow_destructive_ddl = 'on'`.
+- **Test isolation** (`tests/_isolation.py`, applied by conftest before any app import):
+  `REDIS_URL`, `TELEGRAM_BOT_TOKEN`, `ASR_LOCAL_URL`, `VISION_LOCAL_URL`, `MONITOR_BACKUP_DIR`
+  are forced empty, `OWNER_TELEGRAM_ID` a fake id, `ALERT_STATE_DIR` a fresh temp dir, and
+  `Settings` ignores any cwd `.env`. pytest refuses to start if `/.dockerenv` exists or cwd is
+  `/var/www/aibroker`, unless `CI=true` or `AIB_TEST_SANDBOX=1` — a deliberate isolated test
+  container must pass `-e AIB_TEST_SANDBOX=1`. The `db` fixture also asserts
+  `SELECT current_database()` ends in `_test` before the first `drop_all`.
+- **Least-privilege app role**: migration 013 + `docs/runbooks/db-roles.md` (prepared, applied by hand).
 
 ## Pre-commit hooks
 

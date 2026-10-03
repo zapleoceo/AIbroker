@@ -118,11 +118,10 @@ async def test_submit_job_fires_pg_notify():
     _listen_for_jobs uses)."""
     import asyncpg
 
-    from aibroker.config import get_settings
     from aibroker.services.deep_jobs import JOBS_CHANNEL, submit_job
 
     got = asyncio.Event()
-    conn = await asyncpg.connect(_listen_dsn(get_settings().DATABASE_URL))
+    conn = await asyncpg.connect(_listen_dsn(os.environ["TEST_DATABASE_URL"]))
     try:
         await conn.add_listener(JOBS_CHANNEL, lambda *_: got.set())
         pid = await _make_project(["llm:chat"])
