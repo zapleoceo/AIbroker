@@ -521,10 +521,7 @@ async def test_execute_deterministic_error_fails_at_once_without_retries():
 
     for exc in (ValueError("incompatible native tool request"), KeyError("messages"),
                 TypeError("bad")):
-        async def fake_run_chat(**kw):
-            raise exc
-
-        with patch.object(job_queue, "run_chat", fake_run_chat), \
+        with patch.object(job_queue, "run_chat", AsyncMock(side_effect=exc)), \
              patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue, \
              patch.object(job_queue, "_finish", AsyncMock()) as finish:
             await job_queue._execute(_unclaimed_row(pid, retry_count=0))
