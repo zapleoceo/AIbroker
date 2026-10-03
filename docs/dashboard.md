@@ -23,7 +23,7 @@ templates; `build_env` builds the Jinja environment; formatters live in web/form
 | Project detail | `/dashboard/projects/{id}?tab=usage\|models\|keys\|settings` (`project_detail`, `render_project_detail`; `render_projects` re-renders the list after create) | settings: edit, rotate token, delete |
 | Keys & providers | `/dashboard/keys` (`keys_page`) | grouped by provider; status chip, cooldown countdown, quota burn per axis, last success/error; Test / Edit / Enable-Disable / Delete |
 | Add/edit key drawer | `/dashboard/keys/new` (`key_new_form`), `/dashboard/keys/{id}/edit` (`key_edit_form`) | advanced quota overrides collapsed |
-| Models | `/dashboard/models` (`models_page`) | catalogue from `DEFAULT_MODEL`/`MODEL_ROTATION`/chains: capability, provider, id (copy), price in/out per 1M, 7-day p50 latency and success; unrouted models flagged |
+| Models | `/dashboard/models` (`models_page`) | catalogue from `providers/catalog` (`price_info`) and the registry, with the capability chains: capability, provider, id (copy), price in/out per 1M, 7-day p50 latency and success; unrouted models flagged |
 | Jobs | `/dashboard/jobs` (`jobs_page`) | `deep_jobs` states, stuck-queue warning |
 | Audit log | `/dashboard/audit` | `audit_log`, actor/action filters, keyset paging |
 | Settings | `/dashboard/settings` (`settings_page`) | version, caps, links to `/docs` and `/v1/health`, language, logout |
@@ -50,7 +50,7 @@ path, else ignored) to land back on the page they came from.
 `key_activity`, `gather` (parallel on Postgres, sequential on SQLite), `observed_model_stats`, `job_overview`, `audit_page`, `bucket_starts`,
 `floor_bucket`. `routes/dashboard_views.py` shapes rows into view-models (pure functions:
 `build_kpis`, `build_attention`, `build_key_rows`, `group_by_provider`,
-`build_project_cards`, `build_model_catalogue`, `price_per_mtok`, `pct_change`);
+`build_project_cards`, `build_model_catalogue`, `pct_change`);
 `routes/dashboard_labels.py` holds friendly error labels and `key_status` (`KeyStatus`,
 `reason_labels`); `provider_catalogue` drives the add-key drawer.
 
@@ -63,7 +63,7 @@ failure's end. Concurrent identical requests can in theory be mixed; the UI says
 
 ## Landing and health
 
-`/` is generated from the routing tables: `wired_providers` (model table AND a seat in a
+`/` is generated from the provider registry and routing tables: `wired_providers` (registered provider AND a seat in a
 chain — mistral is absent), `client_endpoints` (read from the real `/v1` router) and
 `llms_text` (`/llms.txt`). The provider list is deliberately not derived from which
 providers hold active keys (the public pages must not reveal per-provider key state).
@@ -80,7 +80,4 @@ providers hold active keys (the public pages must not reveal per-provider key st
   cookie is deleted.
 - **Plurals.** `plural_en` / `plural_ru` (web/format.py) and the `tn()` template global give
   "1 error / 2 errors" and "1 ошибка / 2 ошибки / 5 ошибок".
-- **Request drawer switch point.** `request_attempts` groups by `request_id` when a row carries
-  one (after the core refactor adds `usage_log.request_id`, add it to `_REQUEST_SELECT`); older
-  rows keep the timing inference. The Models page still builds from the in-repo tables; switch to
-  `providers/catalog.py` once it lands on master.
+- **Request drawer.** `request_attempts` groups by `usage_log.request_id` (migration 015) and falls back to the timing inference only for rows with a NULL id.

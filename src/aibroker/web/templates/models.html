@@ -45,6 +45,7 @@
             </td>
             <td data-label="Price in / out" class="num mono">
               {% if r.free %}<span class="good">{{ t("free", "бесплатно") }}</span>
+              {% elif r.per_minute is not none %}${{ "%.4f"|format(r.per_minute) }}{{ t("/min", "/мин") }}
               {% elif r.price_in is none %}<span class="dim">—</span>
               {% else %}${{ "%.2f"|format(r.price_in) }} / {{ ("$%.2f"|format(r.price_out)) if r.price_out is not none else "—" }}{% endif %}
             </td>

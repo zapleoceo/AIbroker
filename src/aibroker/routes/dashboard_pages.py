@@ -21,7 +21,7 @@ from aibroker import __version__
 from aibroker.auth_session import require_owner_session
 from aibroker.config import get_settings
 from aibroker.crypto import decrypt, encrypt
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.providers.registry import default_models, provider_names
 from aibroker.routes import dashboard_queries as q
 from aibroker.routes import dashboard_views as views
 from aibroker.routes.dashboard_assets import ASSETS_VERSION
@@ -250,7 +250,7 @@ async def requests_page(request: Request) -> Response:
         **_ctx(request, "requests", ("Requests", "Запросы"), rng=rng, keep=f.as_query()),
         f=f, n_filters=len([k for k in f.as_query() if k not in ("sort", "dir")]),
         rows=rows, has_more=has_more, next_url=nxt, projects=projects,
-        facets=facets, sort_links=sort_links, providers=sorted(DEFAULT_MODEL),
+        facets=facets, sort_links=sort_links, providers=sorted(provider_names()),
         capabilities=list(CAPABILITY_CHAINS), export_url="/dashboard/requests.csv?" + urlencode(base),
         base_query=base, page=f.page, page_size=q.REQUEST_PAGE_SIZE, drawer=drawer,
         row_limit=q.CSV_EXPORT_LIMIT,
@@ -361,7 +361,7 @@ def provider_catalogue() -> list[dict[str, Any]]:
     """One entry per routable provider — drives the add-key drawer's provider
     picker, its scope boxes and its 'models the broker will use' hint."""
     out = []
-    for p, models in DEFAULT_MODEL.items():
+    for p, models in default_models().items():
         usable = sorted(usable_scopes_for_provider(p))
         if not usable:
             continue          # in no chain (mistral since 2026-09-12): a key could never be picked

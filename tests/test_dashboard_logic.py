@@ -136,9 +136,9 @@ def test_model_catalogue_flags_unrouted_prices_and_observed_stats():
     rows = v.build_model_catalogue({("deepseek", "deepseek/deepseek-flash"): {"calls": 4, "success": 75.0, "p50": 900}})
     ds_row = next(r for r in rows if r["model"] == "deepseek/deepseek-flash" and r["capability"] == "chat:smart")
     assert ds_row["paid"] and ds_row["p50"] == 900 and round(ds_row["price_in"], 2) == 0.15
+    assert not any(r["capability"] not in __import__("aibroker.routing.chains", fromlist=["x"]).CAPABILITY_CHAINS for r in rows)
     mistral = [r for r in rows if r["provider"] == "mistral"]
     assert mistral and not any(r["routed"] for r in mistral)
-    assert v.price_per_mtok("nope/never-heard-of-it") == (None, None)
 
 
 # ─── portable queries ───────────────────────────────────────────────────────

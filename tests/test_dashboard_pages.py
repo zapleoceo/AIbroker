@@ -601,8 +601,20 @@ def test_models_table_has_no_forced_wide_columns():
     assert "table-models" in body and 'class="model-id"' in body
 
 
-def test_request_attempts_prefers_request_id_when_a_row_has_one():
+def test_request_attempts_group_by_request_id_and_fall_back_to_inference():
     from aibroker.routes import dashboard_queries as q
-    ds.seed_demo()
-    row = ds.run(q.get_request(12))
-    assert [a["id"] for a in ds.run(q.request_attempts(row))] == [10, 11, 12]   # inference path
+    ds.seed(ds.project(1), ds.key(1))
+    # three rows of one request_id, far apart in time (timing inference could not link them)
+    ds.seed(ds.usage(1, minutes_ago=50, status="error", provider="a", request_id="rq-1"),
+            ds.usage(2, minutes_ago=30, status="error", provider="b", request_id="rq-1"),
+            ds.usage(3, minutes_ago=2, provider="c", request_id="rq-1"),
+            ds.usage(4, minutes_ago=2, provider="d", request_id="rq-2"))
+    row = ds.run(q.get_request(3))
+    assert row["request_id"] == "rq-1"
+    assert [a["id"] for a in ds.run(q.request_attempts(row))] == [1, 2, 3]
+    # NULL request_id: timing inference still works (seeded chain 10 -> 11 -> 12)
+    ds.seed(ds.usage(10, minutes_ago=10, status="error", latency_ms=5000, provider="x",
+                     workflow="w", at=ds.now() - __import__("datetime").timedelta(minutes=10)))
+    old = ds.run(q.get_request(10))
+    assert old["request_id"] is None
+    assert [a["id"] for a in ds.run(q.request_attempts(old))][-1] == 10

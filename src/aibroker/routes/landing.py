@@ -13,13 +13,12 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.routing import APIRoute
 
 from aibroker import __version__
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL
+from aibroker.providers.registry import paid_providers, provider_names
 from aibroker.routes import proxy
 from aibroker.routes.dashboard_assets import ASSETS_VERSION
 from aibroker.routing.chains import (
     CAPABILITY_CHAINS,
     CAPABILITY_SCOPE,
-    PAID_PROVIDERS,
     usable_scopes_for_provider,
 )
 
@@ -67,9 +66,10 @@ def wired_providers() -> list[str]:
     has a model table but sits in no chain since 2026-09-12, is correctly absent.
     Deliberately NOT derived from which providers hold active keys: the public
     page must not reveal per-provider key state (see the /v1/health aggregate)."""
-    wired = [p for p in DEFAULT_MODEL if usable_scopes_for_provider(p)]
-    free = [p for p in wired if p not in PAID_PROVIDERS and p != "local"]
-    paid = [p for p in wired if p in PAID_PROVIDERS]
+    wired = [p for p in provider_names() if usable_scopes_for_provider(p)]
+    paid_set = paid_providers()
+    free = [p for p in wired if p not in paid_set and p != "local"]
+    paid = [p for p in wired if p in paid_set]
     return sorted(free) + sorted(paid) + (["local"] if "local" in wired else [])
 
 
@@ -78,7 +78,7 @@ def _providers_html() -> str:
     for p in wired_providers():
         if p == "local":
             badge = '<span class="badge" data-i18n data-en="self-hosted" data-ru="свой сервер">self-hosted</span>'
-        elif p in PAID_PROVIDERS:
+        elif p in paid_providers():
             badge = '<span class="badge paid">paid</span>'
         else:
             badge = '<span class="badge">free</span>'

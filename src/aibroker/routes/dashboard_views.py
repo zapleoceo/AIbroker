@@ -10,10 +10,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from aibroker.providers.litellm_adapter import DEFAULT_MODEL, models_for
+from aibroker.providers.catalog import price_info
 from aibroker.providers.quotas import axes_for_key, severity_class
+from aibroker.providers.registry import all_models, paid_providers
 from aibroker.routes.dashboard_labels import KeyStatus, key_status, reason_labels
-from aibroker.routing.chains import CAPABILITY_CHAINS, CAPABILITY_SCOPE, PAID_PROVIDERS
+from aibroker.routing.chains import CAPABILITY_CHAINS, CAPABILITY_SCOPE
 from aibroker.web import format as fmt
 
 NEAR_CAP_PCT = 85
@@ -269,47 +270,33 @@ def build_project_cards(projects: Iterable[Any], range_stats: Mapping[int, Mappi
 # ─── models ─────────────────────────────────────────────────────────────────
 
 
-def price_per_mtok(model: str) -> tuple[float | None, float | None]:
-    """($ per 1M input tokens, $ per 1M output tokens) from LiteLLM's pricing
-    map (which litellm_adapter extends with the models it prices itself);
-    (None, None) when unpriced."""
-    try:
-        import litellm
-        cost_map = litellm.model_cost
-    except Exception:  # pragma: no cover — litellm is a hard dependency
-        return None, None
-    tail = model.split("/", 1)[-1]
-    for key in (model, tail, tail.removesuffix(":free")):
-        e = cost_map.get(key)
-        if e and e.get("input_cost_per_token") is not None:
-            out = e.get("output_cost_per_token")
-            return (float(e["input_cost_per_token"]) * 1e6,
-                    float(out) * 1e6 if out is not None else None)
-    return None, None
-
-
 def build_model_catalogue(observed: Mapping[tuple[str, str], Mapping[str, Any]]
                           ) -> list[dict[str, Any]]:
-    """One row per (capability, provider, model): chain position, price, and the
-    last-7-days p50 latency / success from usage_log. Models a provider has in
-    DEFAULT_MODEL but that no chain reaches are listed too, flagged unrouted."""
+    """One row per (capability, model) from the provider catalog: chain position,
+    price (catalog.price_info) and the last-7-days p50 latency / success from
+    usage_log. Models wired for a capability whose chain does not reach their
+    provider are listed too, flagged unrouted."""
     rows: list[dict[str, Any]] = []
-    for cap in CAPABILITY_CHAINS:
-        chain = CAPABILITY_CHAINS[cap]
-        for provider in list(chain) + [p for p, m in DEFAULT_MODEL.items()
-                                       if cap in m and p not in chain]:
-            routed = provider in chain
-            for i, model in enumerate(models_for(provider, cap)):
-                pin, pout = price_per_mtok(model)
-                obs = observed.get((provider, model), {})
-                rows.append({
-                    "capability": cap, "scope": CAPABILITY_SCOPE.get(cap, ""),
-                    "provider": provider, "model": model, "routed": routed,
-                    "position": (chain.index(provider) + 1) if routed else None,
-                    "rotation": i > 0, "paid": provider in PAID_PROVIDERS,
-                    "price_in": pin, "price_out": pout,
-                    "free": pin == 0 and (pout in (0, None)),
-                    "calls": obs.get("calls", 0), "success": obs.get("success"),
-                    "p50": obs.get("p50"),
-                })
+    paid = paid_providers()
+    for spec in all_models():
+        price = price_info(spec)
+        kind = price["kind"]
+        pin, pout = price.get("input_usd_per_mtok"), price.get("output_usd_per_mtok")
+        obs = observed.get((spec.provider, spec.id), {})
+        for cap in sorted(spec.capabilities):
+            chain = CAPABILITY_CHAINS.get(cap, [])
+            routed = spec.provider in chain
+            rows.append({
+                "capability": cap, "scope": CAPABILITY_SCOPE.get(cap, ""),
+                "provider": spec.provider, "model": spec.id, "routed": routed,
+                "position": (chain.index(spec.provider) + 1) if routed else None,
+                "paid": spec.provider in paid,
+                "price_in": pin, "price_out": pout,
+                "per_minute": price.get("usd_per_minute"),
+                "free": kind in ("free", "local") or (pin == 0 and pout in (0, None)),
+                "calls": obs.get("calls", 0), "success": obs.get("success"),
+                "p50": obs.get("p50"),
+            })
+    order = {c: i for i, c in enumerate(CAPABILITY_CHAINS)}
+    rows.sort(key=lambda r: (order.get(r["capability"], 99), r["position"] or 99, r["model"]))
     return rows

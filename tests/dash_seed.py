@@ -62,13 +62,14 @@ def usage(id_: int, *, minutes_ago: float = 5, project_id: int | None = 1,
           workflow: str | None = "triage", status: str = "ok", cost: float = 0.0,
           latency_ms: int | None = 800, tokens_in: int = 100, tokens_out: int = 20,
           cache_read: int = 0, error_kind: str | None = None, http_status: int | None = None,
-          model_served: str | None = None, at: datetime | None = None) -> UsageLogRow:
+          model_served: str | None = None, at: datetime | None = None,
+          request_id: str | None = None) -> UsageLogRow:
     return UsageLogRow(
         id=id_, api_key_id=api_key_id, project_id=project_id, provider=provider, model=model,
         model_served=model_served, capability=capability, workflow=workflow,
         tokens_in=tokens_in, tokens_out=tokens_out, cache_read_tokens=cache_read,
         cache_write_tokens=0, cost_usd=cost, latency_ms=latency_ms, status=status,
-        error_kind=error_kind, http_status=http_status,
+        error_kind=error_kind, http_status=http_status, request_id=request_id,
         created_at=at or (now() - timedelta(minutes=minutes_ago)))
 
 

@@ -403,7 +403,7 @@ _REQUEST_SELECT = (
     "SELECT u.id, u.created_at, u.project_id, p.name AS project, u.provider, u.model, "
     "u.model_served, u.capability, u.workflow, u.tokens_in, u.tokens_out, "
     "u.cache_read_tokens, u.cache_write_tokens, u.cost_usd, u.latency_ms, u.status, "
-    "u.http_status, u.error_kind, u.api_key_id, k.label AS key_label "
+    "u.http_status, u.error_kind, u.api_key_id, u.request_id, k.label AS key_label "
     "FROM usage_log u LEFT JOIN projects p ON p.id = u.project_id "
     "LEFT JOIN api_keys k ON k.id = u.api_key_id"
 )
@@ -606,10 +606,9 @@ def link_attempts(anchor: dict[str, Any], cands: list[dict[str, Any]]) -> list[d
 
 
 async def request_attempts(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """The attempt trail for one usage_log row. SINGLE SWITCH POINT: once
-    usage_log carries a request_id (core refactor) and _REQUEST_SELECT returns
-    it, rows that have one are grouped by it exactly; older rows keep the
-    timing inference below (see _CHAIN_*)."""
+    """The attempt trail for one usage_log row. Rows carrying a request_id
+    (migration 015) are grouped by it exactly; older rows (NULL) keep the timing
+    inference below (see _CHAIN_*)."""
     if row.get("request_id"):
         async with get_session() as s:
             rows = (await s.execute(text(
