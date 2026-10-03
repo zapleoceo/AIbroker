@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from aibroker.auth_session import COOKIE_NAME, issue_session_cookie
 from aibroker.config import get_settings
@@ -91,9 +92,31 @@ def audit_row(id_: int, actor: str = "dashboard", action: str = "key.added",
 
 
 def seed(*rows: Any) -> None:
+    """Insert rows, first adding stub projects / api_keys for any FK a usage or
+    job row references (Postgres enforces them; SQLite does not)."""
     async def _go() -> None:
         async with get_session() as s:
-            s.add_all(rows)
+            parents = [r for r in rows if isinstance(r, ProjectRow | ApiKeyRow)]
+            s.add_all(parents)
+            await s.flush()
+            have_p = {r.id for r in parents if isinstance(r, ProjectRow)}
+            have_k = {r.id for r in parents if isinstance(r, ApiKeyRow)}
+            for model, ids in ((ProjectRow, have_p), (ApiKeyRow, have_k)):
+                for (i,) in (await s.execute(select(model.id))).all():
+                    ids.add(i)
+            stubs: list[Any] = []
+            for r in rows:
+                pid = getattr(r, "project_id", None)
+                if isinstance(r, UsageLogRow | DeepJobRow) and pid is not None and pid not in have_p:
+                    stubs.append(project(pid, f"stub-{pid}"))
+                    have_p.add(pid)
+                kid = getattr(r, "api_key_id", None)
+                if isinstance(r, UsageLogRow) and kid is not None and kid not in have_k:
+                    stubs.append(key(kid, r.provider, f"stub-{kid}"))
+                    have_k.add(kid)
+            s.add_all(stubs)
+            await s.flush()
+            s.add_all([r for r in rows if r not in parents])
     run(_go())
 
 
