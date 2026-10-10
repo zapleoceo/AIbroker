@@ -78,7 +78,7 @@ async def test_forbidden_env_var_refuses_and_never_starts_the_cli(tmp_path, cap,
     register_adapter(cap, lambda: fake)
     assert await execute_run(rid, _cfg(tmp_path, {var: "sk-super-secret-value"})) == "failed"
     assert fake.started is None
-    (last,) = [e for e in await list_events(rid) if e.type == "run.failed"]
+    (last,) = (e for e in await list_events(rid) if e.type == "run.failed")
     assert last.payload["error_class"] == "billing_mode_refused"
     assert var in last.payload["message"] and "sk-super-secret-value" not in last.payload["message"]
     async with get_session() as s:

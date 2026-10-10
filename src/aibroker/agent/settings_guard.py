@@ -20,8 +20,13 @@ _FILES = ("settings.json", "settings.local.json")
 
 
 def _has_key(node: Any, key: str) -> bool:
+    """True when `key` appears anywhere with a NON-EMPTY value. The CLI writes an
+    empty `"mcpServers": {}` into each project entry of .claude.json after login;
+    that defines no server and must not refuse every run."""
     if isinstance(node, dict):
-        return key in node or any(_has_key(v, key) for v in node.values())
+        if node.get(key):
+            return True
+        return any(_has_key(v, key) for v in node.values())
     if isinstance(node, list):
         return any(_has_key(v, key) for v in node)
     return False

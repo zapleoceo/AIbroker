@@ -157,6 +157,8 @@ register(build_provider(
         "openrouter/typesafe/jev-1.13": {
             "transport": "openrouter_decisions", "pricing": "override",
             "input_usd_per_mtok": 0.042, "output_usd_per_mtok": 0.0, "register": False},
+        # OpenRouter public catalog: prompt/completion 0 (checked 2026-10-11).
+        "openrouter/google/gemma-4-31b-it:free": {"pricing": "free"},
         "openrouter/inception/mercury-decide:free": {
             "transport": "openrouter_decisions", "pricing": "free",
             "capabilities": ("decision",)},
