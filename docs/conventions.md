@@ -157,3 +157,10 @@ pre-commit install -t pre-push  # plus pytest on push
 EOL fixer, YAML syntax, large-file guard, merge-conflict markers,
 `detect-private-key` (blocks accidental .pem / id_rsa commits), `ruff
 --fix`, `ruff format`, `pytest -x` on push.
+
+## Docs gate locally
+
+`bash scripts/docs_gate.sh [BASE] [HEAD]` (defaults `origin/master` `HEAD`) mirrors the CI
+docs-check: if anything under `src/`, `infra/`, `services/` or `monitor/` changed and nothing
+under `docs/` did — and no commit message contains `docs-not-needed` — it fails. Run it before
+every push; CI (`docs-check.yml`) stays the authority.

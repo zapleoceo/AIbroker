@@ -12,3 +12,9 @@ Project conventions live in `docs/conventions.md`; this file adds agent-process 
   blanket exemptions and no gate bypasses are added.
 - If a Haiku subagent is unavailable, report the concrete blocker. Never skip the
   documentation update.
+
+## Before every push
+
+Run `bash scripts/docs_gate.sh` (local mirror of `.github/workflows/docs-check.yml`, same
+diff base `origin/master..HEAD` and same paths). A FAIL means docs/ must be updated first.
+CI remains the authority; the local check is not a guarantee.
