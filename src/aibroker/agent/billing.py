@@ -15,15 +15,24 @@ BILLING_REFUSED = "billing_mode_refused"
 
 FORBIDDEN_ENV: dict[str, tuple[str, ...]] = {
     "agent:claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"),
+                     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                     "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
+                     "ANTHROPIC_VERTEX_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK",
+                     "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN"),
     "agent:codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
 }
+
+
+# Whole families are blocked too, so a variable added by a newer CLI is refused by default.
+FORBIDDEN_PREFIXES: dict[str, tuple[str, ...]] = {"agent:claude": ("ANTHROPIC_", "CLAUDE_CODE_USE_")}
 
 
 def forbidden_env_present(capability: str, env: Mapping[str, str]) -> list[str]:
     """Names (never values) of API-billing variables present in `env`. An unknown
     capability has no allow-list, so it is treated as forbidden by the caller."""
-    return [name for name in FORBIDDEN_ENV.get(capability, ()) if name in env]
+    prefixes = FORBIDDEN_PREFIXES.get(capability, ())
+    return [name for name in sorted(env)
+            if name in FORBIDDEN_ENV.get(capability, ()) or name.startswith(prefixes)]
 
 
 RUN_MODES = ("manual", "autonomous", "exam")

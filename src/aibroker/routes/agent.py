@@ -1,7 +1,6 @@
 """Agent runs API (owner-only, scope llm:agent): /v1/agent/runs. See docs/agent-runs.md."""
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -18,6 +17,7 @@ from aibroker.agent.runs import (
     get_run,
     list_events,
 )
+from aibroker.agent.tools import tool_problem
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.services.request_cap import admit_request
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
@@ -25,7 +25,6 @@ from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 router = APIRouter(tags=["agent"], prefix="/agent")
 
 _ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
-_TOOL = r"^[\x20-\x7e]+$"
 
 
 class AttachmentIn(BaseModel):
@@ -57,9 +56,6 @@ class AgentRunRequest(BaseModel):
     model: str | None = Field(None, min_length=1, max_length=128,
                               pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$",
                               description="exact model id; passed through, never substituted")
-
-    def tools_ok(self) -> bool:
-        return all(len(t) <= 128 and re.match(_TOOL, t) is not None for t in self.allowed_tools)
 
 
 class AgentRunSubmitResponse(BaseModel):
@@ -148,8 +144,10 @@ async def agent_run_submit(
 ) -> AgentRunSubmitResponse:
     """Queue an agent run. Owner-only: needs the llm:agent scope."""
     _require_agent_scope(ctx)
-    if not body.tools_ok():
-        raise HTTPException(422, "allowed_tools entries must be printable ASCII, <=128 chars")
+    for tool in body.allowed_tools:
+        problem = tool_problem(tool)
+        if problem:
+            raise HTTPException(422, problem)
     try:
         validate_attachments([a.model_dump() for a in body.attachments])
     except ValueError as e:

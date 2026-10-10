@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -87,7 +88,9 @@ async def test_forbidden_env_var_refuses_and_never_starts_the_cli(tmp_path, cap,
 def test_forbidden_env_sets_match_the_policy():
     assert set(FORBIDDEN_ENV["agent:claude"]) == {
         "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX"}
+        "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN"}
     assert set(FORBIDDEN_ENV["agent:codex"]) == {"OPENAI_API_KEY", "CODEX_API_KEY"}
     assert forbidden_env_present("agent:codex", {"ANTHROPIC_API_KEY": "x"}) == []   # other CLI's var
     assert forbidden_env_present("agent:codex", {"OPENAI_API_KEY": ""}) == ["OPENAI_API_KEY"]
@@ -131,7 +134,7 @@ _BAD = ("dangerously", "bypass", "danger-full-access", "full-auto", "yolo")
 _BAD_TOKENS = {"--last", "--continue", "-c", "--resume-last"}
 
 
-@pytest.mark.parametrize("tools", [[], ["Read"], ["Write", "Bash(git status:*)"]])
+@pytest.mark.parametrize("tools", [[], ["Read"], ["Write", "Grep(src/**)"]])
 @pytest.mark.parametrize("session", [None, "sess-1"])
 @pytest.mark.parametrize("model", [None, "m-exact"])
 def test_argv_never_disables_safeguards_or_uses_implicit_resume(tools, session, model):
@@ -140,17 +143,21 @@ def test_argv_never_disables_safeguards_or_uses_implicit_resume(tools, session, 
     flat = " ".join(argv).lower()
     assert not any(b in flat for b in _BAD) and not _BAD_TOKENS & set(argv), argv
     assert "SECRET PROMPT" not in argv                      # prompt travels on stdin
-    assert (session in argv) == bool(session)
-    assert (model in argv) == bool(model)
+    assert (f"--resume={session}" in argv) == bool(session)
+    assert (f"--model={model}" in argv) == bool(model)
 
 
 def test_claude_argv_shape_and_explicit_tools():
-    a = real_cli.build_claude_argv(_spec(capability="agent:claude"))
-    assert a == ["claude", "-p", "--output-format", "stream-json", "--verbose"]
+    a = real_cli.build_claude_argv(_spec(capability="agent:claude"), config_dir="/home/app/cs")
+    assert a[:6] == ["claude", "-p", "--output-format", "stream-json", "--verbose",
+                     "--setting-sources=user"]
+    assert not any(x.startswith("--allowedTools") for x in a)
+    assert a[-1].startswith("--disallowedTools=") and "Read(//proc/**)" in a[-1]
+    assert "Write(//home/app/cs/**)" in a[-1]
     b = real_cli.build_claude_argv(_spec(capability="agent:claude", session_id="S",
-                                         allowed_tools=["Read", "Edit"], model="m"))
-    assert b[b.index("--resume") + 1] == "S" and b[-3:] == ["--allowedTools", "Read", "Edit"]
-    assert "--permission-mode" not in b
+                                         allowed_tools=["Read", "Edit(src/**)"], model="m"))
+    assert "--resume=S" in b and "--model=m" in b and "--allowedTools=Read,Edit(src/**)" in b
+    assert "--permission-mode" not in " ".join(b)
 
 
 # --- parsers (docs-derived samples) -------------------------------------------------
@@ -216,8 +223,8 @@ def test_login_status_parsers_need_positive_subscription_signal():
 
 class _Stand(real_cli.ClaudeCLI):
     """ClaudeCLI whose argv launches `python -c <script>` instead of the claude binary."""
-    def __init__(self, script, **kw):
-        super().__init__(**kw)
+    def __init__(self, script, cfg, **kw):
+        super().__init__(env={"CLAUDE_CONFIG_DIR": str(cfg), "PATH": os.environ.get("PATH", "")}, **kw)
         self.script = script
 
     def build_argv(self, run):
@@ -234,20 +241,22 @@ _OK_SCRIPT = (
 
 
 async def test_subprocess_adapter_streams_events_and_prompt_on_stdin(tmp_path):
-    cli = _Stand(_OK_SCRIPT)
+    cli = _Stand(_OK_SCRIPT, tmp_path / 'cfg')
     got = [e async for e in cli.start(_spec(workspace=str(tmp_path)))]
     assert [e.type for e in got] == ["session.assigned", "usage", "run.completed"]
     assert got[-1].final_text == "got:SECRET PROMPT"
 
 
 async def test_subprocess_adapter_nonzero_exit_without_turn_is_failed(tmp_path):
-    cli = _Stand("import sys; sys.stderr.write('usage limit reached'); sys.exit(3)")
+    cli = _Stand("import sys; sys.stderr.write('usage limit reached'); sys.exit(3)",
+                 tmp_path / 'cfg')
     (last,) = [e async for e in cli.start(_spec(workspace=str(tmp_path)))]
     assert last.type == "run.failed" and last.error_class == "quota_exhausted"
 
 
 async def test_cancel_terminates_a_hung_process(tmp_path):
-    cli = _Stand("import time,sys; sys.stdin.read(); time.sleep(60)", kill_grace_s=2.0)
+    cli = _Stand("import time,sys; sys.stdin.read(); time.sleep(60)", tmp_path / "cfg",
+                 kill_grace_s=2.0)
 
     async def drain():
         return [e async for e in cli.start(_spec(workspace=str(tmp_path)))]
@@ -265,8 +274,9 @@ async def test_cancel_terminates_a_hung_process(tmp_path):
 
 
 async def test_billing_mode_uses_injected_probe_and_unknown_on_error():
-    async def claude(argv):
+    async def claude(argv, env):
         assert argv == ["claude", "auth", "status"]
+        assert "ADMIN_KEY" not in env
         return json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
 
     assert await real_cli.ClaudeCLI(probe=claude).billing_mode() == "subscription"

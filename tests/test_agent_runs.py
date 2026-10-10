@@ -145,7 +145,7 @@ async def test_account_id_is_required():
 
 async def test_submit_creates_pending_run_and_poll_shows_it():
     key, pid = await _project([AGENT_SCOPE])
-    r = await _submit(key, allowed_tools=["Read", "Bash(git status:*)"])
+    r = await _submit(key, allowed_tools=["Read", "Grep(src/**)"])
     assert r.status_code == 202
     run_id = r.json()["run_id"]
     assert r.headers["x-request-id"] == f"job-{run_id}"
@@ -154,7 +154,7 @@ async def test_submit_creates_pending_run_and_poll_shows_it():
     async with get_session() as s:
         job = await s.get(DeepJobRow, run_id)
     assert job.capability == "agent:codex" and job.project_id == pid
-    assert job.request["allowed_tools"] == ["Read", "Bash(git status:*)"]
+    assert job.request["allowed_tools"] == ["Read", "Grep(src/**)"]
 
 
 async def test_other_project_cannot_see_run():

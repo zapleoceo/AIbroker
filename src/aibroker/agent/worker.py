@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -25,6 +28,21 @@ STALE_GRACE_S = 300.0
 
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+WORKER_MARKER = "/etc/aibroker-agent-worker"
+
+
+def worker_image_problem(env: Mapping[str, str] | None = None,
+                         marker: str = WORKER_MARKER) -> str | None:
+    """The agent lane may only run inside the worker image (CLI + auth volume + minimal
+    privileges); anywhere else it refuses to start."""
+    e = os.environ if env is None else env
+    if not e.get("CLAUDE_CONFIG_DIR"):
+        return "CLAUDE_CONFIG_DIR is not set"
+    if not Path(marker).exists():
+        return f"{marker} is missing - not the agent-worker image"
+    return None
 
 
 def concurrency_for(capability: str) -> int:
@@ -112,6 +130,9 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
 
 async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - loop harness
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
+    problem = worker_image_problem()
+    if problem:
+        raise RuntimeError(f"agent lane refused to start: {problem}")
     register_real_adapters()
     cfg = exec_config_from_settings()
     inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in AGENT_CAPABILITIES}

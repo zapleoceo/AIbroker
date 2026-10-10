@@ -160,8 +160,8 @@ is no fallback to API. The seen mode is stored in `agent_runs.billing_mode`.
 `aibroker.agent.real_cli.ClaudeCLI` (registered by `register_real_adapters` only when
 `AGENT_WORKER_ENABLED`) runs `claude -p --output-format stream-json --verbose` in the run
 workspace via `build_claude_argv`: `--model <id>` exactly as given, `--resume <id>` only with
-an exact session id, `--allowedTools` listing the caller's tools; no bypass / skip-permission
-flag, no "continue"/"last"; the prompt goes on stdin. `billing_mode()` probes
+an exact session id (both as `--opt=value`), the caller's tools as ONE `--allowedTools=A,B`; no
+bypass / skip-permission flag, no "continue"/"last"; the prompt goes on stdin. See "Hardening". `billing_mode()` probes
 `claude auth status` and `parse_claude_auth_status` accepts only a first-party claude.ai
 login. `cancel()` sends SIGTERM, waits `kill_grace_s`, then SIGKILL. The output is parsed by
 `ClaudeParser` (system/init, assistant, user tool_result, result -> events; an init
@@ -216,7 +216,9 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 ### Owner checklist (all on the server, in the compose project directory)
 
 1. Build: `docker compose build api && docker compose --profile agent build agent-worker`
-2. **Billing gate first.** In the Claude account settings (claude.ai, Settings > Usage), confirm
+2. **Check the rendered compose first:** `docker compose --profile agent config | grep -i anthropic`
+   must print NOTHING (no Anthropic variable leaks into the worker service).
+   **Billing gate.** In the Claude account settings (claude.ai, Settings > Usage), confirm
    usage credits / **extra usage** are OFF. Absence of API env vars does NOT prove there is no
    paid continuation: with extra usage enabled, spend can continue after the wrap-up
    (needs CLI >= 2.1.277, gradual rollout, not guaranteed -
@@ -226,6 +228,8 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
    `docker compose --profile agent run --rm agent-worker claude` then type `/login` and follow
    the official browser/device flow. Check: `docker compose --profile agent run --rm agent-worker
    claude auth status` shows `"loggedIn": true` and `"authMethod": "claude.ai"`.
+   The login is written to the named volume `agent_claude_auth`, so it persists across
+   `run --rm` containers and restarts; to log out, remove that volume.
 4. Only after step 2, set `AGENT_PAID_CONTINUATION_VERIFIED_OFF=true` in the compose `.env`.
    Until then `autonomous` / `exam` runs are refused (`billing_mode_refused`); a single manual
    run needs `run_mode: "manual"` plus `accept_paid_continuation_risk: true` in the request.
@@ -239,6 +243,52 @@ after the env and subscription-mode checks. `AGENT_PAID_CONTINUATION_VERIFIED_OF
 false (`ExecConfig.paid_continuation_verified_off`). While false: `run_mode` `autonomous` (the
 default) and `exam` are refused; `manual` is allowed only with
 `accept_paid_continuation_risk`. Request fields: `run_mode`, `accept_paid_continuation_risk`.
+
+## Hardening (independent review, B1-B4 / S1-S7)
+
+What is guaranteed, and what is not.
+
+- **Tools: allow-list only.** `aibroker.agent.tools.tool_problem` accepts exactly
+  `Read|Glob|Grep|Edit|Write`, optionally with one relative scope `Tool(<scope>)` (no spaces,
+  commas or parentheses; no absolute path, `~`, drive letter or `..`). Anything else is
+  refused at submit (422) and again in `build_claude_argv` (`validate_tools`), so a value like
+  `--dangerously-skip-permissions`, `--permission-mode=...`, `--settings=...` can never reach the
+  argv. **Bash (and every other tool) is not on the list in phase 1**; `llm:agent:bash` does not
+  exist. The argv has no positional argument (nothing follows `--`; the prompt is on stdin) and
+  every value is joined (`--allowedTools=`, `--model=`, `--resume=`).
+- **Environment: allow-list built from scratch.** `cli_env` creates the CLI's environment from
+  `PATH, HOME, CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, LANG, TMPDIR` only (never a copy of the
+  worker's). The `claude auth status` probe gets the same. The compose service has no real
+  `ADMIN_KEY` / `INTERNAL_SECRET` / `TOKEN_SECRET` (inert placeholders). The billing guard still
+  refuses a run if `ANTHROPIC_*`, `CLAUDE_CODE_USE_*` or the listed Bedrock / Vertex / Foundry /
+  OAuth-token variables exist in the worker environment (`FORBIDDEN_ENV`, `FORBIDDEN_PREFIXES`).
+- **Auth/config unreachable by task tools.** File tools are scoped to relative workspace paths; in
+  addition `--disallowedTools=` denies Read/Glob/Grep/Edit/Write on `//proc/**`,
+  `**/.credentials.json`, `**/.claude.json` and `CLAUDE_CONFIG_DIR/**`, and
+  `--setting-sources=user` loads no project/local settings. `settings_problem` checks
+  `settings.json` / `settings.local.json` in the config dir and the workspace before every run
+  and fails closed on `apiKeyHelper`, `env`, `defaultMode`, `bypassPermissions` or invalid JSON
+  (`settings_refused`). The official CLI itself reads and refreshes its credential in the config
+  dir (writable for it, on the named volume); the tests prove no tool string a caller can supply
+  names that dir, a credential file, `/proc` or any mount (deny list: `disallowed_tools`). NOT guaranteed: that the CLI's
+  `//path` deny syntax behaves as documented (unverified until phase 4), nor protection against
+  a bug inside the CLI itself.
+- **uid separation: not feasible here.** The CLI runs as the same uid (`app`) as the Python
+  worker: switching uid needs CAP_SETUID, which the container drops (`cap_drop: ALL`,
+  `no-new-privileges`), and there is no sudo. So `/proc/<worker>/environ` (DB URL with password,
+  placeholders) is protected only by the tool allow-list and the `//proc/**` deny above.
+  **Accepted risk**; revisit with a second container for the CLI if the threat model needs it.
+- **Process group.** The CLI is started with `start_new_session=True`; cancel and the end of
+  every run signal the whole group (SIGTERM, grace, SIGKILL), and compose has `init: true`.
+- **Network.** `agent-worker` sits alone on the `agent_db` network with postgres and pgbouncer
+  (not api, redis, vision, monitor); internet egress stays open because the CLI must reach
+  Anthropic (**accepted risk**). Deploy impact: postgres and pgbouncer join `agent_db`, so the
+  next `docker compose up` recreates those two containers.
+- **Filesystem.** `read_only: true` with tmpfs `/tmp` and the workspace tmpfs; `HOME` is the auth
+  volume.
+- **Image check.** `worker_image_problem` makes `agent_worker_loop` refuse to start unless
+  `CLAUDE_CONFIG_DIR` is set and the marker `/etc/aibroker-agent-worker` (written by the
+  Dockerfile, `WORKER_MARKER`) exists.
 
 ## Not done yet
 

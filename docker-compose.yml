@@ -28,6 +28,7 @@ services:
     # 02-03.09 picked llama-server, but postgres was as eligible.
     # postgres: 90-280MiB observed, stock shared_buffers 128MB, 100 conns.
     mem_limit: 1024m
+    networks: [default, agent_db]
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -56,6 +57,7 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: "6432"
     mem_limit: 128m   # 1-2MiB observed
+    networks: [default, agent_db]
     # Without this the deploy gate could only assert "running", not "working".
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U aibroker"]
@@ -328,9 +330,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
       DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
-      TOKEN_SECRET: ${TOKEN_SECRET:?TOKEN_SECRET must be set}
-      ADMIN_KEY: ${ADMIN_KEY:?ADMIN_KEY must be set}
-      INTERNAL_SECRET: ${INTERNAL_SECRET:?INTERNAL_SECRET must be set}
+      # The settings model requires these three, but the agent lane uses none of them: inert
+      # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
+      TOKEN_SECRET: agent-worker-placeholder-token-secret
+      ADMIN_KEY: agent-worker-placeholder-admin-key
+      INTERNAL_SECRET: agent-worker-placeholder-internal-secret
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AGENT_WORKER_ENABLED: "true"
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
@@ -339,6 +343,12 @@ services:
       - agent_claude_auth:/home/app/claude-state
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
+      - /tmp:size=64m,uid=10001,gid=10001,mode=1777
+    read_only: true
+    init: true   # reaps tool children; with the CLI's own process group, no orphans survive a run
+    # Reaches only postgres/pgbouncer (not api/redis/vision). Internet egress stays open: the CLI
+    # must reach Anthropic. ACCEPTED RISK (see docs/agent-runs.md).
+    networks: [agent_db]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
@@ -347,6 +357,11 @@ services:
     pids_limit: 256
     restart: "no"
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
+networks:
+  # Dedicated network of the agent worker: it and postgres/pgbouncer only.
+  agent_db:
+    driver: bridge
 
 volumes:
   aibroker_pgdata:
