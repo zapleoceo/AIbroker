@@ -12,6 +12,7 @@ from sqlalchemy import select
 from aibroker.agent import events as ev
 from aibroker.agent.constants import AGENT_CAPABILITIES
 from aibroker.agent.executor import ExecConfig, exec_config_from_settings, execute_run
+from aibroker.agent.real_cli import register_real_adapters
 from aibroker.agent.runs import RunConflict, append_event
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -92,6 +93,7 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
 
 async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - loop harness
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
+    register_real_adapters()
     cfg = exec_config_from_settings()
     inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in AGENT_CAPABILITIES}
     log.info("agent worker started (workspace=%s)", cfg.workspace_root)

@@ -40,7 +40,7 @@ def _adapters():
 def cfg(tmp_path):
     return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05,
                       cancel_grace_s=1.0, file_max_bytes=100, files_total_bytes=150,
-                      files_max_count=3, files_ttl_s=3600)
+                      files_max_count=3, files_ttl_s=3600, env={})
 
 
 async def _project() -> int:
@@ -146,7 +146,7 @@ async def test_quota_exhausted_stays_failed_no_retry_no_fallback(cfg):
     assert job.error_message.startswith("quota_exhausted") and job.retry_count == 0
     async with get_session() as s:
         assert len((await s.execute(select(DeepJobRow))).scalars().all()) == 1   # no second run
-    assert run.billing_mode is None and fake.started.account_id == "acc"        # same account
+    assert run.billing_mode == "subscription" and fake.started.account_id == "acc"        # same account
 
 
 # --- timeouts and cancel -------------------------------------------------------

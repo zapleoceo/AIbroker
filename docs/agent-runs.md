@@ -1,8 +1,8 @@
 # Agent runs (owner-only CLI workers)
 
 Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the broker queue.
-Status: **phase 1, checkpoints C1-C2** - data model, event schema, adapter contract, fake adapter,
-API, worker lane, locks, workspaces, timeouts. The real CLI adapters and the billing guard are C3.
+Status: **phase 1, C1 + C2-min** - data model, event schema, adapter contract, fake adapter,
+API, worker lane, locks, workspaces, timeouts. One real adapter (`ClaudeCLI`) and the billing guard are in; Codex, the model catalog and multi-account are later.
 
 ## Legal / scope note
 
@@ -146,8 +146,33 @@ writes files into the workspace.
   (`usage_*` columns, `usage_source` = `cli_reported`, `billing_mode`), never in `usage_log`,
   and `cost_usd` stays NULL unless a cost is confirmed (nothing sets it in phase 1).
 
+## Billing guard and the real adapter (C2-min)
+
+`aibroker.agent.billing`: `check_billing_mode(capability, adapter, env)` runs before EVERY
+adapter start (after `run.started`, inside `execute_run`). `FORBIDDEN_ENV` lists the
+API-billing variables per capability (`forbidden_env_present` reports names, never values):
+claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`; codex: `OPENAI_API_KEY`, `CODEX_API_KEY`. Any of them in the worker
+environment (`ExecConfig.env`, default `os.environ`), or an adapter whose `billing_mode()` is
+anything but a positive `subscription` (unknown included, also when the probe raises), ends
+the run with `run.failed error_class=billing_mode_refused`. The CLI is never started and there
+is no fallback to API. The seen mode is stored in `agent_runs.billing_mode`.
+
+`aibroker.agent.real_cli.ClaudeCLI` (registered by `register_real_adapters` only when
+`AGENT_WORKER_ENABLED`) runs `claude -p --output-format stream-json --verbose` in the run
+workspace via `build_claude_argv`: `--model <id>` exactly as given, `--resume <id>` only with
+an exact session id, `--allowedTools` listing the caller's tools; no bypass / skip-permission
+flag, no "continue"/"last"; the prompt goes on stdin. `billing_mode()` probes
+`claude auth status` and `parse_claude_auth_status` accepts only a first-party claude.ai
+login. `cancel()` sends SIGTERM, waits `kill_grace_s`, then SIGKILL. The output is parsed by
+`ClaudeParser` (system/init, assistant, user tool_result, result -> events; an init
+`apiKeySource` other than none is refused at runtime); `classify_failure` maps limit wording
+to `quota_exhausted`. **ClaudeCLI and ClaudeParser are UNVERIFIED against the real CLI
+(phase 4)**; tests use doc-derived sample lines and a python stand-in process. The CLI uses
+the worker's own subscription login; the broker never reads or moves credentials.
+
 ## Not done yet
 
-C3: billing-mode guard and the real `CodexCLI` / `ClaudeCLI` adapters (unverified against the
-real CLIs until phase 4). Phase 2+: `$imagegen` headless support is unproven; the Claude
+Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),
+multi-account config dirs. Phase 2+: `$imagegen` headless support is unproven; the Claude
 critic must receive real image bytes.

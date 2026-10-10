@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
+from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.lock import session_lock
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import RunConflict, append_event, record_usage, requeue_run
@@ -36,6 +38,7 @@ class ExecConfig:
     files_ttl_s: int = 3600
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
+    env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
 
 
 def exec_config_from_settings() -> ExecConfig:
@@ -130,10 +133,15 @@ async def _drive(run: AgentRunRow, req: dict[str, Any], adapter: AgentCLI,
             capability=run.capability, account_id=run.account_id,
             resumed_session_id=run.resume_session_id))
         if run.resume_session_id and not adapter.supports_resume:
-            return await _finish(run_id, ev.RunFailed(error_class="resume_unsupported"), totals)
+            return await _finish(run_id, ev.RunFailed(error_class="resume_unsupported"), totals,
+                                 "unverified")
+        mode, refusal = await check_billing_mode(
+            run.capability, adapter, os.environ if cfg.env is None else cfg.env)
+        if refusal is not None:   # fail closed, before the CLI is ever started
+            return await _finish(run_id, refusal, totals, mode)
         bad_model = await _check_model(adapter, run.model)
         if bad_model is not None:
-            return await _finish(run_id, bad_model, totals)
+            return await _finish(run_id, bad_model, totals, mode)
         spec = AgentRunSpec(
             run_id=run_id, capability=run.capability, prompt=req["prompt"],
             workspace=workspace, account_id=run.account_id, session_id=run.resume_session_id,
@@ -148,7 +156,7 @@ async def _drive(run: AgentRunRow, req: dict[str, Any], adapter: AgentCLI,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
             terminal = ev.RunCompleted(final_text=terminal.final_text, files=files)
-        return await _finish(run_id, terminal, totals)
+        return await _finish(run_id, terminal, totals, mode)
     finally:
         cleanup_workspace(workspace)
 
