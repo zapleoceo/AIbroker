@@ -219,7 +219,10 @@ class DeepJobRow(Base):
     Submit here, poll for the result — see services/deep_jobs.py."""
     __tablename__ = "deep_jobs"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # Integer on SQLite so the ORM insert autoincrements there (agent-run tests).
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     project_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
@@ -241,3 +244,44 @@ class DeepJobRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime)  # claimed → running
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class AgentRunRow(Base):
+    """Agent-run side record (migration 017): one row per `agent:*` deep_jobs row.
+
+    The queue row owns status/result/retention; this row owns what only an
+    agent run has (see docs/agent-runs.md)."""
+    __tablename__ = "agent_runs"
+
+    run_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("deep_jobs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    project_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    capability: Mapped[str] = mapped_column(String(30), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(128))   # CLI session, set from the first event
+    resume_session_id: Mapped[str | None] = mapped_column(String(128))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    workspace: Mapped[str | None] = mapped_column(Text)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(20))  # completed|failed|cancelled|timed_out
+
+
+class AgentRunEventRow(Base):
+    """One typed event of an agent run (agent/events.py), ordered by seq."""
+    __tablename__ = "agent_run_events"
+
+    run_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("deep_jobs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    ts: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

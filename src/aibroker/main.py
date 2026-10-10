@@ -15,7 +15,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from aibroker import __version__
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
-from aibroker.routes import admin, dashboard, health, landing, proxy, signup
+from aibroker.routes import admin, agent, dashboard, health, landing, proxy, signup
 from aibroker.services.job_queue import dispatcher_loop
 from aibroker.services.request_cap import RequestCapExhausted
 from aibroker.telemetry.request_context import new_request_id, request_scope, sanitize_request_id
@@ -140,6 +140,7 @@ async def _request_cap_exhausted(_: Request, exc: RequestCapExhausted) -> JSONRe
 app.include_router(landing.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
+app.include_router(agent.router, prefix="/v1")
 app.include_router(signup.router, prefix="/v1")
 app.include_router(admin.router, prefix="/admin")
 app.include_router(dashboard.router)

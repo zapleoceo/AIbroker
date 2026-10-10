@@ -113,7 +113,9 @@ class Settings(BaseSettings):
 
     @property
     def signup_scopes(self) -> list[str]:
-        return [x.strip() for x in self.SIGNUP_DEFAULT_SCOPES.split(",") if x.strip()]
+        from aibroker.agent.constants import OWNER_ONLY_SCOPES
+        return [x.strip() for x in self.SIGNUP_DEFAULT_SCOPES.split(",")
+                if x.strip() and x.strip() not in OWNER_ONLY_SCOPES]
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"

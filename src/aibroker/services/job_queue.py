@@ -163,7 +163,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
                 "  completed_at = CASE WHEN retry_count + 1 > :max THEN now() ELSE completed_at END, "
                 "  started_at = NULL, "
                 "  retry_count = retry_count + 1 "
-                "WHERE status = 'running' "
+                "WHERE status = 'running' AND capability NOT LIKE 'agent:%' "
                 "  AND started_at < now() - make_interval(secs => :stale)"
             ),
             {"max": _MAX_RETRIES, "stale": _STALE_RUNNING_S},
@@ -183,7 +183,8 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
                 "UPDATE deep_jobs SET status = 'running', started_at = now() "
                 "WHERE id IN ("
                 "  SELECT id FROM deep_jobs "
-                "  WHERE status = 'pending' AND (run_after IS NULL OR run_after < now()) "
+                "  WHERE status = 'pending' AND capability NOT LIKE 'agent:%' "
+                "    AND (run_after IS NULL OR run_after < now()) "
                 "  ORDER BY created_at "
                 "  LIMIT :n "
                 "  FOR UPDATE SKIP LOCKED"

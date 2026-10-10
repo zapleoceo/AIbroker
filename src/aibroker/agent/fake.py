@@ -1,0 +1,47 @@
+"""Scripted AgentCLI for tests - no process, no network, no credentials."""
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+from aibroker.agent.adapter import AgentRunSpec, BillingMode, StreamEvent
+
+
+class FakeAgentCLI:
+    """Plays `script`: events are yielded; ("sleep", s), ("hang",) block;
+    ("write", relpath, text) creates a file in the workspace; ("raise", msg) fails."""
+    supports_resume = True
+
+    def __init__(self, script: list[object], mode: BillingMode = "subscription") -> None:
+        self.script = script
+        self.mode: BillingMode = mode
+        self.cancel_calls = 0
+        self.started: AgentRunSpec | None = None
+        self._cancelled = asyncio.Event()
+
+    async def billing_mode(self) -> BillingMode:
+        return self.mode
+
+    async def cancel(self) -> None:
+        self.cancel_calls += 1
+        self._cancelled.set()
+
+    async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        self.started = run
+        for step in self.script:
+            if isinstance(step, tuple):
+                kind = step[0]
+                if kind == "sleep":
+                    await asyncio.sleep(float(step[1]))
+                elif kind == "hang":
+                    await self._cancelled.wait()
+                    return
+                elif kind == "write":
+                    target = Path(run.workspace) / str(step[1])
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(str(step[2]), encoding="utf-8")
+                elif kind == "raise":
+                    raise RuntimeError(str(step[1]))
+                continue
+            yield step  # type: ignore[misc]

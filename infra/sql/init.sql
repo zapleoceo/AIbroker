@@ -141,6 +141,34 @@ CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after
 -- In-flight dedup lookup in submit_job (migration 010).
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_dedup ON deep_jobs(project_id, capability, payload_hash, created_at DESC);
 
+-- Agent runs (017): side record + typed event log for `agent:*` deep_jobs rows.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  run_id BIGINT PRIMARY KEY REFERENCES deep_jobs(id) ON DELETE CASCADE,
+  project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  capability VARCHAR(30) NOT NULL,
+  task_id VARCHAR(128) NOT NULL,
+  account_id VARCHAR(64) NOT NULL,
+  session_id VARCHAR(128),
+  resume_session_id VARCHAR(128),
+  idempotency_key VARCHAR(128),
+  workspace TEXT,
+  cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+  last_event_at TIMESTAMP,
+  last_seq INTEGER NOT NULL DEFAULT 0,
+  outcome VARCHAR(20)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_idem
+  ON agent_runs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_agent_runs_session ON agent_runs(project_id, account_id, session_id);
+CREATE TABLE IF NOT EXISTS agent_run_events (
+  run_id BIGINT NOT NULL REFERENCES deep_jobs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  ts TIMESTAMP NOT NULL,
+  type VARCHAR(32) NOT NULL,
+  payload JSONB NOT NULL,
+  PRIMARY KEY (run_id, seq)
+);
+
 -- ─── Folded-in migrations (kept in sync with infra/sql/migrations/) ─────────
 -- 002 discovered free-tier limits (parsed from provider response headers)
 -- 003 per-key manual quota overrides (4 axes; win over discovered_* / defaults)
