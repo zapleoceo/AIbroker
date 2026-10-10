@@ -305,6 +305,52 @@ services:
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
+  # Owner-only agent worker (docs/agent-runs.md). Profile `agent`: a normal `docker compose up -d`
+  # does NOT start it. Needs the broker image first (`docker compose build api`).
+  #   log in (owner, once): docker compose --profile agent run --rm agent-worker claude   -> /login
+  #   run:                  docker compose --profile agent up -d agent-worker
+  # Deliberately absent: docker.sock, privileged, host network, host home mounts, any
+  # ANTHROPIC_* / OPENAI_* variable (the billing guard refuses a run if one is present).
+  agent-worker:
+    profiles: ["agent"]
+    build:
+      context: .
+      dockerfile: infra/agent-worker/Dockerfile
+      args:
+        BASE_IMAGE: ${AGENT_BASE_IMAGE:-aibroker-api:latest}
+    image: aibroker-agent-worker
+    container_name: aibroker-agent-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
+      TOKEN_SECRET: ${TOKEN_SECRET:?TOKEN_SECRET must be set}
+      ADMIN_KEY: ${ADMIN_KEY:?ADMIN_KEY must be set}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?INTERNAL_SECRET must be set}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_WORKER_ENABLED: "true"
+      # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
+      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+    volumes:
+      - agent_claude_auth:/home/app/claude-state
+    tmpfs:
+      - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 256
+    restart: "no"
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
 volumes:
   aibroker_pgdata:
+    driver: local
+  # CLI subscription login of the agent worker (named volume; never an image layer or a host mount).
+  agent_claude_auth:
     driver: local
