@@ -67,3 +67,18 @@ price. Free models are marked `pricing="free"` in `providers/specs.py` (register
 - `audio_input_rate(model)` — USD per audio input token (LiteLLM map, else `AUDIO_INPUT_USD_PER_M`).
 - `audio_surcharge(model, audio_tokens)` — extra cost of audio tokens over the text rate.
 - `is_priced(model)` — whether LiteLLM's map (incl. our `register_model` entries) knows the model; used by the pricing regression test.
+
+## 2026-10-10 — OpenRouter decision / free models re-confirmed
+
+LiteLLM's remote price map dropped these models, so their prices are now registered from
+OpenRouter's official per-model endpoint API (not the `/models` list, where jev-1.13 is absent):
+
+| model | price per 1M (in / out) | source |
+|---|---|---|
+| `openrouter/typesafe/jev-1.13` | $0.042 / $0 | https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints (provider TypeSafe) |
+| `openrouter/inception/mercury-decide:free` | $0 / $0 | https://openrouter.ai/api/v1/models/inception/mercury-decide:free/endpoints |
+| `openrouter/google/gemma-4-31b-it:free` | $0 / $0 | OpenRouter `/api/v1/models` catalog |
+
+jev-1.13 is registered in LiteLLM's map (`register` on) so the pricing checks see the confirmed
+price; the decisions path still books the cost OpenRouter reports in `usage.cost`.
+`typesafe/jev-router` is a different model (a router over Jev with variable price), not a rename.
