@@ -39,7 +39,8 @@ def _adapters():
 
 @pytest.fixture
 def cfg(tmp_path):
-    return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05, env={})
+    return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05, env={},
+                      paid_continuation_verified_off=True)
 
 
 async def _project():
@@ -144,13 +145,15 @@ async def test_waiting_run_is_not_claimed_early_then_resumes_own_session(cfg, mo
 
 async def test_no_fallback_billing_guard_still_applies_on_retry(tmp_path):
     rid = await _run(deadline_s=3600)
-    clean = ExecConfig(workspace_root=str(tmp_path / "w"), env={})
+    clean = ExecConfig(workspace_root=str(tmp_path / "w"), env={},
+                      paid_continuation_verified_off=True)
     register_adapter("agent:claude", lambda: FakeAgentCLI([_quota()]))
     await execute_run(rid, clean)
     await _again(rid)
     fake = FakeAgentCLI([ev.RunCompleted()])
     register_adapter("agent:claude", lambda: fake)
-    dirty = ExecConfig(workspace_root=str(tmp_path / "w"), env={"ANTHROPIC_API_KEY": "x"})
+    dirty = ExecConfig(workspace_root=str(tmp_path / "w"), env={"ANTHROPIC_API_KEY": "x"},
+                      paid_continuation_verified_off=True)
     assert await execute_run(rid, dirty) == "failed" and fake.started is None
     async with get_session() as s:
         assert len((await s.execute(select(DeepJobRow))).scalars().all()) == 1

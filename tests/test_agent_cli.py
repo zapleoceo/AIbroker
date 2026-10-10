@@ -63,7 +63,8 @@ async def _run(cap="agent:codex") -> int:
 
 
 def _cfg(tmp_path, env):
-    return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05, env=env)
+    return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05, env=env,
+                      paid_continuation_verified_off=True)
 
 
 # --- billing guard --------------------------------------------------------------

@@ -45,6 +45,11 @@ class AgentRunRequest(BaseModel):
     wall_timeout_s: int = Field(1800, ge=10, le=7200)
     idle_timeout_s: int = Field(300, ge=5, le=1800)
     allowed_tools: list[str] = Field(default_factory=list, max_length=32)
+    run_mode: Literal["manual", "autonomous", "exam"] = Field(
+        "autonomous", description="autonomous/exam runs are refused until the owner verified "
+                                  "paid continuation OFF")
+    accept_paid_continuation_risk: bool = Field(
+        False, description="manual runs only: accept that extra usage may be enabled")
     deadline_s: int = Field(21600, ge=60, le=604800,
                             description="overall limit incl. quota waits; then run.timed_out")
     attachments: list[AttachmentIn] = Field(default_factory=list, max_length=MAX_FILES,
@@ -155,7 +160,8 @@ async def agent_run_submit(
             task_id=body.task_id, account_id=body.account_id, session_id=body.session_id,
             idempotency_key=body.idempotency_key, wall_timeout_s=body.wall_timeout_s,
             idle_timeout_s=body.idle_timeout_s, allowed_tools=body.allowed_tools,
-            model=body.model, deadline_s=body.deadline_s,
+            model=body.model, deadline_s=body.deadline_s, run_mode=body.run_mode,
+            accept_paid_continuation_risk=body.accept_paid_continuation_risk,
             attachments=[a.model_dump() for a in body.attachments],
         )
     except RunRejected as e:

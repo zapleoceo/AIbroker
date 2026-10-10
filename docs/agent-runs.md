@@ -200,6 +200,46 @@ caller did not (the only implicit permission). The bytes are never replaced by a
 description, are not returned as outputs, and are dropped from the stored request
 (`strip_attachment_data`) when the run ends.
 
+## Worker container and owner handoff
+
+The worker runs in its own container, `agent-worker` (`infra/agent-worker/Dockerfile`, compose
+profile `agent`, so a normal `docker compose up -d` does NOT start it). It is built on the
+broker image plus Node 22 and the official CLI pinned to an exact version
+(`@anthropic-ai/claude-code@2.1.296`, must be >= 2.1.277). Entry point:
+`python -m aibroker.agent.run_worker` (`run_worker`: only the agent lane, no HTTP, no LLM
+dispatcher). No docker.sock, no privileged, no host network, no home mounts, `cap_drop: ALL`,
+`no-new-privileges`; CLI login state is the named volume `agent_claude_auth`
+(`/home/app/claude-state`). Resource limits (cpus 1, mem 1g, pids 256) are declared in compose
+and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 (Claude Code)`;
+`claude auth status` -> `loggedIn: false`.
+
+### Owner checklist (all on the server, in the compose project directory)
+
+1. Build: `docker compose build api && docker compose --profile agent build agent-worker`
+2. **Billing gate first.** In the Claude account settings (claude.ai, Settings > Usage), confirm
+   usage credits / **extra usage** are OFF. Absence of API env vars does NOT prove there is no
+   paid continuation: with extra usage enabled, spend can continue after the wrap-up
+   (needs CLI >= 2.1.277, gradual rollout, not guaranteed -
+   https://support.claude.com/en/articles/17040437-claude-code-wrap-up-allowance).
+   We never change account settings; the owner confirms.
+3. Log in (owner only, interactive, once):
+   `docker compose --profile agent run --rm agent-worker claude` then type `/login` and follow
+   the official browser/device flow. Check: `docker compose --profile agent run --rm agent-worker
+   claude auth status` shows `"loggedIn": true` and `"authMethod": "claude.ai"`.
+4. Only after step 2, set `AGENT_PAID_CONTINUATION_VERIFIED_OFF=true` in the compose `.env`.
+   Until then `autonomous` / `exam` runs are refused (`billing_mode_refused`); a single manual
+   run needs `run_mode: "manual"` plus `accept_paid_continuation_risk: true` in the request.
+5. Start the lane: `docker compose --profile agent up -d agent-worker`; grant a project the
+   `llm:agent` scope through the admin API.
+
+### Billing gate: paid continuation
+
+`paid_continuation_refusal` (in `aibroker.agent.billing`) runs inside `check_billing_mode`
+after the env and subscription-mode checks. `AGENT_PAID_CONTINUATION_VERIFIED_OFF` defaults to
+false (`ExecConfig.paid_continuation_verified_off`). While false: `run_mode` `autonomous` (the
+default) and `exam` are refused; `manual` is allowed only with
+`accept_paid_continuation_risk`. Request fields: `run_mode`, `accept_paid_continuation_risk`.
+
 ## Not done yet
 
 Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),

@@ -40,7 +40,8 @@ def _adapters():
 def cfg(tmp_path):
     return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05,
                       cancel_grace_s=1.0, file_max_bytes=100, files_total_bytes=150,
-                      files_max_count=3, files_ttl_s=3600, env={})
+                      files_max_count=3, files_ttl_s=3600, env={},
+                      paid_continuation_verified_off=True)
 
 
 async def _project() -> int:

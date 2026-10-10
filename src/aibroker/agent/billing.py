@@ -26,9 +26,27 @@ def forbidden_env_present(capability: str, env: Mapping[str, str]) -> list[str]:
     return [name for name in FORBIDDEN_ENV.get(capability, ()) if name in env]
 
 
-async def check_billing_mode(capability: str, adapter: AgentCLI,
-                             env: Mapping[str, str]) -> tuple[str, RunFailed | None]:
-    """-> (mode seen, refusal or None). Only a positive "subscription" passes."""
+RUN_MODES = ("manual", "autonomous", "exam")
+
+
+def paid_continuation_refusal(run_mode: str, risk_ack: bool, verified_off: bool) -> RunFailed | None:
+    """Absence of API env does not prove no paid continuation (usage credits / extra usage on
+    the account can spend after wrap-up). Until the owner verified it OFF, only a manual run
+    that explicitly accepts the risk may start."""
+    if verified_off or (run_mode == "manual" and risk_ack):
+        return None
+    return RunFailed(
+        error_class=BILLING_REFUSED,
+        message="paid continuation not verified OFF (AGENT_PAID_CONTINUATION_VERIFIED_OFF); "
+                f"a {run_mode} run needs the owner's confirmation, or run_mode=manual with "
+                "accept_paid_continuation_risk")
+
+
+async def check_billing_mode(capability: str, adapter: AgentCLI, env: Mapping[str, str], *,
+                             run_mode: str = "autonomous", risk_ack: bool = False,
+                             verified_off: bool = False) -> tuple[str, RunFailed | None]:
+    """-> (mode seen, refusal or None). Only a positive "subscription" passes, and then
+    only if paid continuation is verified off (or a manual run accepted the risk)."""
     if capability not in FORBIDDEN_ENV:
         return "unknown", RunFailed(error_class=BILLING_REFUSED,
                                     message=f"no billing policy for {capability}")
@@ -46,4 +64,4 @@ async def check_billing_mode(capability: str, adapter: AgentCLI,
         return mode, RunFailed(
             error_class=BILLING_REFUSED,
             message=f"CLI did not positively report subscription mode (got {mode})")
-    return mode, None
+    return mode, paid_continuation_refusal(run_mode, risk_ack, verified_off)

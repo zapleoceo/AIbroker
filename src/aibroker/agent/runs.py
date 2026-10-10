@@ -85,6 +85,7 @@ async def create_run(
     session_id: str | None, idempotency_key: str | None, wall_timeout_s: int,
     idle_timeout_s: int, allowed_tools: list[str], model: str | None = None,
     deadline_s: int = 21600, attachments: list[dict[str, Any]] | None = None,
+    run_mode: str = "autonomous", accept_paid_continuation_risk: bool = False,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight)."""
@@ -93,6 +94,7 @@ async def create_run(
         "session_id": session_id, "wall_timeout_s": wall_timeout_s,
         "idle_timeout_s": idle_timeout_s, "allowed_tools": allowed_tools, "model": model,
         "deadline_s": deadline_s, "attachments": attachments or [],
+        "run_mode": run_mode, "accept_paid_continuation_risk": accept_paid_continuation_risk,
     }
     phash = payload_hash(project.id, capability, request)
     if idempotency_key:

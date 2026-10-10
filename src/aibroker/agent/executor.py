@@ -45,6 +45,7 @@ class ExecConfig:
     files_ttl_s: int = 3600
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
+    paid_continuation_verified_off: bool = False
     quota_backoff_base_s: float = 60.0
     quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
     env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
@@ -57,6 +58,7 @@ def exec_config_from_settings() -> ExecConfig:
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
         files_ttl_s=s.AGENT_FILES_TTL_S,
+        paid_continuation_verified_off=s.AGENT_PAID_CONTINUATION_VERIFIED_OFF,
     )
 
 
@@ -174,7 +176,10 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             return await _finish(run_id, ev.RunFailed(error_class="resume_unsupported"), totals,
                                  "unverified")
         mode, refusal = await check_billing_mode(
-            run.capability, adapter, os.environ if cfg.env is None else cfg.env)
+            run.capability, adapter, os.environ if cfg.env is None else cfg.env,
+            run_mode=str(req.get("run_mode", "autonomous")),
+            risk_ack=bool(req.get("accept_paid_continuation_risk", False)),
+            verified_off=cfg.paid_continuation_verified_off)
         if refusal is not None:   # fail closed, before the CLI is ever started
             return await _finish(run_id, refusal, totals, mode)
         bad_model = await _check_model(adapter, run.model)

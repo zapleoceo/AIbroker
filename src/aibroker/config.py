@@ -123,6 +123,11 @@ class Settings(BaseSettings):
     AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
     AGENT_CONCURRENCY_CLAUDE: int = 1
     AGENT_WORKSPACE_ROOT: str = "/var/lib/aibroker/agent-workspaces"
+    # The owner has checked in the Claude account settings that usage credits / extra usage are
+    # OFF (a missing API key does NOT prove that). Until true, autonomous/exam agent runs are
+    # refused; a manual run needs its own explicit per-run acknowledgement. We never change
+    # account settings.
+    AGENT_PAID_CONTINUATION_VERIFIED_OFF: bool = False
     AGENT_CANCEL_POLL_S: float = 1.0
     AGENT_CANCEL_GRACE_S: float = 15.0     # how long adapter.cancel() may take
     AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
