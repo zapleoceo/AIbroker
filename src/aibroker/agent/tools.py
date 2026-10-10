@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import re
 
-_ALLOWED = re.compile(r"^(Read|Glob|Grep|Edit|Write)(\([^\s(),]{1,100}\))?$")
+# The scope is MANDATORY: a bare `Read` would be workspace-wide at best and is never accepted.
+_ALLOWED = re.compile(r"^(Read|Glob|Grep|Edit|Write)\([^\s(),]{1,100}\)$")
 _ABS = re.compile(r"^(/|\\|~|[A-Za-z]:)")
 _FILE_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write")
 # Defense in depth on top of the allow-list: credential files wherever they sit.
@@ -18,9 +19,9 @@ _CREDENTIAL_GLOBS = ("**/.credentials.json", "**/.claude.json")
 def tool_problem(tool: str) -> str | None:
     """Why `tool` is refused, or None when it is on the allow-list with a relative scope."""
     if not _ALLOWED.match(tool):
-        return f"tool {tool!r} is not on the allow-list (Read|Glob|Grep|Edit|Write)"
-    scope = tool[tool.index("(") + 1:-1] if "(" in tool else ""
-    if scope and (_ABS.match(scope) or ".." in scope.replace("\\", "/").split("/")):
+        return f"tool {tool!r} is not on the allow-list (Read|Glob|Grep|Edit|Write, each with a relative scope: Tool(<path>))"
+    scope = tool[tool.index("(") + 1:-1]
+    if _ABS.match(scope) or ".." in scope.replace("\\", "/").split("/"):
         return f"tool scope {scope!r} must be relative and must not contain '..'"
     return None
 
@@ -33,9 +34,14 @@ def validate_tools(tools: list[str]) -> None:
             raise ValueError(problem)
 
 
+def tool_names(tools: list[str]) -> list[str]:
+    """Distinct tool names (no scopes) in first-seen order, for `--tools=`."""
+    return list(dict.fromkeys(t.split("(")[0] for t in tools))
+
+
 def disallowed_tools(config_dir: str | None) -> list[str]:
     """Always-denied paths: /proc (the worker environment), the CLI auth dir, credential files."""
-    paths = ["//proc/**", *_CREDENTIAL_GLOBS]
+    paths = ["//proc/**", "//dev/**", "//sys/**", *_CREDENTIAL_GLOBS]
     if config_dir:
         paths.append("/" + config_dir.rstrip("/") + "/**")
     return [f"{t}({p})" for p in paths for t in _FILE_TOOLS]

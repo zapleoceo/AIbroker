@@ -233,8 +233,29 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 4. Only after step 2, set `AGENT_PAID_CONTINUATION_VERIFIED_OFF=true` in the compose `.env`.
    Until then `autonomous` / `exam` runs are refused (`billing_mode_refused`); a single manual
    run needs `run_mode: "manual"` plus `accept_paid_continuation_risk: true` in the request.
-5. Start the lane: `docker compose --profile agent up -d agent-worker`; grant a project the
+5. Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`; grant a project the
    `llm:agent` scope through the admin API.
+
+6. **Enabling the worker only, with the owner's confirmation** - attach the shared DB to the
+   worker network without restarting it (compose project `aibroker`, so the network is
+   `aibroker_agent_db`; verify with `docker network ls | grep agent_db`):
+   `docker network connect --alias postgres aibroker_agent_db aibroker-postgres`
+   `docker network connect --alias pgbouncer aibroker_agent_db aibroker-pgbouncer`
+   (undo: `docker network disconnect aibroker_agent_db aibroker-postgres`, same for pgbouncer.
+   The attachment does not survive a recreate of those containers; repeat it then.)
+
+### First supervised run (required evidence)
+
+Before any unattended use, the owner watches ONE run whose prompt asks the agent to try each
+of these, and the result must show every one refused (the permission denial in the event
+log), with the success cases still working. The deny syntax is unverified until this is done.
+
+- allowed: read and write `inputs/x` (scoped), read an attached image;
+- refused: read `/etc/hostname`, `~/.credentials.json` and `<config dir>/.credentials.json`,
+  `/proc/self/environ`, `/dev/fd/../environ`, `/proc/1/environ`, `../run-<other id>/` files,
+  write to `.claude/settings.json` in the workspace, write outside the workspace;
+- afterwards: `settings_problem` still passes for the logged-in config dir, and no files
+  changed under the config dir except the CLI's own state.
 
 ### Billing gate: paid continuation
 
@@ -249,13 +270,18 @@ default) and `exam` are refused; `manual` is allowed only with
 What is guaranteed, and what is not.
 
 - **Tools: allow-list only.** `aibroker.agent.tools.tool_problem` accepts exactly
-  `Read|Glob|Grep|Edit|Write`, optionally with one relative scope `Tool(<scope>)` (no spaces,
+  `Read|Glob|Grep|Edit|Write`, always with one MANDATORY relative scope `Tool(<scope>)` (a bare
+  `Read` is refused; no spaces,
   commas or parentheses; no absolute path, `~`, drive letter or `..`). Anything else is
   refused at submit (422) and again in `build_claude_argv` (`validate_tools`), so a value like
   `--dangerously-skip-permissions`, `--permission-mode=...`, `--settings=...` can never reach the
   argv. **Bash (and every other tool) is not on the list in phase 1**; `llm:agent:bash` does not
   exist. The argv has no positional argument (nothing follows `--`; the prompt is on stdin) and
-  every value is joined (`--allowedTools=`, `--model=`, `--resume=`).
+  every value is joined (`--allowedTools=`, `--model=`, `--resume=`). Besides the scoped
+  permissions the argv passes `--tools=<names>` (`tool_names`: the built-in tool set is cut to the requested
+  names; none requested = `--tools ""`) and `--strict-mcp-config` without any `--mcp-config`
+  (no MCP servers); both flags exist in the pinned 2.1.296 (`claude --help`). Runs with
+  attachments get exactly one extra permission, the scoped `Read(inputs/**)`.
 - **Environment: allow-list built from scratch.** `cli_env` creates the CLI's environment from
   `PATH, HOME, CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, LANG, TMPDIR` only (never a copy of the
   worker's). The `claude auth status` probe gets the same. The compose service has no real
@@ -263,12 +289,17 @@ What is guaranteed, and what is not.
   refuses a run if `ANTHROPIC_*`, `CLAUDE_CODE_USE_*` or the listed Bedrock / Vertex / Foundry /
   OAuth-token variables exist in the worker environment (`FORBIDDEN_ENV`, `FORBIDDEN_PREFIXES`).
 - **Auth/config unreachable by task tools.** File tools are scoped to relative workspace paths; in
-  addition `--disallowedTools=` denies Read/Glob/Grep/Edit/Write on `//proc/**`,
+  addition `--disallowedTools=` denies Read/Glob/Grep/Edit/Write on `//proc/**`, `//dev/**`, `//sys/**`,
   `**/.credentials.json`, `**/.claude.json` and `CLAUDE_CONFIG_DIR/**`, and
   `--setting-sources=user` loads no project/local settings. `settings_problem` checks
   `settings.json` / `settings.local.json` in the config dir and the workspace before every run
-  and fails closed on `apiKeyHelper`, `env`, `defaultMode`, `bypassPermissions` or invalid JSON
-  (`settings_refused`). The official CLI itself reads and refreshes its credential in the config
+  against an ALLOW-list (`ALLOWED_SETTINGS_KEYS`: `$schema`, `theme`, `verbose`, scalar values
+  only); hooks, permissions, statusLine, mcpServers, enableAllProjectMcpServers,
+  otelHeadersHelper, awsAuthRefresh, awsCredentialExport, forceLoginMethod, apiKeyHelper, env,
+  defaultMode and every unknown key refuse the run, as does invalid JSON (`settings_refused`).
+  `<config_dir>/.claude.json` must not define `mcpServers`. The CLI keeps its login in
+  `.credentials.json` / `.claude.json`, not settings.json; the first supervised run confirms a
+  logged-in config dir still passes. The official CLI itself reads and refreshes its credential in the config
   dir (writable for it, on the named volume); the tests prove no tool string a caller can supply
   names that dir, a credential file, `/proc` or any mount (deny list: `disallowed_tools`). NOT guaranteed: that the CLI's
   `//path` deny syntax behaves as documented (unverified until phase 4), nor protection against
@@ -276,14 +307,16 @@ What is guaranteed, and what is not.
 - **uid separation: not feasible here.** The CLI runs as the same uid (`app`) as the Python
   worker: switching uid needs CAP_SETUID, which the container drops (`cap_drop: ALL`,
   `no-new-privileges`), and there is no sudo. So `/proc/<worker>/environ` (DB URL with password,
-  placeholders) is protected only by the tool allow-list and the `//proc/**` deny above.
+  placeholders) is protected by `run_worker` calling `prctl(PR_SET_DUMPABLE, 0)` at startup
+  (`set_non_dumpable`: a same-uid child cannot read the worker's `/proc/<pid>/environ`), by the
+  tool allow-list and by the `//proc/**` deny above.
   **Accepted risk**; revisit with a second container for the CLI if the threat model needs it.
 - **Process group.** The CLI is started with `start_new_session=True`; cancel and the end of
   every run signal the whole group (SIGTERM, grace, SIGKILL), and compose has `init: true`.
-- **Network.** `agent-worker` sits alone on the `agent_db` network with postgres and pgbouncer
-  (not api, redis, vision, monitor); internet egress stays open because the CLI must reach
-  Anthropic (**accepted risk**). Deploy impact: postgres and pgbouncer join `agent_db`, so the
-  next `docker compose up` recreates those two containers.
+- **Network.** `agent-worker` is alone on the `agent_db` network; postgres and pgbouncer are
+  attached to it live by the owner (checklist step 6: `docker network connect`, no restart), so
+  they are NOT recreated by a deploy and api, redis, vision and monitor are never on it.
+  Internet egress stays open because the CLI must reach Anthropic (**accepted risk**).
 - **Filesystem.** `read_only: true` with tmpfs `/tmp` and the workspace tmpfs; `HOME` is the auth
   volume.
 - **Image check.** `worker_image_problem` makes `agent_worker_loop` refuse to start unless

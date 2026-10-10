@@ -134,7 +134,7 @@ _BAD = ("dangerously", "bypass", "danger-full-access", "full-auto", "yolo")
 _BAD_TOKENS = {"--last", "--continue", "-c", "--resume-last"}
 
 
-@pytest.mark.parametrize("tools", [[], ["Read"], ["Write", "Grep(src/**)"]])
+@pytest.mark.parametrize("tools", [[], ["Read(src/**)"], ["Write(out/**)", "Grep(src/**)"]])
 @pytest.mark.parametrize("session", [None, "sess-1"])
 @pytest.mark.parametrize("model", [None, "m-exact"])
 def test_argv_never_disables_safeguards_or_uses_implicit_resume(tools, session, model):
@@ -155,8 +155,8 @@ def test_claude_argv_shape_and_explicit_tools():
     assert a[-1].startswith("--disallowedTools=") and "Read(//proc/**)" in a[-1]
     assert "Write(//home/app/cs/**)" in a[-1]
     b = real_cli.build_claude_argv(_spec(capability="agent:claude", session_id="S",
-                                         allowed_tools=["Read", "Edit(src/**)"], model="m"))
-    assert "--resume=S" in b and "--model=m" in b and "--allowedTools=Read,Edit(src/**)" in b
+                                         allowed_tools=["Read(docs/**)", "Edit(src/**)"], model="m"))
+    assert "--resume=S" in b and "--model=m" in b and "--allowedTools=Read(docs/**),Edit(src/**)" in b
     assert "--permission-mode" not in " ".join(b)
 
 

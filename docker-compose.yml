@@ -28,7 +28,6 @@ services:
     # 02-03.09 picked llama-server, but postgres was as eligible.
     # postgres: 90-280MiB observed, stock shared_buffers 128MB, 100 conns.
     mem_limit: 1024m
-    networks: [default, agent_db]
     restart: unless-stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
@@ -57,7 +56,6 @@ services:
       AUTH_TYPE: plain
       LISTEN_PORT: "6432"
     mem_limit: 128m   # 1-2MiB observed
-    networks: [default, agent_db]
     # Without this the deploy gate could only assert "running", not "working".
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U aibroker"]
@@ -359,7 +357,8 @@ services:
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
 networks:
-  # Dedicated network of the agent worker: it and postgres/pgbouncer only.
+  # Dedicated network of the agent worker. postgres/pgbouncer are NOT declared on it (that would
+  # recreate the shared DB on deploy); the owner attaches them live, see docs/agent-runs.md.
   agent_db:
     driver: bridge
 

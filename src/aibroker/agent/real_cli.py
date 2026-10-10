@@ -32,10 +32,11 @@ from aibroker.agent.adapter import AgentRunSpec, BillingMode, ModelInfo, StreamE
 from aibroker.agent.parsers import ClaudeParser, parse_claude_auth_status
 from aibroker.agent.registry import register_adapter
 from aibroker.agent.settings_guard import settings_problem
-from aibroker.agent.tools import disallowed_tools, validate_tools
+from aibroker.agent.tools import disallowed_tools, tool_names, validate_tools
 
 Probe = Callable[[list[str], Mapping[str, str]], Awaitable[str]]
 
+ATTACHMENT_READ = "Read(inputs/**)"
 CLI_ENV_KEYS = ("PATH", "HOME", "CLAUDE_CONFIG_DIR", "DISABLE_AUTOUPDATER", "LANG", "TMPDIR")
 
 
@@ -53,10 +54,12 @@ def build_claude_argv(run: AgentRunSpec, binary: str = "claude",
     ValueError when a requested tool is not acceptable."""
     tools = list(run.allowed_tools)
     validate_tools(tools)
-    if run.attachments and not any(t == "Read" or t.startswith("Read(") for t in tools):
-        tools.append("Read")   # the CLI must be able to open the attached files
+    if run.attachments and ATTACHMENT_READ not in tools:
+        tools.append(ATTACHMENT_READ)   # scoped: the CLI may open ONLY the attached files
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose",
-            "--setting-sources=user"]
+            "--setting-sources=user", "--strict-mcp-config"]
+    # Restrict the built-in tool set itself to the requested ones (empty = no tools at all).
+    argv += [f"--tools={','.join(tool_names(tools))}"] if tools else ["--tools", ""]
     if run.model:
         argv.append(f"--model={run.model}")
     if run.session_id:

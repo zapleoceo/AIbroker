@@ -278,13 +278,13 @@ def test_claude_argv_and_prompt_reference_the_real_files():
     spec = AgentRunSpec(run_id=1, capability="agent:claude", prompt="grade this",
                         workspace="/w", account_id="a", attachments=["inputs/shot.png"])
     argv = real_cli.build_claude_argv(spec)
-    assert "--allowedTools=Read" in argv
+    assert "--allowedTools=Read(inputs/**)" in argv and "--tools=Read" in argv
     prompt = real_cli.build_claude_prompt(spec)
     assert "inputs/shot.png" in prompt and prompt.startswith("grade this")
     explicit = AgentRunSpec(run_id=1, capability="agent:claude", prompt="p", workspace="/w",
                             account_id="a", attachments=["inputs/a.png"],
-                            allowed_tools=["Read", "Edit"])
-    assert "--allowedTools=Read,Edit" in real_cli.build_claude_argv(explicit)
+                            allowed_tools=["Read(inputs/**)", "Edit(out/**)"])
+    assert "--allowedTools=Read(inputs/**),Edit(out/**)" in real_cli.build_claude_argv(explicit)
     plain = AgentRunSpec(run_id=1, capability="agent:claude", prompt="p", workspace="/w",
                          account_id="a")
     assert not any(a.startswith("--allowedTools") for a in real_cli.build_claude_argv(plain))

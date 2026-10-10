@@ -1,9 +1,13 @@
-"""Fail-closed check of the CLI settings files before every run.
+"""Fail-closed check of the CLI settings files before every run (ALLOW-list).
 
-settings.json / settings.local.json in the CLI config dir (and in the run workspace) can carry
-an apiKeyHelper (an alternative, possibly paid, credential), an `env` block (could inject
-ANTHROPIC_* variables the env guard cannot see) or a permissive defaultMode /
-bypassPermissions. Any of those, or an unreadable file, refuses the run.
+settings.json / settings.local.json (CLI config dir and run workspace) may contain ONLY the
+inert display keys below. Anything else - hooks, permissions, statusLine, mcpServers,
+enableAllProjectMcpServers, otelHeadersHelper, awsAuthRefresh, awsCredentialExport,
+forceLoginMethod, apiKeyHelper, env, defaultMode, bypassPermissions, unknown keys - refuses
+the run, as does unreadable / invalid JSON. `<config_dir>/.claude.json` (the CLI's own state)
+must not define MCP servers anywhere. The CLI keeps its login in `.credentials.json` /
+`.claude.json`, not in settings.json, so this list stays minimal; the first supervised run
+confirms that a logged-in config dir still passes.
 """
 from __future__ import annotations
 
@@ -11,30 +15,27 @@ import json
 from pathlib import Path
 from typing import Any
 
-FORBIDDEN_KEYS = frozenset({"apiKeyHelper", "env", "defaultMode", "bypassPermissions"})
+ALLOWED_SETTINGS_KEYS = frozenset({"$schema", "theme", "verbose"})
 _FILES = ("settings.json", "settings.local.json")
 
 
-def _walk(node: Any) -> str | None:
+def _has_key(node: Any, key: str) -> bool:
     if isinstance(node, dict):
-        for key, value in node.items():
-            if key in FORBIDDEN_KEYS:
-                return f"key {key!r}"
-            found = _walk(value)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for item in node:
-            found = _walk(item)
-            if found:
-                return found
-    elif isinstance(node, str) and node == "bypassPermissions":
-        return "value 'bypassPermissions'"
-    return None
+        return key in node or any(_has_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_key(v, key) for v in node)
+    return False
+
+
+def _load(path: Path) -> tuple[Any, str | None]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (OSError, ValueError):
+        return None, f"{path} is unreadable or not valid JSON"
 
 
 def settings_problem(config_dir: str | None, workspace: str) -> str | None:
-    """-> why the run must be refused, or None when every settings file is clean."""
+    """-> why the run must be refused, or None when every file is clean."""
     if not config_dir:
         return "CLAUDE_CONFIG_DIR is not set"
     candidates = [Path(config_dir) / n for n in _FILES]
@@ -42,11 +43,21 @@ def settings_problem(config_dir: str | None, workspace: str) -> str | None:
     for path in candidates:
         if not path.exists():
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return f"{path} is unreadable or not valid JSON"
-        found = _walk(data)
-        if found:
-            return f"{path} contains {found}"
+        data, err = _load(path)
+        if err:
+            return err
+        if not isinstance(data, dict):
+            return f"{path} is not a JSON object"
+        extra = sorted(set(data) - ALLOWED_SETTINGS_KEYS)
+        if extra:
+            return f"{path} contains key {extra[0]!r} (not in the allow-list)"
+        if any(isinstance(v, dict | list) for v in data.values()):
+            return f"{path} contains a nested value"
+    state = Path(config_dir) / ".claude.json"
+    if state.exists():
+        data, err = _load(state)
+        if err:
+            return err
+        if _has_key(data, "mcpServers"):
+            return f"{state} defines mcpServers"
     return None

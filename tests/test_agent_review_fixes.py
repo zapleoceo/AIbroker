@@ -48,7 +48,8 @@ def _spec(**kw):
 INJECTIONS = ["--dangerously-skip-permissions", "--permission-mode=bypassPermissions",
               "--settings=/tmp/x.json", "-p", "Read,--dangerously-skip-permissions",
               "Read --settings=x", "Read(src/**),Write", "readme", "Task", "WebFetch",
-              "mcp__x__y", "Read(", "Read()", "Read(a b)", "Bash", "Bash(ls)"]
+              "mcp__x__y", "Read(", "Read()", "Read(a b)", "Bash", "Bash(ls)",
+              "Read", "Glob", "Grep", "Edit", "Write"]
 
 
 @pytest.mark.parametrize("tool", INJECTIONS)
@@ -60,17 +61,17 @@ def test_injected_or_unlisted_tools_are_refused(tool):
         real_cli.build_claude_argv(_spec(allowed_tools=[tool]))     # never reaches argv
 
 
-@pytest.mark.parametrize("tool", ["Read", "Glob", "Grep", "Edit", "Write", "Read(src/**/*.py)",
-                                  "Edit(docs/a.md)", "Grep(foo*)"])
+@pytest.mark.parametrize("tool", ["Read(src/**/*.py)", "Glob(docs/*)", "Grep(foo*)",
+                                  "Edit(docs/a.md)", "Write(out/**)"])
 def test_listed_tools_pass(tool):
     assert tool_problem(tool) is None
 
 
 def test_argv_uses_single_joined_options_and_no_positionals():
     argv = real_cli.build_claude_argv(
-        _spec(allowed_tools=["Read", "Grep(src/**)"], model="m-1", session_id="S-1"),
+        _spec(allowed_tools=["Read(docs/**)", "Grep(src/**)"], model="m-1", session_id="S-1"),
         config_dir="/c")
-    assert "--allowedTools=Read,Grep(src/**)" in argv and "--model=m-1" in argv
+    assert "--allowedTools=Read(docs/**),Grep(src/**)" in argv and "--model=m-1" in argv
     assert "--resume=S-1" in argv
     assert not {"--allowedTools", "--model", "--resume", "--disallowedTools"} & set(argv)
     assert sum(a.startswith("--allowedTools") for a in argv) == 1
@@ -132,7 +133,7 @@ async def test_task_tools_cannot_name_credentials_environ_or_mounts(tool):
 def test_explicit_denies_cover_credentials_proc_and_config_for_read_and_write_tools():
     deny = disallowed_tools("/home/app/claude-state")
     for tool in ("Read", "Glob", "Grep", "Edit", "Write"):
-        for target in ("//proc/**", "**/.credentials.json", "**/.claude.json",
+        for target in ("//proc/**", "//dev/**", "//sys/**", "**/.credentials.json", "**/.claude.json",
                        "//home/app/claude-state/**"):
             assert f"{tool}({target})" in deny, (tool, target)
 
@@ -237,7 +238,7 @@ def test_clean_missing_broken_and_unset_settings(tmp_path):
     (tmp_path / "cfg").mkdir()
     assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is None      # no files
     (tmp_path / "cfg" / "settings.json").write_text(json.dumps(
-        {"permissions": {"allow": ["Read"]}, "theme": "dark"}))
+        {"theme": "dark", "verbose": True}))
     assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is None
     (tmp_path / "cfg" / "settings.local.json").write_text("{not json")
     assert "unreadable" in settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws"))
@@ -325,12 +326,20 @@ def test_agent_worker_init_readonly_tmpfs_and_dedicated_network():
     assert "networks: [agent_db]" in svc and "default" not in svc.split("networks:")[1]
 
 
-def test_only_postgres_and_pgbouncer_share_the_agent_network():
+def test_only_the_worker_is_declared_on_the_agent_network():
     on = {n for n in ("postgres", "pgbouncer", "redis", "api", "monitor", "vision-local")
           if "agent_db" in _service(n)}
-    assert on == {"postgres", "pgbouncer"}
+    assert on == set()                            # shared DB is never recreated by a deploy
+    for n in ("postgres", "pgbouncer"):
+        assert "networks:" not in _service(n)     # their networks are unchanged
     assert re.search(r"^networks:\n(  #.*\n)*  agent_db:\n    driver: bridge", COMPOSE, re.M)
     assert "internal: true" not in COMPOSE      # internet egress stays (documented accepted risk)
+
+
+def test_docs_give_the_live_network_attach_commands():
+    for svc, ctr in (("postgres", "aibroker-postgres"), ("pgbouncer", "aibroker-pgbouncer")):
+        assert f"docker network connect --alias {svc} aibroker_agent_db {ctr}" in DOCS
+    assert re.search(r"^name: aibroker$", COMPOSE, re.M)          # => network aibroker_agent_db
 
 
 # --- S5: refuse outside the worker image ------------------------------------------------------
@@ -361,5 +370,108 @@ def test_dockerfile_writes_the_marker():
 def test_docs_cover_checklist_login_persistence_and_accepted_risks():
     assert "docker compose --profile agent config | grep -i anthropic" in DOCS
     assert "persists" in DOCS and "named volume" in DOCS
-    for needle in ("Bash", "accepted risk", "/proc", "uid", "guaranteed"):
+    for needle in ("Bash", "accepted risk", "/proc", "uid", "guaranteed", "first supervised run",
+                   "/dev/fd/", "NOT recreated"):
         assert needle in DOCS, needle
+
+
+# --- round 2: mandatory scope, --tools, MCP, dumpable, settings allow-list ------------------------
+
+
+@pytest.mark.parametrize("tool", ["Read", "Glob", "Grep", "Edit", "Write"])
+async def test_bare_file_tools_are_refused_everywhere(tool):
+    assert tool_problem(tool) is not None
+    with pytest.raises(ValueError):
+        real_cli.build_claude_argv(_spec(allowed_tools=[tool]))
+    key = await _project([AGENT_SCOPE])
+    assert (await _submit(key, allowed_tools=[tool])).status_code == 422
+
+
+def test_attachment_runs_get_only_a_scoped_read():
+    argv = real_cli.build_claude_argv(_spec(attachments=["inputs/a.png"]))
+    allowed = next(a for a in argv if a.startswith("--allowedTools="))
+    assert allowed == "--allowedTools=Read(inputs/**)"
+    assert "Read" not in allowed.removeprefix("--allowedTools=").split(",")   # never bare
+    both = real_cli.build_claude_argv(_spec(attachments=["inputs/a.png"],
+                                            allowed_tools=["Grep(src/**)"]))
+    assert "--allowedTools=Grep(src/**),Read(inputs/**)" in both
+    again = real_cli.build_claude_argv(_spec(attachments=["inputs/a.png"],
+                                             allowed_tools=["Read(inputs/**)"]))
+    assert "--allowedTools=Read(inputs/**)" in again
+
+
+def test_tools_flag_restricts_the_builtin_set_and_mcp_is_off():
+    argv = real_cli.build_claude_argv(_spec(allowed_tools=["Read(a/**)", "Read(b/**)", "Edit(c/*)"]))
+    assert "--tools=Read,Edit" in argv and "--strict-mcp-config" in argv
+    assert "--mcp-config" not in " ".join(argv)
+    none = real_cli.build_claude_argv(_spec())
+    assert none[none.index("--tools") + 1] == "" and "--strict-mcp-config" in none
+
+
+def test_dev_and_sys_are_denied_too():
+    deny = disallowed_tools("/c")
+    for tool in ("Read", "Glob", "Grep", "Edit", "Write"):
+        assert f"{tool}(//dev/**)" in deny and f"{tool}(//sys/**)" in deny
+
+
+def test_worker_makes_itself_non_dumpable():
+    from aibroker.agent.run_worker import PR_SET_DUMPABLE, set_non_dumpable
+    calls = []
+
+    class Libc:
+        def prctl(self, *args):
+            calls.append(args)
+            return 0
+
+    assert set_non_dumpable(Libc()) is True
+    assert calls == [(PR_SET_DUMPABLE, 0, 0, 0, 0)] and PR_SET_DUMPABLE == 4
+
+    class Failing:
+        def prctl(self, *args):
+            return -1
+
+    assert set_non_dumpable(Failing()) is False
+    assert set_non_dumpable(object()) is False          # no prctl at all (non-Linux)
+
+
+def test_run_worker_calls_set_non_dumpable_before_touching_the_database():
+    import inspect
+
+    from aibroker.agent import run_worker
+    src = inspect.getsource(run_worker.run_worker)
+    assert src.index("set_non_dumpable") < src.index("init_engine")
+
+
+@pytest.mark.parametrize("content", [
+    {"hooks": {"PreToolUse": []}}, {"permissions": {"allow": ["Read(*)"]}},
+    {"statusLine": {"type": "command", "command": "x"}}, {"mcpServers": {"x": {}}},
+    {"enableAllProjectMcpServers": True}, {"otelHeadersHelper": "x"}, {"awsAuthRefresh": "x"},
+    {"awsCredentialExport": "x"}, {"forceLoginMethod": "console"}, {"apiKeyHelper": "x"},
+    {"env": {"A": "b"}}, {"defaultMode": "x"}, {"model": "opus"}, {"theme": {"nested": 1}},
+    ["not", "an", "object"],
+])
+def test_settings_allow_list_refuses_everything_else(tmp_path, content):
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "settings.json").write_text(json.dumps(content))
+    assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is not None
+
+
+def test_settings_allow_list_accepts_inert_keys_and_login_state(tmp_path):
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "settings.json").write_text(json.dumps(
+        {"$schema": "x", "theme": "dark", "verbose": False}))
+    (tmp_path / "cfg" / ".claude.json").write_text(json.dumps(
+        {"userID": "u", "oauthAccount": {"emailAddress": "o@example.com"},
+         "projects": {"/w": {"allowedTools": []}}}))
+    (tmp_path / "cfg" / ".credentials.json").write_text("{not even read}")
+    assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is None
+
+
+@pytest.mark.parametrize("state", [{"mcpServers": {"x": {}}},
+                                   {"projects": {"/w": {"mcpServers": {"x": {}}}}}])
+def test_mcp_servers_in_claude_json_refuse_the_run(tmp_path, state):
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / ".claude.json").write_text(json.dumps(state))
+    assert "mcpServers" in settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws"))
+    (tmp_path / "cfg" / ".claude.json").write_text("{broken")
+    assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is not None
