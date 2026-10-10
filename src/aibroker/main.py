@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from aibroker import __version__
+from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
 from aibroker.routes import admin, agent, dashboard, health, landing, proxy, signup
@@ -49,6 +50,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
     # `running` is re-queued by the next worker (see services/job_queue.py).
     stop = asyncio.Event()
     dispatcher = asyncio.create_task(dispatcher_loop(stop))
+    agent_worker = (asyncio.create_task(agent_worker_loop(stop))
+                    if get_settings().AGENT_WORKER_ENABLED else None)
     log.info("aibroker started", host=get_settings().PUBLIC_HOST)
     try:
         yield
@@ -58,6 +61,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
             await asyncio.wait_for(dispatcher, timeout=10)
         except (TimeoutError, asyncio.CancelledError):
             dispatcher.cancel()
+        if agent_worker is not None:
+            try:
+                await asyncio.wait_for(agent_worker, timeout=30)
+            except (TimeoutError, asyncio.CancelledError):
+                agent_worker.cancel()
         await close_engine()
 
 

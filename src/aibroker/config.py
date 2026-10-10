@@ -117,6 +117,19 @@ class Settings(BaseSettings):
         return [x.strip() for x in self.SIGNUP_DEFAULT_SCOPES.split(",")
                 if x.strip() and x.strip() not in OWNER_ONLY_SCOPES]
 
+    # Agent runs (docs/agent-runs.md): a dedicated, owner-only worker lane. OFF by default;
+    # enable on exactly the process/container that has the CLIs and subscription logins.
+    AGENT_WORKER_ENABLED: bool = False
+    AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
+    AGENT_CONCURRENCY_CLAUDE: int = 1
+    AGENT_WORKSPACE_ROOT: str = "/var/lib/aibroker/agent-workspaces"
+    AGENT_CANCEL_POLL_S: float = 1.0
+    AGENT_CANCEL_GRACE_S: float = 15.0     # how long adapter.cancel() may take
+    AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
+    AGENT_FILES_TOTAL_BYTES: int = 1024 * 1024
+    AGENT_FILES_MAX_COUNT: int = 20
+    AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
+
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
 

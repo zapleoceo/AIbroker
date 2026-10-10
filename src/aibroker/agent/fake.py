@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from aibroker.agent.adapter import AgentRunSpec, BillingMode, StreamEvent
+from aibroker.agent.adapter import AgentRunSpec, BillingMode, ModelInfo, StreamEvent
 
 
 class FakeAgentCLI:
@@ -13,8 +13,10 @@ class FakeAgentCLI:
     ("write", relpath, text) creates a file in the workspace; ("raise", msg) fails."""
     supports_resume = True
 
-    def __init__(self, script: list[object], mode: BillingMode = "subscription") -> None:
+    def __init__(self, script: list[object], mode: BillingMode = "subscription",
+                 models: list[ModelInfo] | None = None) -> None:
         self.script = script
+        self.models = models
         self.mode: BillingMode = mode
         self.cancel_calls = 0
         self.started: AgentRunSpec | None = None
@@ -22,6 +24,9 @@ class FakeAgentCLI:
 
     async def billing_mode(self) -> BillingMode:
         return self.mode
+
+    async def list_models(self) -> list[ModelInfo] | None:
+        return self.models
 
     async def cancel(self) -> None:
         self.cancel_calls += 1

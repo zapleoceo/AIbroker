@@ -271,6 +271,16 @@ class AgentRunRow(Base):
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     outcome: Mapped[str | None] = mapped_column(String(20))  # completed|failed|cancelled|timed_out
+    model: Mapped[str | None] = mapped_column(String(128))   # EXACT requested id, never substituted
+    # Subscription usage is kept apart from API billing (never written to usage_log):
+    # tokens/turns as the CLI reported; cost_usd stays NULL unless a cost is confirmed.
+    billing_mode: Mapped[str | None] = mapped_column(String(16))
+    usage_source: Mapped[str | None] = mapped_column(String(24))
+    usage_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    usage_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    usage_cache_read_tokens: Mapped[int | None] = mapped_column(Integer)
+    usage_turns: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
 
 
 class AgentRunEventRow(Base):

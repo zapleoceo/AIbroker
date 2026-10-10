@@ -1,8 +1,8 @@
 # Agent runs (owner-only CLI workers)
 
 Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the broker queue.
-Status: **phase 1, checkpoint C1** - data model, event schema, adapter contract, fake adapter,
-API. No worker executes anything yet (C2) and the real CLI adapters do not exist yet (C3).
+Status: **phase 1, checkpoints C1-C2** - data model, event schema, adapter contract, fake adapter,
+API, worker lane, locks, workspaces, timeouts. The real CLI adapters and the billing guard are C3.
 
 ## Legal / scope note
 
@@ -93,8 +93,61 @@ async iterator of events, `cancel()`. One instance serves one run. `FakeAgentCLI
 (`aibroker.agent.fake`) is a scripted fake: emits events, hangs until cancelled, raises,
 writes files into the workspace.
 
+## Worker lane (C2)
+
+`aibroker.agent.worker` is a lane of its own, started from the app lifespan only when
+`AGENT_WORKER_ENABLED=true` (off by default - enable it on the one process that has the CLIs).
+
+- `claim_agent_runs(capability, limit)` claims `agent:*` rows of ONE capability
+  (`FOR UPDATE SKIP LOCKED`); `concurrency_for` gives the slots
+  (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Slots are never shared
+  with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
+- `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
+  becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
+- `drain_agent_once` is the deterministic one-pass used by tests; `agent_worker_loop` is the
+  forever loop.
+
+`aibroker.agent.executor.execute_run` drives a claimed run (`ExecConfig` from
+`exec_config_from_settings`) to exactly one terminal event:
+
+1. cancel flag already set -> `run.cancelled`; no adapter registered
+   (`aibroker.agent.registry`: `register_adapter`, `make_adapter`, `clear_adapters` for tests) -> `adapter_unavailable`.
+2. **Session lock** (resume only): `session_lock(account_id, session_id)` (key from `lock_name`) is a Postgres
+   advisory lock on a dedicated *direct* connection (not PgBouncer); in-process elsewhere.
+   Busy -> the run goes back to `pending` with a delay (`requeue_run`), failing
+   `session_busy` after `session_busy_max` tries. Two runs never use one session at once.
+3. **Workspace**: `create_workspace` makes `AGENT_WORKSPACE_ROOT/run-<id>` with mode 0700;
+   it is removed afterwards, also on failure (`cleanup_workspace`).
+4. `run.started`, then the adapter stream. **Wall** (`wall_timeout_s`) and **idle** (no event
+   for `idle_timeout_s`) timeouts give `run.timed_out`; the cancel flag
+   (`cancel_requested`, polled every `AGENT_CANCEL_POLL_S`) gives `run.cancelled`. Both call
+   `adapter.cancel()` (the adapter contract owns SIGTERM then SIGKILL), bounded by
+   `AGENT_CANCEL_GRACE_S`.
+5. Adapter crash -> `adapter_error`; stream ending without a terminal event ->
+   `no_terminal_event`. Failures are never retried or rerouted; an adapter-reported
+   `quota_exhausted` stays `quota_exhausted` (no API fallback, no extra usage, no account
+   rotation).
+6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files`:
+   regular, non-symlink files inside the workspace only; per-file cap
+   (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
+   `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
+   then the API returns `expired: true` and no content.
+
+## Models, usage, billing separation
+
+- **Model catalog comes from the CLI**, never from this repo: `AgentCLI.list_models()` returns
+  `ModelInfo` entries (Codex: app-server `model/list` + `provider/capabilities`; Claude: its
+  own list) or `None` when unavailable. Phase 1 defines the interface and the fake only.
+- **No silent substitution.** `model` (request field) is passed to the adapter exactly. If the
+  CLI catalog is available and lacks the id, the run fails `model_unavailable` before start;
+  if the catalog is unavailable the exact id is still passed through. `latest` is used only
+  when the caller wrote `latest`.
+- **Subscription usage is kept apart from API billing**: it is stored on the run
+  (`usage_*` columns, `usage_source` = `cli_reported`, `billing_mode`), never in `usage_log`,
+  and `cost_usd` stays NULL unless a cost is confirmed (nothing sets it in phase 1).
+
 ## Not done yet
 
-C2: worker lane, per-session advisory lock, workspaces, wall/idle timeouts, cancel
-execution, file caps. C3: billing-mode guard and the real `CodexCLI` / `ClaudeCLI` adapters
-(unverified against the real CLIs until phase 4).
+C3: billing-mode guard and the real `CodexCLI` / `ClaudeCLI` adapters (unverified against the
+real CLIs until phase 4). Phase 2+: `$imagegen` headless support is unproven; the Claude
+critic must receive real image bytes.

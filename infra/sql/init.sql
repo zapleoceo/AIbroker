@@ -155,7 +155,15 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
   last_event_at TIMESTAMP,
   last_seq INTEGER NOT NULL DEFAULT 0,
-  outcome VARCHAR(20)
+  outcome VARCHAR(20),
+  model VARCHAR(128),
+  billing_mode VARCHAR(16),
+  usage_source VARCHAR(24),
+  usage_input_tokens INTEGER,
+  usage_output_tokens INTEGER,
+  usage_cache_read_tokens INTEGER,
+  usage_turns INTEGER,
+  cost_usd DOUBLE PRECISION
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_idem
   ON agent_runs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;

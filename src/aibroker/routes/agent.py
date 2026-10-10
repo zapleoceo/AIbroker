@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -37,6 +38,9 @@ class AgentRunRequest(BaseModel):
     wall_timeout_s: int = Field(1800, ge=10, le=7200)
     idle_timeout_s: int = Field(300, ge=5, le=1800)
     allowed_tools: list[str] = Field(default_factory=list, max_length=32)
+    model: str | None = Field(None, min_length=1, max_length=128,
+                              pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$",
+                              description="exact model id; passed through, never substituted")
 
     def tools_ok(self) -> bool:
         return all(len(t) <= 128 and re.match(_TOOL, t) is not None for t in self.allowed_tools)
@@ -60,6 +64,12 @@ class AgentRunResponse(BaseModel):
     final_text: str | None = None
     files: list[dict[str, Any]] | None = None
     error: str | None = None
+    model: str | None = None
+    billing_mode: str | None = None
+    usage: dict[str, int | None] | None = None
+    usage_source: str | None = None
+    cost_usd: float | None = Field(
+        None, description="NULL unless a cost is confirmed; subscription usage is not priced")
 
 
 class AgentEventOut(BaseModel):
@@ -81,14 +91,33 @@ def _require_agent_scope(ctx: ProjectCtx) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"project lacks scope: {AGENT_SCOPE}")
 
 
+def _live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Past its TTL a file keeps its name/size but loses its content."""
+    if files is None:
+        return None
+    now = datetime.now(UTC).isoformat()
+    out = []
+    for f in files:
+        if f.get("expires_at") and f["expires_at"] < now:
+            f = {**f, "content_b64": None, "expired": True}
+        out.append(f)
+    return out
+
+
 def _shape(run: Any, job: Any) -> AgentRunResponse:
     state = run.outcome or ("running" if job.status == "running" else "pending")
-    meta = job.result_meta or {}
+    files = _live_files((job.result_meta or {}).get("files"))
+    usage = None
+    if run.usage_source is not None:
+        usage = {"input_tokens": run.usage_input_tokens, "output_tokens": run.usage_output_tokens,
+                 "cache_read_tokens": run.usage_cache_read_tokens, "turns": run.usage_turns}
     return AgentRunResponse(
         run_id=run.run_id, status=state, capability=run.capability, task_id=run.task_id,
         account_id=run.account_id, session_id=run.session_id,
         cancel_requested=run.cancel_requested, final_text=job.result_text,
-        files=meta.get("files"), error=job.error_message,
+        files=files, error=job.error_message, model=run.model,
+        billing_mode=run.billing_mode, usage=usage, usage_source=run.usage_source,
+        cost_usd=run.cost_usd,
     )
 
 
@@ -106,6 +135,7 @@ async def agent_run_submit(
             task_id=body.task_id, account_id=body.account_id, session_id=body.session_id,
             idempotency_key=body.idempotency_key, wall_timeout_s=body.wall_timeout_s,
             idle_timeout_s=body.idle_timeout_s, allowed_tools=body.allowed_tools,
+            model=body.model,
         )
     except RunRejected as e:
         raise HTTPException(400, str(e)) from e

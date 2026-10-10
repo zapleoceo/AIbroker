@@ -26,6 +26,7 @@ class FileRef(BaseModel):
     size: int = 0
     content_b64: str | None = None
     skipped: str | None = None   # too_large | cap_reached | unsafe_path | missing
+    expires_at: str | None = None   # ISO UTC; past it the content is no longer served
     expired: bool = False
 
 
@@ -72,6 +73,7 @@ class Usage(_Event):
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     turns: int | None = None
+    source: str = "cli_reported"   # where the numbers come from; never a price
 
 
 class RunCompleted(_Event):

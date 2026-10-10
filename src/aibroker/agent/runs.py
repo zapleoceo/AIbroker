@@ -81,14 +81,14 @@ async def _check_resume(project_id: int, capability: str, account_id: str, sessi
 async def create_run(
     *, project: ProjectRow, capability: str, prompt: str, task_id: str, account_id: str,
     session_id: str | None, idempotency_key: str | None, wall_timeout_s: int,
-    idle_timeout_s: int, allowed_tools: list[str],
+    idle_timeout_s: int, allowed_tools: list[str], model: str | None = None,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight)."""
     request: dict[str, Any] = {
         "prompt": prompt, "task_id": task_id, "account_id": account_id,
         "session_id": session_id, "wall_timeout_s": wall_timeout_s,
-        "idle_timeout_s": idle_timeout_s, "allowed_tools": allowed_tools,
+        "idle_timeout_s": idle_timeout_s, "allowed_tools": allowed_tools, "model": model,
     }
     phash = payload_hash(project.id, capability, request)
     if idempotency_key:
@@ -111,7 +111,7 @@ async def create_run(
             s.add(AgentRunRow(
                 run_id=job.id, project_id=project.id, capability=capability,
                 task_id=task_id, account_id=account_id, resume_session_id=session_id,
-                idempotency_key=idempotency_key,
+                idempotency_key=idempotency_key, model=model,
             ))
             run_id = job.id
     except IntegrityError:   # lost the idempotency_key race: the winner's run is the answer
@@ -202,3 +202,31 @@ async def cancel_run(run_id: int, project_id: int) -> tuple[AgentRunRow, DeepJob
                 if row is not None:
                     row.cancel_requested = True
     return await get_run(run_id, project_id)
+
+
+async def record_usage(run_id: int, totals: dict[str, int | None], billing_mode: str | None) -> None:
+    """Keep the CLI-reported usage on the run. Subscription usage lives here, apart from
+    API billing (never usage_log); cost_usd stays NULL - no confirmed cost."""
+    async with get_session() as s:
+        run = await s.get(AgentRunRow, run_id)
+        if run is None:
+            return
+        run.billing_mode = billing_mode
+        run.usage_source = "cli_reported" if any(v is not None for v in totals.values()) else None
+        run.usage_input_tokens = totals.get("input_tokens")
+        run.usage_output_tokens = totals.get("output_tokens")
+        run.usage_cache_read_tokens = totals.get("cache_read_tokens")
+        run.usage_turns = totals.get("turns")
+
+
+async def requeue_run(run_id: int, delay_s: float) -> int:
+    """Put a claimed-but-blocked run (session busy) back to pending -> times requeued."""
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, run_id)
+        if job is None:
+            return 0
+        job.status = "pending"
+        job.started_at = None
+        job.retry_count += 1
+        job.run_after = _now() + timedelta(seconds=delay_s)
+        return job.retry_count

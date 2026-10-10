@@ -31,6 +31,14 @@ class AgentRunSpec:
     account_id: str
     session_id: str | None = None          # exact CLI session to resume
     allowed_tools: list[str] = field(default_factory=list)
+    model: str | None = None               # EXACT id the caller chose; never substituted
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """One entry of the model/capability catalog, as reported BY the CLI."""
+    id: str
+    capabilities: tuple[str, ...] = ()
 
 
 class AgentCLI(Protocol):
@@ -39,6 +47,11 @@ class AgentCLI(Protocol):
 
     async def billing_mode(self) -> BillingMode:
         """Positively report the auth mode; anything unsure is "unknown" (refused)."""
+        ...
+
+    async def list_models(self) -> list[ModelInfo] | None:
+        """Catalog from the CLI itself (codex app-server model/list + provider/capabilities;
+        claude: its own model list). Never hardcoded. None = catalog unavailable."""
         ...
 
     def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
