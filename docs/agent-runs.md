@@ -118,16 +118,27 @@ writes files into the workspace.
    ROW in `agent_session_leases` (`AgentSessionLeaseRow`, migration 018, PK
    `(account_id, session_id)`) - no Postgres advisory lock, so the worker needs only the
    pgbouncer connection. `acquire_lease` is one atomic `INSERT ... ON CONFLICT DO UPDATE ... WHERE
-   lease_until < now`: it succeeds only for a free or EXPIRED session. While the run is alive a
-   heartbeat task (`renew_lease`) extends `lease_until` every `AGENT_SESSION_LEASE_HEARTBEAT_S`
+   lease_until < now`: it succeeds only for a free or EXPIRED session. On Postgres every
+   comparison and stored timestamp uses the DATABASE clock (`now() AT TIME ZONE 'utc'`, TTL via
+   `make_interval`), so workers with skewed app clocks agree; the app clock (`_now`) is used only
+   by the SQLite branch of the unit tests. While the run is alive a heartbeat task (`renew_lease`,
+   same DB clock) extends `lease_until` every `AGENT_SESSION_LEASE_HEARTBEAT_S`
    (30 s); the TTL `AGENT_SESSION_LEASE_TTL_S` (120 s, keep >= 3 heartbeats) lets a crashed
    worker's lease expire by itself. `release_lease` runs when the run ends (any outcome).
+   **Lost lease**: the heartbeat sets `Lease.lost` when a renewal is refused (another holder took
+   the session) or when no renewal succeeds before a local monotonic deadline (the DB is
+   unreachable for longer than the TTL; the deadline counts from the start of the last successful
+   renewal request, so it is never later than the DB's `lease_until`; DB errors and hangs are both
+   covered). The stream loop then stops the CLI at once (cancel, like a timeout) and the run
+   ends with **no terminal write**; the stale-run sweep later closes it as `run.failed
+   worker_lost`. It is never re-run.
    Busy -> the run goes back to `pending` with a delay (`requeue_run`), failing
    `session_busy` after `session_busy_max` tries. Two runs never use one session at once.
    Every acquisition returns a `Lease` with a FENCE token that grows by one on each takeover
    (`release_lease` expires the row in place, so the counter survives). The run's writes -
    events, status/result (`append_event`), usage (`record_usage`) and quota parking
-   (`park_for_quota`) - run `check_fence` inside their own transaction, which locks the lease
+   (`park_for_quota`) and the workspace record (`run.workspace`, written by step 3) - run
+   `check_fence` inside their own transaction, which locks the lease
    row and raises `StaleLease` if another run now holds the session. A zombie whose lease was
    taken over therefore cannot write; `_held_drive` stops it (no terminal event) and the adapter
    is cancelled. Nothing relies on session-level database state, so it works with transaction
