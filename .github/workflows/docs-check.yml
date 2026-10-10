@@ -36,7 +36,8 @@ jobs:
           CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
           echo "== changed files =="; echo "$CHANGED"
 
-          if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -qiF "docs-not-needed"; then
+          # no `grep -q`: an early exit would SIGPIPE `git log` and, with pipefail, ignore the opt-out
+          if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -iF "docs-not-needed" >/dev/null; then
             echo "::notice::'docs-not-needed' found in commit message — skipping check."
             exit 0
           fi
@@ -45,7 +46,7 @@ jobs:
           DOCS="$(echo "$CHANGED" | grep -E '^docs/' || true)"
 
           if [ -n "$CODE" ] && [ -z "$DOCS" ]; then
-            echo "::error::Code under src/ or infra/ changed but /docs was not updated."
+            echo "::error::Code under src/, infra/, services/ or monitor/ changed but /docs was not updated."
             echo "Update the relevant doc (docs/README.md lists them) OR add"
             echo "'docs-not-needed' to a commit message if the change is purely cosmetic."
             exit 1
