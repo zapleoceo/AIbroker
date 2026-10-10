@@ -2,7 +2,7 @@
 
 Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the broker queue.
 Status: **phase 1, C1 + C2-min** - data model, event schema, adapter contract, fake adapter,
-API, worker lane, locks, workspaces, timeouts. One real adapter (`ClaudeCLI`) and the billing guard are in; Codex, the model catalog and multi-account are later.
+API, worker lane, session leases, workspaces, timeouts. One real adapter (`ClaudeCLI`) and the billing guard are in; Codex, the model catalog and multi-account are later.
 
 ## Legal / scope note
 
@@ -30,8 +30,10 @@ client-visible request id `job-<id>` are reused - plus:
 |---|---|---|
 | `agent_runs` | `AgentRunRow` | `task_id`, `account_id`, `session_id` (set from the first `session.assigned`), `resume_session_id`, `idempotency_key`, `workspace`, `cancel_requested`, `last_event_at`, `last_seq`, `outcome` |
 | `agent_run_events` | `AgentRunEventRow` | `(run_id, seq)`, `ts`, `type`, `payload` (JSONB); cascade-deleted with the job |
+| `agent_session_leases` | `AgentSessionLeaseRow` | PK `(account_id, session_id)`; `run_id` (current holder), `lease_until`, `heartbeat_at`, `fence` (fencing token, +1 per acquisition; expired in place on release, never deleted) |
 
 Migration `infra/sql/migrations/017_agent_runs.sql`, mirrored in `infra/sql/init.sql`.
+Migration `infra/sql/migrations/018_agent_session_leases.sql` adds `agent_session_leases`.
 The LLM dispatcher (`services/job_queue.py`) never claims or stale-requeues `agent:%` rows;
 they belong to the dedicated worker lane (C2).
 

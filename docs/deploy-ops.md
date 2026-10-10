@@ -145,6 +145,11 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+Migration 018 (agent session leases) adds `agent_session_leases`. Apply it BEFORE deploying
+code that takes session leases (the agent worker lane); the agent worker itself connects only
+through pgbouncer, so it needs no direct Postgres access for this. The owner checklist is in
+[agent-runs.md](agent-runs.md#owner-checklist-all-on-the-server-in-the-compose-project-directory).
+
 Migration 015 (2026-10-03, core refactor) adds `usage_log.request_id VARCHAR(64)` and a
 partial index `ix_usage_request_id` — the request trace behind the `X-Request-Id`
 header. `record_usage` degrades gracefully (drops only the column the live schema lacks,
