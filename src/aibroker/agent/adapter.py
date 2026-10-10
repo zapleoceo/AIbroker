@@ -32,6 +32,7 @@ class AgentRunSpec:
     session_id: str | None = None          # exact CLI session to resume
     allowed_tools: list[str] = field(default_factory=list)
     model: str | None = None               # EXACT id the caller chose; never substituted
+    attachments: list[str] = field(default_factory=list)   # workspace-relative input files
 
 
 @dataclass(frozen=True)

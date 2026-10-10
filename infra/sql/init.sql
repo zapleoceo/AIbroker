@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   usage_output_tokens INTEGER,
   usage_cache_read_tokens INTEGER,
   usage_turns INTEGER,
-  cost_usd DOUBLE PRECISION
+  cost_usd DOUBLE PRECISION,
+  quota_waits INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runs_idem
   ON agent_runs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;

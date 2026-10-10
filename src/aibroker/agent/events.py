@@ -76,6 +76,15 @@ class Usage(_Event):
     source: str = "cli_reported"   # where the numbers come from; never a price
 
 
+class RunWaitingQuota(_Event):
+    """Non-terminal: the CLI hit its usage limit; the run waits and is retried later on the
+    SAME account and billing route (never an API fallback)."""
+    type: Literal["run.waiting_quota"] = "run.waiting_quota"
+    not_before: str
+    attempt: int
+    reset_reported: bool = False
+
+
 class RunCompleted(_Event):
     type: Literal["run.completed"] = "run.completed"
     final_text: str = ""
@@ -86,6 +95,7 @@ class RunFailed(_Event):
     type: Literal["run.failed"] = "run.failed"
     error_class: str
     message: str = ""
+    reset_at: str | None = None   # ISO UTC when a quota limit resets, if the CLI said
 
 
 class RunCancelled(_Event):
@@ -94,11 +104,11 @@ class RunCancelled(_Event):
 
 class RunTimedOut(_Event):
     type: Literal["run.timed_out"] = "run.timed_out"
-    limit: Literal["wall", "idle"] = "wall"
+    limit: Literal["wall", "idle", "deadline"] = "wall"
 
 
 AnyEvent = (RunStarted | SessionAssigned | MessageDelta | ToolCall | ToolResult | FileChanged
-            | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut)
+            | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota)
 AgentEvent = Annotated[AnyEvent, Field(discriminator="type")]
 _ADAPTER: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)
 

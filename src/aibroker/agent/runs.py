@@ -11,12 +11,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from aibroker.agent.attachments import strip_attachment_data
 from aibroker.agent.events import (
     MAX_TEXT_CHARS,
     OUTCOME_BY_TYPE,
     TERMINAL_TYPES,
     AnyEvent,
     RunCancelled,
+    RunWaitingQuota,
 )
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
@@ -82,6 +84,7 @@ async def create_run(
     *, project: ProjectRow, capability: str, prompt: str, task_id: str, account_id: str,
     session_id: str | None, idempotency_key: str | None, wall_timeout_s: int,
     idle_timeout_s: int, allowed_tools: list[str], model: str | None = None,
+    deadline_s: int = 21600, attachments: list[dict[str, Any]] | None = None,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight)."""
@@ -89,6 +92,7 @@ async def create_run(
         "prompt": prompt, "task_id": task_id, "account_id": account_id,
         "session_id": session_id, "wall_timeout_s": wall_timeout_s,
         "idle_timeout_s": idle_timeout_s, "allowed_tools": allowed_tools, "model": model,
+        "deadline_s": deadline_s, "attachments": attachments or [],
     }
     phash = payload_hash(project.id, capability, request)
     if idempotency_key:
@@ -183,6 +187,9 @@ async def append_event(run_id: int, event: AnyEvent) -> int:
                     job.error_message = f"{event.error_class}: {event.message}"
                 else:
                     job.error_message = event.type
+            if isinstance(job.request, dict) and job.request.get("attachments"):
+                job.request = {**job.request,
+                               "attachments": strip_attachment_data(job.request["attachments"])}
         return run.last_seq
 
 
@@ -212,11 +219,12 @@ async def record_usage(run_id: int, totals: dict[str, int | None], billing_mode:
         if run is None:
             return
         run.billing_mode = billing_mode
-        run.usage_source = "cli_reported" if any(v is not None for v in totals.values()) else None
-        run.usage_input_tokens = totals.get("input_tokens")
-        run.usage_output_tokens = totals.get("output_tokens")
-        run.usage_cache_read_tokens = totals.get("cache_read_tokens")
-        run.usage_turns = totals.get("turns")
+        if any(v is not None for v in totals.values()):
+            run.usage_source = "cli_reported"
+        for col, key in (("usage_input_tokens", "input_tokens"), ("usage_output_tokens", "output_tokens"),
+                         ("usage_cache_read_tokens", "cache_read_tokens"), ("usage_turns", "turns")):
+            if totals.get(key) is not None:   # additive: a run may span several attempts
+                setattr(run, col, (getattr(run, col) or 0) + totals[key])
 
 
 async def requeue_run(run_id: int, delay_s: float) -> int:
@@ -230,3 +238,32 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
         job.retry_count += 1
         job.run_after = _now() + timedelta(seconds=delay_s)
         return job.retry_count
+
+
+async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool = False) -> int:
+    """The CLI hit its usage limit: record `run.waiting_quota`, put the run back to pending
+    until `not_before`, and resume THIS run's own session on the retry. Same account, same
+    billing route -> number of quota waits so far."""
+    now = _now()
+    async with get_session() as s:
+        run = await s.get(AgentRunRow, run_id)
+        job = await s.get(DeepJobRow, run_id)
+        if run is None or job is None or run.outcome is not None:
+            raise RunConflict(f"agent run {run_id} is not waiting-capable")
+        run.quota_waits += 1
+        run.last_seq += 1
+        run.last_event_at = now
+        s.add(AgentRunEventRow(
+            run_id=run_id, seq=run.last_seq, ts=now, type="run.waiting_quota",
+            payload=_waiting_payload(not_before, run.quota_waits, reset_reported)))
+        if run.session_id:
+            run.resume_session_id = run.session_id
+        job.status = "pending"
+        job.started_at = None
+        job.run_after = not_before
+        return run.quota_waits
+
+
+def _waiting_payload(not_before: datetime, attempt: int, reset_reported: bool) -> dict[str, Any]:
+    return RunWaitingQuota(not_before=not_before.replace(tzinfo=UTC).isoformat(),
+                           attempt=attempt, reset_reported=reset_reported).model_dump(mode="json")

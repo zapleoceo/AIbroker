@@ -16,7 +16,7 @@ from aibroker.agent.real_cli import register_real_adapters
 from aibroker.agent.runs import RunConflict, append_event
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import DeepJobRow
+from aibroker.db.models import AgentRunRow, DeepJobRow
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +73,25 @@ async def fail_stale_agent_runs() -> int:
     return failed
 
 
+async def expire_overdue_waiting() -> int:
+    """A run waiting for quota past its overall deadline ends `run.timed_out` (deadline)."""
+    now = _now()
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(DeepJobRow).join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
+                DeepJobRow.status == "pending", AgentRunRow.quota_waits > 0,
+                AgentRunRow.outcome.is_(None))
+        )).scalars().all()
+        overdue = [r.id for r in rows if now >= r.created_at + timedelta(
+            seconds=float(r.request.get("deadline_s", 21600)))]
+    done = 0
+    for run_id in overdue:
+        with contextlib.suppress(RunConflict):
+            await append_event(run_id, ev.RunTimedOut(limit="deadline"))
+            done += 1
+    return done
+
+
 async def drain_agent_once(cfg: ExecConfig) -> int:
     """One pass: claim within each capability's free slots and run them to completion
     (deterministic; used by tests). Returns how many were claimed."""
@@ -100,6 +119,7 @@ async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - 
     while not stop.is_set():
         try:
             await fail_stale_agent_runs()
+            await expire_overdue_waiting()
             for cap in AGENT_CAPABILITIES:
                 free = concurrency_for(cap) - len(inflight[cap])
                 for run_id in await claim_agent_runs(cap, free):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aibroker.agent import events as ev
@@ -22,6 +23,20 @@ _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many reque
 def classify_failure(message: str) -> str:
     """quota_exhausted for limit/quota wording, else cli_error. Never triggers a fallback."""
     return "quota_exhausted" if _QUOTA.search(message or "") else "cli_error"
+
+
+def parse_reset_at(message: str, now: datetime | None = None) -> str | None:
+    """When a quota message states the reset time -> ISO UTC, else None. Understands
+    'limit reached|<epoch seconds>' and 'in N minutes/hours'. UNVERIFIED wording."""
+    now = now or datetime.now(UTC)
+    m = re.search(r"\|\s*(\d{10})\b", message or "")
+    if m:
+        return datetime.fromtimestamp(int(m.group(1)), UTC).isoformat()
+    m = re.search(r"in (\d+)\s*(minute|hour|min|hr)s?", message or "", re.I)
+    if m:
+        step = timedelta(hours=1) if m.group(2).lower().startswith("h") else timedelta(minutes=1)
+        return (now + int(m.group(1)) * step).isoformat()
+    return None
 
 
 def _json(line: str) -> dict[str, Any] | None:
@@ -92,7 +107,8 @@ class ClaudeParser:
             text = str(data.get("result") or "")
             if data.get("is_error") or str(data.get("subtype", "success")).startswith("error"):
                 msg = text or str(data.get("subtype"))
-                out.append(ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000]))
+                out.append(ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000],
+                                        reset_at=parse_reset_at(msg)))
             else:
                 out.append(ev.RunCompleted(final_text=text))
             return out
@@ -100,7 +116,8 @@ class ClaudeParser:
 
     def finish(self, returncode: int, stderr_tail: str = "") -> StreamEvent:
         msg = stderr_tail.strip() or f"claude exited {returncode} without a result"
-        return ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000])
+        return ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000],
+                            reset_at=parse_reset_at(msg))
 
 
 def _text(content: Any) -> str:

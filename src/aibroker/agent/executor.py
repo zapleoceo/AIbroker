@@ -13,14 +13,21 @@ import os
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
+from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.lock import session_lock
 from aibroker.agent.registry import make_adapter
-from aibroker.agent.runs import RunConflict, append_event, record_usage, requeue_run
+from aibroker.agent.runs import (
+    RunConflict,
+    append_event,
+    park_for_quota,
+    record_usage,
+    requeue_run,
+)
 from aibroker.agent.workspace import cleanup_workspace, collect_files, create_workspace
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -38,6 +45,8 @@ class ExecConfig:
     files_ttl_s: int = 3600
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
+    quota_backoff_base_s: float = 60.0
+    quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
     env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
 
 
@@ -88,6 +97,8 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return run.outcome
     req = dict(job.request)
     totals: dict[str, int | None] = {}
+    if _now() >= job.created_at + timedelta(seconds=float(req.get("deadline_s", 21600))):
+        return await _finish(run_id, ev.RunTimedOut(limit="deadline"), totals)
     if run.cancel_requested:
         return await _finish(run_id, ev.RunCancelled(), totals)
     adapter = make_adapter(run.capability)
@@ -101,7 +112,7 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
                 return await _finish(run_id, ev.RunFailed(
                     error_class="session_busy", message="session stayed locked"), totals)
             return None
-        return await _drive(run, req, adapter, cfg)
+        return await _drive(run, job, adapter, cfg)
 
 
 async def _check_model(adapter: AgentCLI, model: str | None) -> ev.RunFailed | None:
@@ -119,9 +130,36 @@ async def _check_model(adapter: AgentCLI, model: str | None) -> ev.RunFailed | N
     return None
 
 
-async def _drive(run: AgentRunRow, req: dict[str, Any], adapter: AgentCLI,
+def _now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFailed,
+                          totals: dict[str, int | None], mode: str, cfg: ExecConfig) -> str:
+    """Quota exhausted = WAIT: requeue until the reported reset time (+5 s), else
+    exponential backoff capped at quota_backoff_cap_s. Same account, same subscription
+    route - never API/OpenRouter, never another account. Past the run's overall
+    deadline it ends `run.timed_out` instead."""
+    now = _now()
+    reset = None
+    if failed.reset_at:
+        with contextlib.suppress(ValueError):
+            reset = datetime.fromisoformat(failed.reset_at).astimezone(UTC).replace(tzinfo=None)
+    delay = max(0.0, (reset - now).total_seconds()) + 5.0 if reset else min(
+        cfg.quota_backoff_base_s * 2 ** run.quota_waits, cfg.quota_backoff_cap_s)
+    not_before = now + timedelta(seconds=delay)
+    deadline = job.created_at + timedelta(seconds=float(job.request.get("deadline_s", 21600)))
+    if not_before >= deadline:
+        return await _finish(run.run_id, ev.RunTimedOut(limit="deadline"), totals, mode)
+    await record_usage(run.run_id, totals, mode)
+    await park_for_quota(run.run_id, not_before, reset_reported=reset is not None)
+    return "waiting_quota"
+
+
+async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                  cfg: ExecConfig) -> str:
     run_id = run.run_id
+    req = dict(job.request)
     totals: dict[str, int | None] = {}
     workspace = create_workspace(cfg.workspace_root, run_id)
     try:
@@ -142,13 +180,21 @@ async def _drive(run: AgentRunRow, req: dict[str, Any], adapter: AgentCLI,
         bad_model = await _check_model(adapter, run.model)
         if bad_model is not None:
             return await _finish(run_id, bad_model, totals, mode)
+        try:
+            attached = write_attachments(workspace, list(req.get("attachments") or []))
+        except ValueError as exc:
+            return await _finish(run_id, ev.RunFailed(error_class="attachment_invalid",
+                                                      message=str(exc)[:500]), totals, mode)
         spec = AgentRunSpec(
             run_id=run_id, capability=run.capability, prompt=req["prompt"],
             workspace=workspace, account_id=run.account_id, session_id=run.resume_session_id,
-            allowed_tools=list(req.get("allowed_tools") or []), model=run.model)
+            allowed_tools=list(req.get("allowed_tools") or []), model=run.model,
+            attachments=attached)
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
             float(req.get("idle_timeout_s", 300)), cfg)
+        if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
+            return await _wait_for_quota(run, job, terminal, totals, mode, cfg)
         if isinstance(terminal, ev.RunCompleted):
             paths = changed + [f.path for f in terminal.files]
             files = await asyncio.to_thread(

@@ -8,6 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
+from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachments
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.runs import (
     RunConflict,
@@ -27,6 +28,12 @@ _ID = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
 _TOOL = r"^[\x20-\x7e]+$"
 
 
+class AttachmentIn(BaseModel):
+    name: str = Field(pattern=NAME_PATTERN)
+    media_type: str
+    data_b64: str = Field(min_length=1)
+
+
 class AgentRunRequest(BaseModel):
     capability: Literal["agent:codex", "agent:claude"]
     prompt: str = Field(min_length=1, max_length=200_000)
@@ -38,6 +45,10 @@ class AgentRunRequest(BaseModel):
     wall_timeout_s: int = Field(1800, ge=10, le=7200)
     idle_timeout_s: int = Field(300, ge=5, le=1800)
     allowed_tools: list[str] = Field(default_factory=list, max_length=32)
+    deadline_s: int = Field(21600, ge=60, le=604800,
+                            description="overall limit incl. quota waits; then run.timed_out")
+    attachments: list[AttachmentIn] = Field(default_factory=list, max_length=MAX_FILES,
+                                            description="real input files (images)")
     model: str | None = Field(None, min_length=1, max_length=128,
                               pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$",
                               description="exact model id; passed through, never substituted")
@@ -55,7 +66,10 @@ class AgentRunSubmitResponse(BaseModel):
 
 class AgentRunResponse(BaseModel):
     run_id: int
-    status: str = Field(description="pending|running|completed|failed|cancelled|timed_out")
+    status: str = Field(
+        description="pending|waiting_quota|running|completed|failed|cancelled|timed_out")
+    not_before: str | None = Field(None, description="waiting_quota: earliest next attempt (UTC)")
+    quota_waits: int = 0
     capability: str
     task_id: str
     account_id: str
@@ -105,7 +119,8 @@ def _live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | No
 
 
 def _shape(run: Any, job: Any) -> AgentRunResponse:
-    state = run.outcome or ("running" if job.status == "running" else "pending")
+    state = run.outcome or ("running" if job.status == "running" else (
+        "waiting_quota" if run.quota_waits else "pending"))
     files = _live_files((job.result_meta or {}).get("files"))
     usage = None
     if run.usage_source is not None:
@@ -115,7 +130,8 @@ def _shape(run: Any, job: Any) -> AgentRunResponse:
         run_id=run.run_id, status=state, capability=run.capability, task_id=run.task_id,
         account_id=run.account_id, session_id=run.session_id,
         cancel_requested=run.cancel_requested, final_text=job.result_text,
-        files=files, error=job.error_message, model=run.model,
+        files=files, error=job.error_message, model=run.model, quota_waits=run.quota_waits,
+        not_before=job.run_after.isoformat() if state == "waiting_quota" and job.run_after else None,
         billing_mode=run.billing_mode, usage=usage, usage_source=run.usage_source,
         cost_usd=run.cost_usd,
     )
@@ -130,12 +146,17 @@ async def agent_run_submit(
     if not body.tools_ok():
         raise HTTPException(422, "allowed_tools entries must be printable ASCII, <=128 chars")
     try:
+        validate_attachments([a.model_dump() for a in body.attachments])
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    try:
         run_id, created = await create_run(
             project=ctx.project, capability=body.capability, prompt=body.prompt,
             task_id=body.task_id, account_id=body.account_id, session_id=body.session_id,
             idempotency_key=body.idempotency_key, wall_timeout_s=body.wall_timeout_s,
             idle_timeout_s=body.idle_timeout_s, allowed_tools=body.allowed_tools,
-            model=body.model,
+            model=body.model, deadline_s=body.deadline_s,
+            attachments=[a.model_dump() for a in body.attachments],
         )
     except RunRejected as e:
         raise HTTPException(400, str(e)) from e

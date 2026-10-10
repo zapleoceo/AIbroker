@@ -17,8 +17,8 @@ can never grant it. Capabilities: `agent:codex`, `agent:claude` (`AGENT_CAPABILI
 - **The subscription route must not be declared ready from fake tests alone.** Everything
   here is tested against `FakeAgentCLI`; a real CLI on a real subscription login has not
   been run. Readiness requires the phase-4 verification against the real CLIs.
-- On **quota exhaustion** the run waits or fails with `error_class=quota_exhausted`.
-  **No fallback to API billing, no "extra usage", no rotation to another account.**
+- On **quota exhaustion** the run WAITS (see below), visible as `waiting_quota`.
+  **No fallback to API billing/OpenRouter, no "extra usage", no rotation to another account.**
   An account is chosen by the caller (`account_id`) and never swapped by the broker.
 
 ## Architecture
@@ -124,9 +124,8 @@ writes files into the workspace.
    `adapter.cancel()` (the adapter contract owns SIGTERM then SIGKILL), bounded by
    `AGENT_CANCEL_GRACE_S`.
 5. Adapter crash -> `adapter_error`; stream ending without a terminal event ->
-   `no_terminal_event`. Failures are never retried or rerouted; an adapter-reported
-   `quota_exhausted` stays `quota_exhausted` (no API fallback, no extra usage, no account
-   rotation).
+   `no_terminal_event`. Failures are never retried or rerouted. The one exception is
+   quota exhaustion, which waits (below).
 6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files`:
    regular, non-symlink files inside the workspace only; per-file cap
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
@@ -170,6 +169,36 @@ login. `cancel()` sends SIGTERM, waits `kill_grace_s`, then SIGKILL. The output 
 to `quota_exhausted`. **ClaudeCLI and ClaudeParser are UNVERIFIED against the real CLI
 (phase 4)**; tests use doc-derived sample lines and a python stand-in process. The CLI uses
 the worker's own subscription login; the broker never reads or moves credentials.
+
+## Quota exhaustion = wait
+
+When the adapter reports `run.failed quota_exhausted` (`classify_failure` on the CLI's limit
+wording; `parse_reset_at` reads a stated reset time - `|<epoch>` or "in N minutes/hours", wording
+UNVERIFIED), `_wait_for_quota` does not fail the run: `park_for_quota` stores the non-terminal
+`run.waiting_quota` event (`RunWaitingQuota`: `not_before`, `attempt`, `reset_reported`), puts
+the job back to `pending` with `run_after = not_before`, and the API shows status
+`waiting_quota` with `not_before` and `quota_waits`. `not_before` is the reported reset time
+(+5 s) or, without one, exponential backoff 60 s x 2^n capped at 30 min
+(`quota_backoff_cap_s`). The retry runs on the SAME account and subscription route (the
+billing guard re-checks every attempt) and resumes this run's own session; usage adds up
+across attempts. Never an API/OpenRouter fallback, never another account.
+
+The wait is bounded by the request's overall `deadline_s` (default 6 h, counted from creation):
+a `not_before` past it, an `execute_run` after it, or `expire_overdue_waiting` (worker tick)
+for a run still parked ends with `run.timed_out limit=deadline`. Cancel works while waiting.
+
+## Input attachments
+
+`attachments` in `AgentRunRequest` (`AttachmentIn`: `name`, `media_type`, `data_b64`) carry real
+images: png / jpeg / webp / gif only, at most `MAX_FILES` files, `MAX_BYTES` each,
+`MAX_TOTAL_BYTES` together, name must match `NAME_PATTERN` and its extension the type, and the
+bytes must match the type's magic number (`validate_attachments`, `decode_attachment`; 422 at
+submit). The executor writes them with `write_attachments` to `<workspace>/inputs/` (0600) and
+`AgentRunSpec.attachments` lists the paths. `ClaudeCLI` (`build_claude_prompt`) names those
+paths in the prompt and `build_claude_argv` adds the `Read` tool to `--allowedTools` when the
+caller did not (the only implicit permission). The bytes are never replaced by a text
+description, are not returned as outputs, and are dropped from the stored request
+(`strip_attachment_data`) when the run ends.
 
 ## Not done yet
 

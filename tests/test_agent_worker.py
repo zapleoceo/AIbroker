@@ -138,17 +138,6 @@ async def test_adapter_crash_and_missing_terminal_are_failed_runs(cfg):
     assert (await _row(b))[1].error_message.startswith("no_terminal_event")
 
 
-async def test_quota_exhausted_stays_failed_no_retry_no_fallback(cfg):
-    rid = await _run()
-    fake = _use(FakeAgentCLI([ev.RunFailed(error_class="quota_exhausted", message="limit")]))
-    assert await execute_run(rid, cfg) == "failed"
-    run, job = await _row(rid)
-    assert job.error_message.startswith("quota_exhausted") and job.retry_count == 0
-    async with get_session() as s:
-        assert len((await s.execute(select(DeepJobRow))).scalars().all()) == 1   # no second run
-    assert run.billing_mode == "subscription" and fake.started.account_id == "acc"        # same account
-
-
 # --- timeouts and cancel -------------------------------------------------------
 
 

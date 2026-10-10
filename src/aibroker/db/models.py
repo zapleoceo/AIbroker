@@ -281,6 +281,7 @@ class AgentRunRow(Base):
     usage_cache_read_tokens: Mapped[int | None] = mapped_column(Integer)
     usage_turns: Mapped[int | None] = mapped_column(Integer)
     cost_usd: Mapped[float | None] = mapped_column(Float)
+    quota_waits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class AgentRunEventRow(Base):

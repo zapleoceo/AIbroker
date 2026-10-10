@@ -34,9 +34,21 @@ def build_claude_argv(run: AgentRunSpec, binary: str = "claude") -> list[str]:
         argv += ["--model", run.model]
     if run.session_id:
         argv += ["--resume", run.session_id]
-    if run.allowed_tools:
-        argv += ["--allowedTools", *run.allowed_tools]
+    tools = list(run.allowed_tools)
+    if run.attachments and not any(t == "Read" or t.startswith("Read(") for t in tools):
+        tools.append("Read")   # the CLI must be able to open the attached files
+    if tools:
+        argv += ["--allowedTools", *tools]
     return argv
+
+
+def build_claude_prompt(run: AgentRunSpec) -> str:
+    """The prompt, plus the REAL attached files named by path (read them with Read)."""
+    if not run.attachments:
+        return run.prompt
+    listing = "\n".join(f"- {p}" for p in run.attachments)
+    return (f"{run.prompt}\n\nAttached input files (real files in the working directory; "
+            f"open them with the Read tool):\n{listing}\n")
 
 
 async def _run_probe(argv: list[str]) -> str:  # pragma: no cover - spawns the real CLI
@@ -101,7 +113,7 @@ class ClaudeCLI:
         parser = ClaudeParser(run.workspace)
         try:
             assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write(run.prompt.encode())
+            proc.stdin.write(build_claude_prompt(run).encode())
             await proc.stdin.drain()
             proc.stdin.close()
             async for raw in proc.stdout:
