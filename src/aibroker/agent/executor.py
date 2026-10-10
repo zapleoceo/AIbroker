@@ -20,7 +20,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
-from aibroker.agent.lock import Lease, StaleLease, session_lock
+from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import (
     RunConflict,
@@ -182,6 +182,7 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
     workspace = create_workspace(cfg.workspace_root, run_id)
     try:
         async with get_session() as s:
+            await check_fence(s, lease)          # a stale holder writes nothing, not even this
             row = await s.get(AgentRunRow, run_id)
             if row is not None:
                 row.workspace = workspace
@@ -247,9 +248,13 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
     task = asyncio.create_task(pump())
     t0 = last = last_poll = time.monotonic()
     terminal: ev.AnyEvent | None = None
+    lease_lost = False
     try:
         while terminal is None:
             now = time.monotonic()
+            if lease is not None and lease.lost.is_set():
+                lease_lost = True       # stop the CLI at once, like a cancel, but write nothing
+                break
             if now - t0 >= wall_s:
                 terminal = ev.RunTimedOut(limit="wall")
             elif now - last >= idle_s:
@@ -285,4 +290,6 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+    if lease_lost:
+        raise StaleLease(f"run {run_id} can no longer assume its session lease")
     return terminal or ev.RunFailed(error_class="no_terminal_event"), changed

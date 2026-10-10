@@ -7,13 +7,14 @@ import asyncio
 import inspect
 import os
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import asyncpg
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 
 from aibroker.agent import events as ev
 from aibroker.agent import worker
@@ -409,3 +410,137 @@ def test_migration_018_is_additive_and_mirrored_in_init_sql():
     init = (ROOT / "infra" / "sql" / "init.sql").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS agent_session_leases" in init
     assert "PRIMARY KEY (account_id, session_id)" in init and "fence BIGINT" in init
+
+
+# --- database clock -----------------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="the database clock is a Postgres feature (SQLite branch uses the app clock)")
+@pytest.mark.parametrize("skew", [timedelta(days=2), -timedelta(days=2)])
+async def test_lease_is_judged_by_the_database_clock_not_the_app_clock(monkeypatch, skew):
+    from aibroker.agent import lock as lock_mod
+
+    def boom():
+        raise AssertionError("the app clock was consulted on Postgres")
+
+    monkeypatch.setattr(lock_mod, "_now", boom)               # any use of the app clock fails
+    first = await acquire_lease("a", "live", 1, ttl_s=60)
+    assert first is not None
+    assert await acquire_lease("a", "live", 2, ttl_s=60) is None     # live by the DB clock
+    short = await acquire_lease("a", "short", 1, ttl_s=0.3)
+    await asyncio.sleep(0.5)
+    assert await acquire_lease("a", "short", 2, ttl_s=60) is not None  # expired by the DB clock
+    assert not await renew_lease(short)
+    async with get_session() as s:
+        gap = (await s.execute(text(
+            "SELECT extract(epoch FROM (lease_until - (now() AT TIME ZONE 'utc'))) "
+            "FROM agent_session_leases WHERE session_id = 'live'"))).scalar_one()
+    assert 50 < float(gap) <= 60                               # stored on the DB timeline
+
+
+async def test_sqlite_branch_uses_the_app_clock_for_unit_tests(monkeypatch):
+    if not ON_SQLITE:
+        pytest.skip("SQLite-only branch")
+    from aibroker.agent import lock as lock_mod
+    base = lock_mod._now()
+    monkeypatch.setattr(lock_mod, "_now", lambda: base + timedelta(days=1))
+    assert await acquire_lease("a", "s", 1, ttl_s=60) is not None
+    monkeypatch.setattr(lock_mod, "_now", lambda: base + timedelta(days=3))
+    assert await acquire_lease("a", "s", 2, ttl_s=60) is not None      # app clock moved past it
+
+
+# --- a lost lease stops the CLI at once -----------------------------------------------------------------
+
+
+async def _steal(account="acc", session="SL", run_id=4242):
+    async with get_session() as s:
+        row = (await s.execute(select(AgentSessionLeaseRow).where(
+            AgentSessionLeaseRow.account_id == account,
+            AgentSessionLeaseRow.session_id == session))).scalar_one()
+        row.run_id = run_id
+        row.fence = row.fence + 1
+
+
+async def _wait_until(pred, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def test_heartbeat_sets_lost_when_the_renewal_is_refused():
+    async with session_lock("a", "s", 1, ttl_s=0.9, heartbeat_s=0.1) as lease:
+        assert not lease.lost.is_set()
+        await _steal("a", "s", 4242)
+        assert await _wait_until(lease.lost.is_set, 1.0)
+
+
+async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
+    rid = await _resume_run()
+    fake = FakeAgentCLI([ev.MessageDelta(text="working"), ("hang",)])
+    register_adapter("agent:claude", lambda: fake)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
+                     cancel_poll_s=0.05, lease_ttl_s=0.9, lease_heartbeat_s=0.1)
+    task = asyncio.create_task(execute_run(rid, cfg))
+    assert await _wait_until(lambda: fake.started is not None)
+    t0 = time.monotonic()
+    await _steal()                                              # a newer holder: renewal -> False
+    assert await asyncio.wait_for(task, 3) is None
+    assert time.monotonic() - t0 < 1.0 and fake.cancel_calls == 1
+    assert not set(await _events(rid)) & ev.TERMINAL_TYPES      # no terminal write by the zombie
+    async with get_session() as s:
+        assert (await s.get(DeepJobRow, rid)).status == "running"
+
+
+@pytest.mark.parametrize("failure", ["raises", "hangs"])
+async def test_db_errors_past_the_ttl_stop_the_cli(tmp_path, monkeypatch, failure):
+    from aibroker.agent import lock as lock_mod
+    rid = await _resume_run()
+    fake = FakeAgentCLI([("hang",)])
+    register_adapter("agent:claude", lambda: fake)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
+                     cancel_poll_s=0.05, lease_ttl_s=0.6, lease_heartbeat_s=0.1)
+
+    async def broken(lease, ttl_s=0.0):
+        if failure == "hangs":
+            await asyncio.sleep(3600)
+        raise OSError("database unreachable")
+
+    task = asyncio.create_task(execute_run(rid, cfg))
+    assert await _wait_until(lambda: fake.started is not None)
+    t0 = time.monotonic()
+    monkeypatch.setattr(lock_mod, "renew_lease", broken)         # the DB goes away
+    assert await asyncio.wait_for(task, 4) is None
+    elapsed = time.monotonic() - t0
+    assert 0.1 < elapsed < 0.6 + 0.8 and fake.cancel_calls == 1  # stopped near the local deadline
+    assert not set(await _events(rid)) & ev.TERMINAL_TYPES
+
+
+async def test_healthy_renewals_never_set_lost(tmp_path):
+    rid = await _resume_run()
+    fake = FakeAgentCLI([("sleep", 1.0), ev.RunCompleted(final_text="ok")])
+    register_adapter("agent:claude", lambda: fake)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
+                     cancel_poll_s=0.05, lease_ttl_s=0.6, lease_heartbeat_s=0.1)
+    assert await execute_run(rid, cfg) == "completed" and fake.cancel_calls == 0
+
+
+# --- the workspace write is fenced ------------------------------------------------------------------------
+
+
+async def test_workspace_write_is_fenced(tmp_path):
+    from aibroker.agent.executor import _drive
+    from aibroker.db.models import AgentRunRow
+    rid = await _resume_run()
+    stale = await acquire_lease("acc", "SL", rid, ttl_s=-5)
+    assert await acquire_lease("acc", "SL", 8888, ttl_s=60) is not None
+    async with get_session() as s:
+        run, job = await s.get(AgentRunRow, rid), await s.get(DeepJobRow, rid)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+    with pytest.raises(StaleLease):
+        await _drive(run, job, FakeAgentCLI([ev.RunCompleted()]), cfg, stale)
+    async with get_session() as s:
+        assert (await s.get(AgentRunRow, rid)).workspace is None
+    assert await _events(rid) == []
