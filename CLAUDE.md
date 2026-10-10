@@ -17,4 +17,7 @@ Project conventions live in `docs/conventions.md`; this file adds agent-process 
 
 Run `bash scripts/docs_gate.sh` (local approximation of `.github/workflows/docs-check.yml`: same paths and
 opt-out, diff from the merge-base with a freshly fetched `origin/master`). A FAIL means docs/ must be updated first.
+It is an approximation: it equals CI only for a fast-forward push to `master` after a
+successful fetch; if the fetch fails the gate exits non-zero ("stale base") and never PASSes.
+`--offline` skips the fetch and is non-gating (informational only, not CI parity).
 CI remains the authority; the local check is not a guarantee.

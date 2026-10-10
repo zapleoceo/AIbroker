@@ -160,7 +160,9 @@ EOL fixer, YAML syntax, large-file guard, merge-conflict markers,
 
 ## Docs gate locally
 
-`bash scripts/docs_gate.sh [BASE] [HEAD]` (defaults `origin/master` `HEAD`, diff from their merge-base; fetches
-`origin/master` first) approximates the CI docs-check: if anything under `src/`, `infra/`, `services/` or `monitor/` changed and nothing
+`bash scripts/docs_gate.sh [BASE] [HEAD]` (defaults `origin/master` `HEAD`, diff from their merge-base; any `origin/...`
+base is fetched first; `--offline` must be the first argument) approximates the CI docs-check: if anything under `src/`, `infra/`, `services/` or `monitor/` changed and nothing
 under `docs/` did — and no commit message contains `docs-not-needed` — it fails. Run it before
-every push; CI (`docs-check.yml`) stays the authority.
+every push; CI (`docs-check.yml`) stays the authority. It is an approximation, equal to CI only
+for a fast-forward push to `master`; a failed fetch makes it exit 2 ("stale base: fetch failed,
+gate not evaluated") instead of passing. `--offline` skips the fetch and is non-gating.
