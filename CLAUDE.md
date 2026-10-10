@@ -15,6 +15,6 @@ Project conventions live in `docs/conventions.md`; this file adds agent-process 
 
 ## Before every push
 
-Run `bash scripts/docs_gate.sh` (local mirror of `.github/workflows/docs-check.yml`, same
-diff base `origin/master..HEAD` and same paths). A FAIL means docs/ must be updated first.
+Run `bash scripts/docs_gate.sh` (local approximation of `.github/workflows/docs-check.yml`: same paths and
+opt-out, diff from the merge-base with a freshly fetched `origin/master`). A FAIL means docs/ must be updated first.
 CI remains the authority; the local check is not a guarantee.

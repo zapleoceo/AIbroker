@@ -160,7 +160,7 @@ EOL fixer, YAML syntax, large-file guard, merge-conflict markers,
 
 ## Docs gate locally
 
-`bash scripts/docs_gate.sh [BASE] [HEAD]` (defaults `origin/master` `HEAD`) mirrors the CI
-docs-check: if anything under `src/`, `infra/`, `services/` or `monitor/` changed and nothing
+`bash scripts/docs_gate.sh [BASE] [HEAD]` (defaults `origin/master` `HEAD`, diff from their merge-base; fetches
+`origin/master` first) approximates the CI docs-check: if anything under `src/`, `infra/`, `services/` or `monitor/` changed and nothing
 under `docs/` did — and no commit message contains `docs-not-needed` — it fails. Run it before
 every push; CI (`docs-check.yml`) stays the authority.

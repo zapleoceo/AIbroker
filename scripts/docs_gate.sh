@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Local mirror of .github/workflows/docs-check.yml (CI stays the authority).
-# Usage: scripts/docs_gate.sh [BASE] [HEAD]   — defaults: origin/master HEAD,
-# i.e. exactly what CI compares on a push (github.event.before .. github.sha).
+# Local approximation of .github/workflows/docs-check.yml (CI stays the authority).
+# Usage: scripts/docs_gate.sh [BASE] [HEAD]   — defaults: origin/master HEAD.
+# Compares merge-base(BASE, HEAD)..HEAD. Equal to CI's base (github.event.before) for a
+# fast-forward push to master with a freshly fetched origin/master; otherwise approximate.
 set -euo pipefail
+if [ $# -eq 0 ]; then git fetch -q origin master || echo "docs gate: warning - fetch failed, origin/master may be stale"; fi
 BASE="${1:-origin/master}"
 HEAD="${2:-HEAD}"
-CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
-if git log --format=%B "${BASE}..${HEAD}" | grep -qiF "docs-not-needed"; then
+MB="$(git merge-base "$BASE" "$HEAD")"
+CHANGED="$(git diff --name-only "$MB" "$HEAD")"
+LOG="$(git log --format=%B "${MB}..${HEAD}")"
+if printf '%s\n' "$LOG" | grep -iF "docs-not-needed" >/dev/null; then
   echo "docs gate: 'docs-not-needed' in a commit message - skipped (same as CI)"; exit 0
 fi
 CODE="$(echo "$CHANGED" | grep -E '^(src|infra|services|monitor)/' || true)"
