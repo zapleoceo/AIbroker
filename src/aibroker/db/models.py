@@ -284,6 +284,19 @@ class AgentRunRow(Base):
     quota_waits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class AgentSessionLeaseRow(Base):
+    """Lease on one CLI session (migration 018): at most one live run per (account, session)."""
+    __tablename__ = "agent_session_leases"
+
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[int] = mapped_column(BigInteger, nullable=False)   # holder
+    lease_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Fence token: +1 on every acquisition; a run's writes must carry the current one.
+    fence: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+
+
 class AgentRunEventRow(Base):
     """One typed event of an agent run (agent/events.py), ordered by seq."""
     __tablename__ = "agent_run_events"

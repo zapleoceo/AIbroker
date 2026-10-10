@@ -178,6 +178,18 @@ CREATE TABLE IF NOT EXISTS agent_run_events (
   PRIMARY KEY (run_id, seq)
 );
 
+-- Agent session leases (018): replaces the Postgres advisory lock, so the agent worker needs only
+-- the pgbouncer connection (no direct connection, no session-level lock). Additive.
+CREATE TABLE IF NOT EXISTS agent_session_leases (
+  account_id VARCHAR(64) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  run_id BIGINT NOT NULL,
+  lease_until TIMESTAMP NOT NULL,
+  heartbeat_at TIMESTAMP NOT NULL,
+  fence BIGINT NOT NULL DEFAULT 1,   -- +1 per acquisition; writes of a run carry it (fencing)
+  PRIMARY KEY (account_id, session_id)
+);
+
 -- ─── Folded-in migrations (kept in sync with infra/sql/migrations/) ─────────
 -- 002 discovered free-tier limits (parsed from provider response headers)
 -- 003 per-key manual quota overrides (4 axes; win over discovered_* / defaults)

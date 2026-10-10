@@ -20,6 +20,7 @@ from aibroker.agent.events import (
     RunCancelled,
     RunWaitingQuota,
 )
+from aibroker.agent.lock import Lease, check_fence
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash
@@ -158,11 +159,13 @@ def _clip(value: Any) -> Any:
     return value
 
 
-async def append_event(run_id: int, event: AnyEvent) -> int:
+async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None) -> int:
     """Store the next event of a run (single writer per run) -> its seq. Terminal
-    events also close the run: outcome set, queue row moved to done/error."""
+    events also close the run: outcome set, queue row moved to done/error. With a `lease`
+    the write is FENCED: StaleLease if the session was taken over by a newer holder."""
     now = _now()
     async with get_session() as s:
+        await check_fence(s, lease)
         run = await s.get(AgentRunRow, run_id)
         if run is None:
             raise LookupError(f"agent run {run_id} not found")
@@ -213,10 +216,13 @@ async def cancel_run(run_id: int, project_id: int) -> tuple[AgentRunRow, DeepJob
     return await get_run(run_id, project_id)
 
 
-async def record_usage(run_id: int, totals: dict[str, int | None], billing_mode: str | None) -> None:
+async def record_usage(run_id: int, totals: dict[str, int | None], billing_mode: str | None,
+                       lease: Lease | None = None) -> None:
     """Keep the CLI-reported usage on the run. Subscription usage lives here, apart from
-    API billing (never usage_log); cost_usd stays NULL - no confirmed cost."""
+    API billing (never usage_log); cost_usd stays NULL - no confirmed cost. Fenced like
+    append_event."""
     async with get_session() as s:
+        await check_fence(s, lease)
         run = await s.get(AgentRunRow, run_id)
         if run is None:
             return
@@ -242,12 +248,14 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
         return job.retry_count
 
 
-async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool = False) -> int:
+async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool = False,
+                         lease: Lease | None = None) -> int:
     """The CLI hit its usage limit: record `run.waiting_quota`, put the run back to pending
     until `not_before`, and resume THIS run's own session on the retry. Same account, same
-    billing route -> number of quota waits so far."""
+    billing route -> number of quota waits so far. Fenced like append_event."""
     now = _now()
     async with get_session() as s:
+        await check_fence(s, lease)
         run = await s.get(AgentRunRow, run_id)
         job = await s.get(DeepJobRow, run_id)
         if run is None or job is None or run.outcome is not None:

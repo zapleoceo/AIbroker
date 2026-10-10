@@ -337,8 +337,8 @@ def test_only_the_worker_is_declared_on_the_agent_network():
 
 
 def test_docs_give_the_live_network_attach_commands():
-    for svc, ctr in (("postgres", "aibroker-postgres"), ("pgbouncer", "aibroker-pgbouncer")):
-        assert f"docker network connect --alias {svc} aibroker_agent_db {ctr}" in DOCS
+    assert "docker network connect --alias pgbouncer aibroker_agent_db aibroker-pgbouncer" in DOCS
+    assert "docker network connect --alias postgres" not in DOCS      # the worker needs pgbouncer only
     assert re.search(r"^name: aibroker$", COMPOSE, re.M)          # => network aibroker_agent_db
 
 

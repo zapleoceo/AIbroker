@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -19,7 +20,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
-from aibroker.agent.lock import session_lock
+from aibroker.agent.lock import Lease, StaleLease, session_lock
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import (
     RunConflict,
@@ -33,6 +34,8 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ExecConfig:
@@ -45,6 +48,8 @@ class ExecConfig:
     files_ttl_s: int = 3600
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
+    lease_ttl_s: float = 120.0         # > 3 x heartbeat: a crashed worker's lease expires
+    lease_heartbeat_s: float = 30.0
     paid_continuation_verified_off: bool = False
     quota_backoff_base_s: float = 60.0
     quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
@@ -57,21 +62,17 @@ def exec_config_from_settings() -> ExecConfig:
         workspace_root=s.AGENT_WORKSPACE_ROOT, cancel_poll_s=s.AGENT_CANCEL_POLL_S,
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
-        files_ttl_s=s.AGENT_FILES_TTL_S,
+        files_ttl_s=s.AGENT_FILES_TTL_S, lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
+        lease_heartbeat_s=s.AGENT_SESSION_LEASE_HEARTBEAT_S,
         paid_continuation_verified_off=s.AGENT_PAID_CONTINUATION_VERIFIED_OFF,
     )
 
 
-@contextlib.asynccontextmanager
-async def _no_lock() -> AsyncIterator[bool]:
-    yield True
-
-
 async def _finish(run_id: int, terminal: ev.AnyEvent, totals: dict[str, int | None],
-                  billing_mode: str | None = None) -> str:
-    await record_usage(run_id, totals, billing_mode)
+                  billing_mode: str | None = None, lease: Lease | None = None) -> str:
+    await record_usage(run_id, totals, billing_mode, lease)
     with contextlib.suppress(RunConflict):   # closed under us: the first terminal event wins
-        await append_event(run_id, terminal)
+        await append_event(run_id, terminal, lease)
     return ev.OUTCOME_BY_TYPE[terminal.type]
 
 
@@ -108,13 +109,27 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunFailed(
             error_class="adapter_unavailable", message=f"no adapter for {run.capability}"), totals)
     resume = run.resume_session_id
-    async with (session_lock(run.account_id, resume) if resume else _no_lock()) as got:
-        if not got:
+    if not resume:
+        return await _held_drive(run, job, adapter, cfg, None)
+    async with session_lock(run.account_id, resume, run_id, ttl_s=cfg.lease_ttl_s,
+                            heartbeat_s=cfg.lease_heartbeat_s) as lease:
+        if lease is None:
             if await requeue_run(run_id, cfg.session_busy_delay_s) > cfg.session_busy_max:
                 return await _finish(run_id, ev.RunFailed(
                     error_class="session_busy", message="session stayed locked"), totals)
             return None
-        return await _drive(run, job, adapter, cfg)
+        return await _held_drive(run, job, adapter, cfg, lease)
+
+
+async def _held_drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg: ExecConfig,
+                      lease: Lease | None) -> str | None:
+    """_drive, but a run whose lease was taken over (StaleLease on a fenced write) simply
+    stops: the newer holder owns the session and this zombie writes nothing more."""
+    try:
+        return await _drive(run, job, adapter, cfg, lease)
+    except StaleLease:
+        log.error("run %d lost its session lease; stopping without further writes", run.run_id)
+        return None
 
 
 async def _check_model(adapter: AgentCLI, model: str | None) -> ev.RunFailed | None:
@@ -137,7 +152,8 @@ def _now() -> datetime:
 
 
 async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFailed,
-                          totals: dict[str, int | None], mode: str, cfg: ExecConfig) -> str:
+                          totals: dict[str, int | None], mode: str, cfg: ExecConfig,
+                          lease: Lease | None = None) -> str:
     """Quota exhausted = WAIT: requeue until the reported reset time (+5 s), else
     exponential backoff capped at quota_backoff_cap_s. Same account, same subscription
     route - never API/OpenRouter, never another account. Past the run's overall
@@ -152,14 +168,14 @@ async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFaile
     not_before = now + timedelta(seconds=delay)
     deadline = job.created_at + timedelta(seconds=float(job.request.get("deadline_s", 21600)))
     if not_before >= deadline:
-        return await _finish(run.run_id, ev.RunTimedOut(limit="deadline"), totals, mode)
-    await record_usage(run.run_id, totals, mode)
-    await park_for_quota(run.run_id, not_before, reset_reported=reset is not None)
+        return await _finish(run.run_id, ev.RunTimedOut(limit="deadline"), totals, mode, lease)
+    await record_usage(run.run_id, totals, mode, lease)
+    await park_for_quota(run.run_id, not_before, reset_reported=reset is not None, lease=lease)
     return "waiting_quota"
 
 
 async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
-                 cfg: ExecConfig) -> str:
+                 cfg: ExecConfig, lease: Lease | None = None) -> str:
     run_id = run.run_id
     req = dict(job.request)
     totals: dict[str, int | None] = {}
@@ -171,25 +187,25 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                 row.workspace = workspace
         await append_event(run_id, ev.RunStarted(
             capability=run.capability, account_id=run.account_id,
-            resumed_session_id=run.resume_session_id))
+            resumed_session_id=run.resume_session_id), lease)
         if run.resume_session_id and not adapter.supports_resume:
             return await _finish(run_id, ev.RunFailed(error_class="resume_unsupported"), totals,
-                                 "unverified")
+                                 "unverified", lease)
         mode, refusal = await check_billing_mode(
             run.capability, adapter, os.environ if cfg.env is None else cfg.env,
             run_mode=str(req.get("run_mode", "autonomous")),
             risk_ack=bool(req.get("accept_paid_continuation_risk", False)),
             verified_off=cfg.paid_continuation_verified_off)
         if refusal is not None:   # fail closed, before the CLI is ever started
-            return await _finish(run_id, refusal, totals, mode)
+            return await _finish(run_id, refusal, totals, mode, lease)
         bad_model = await _check_model(adapter, run.model)
         if bad_model is not None:
-            return await _finish(run_id, bad_model, totals, mode)
+            return await _finish(run_id, bad_model, totals, mode, lease)
         try:
             attached = write_attachments(workspace, list(req.get("attachments") or []))
         except ValueError as exc:
             return await _finish(run_id, ev.RunFailed(error_class="attachment_invalid",
-                                                      message=str(exc)[:500]), totals, mode)
+                                                      message=str(exc)[:500]), totals, mode, lease)
         spec = AgentRunSpec(
             run_id=run_id, capability=run.capability, prompt=req["prompt"],
             workspace=workspace, account_id=run.account_id, session_id=run.resume_session_id,
@@ -197,9 +213,9 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             attachments=attached)
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
-            float(req.get("idle_timeout_s", 300)), cfg)
+            float(req.get("idle_timeout_s", 300)), cfg, lease)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
-            return await _wait_for_quota(run, job, terminal, totals, mode, cfg)
+            return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
         if isinstance(terminal, ev.RunCompleted):
             paths = changed + [f.path for f in terminal.files]
             files = await asyncio.to_thread(
@@ -207,14 +223,14 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
             terminal = ev.RunCompleted(final_text=terminal.final_text, files=files)
-        return await _finish(run_id, terminal, totals, mode)
+        return await _finish(run_id, terminal, totals, mode, lease)
     finally:
         cleanup_workspace(workspace)
 
 
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                   totals: dict[str, int | None], wall_s: float, idle_s: float,
-                  cfg: ExecConfig) -> tuple[ev.AnyEvent, list[str]]:
+                  cfg: ExecConfig, lease: Lease | None = None) -> tuple[ev.AnyEvent, list[str]]:
     q: asyncio.Queue[ev.AnyEvent | None] = asyncio.Queue()
     changed: list[str] = []
 
@@ -262,7 +278,7 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                         totals[key] = (totals.get(key) or 0) + val
             elif isinstance(item, ev.FileChanged) and item.action != "deleted":
                 changed.append(item.path)
-            await append_event(run_id, item)
+            await append_event(run_id, item, lease)
     finally:
         if terminal is None or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
             await _stop_adapter(adapter, cfg.cancel_grace_s)

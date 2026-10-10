@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # refused; a manual run needs its own explicit per-run acknowledgement. We never change
     # account settings.
     AGENT_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
+    # never frees a live session, yet a crashed worker's lease expires on its own.
+    AGENT_SESSION_LEASE_TTL_S: float = 120.0
+    AGENT_SESSION_LEASE_HEARTBEAT_S: float = 30.0
     AGENT_CANCEL_POLL_S: float = 1.0
     AGENT_CANCEL_GRACE_S: float = 15.0     # how long adapter.cancel() may take
     AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file

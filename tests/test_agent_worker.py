@@ -339,13 +339,13 @@ async def test_resume_passes_exact_session_id_to_adapter(cfg):
 
 async def test_session_lock_is_exclusive_per_account_and_session():
     async with session_lock("a", "s") as one:
-        assert one is True
+        assert one is not None
         async with session_lock("a", "s") as two:
-            assert two is False
+            assert two is None
         async with session_lock("a", "other") as three, session_lock("b", "s") as four:
-            assert three is True and four is True
+            assert three is not None and four is not None
     async with session_lock("a", "s") as again:
-        assert again is True
+        assert again is not None
 
 
 async def test_resume_run_is_requeued_not_failed_while_session_is_locked(cfg):

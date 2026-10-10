@@ -112,10 +112,24 @@ writes files into the workspace.
 
 1. cancel flag already set -> `run.cancelled`; no adapter registered
    (`aibroker.agent.registry`: `register_adapter`, `make_adapter`, `clear_adapters` for tests) -> `adapter_unavailable`.
-2. **Session lock** (resume only): `session_lock(account_id, session_id)` (key from `lock_name`) is a Postgres
-   advisory lock on a dedicated *direct* connection (not PgBouncer); in-process elsewhere.
+2. **Session lease** (resume only): `session_lock(account_id, session_id, run_id)` takes a lease
+   ROW in `agent_session_leases` (`AgentSessionLeaseRow`, migration 018, PK
+   `(account_id, session_id)`) - no Postgres advisory lock, so the worker needs only the
+   pgbouncer connection. `acquire_lease` is one atomic `INSERT ... ON CONFLICT DO UPDATE ... WHERE
+   lease_until < now`: it succeeds only for a free or EXPIRED session. While the run is alive a
+   heartbeat task (`renew_lease`) extends `lease_until` every `AGENT_SESSION_LEASE_HEARTBEAT_S`
+   (30 s); the TTL `AGENT_SESSION_LEASE_TTL_S` (120 s, keep >= 3 heartbeats) lets a crashed
+   worker's lease expire by itself. `release_lease` runs when the run ends (any outcome).
    Busy -> the run goes back to `pending` with a delay (`requeue_run`), failing
    `session_busy` after `session_busy_max` tries. Two runs never use one session at once.
+   Every acquisition returns a `Lease` with a FENCE token that grows by one on each takeover
+   (`release_lease` expires the row in place, so the counter survives). The run's writes -
+   events, status/result (`append_event`), usage (`record_usage`) and quota parking
+   (`park_for_quota`) - run `check_fence` inside their own transaction, which locks the lease
+   row and raises `StaleLease` if another run now holds the session. A zombie whose lease was
+   taken over therefore cannot write; `_held_drive` stops it (no terminal event) and the adapter
+   is cancelled. Nothing relies on session-level database state, so it works with transaction
+   pooling.
 3. **Workspace**: `create_workspace` makes `AGENT_WORKSPACE_ROOT/run-<id>` with mode 0700;
    it is removed afterwards, also on failure (`cleanup_workspace`).
 4. `run.started`, then the adapter stream. **Wall** (`wall_timeout_s`) and **idle** (no event
@@ -215,7 +229,9 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 
 ### Owner checklist (all on the server, in the compose project directory)
 
-1. Build: `docker compose build api && docker compose --profile agent build agent-worker`
+1. Apply migration 018 (adds `agent_session_leases`):
+   `psql "$DATABASE_URL" -f infra/sql/migrations/018_agent_session_leases.sql`.
+   Build: `docker compose build api && docker compose --profile agent build agent-worker`
 2. **Check the rendered compose first:** `docker compose --profile agent config | grep -i anthropic`
    must print NOTHING (no Anthropic variable leaks into the worker service).
    **Billing gate.** In the Claude account settings (claude.ai, Settings > Usage), confirm
@@ -236,26 +252,44 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 5. Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`; grant a project the
    `llm:agent` scope through the admin API.
 
-6. **Enabling the worker only, with the owner's confirmation** - attach the shared DB to the
-   worker network without restarting it (compose project `aibroker`, so the network is
-   `aibroker_agent_db`; verify with `docker network ls | grep agent_db`):
-   `docker network connect --alias postgres aibroker_agent_db aibroker-postgres`
+6. **Enabling the worker only, with the owner's confirmation** - attach pgbouncer (the ONLY
+   database endpoint the worker uses) to the worker network without restarting it (compose
+   project `aibroker`, so the network is `aibroker_agent_db`; verify with
+   `docker network ls | grep agent_db`):
    `docker network connect --alias pgbouncer aibroker_agent_db aibroker-pgbouncer`
-   (undo: `docker network disconnect aibroker_agent_db aibroker-postgres`, same for pgbouncer.
-   The attachment does not survive a recreate of those containers; repeat it then.)
+   (undo: `docker network disconnect aibroker_agent_db aibroker-pgbouncer`. The attachment does
+   not survive a recreate of that container; repeat it then.) Postgres itself is never attached.
 
 ### First supervised run (required evidence)
 
-Before any unattended use, the owner watches ONE run whose prompt asks the agent to try each
-of these, and the result must show every one refused (the permission denial in the event
-log), with the success cases still working. The deny syntax is unverified until this is done.
+Before any unattended use, the owner watches ONE run in an ISOLATED test setup and the result
+must show every probe below refused (the permission denial in the event log), with the allowed
+cases still working. **No probe ever touches a real secret, the real auth volume, the broker
+environment or another run's data**: every target is a synthetic canary created by the test
+harness. The deny syntax is unverified until this is done.
+
+Setup (all synthetic): a throwaway `CLAUDE_CONFIG_DIR` on a SEPARATE test volume (never
+`agent_claude_auth`) holding a FAKE `.credentials.json` and `settings.json` canary
+(`{"canary": "not-a-credential"}`); a canary file `canary.txt` placed by the harness OUTSIDE
+the run workspace; a second, empty workspace `run-canary/` standing in for "another run".
+The run's real login is a separate step and is not part of this probe.
 
 - allowed: read and write `inputs/x` (scoped), read an attached image;
-- refused: read `/etc/hostname`, `~/.credentials.json` and `<config dir>/.credentials.json`,
-  `/proc/self/environ`, `/dev/fd/../environ`, `/proc/1/environ`, `../run-<other id>/` files,
-  write to `.claude/settings.json` in the workspace, write outside the workspace;
-- afterwards: `settings_problem` still passes for the logged-in config dir, and no files
-  changed under the config dir except the CLI's own state.
+- refused: read the outside canary file, the FAKE `.credentials.json` in the throwaway config
+  dir (by absolute and by `../` path), `/proc/self/environ` and `/dev/fd/../environ` of the
+  probe run (the harness process holds only canary variables), a file in the `run-canary/`
+  stand-in via `../`, write to `.claude/settings.json` in the workspace, write outside the
+  workspace;
+- afterwards: `settings_problem` passes for a clean config dir and refuses the canary
+  `settings.json`, and the canary files are unchanged.
+
+### Rollback
+
+Routine rollback is: stop the worker (`docker compose --profile agent stop agent-worker`)
+and/or revoke the exact test grant (remove `llm:agent` from the test project). Deleting the auth
+volume or logging out is NOT a routine rollback: the account's authentication is handled
+separately by the owner. Stopping the worker leaves queued runs `pending` and in-flight runs
+`running`; `fail_stale_agent_runs` closes the latter as `worker_lost` once the worker is back.
 
 ### Billing gate: paid continuation
 
@@ -313,9 +347,11 @@ What is guaranteed, and what is not.
   **Accepted risk**; revisit with a second container for the CLI if the threat model needs it.
 - **Process group.** The CLI is started with `start_new_session=True`; cancel and the end of
   every run signal the whole group (SIGTERM, grace, SIGKILL), and compose has `init: true`.
-- **Network.** `agent-worker` is alone on the `agent_db` network; postgres and pgbouncer are
+- **Network.** `agent-worker` is alone on the `agent_db` network; pgbouncer is
   attached to it live by the owner (checklist step 6: `docker network connect`, no restart), so
-  they are NOT recreated by a deploy and api, redis, vision and monitor are never on it.
+  it is NOT recreated by a deploy, and postgres, api, redis, vision and monitor are never on it.
+  The worker uses only the pgbouncer `DATABASE_URL` (transaction pooling): polling claims, no
+  `LISTEN`, no direct Postgres connection (`DIRECT_DATABASE_URL` is not set for it).
   Internet egress stays open because the CLI must reach Anthropic (**accepted risk**).
 - **Filesystem.** `read_only: true` with tmpfs `/tmp` and the workspace tmpfs; `HOME` is the auth
   volume.

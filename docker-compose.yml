@@ -320,14 +320,12 @@ services:
         BASE_IMAGE: ${AGENT_BASE_IMAGE:-aibroker-api:latest}
     image: aibroker-agent-worker
     container_name: aibroker-agent-worker
+    # Only pgbouncer (transaction pooling): no direct postgres connection, no LISTEN, no session lock.
     depends_on:
-      postgres:
-        condition: service_healthy
       pgbouncer:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
-      DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
