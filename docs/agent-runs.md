@@ -610,6 +610,8 @@ After a fresh Codex thread, the WORKER process copies PNGs only from
 `$CODEX_HOME/generated_images/<thread UUID>` into the run's `out/` (`export_generated_pngs`, called through
 `export_artifacts`). `CODEX_HOME` is never given to the model (the sandbox profile denies it and the
 prompt never names it). The thread UUID must come from this CLI process's single `thread.started` event;
+`snapshot_generated_paths()` records pre-existing names before the run, so a
+previous image cannot be claimed as this run's output.
 duplicate or conflicting thread identities disable PNG export;
 the pinned Codex 0.162.1 image extension writes `generated_images/<thread UUID>/<call ID>.png`.
 Resumed threads export no PNG because a stale CLI can still write into their shared thread directory
