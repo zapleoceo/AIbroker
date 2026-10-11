@@ -77,7 +77,7 @@ class ClaudeParser:
     def _rel(self, path: str) -> str:
         if self.workspace and os.path.isabs(path):
             try:
-                return os.path.relpath(path, self.workspace)
+                return os.path.relpath(path, self.workspace).replace("\\", "/")
             except ValueError:
                 return path
         return path

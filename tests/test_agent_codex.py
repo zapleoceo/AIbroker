@@ -354,6 +354,7 @@ _OK = ("import sys,json,os\n"
        "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}))\n")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Codex sandbox profile requires Linux paths")
 async def test_stand_in_streams_events_prompt_on_stdin_and_a_clean_env(tmp_path, monkeypatch):
     for k in ("OPENAI_API_KEY", "CODEX_API_KEY", "ADMIN_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.setenv(k, "leak")
@@ -380,12 +381,14 @@ async def test_preflight_refuses_without_codex_home_or_with_a_project_codex_dir(
     assert got[0].error_class == "settings_refused" and cli._proc is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Codex sandbox profile requires Linux paths")
 async def test_a_bad_resume_id_fails_the_run_before_spawning(tmp_path):
     cli = CodexCLI(env={"CODEX_HOME": str(tmp_path)}, sandbox_probe=_sandbox_ok)
     got = [e async for e in cli.start(_spec(workspace=str(tmp_path), session_id="last"))]
     assert got[0].error_class == "tool_invalid" and cli._proc is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Codex sandbox profile requires Linux paths")
 async def test_cancel_terminates_a_hung_stand_in(tmp_path):
     import asyncio
     cli = _Stand("import time,sys; sys.stdin.read(); time.sleep(60)", tmp_path / "h",

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -174,6 +176,7 @@ async def test_a_lane_with_no_capabilities_refuses_to_start(monkeypatch):
 # --- per-run HOME --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode is checked on Linux")
 def test_codex_home_for_a_run_is_a_fresh_empty_dir_inside_the_workspace(tmp_path):
     cli = CodexCLI(env={"CODEX_HOME": "/home/app/codex-state", "HOME": "/home/app/claude-state"})
     ws1, ws2 = create_workspace(str(tmp_path), 1), create_workspace(str(tmp_path), 2)
@@ -393,7 +396,7 @@ def test_acceptance_script_is_canary_only_and_prints_no_content():
     assert "X-Project-Key" in code and "@\"$WORK/headers\"" in code     # key via a header file
 
 
-@pytest.mark.skipif(subprocess.run(["bash", "-c", "true"], capture_output=True).returncode != 0,
+@pytest.mark.skipif(shutil.which("bash") is None,
                     reason="no bash")
 @pytest.mark.parametrize("env", [
     {"CANARY_AUTH_JSON": "/home/app/codex-state/auth.json",
