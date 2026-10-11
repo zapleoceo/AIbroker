@@ -40,6 +40,14 @@ infer subscription availability from API-model catalogs. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
 
+The implementation exposes configured candidates through `subscription_models()`, exact
+pin lookup in `subscription_model()`, and the availability check in
+`subscription_model_verified()`. For a subscription job,
+`prompt_for_messages()` preserves text turns and roles;
+`response_format_problem()` rejects unsupported formats before enqueue and
+`output_problem()` validates the final JSON. `live_files()` hides expired
+file bytes when the client polls the job.
+
 Subscription jobs accept text role turns and `response_format` `json_object`
 or `json_schema`; the final JSON is validated, with invalid output ending in
 an error. Tool definitions, tool history, image input, vision, nondefault
