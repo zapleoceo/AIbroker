@@ -489,10 +489,10 @@ start, the run fails; nothing bypasses it).
 
 Owner login handoff for Codex (once, interactive, after the Claude steps): enable **device code
 authorization** in the ChatGPT security settings first, then
-`docker compose --profile agent run --rm agent-worker codex login --device-auth -c cli_auth_credentials_store="file" -c forced_login_method="chatgpt"`
+`docker compose --profile agent run --rm agent-worker-codex codex login --device-auth -c cli_auth_credentials_store="file" -c forced_login_method="chatgpt"`
 (the `-c` overrides force the file store; plain `codex login --device-auth` is the same command), follow
 the device-code flow, then check with
-`docker compose --profile agent run --rm agent-worker codex login -c cli_auth_credentials_store="file" status`
+`docker compose --profile agent run --rm agent-worker-codex codex login -c cli_auth_credentials_store="file" status`
 (expect a ChatGPT login; `Not logged in` before the login). Whether paid "extra usage" can continue a
 ChatGPT-plan run is the same open billing gate as for Claude (`AGENT_PAID_CONTINUATION_VERIFIED_OFF`).
 
