@@ -392,6 +392,15 @@ async def test_codex_uses_only_the_thread_id_emitted_by_its_own_process(tmp_path
     assert [e.type async for e in cli.start(resumed)] == ["session.assigned", "run.completed"]
     assert cli._image_session_id is None
 
+    async def conflicting_start(self, run):
+        yield ev.SessionAssigned(session_id=THREAD)
+        yield ev.SessionAssigned(session_id=OTHER_THREAD)
+        yield ev.RunCompleted(final_text="done")
+
+    monkeypatch.setattr(SubprocessCLI, "start", conflicting_start)
+    assert [e.type async for e in cli.start(spec)] == ["session.assigned", "session.assigned", "run.completed"]
+    assert cli._image_session_id is None
+
 
 def test_the_model_never_sees_codex_home_in_its_prompt():
     spec = AgentRunSpec(run_id=1, capability="agent:codex", prompt="draw a cat", workspace="/w",

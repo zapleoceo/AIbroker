@@ -162,10 +162,14 @@ class CodexCLI(SubprocessCLI):
         exported for resumes until the CLI supplies exact per-call provenance.
         """
         self._image_session_id = None
+        session_seen = False
         async for item in super().start(run):
-            if isinstance(item, SessionAssigned) and run.session_id is None \
-                    and UUID_RE.fullmatch(item.session_id):
-                self._image_session_id = item.session_id
+            if isinstance(item, SessionAssigned):
+                if session_seen:
+                    self._image_session_id = None  # ambiguous CLI identity
+                elif run.session_id is None and UUID_RE.fullmatch(item.session_id):
+                    self._image_session_id = item.session_id
+                session_seen = True
             yield item
 
     def stdin_payload(self, run: AgentRunSpec) -> str:
