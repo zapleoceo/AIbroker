@@ -372,7 +372,10 @@ async def test_session_lock_holder_blocks_second_run_end_to_end(cfg):
     gate = FakeAgentCLI([("hang",)])
     _use(gate)
     t1 = asyncio.create_task(execute_run(r1, cfg))
-    await asyncio.sleep(0.2)
+    async def first_started():
+        while gate.started is None:
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(first_started(), 5)
     r2 = await _run(pid, session_id="SE", task="T3")
     assert await execute_run(r2, cfg) is None          # blocked while r1 holds the session
     await gate.cancel()

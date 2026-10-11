@@ -508,13 +508,24 @@ async def test_db_errors_past_the_ttl_stop_the_cli(tmp_path, monkeypatch, failur
             await asyncio.sleep(3600)
         raise OSError("database unreachable")
 
+    cancel_at = None
+    original_cancel = fake.cancel
+
+    async def timed_cancel():
+        nonlocal cancel_at
+        cancel_at = time.monotonic()
+        await original_cancel()
+
+    monkeypatch.setattr(fake, "cancel", timed_cancel)
+
     task = asyncio.create_task(execute_run(rid, cfg))
     assert await _wait_until(lambda: fake.started is not None)
     t0 = time.monotonic()
     monkeypatch.setattr(lock_mod, "renew_lease", broken)         # the DB goes away
     assert await asyncio.wait_for(task, 4) is None
-    elapsed = time.monotonic() - t0
-    assert 0.1 < elapsed < 0.6 + 0.8 and fake.cancel_calls == 1  # stopped near the local deadline
+    assert cancel_at is not None
+    elapsed = cancel_at - t0
+    assert 0.1 < elapsed < 0.6 + 0.8 and fake.cancel_calls == 1  # CLI stopped near the deadline
     assert not set(await _events(rid)) & ev.TERMINAL_TYPES
 
 
