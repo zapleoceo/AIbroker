@@ -22,6 +22,19 @@ project_not_allowed` - no CLI start, no `billing.attested`. Compose passes the v
 `api` and `agent-worker`; the operator sets `AGENT_ALLOWED_PROJECT_IDS=11` in `.env` BEFORE
 deploying this change, otherwise the owner test project is locked out (by design).
 
+**Per-project policy (fail-closed, narrowing only).** `AGENT_PROJECT_POLICY` is JSON in the environment,
+e.g. `{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}` (`ProjectPolicy`, `policy_for`,
+`policy_violation` in `aibroker.agent.policy`). On `POST /v1/agent/runs`, after the scope and project
+allowlist checks, a request is refused with 403 `{"error": ...}` (`AgentPolicyViolation`) when:
+the project has no entry or an empty `models` / `accounts` list - `agent_policy_missing`; the request's
+`model` is absent or not EXACTLY one of the project's models (no prefix match, no implicit default,
+`latest` only if listed) - `model_not_allowed`; the `account_id` is not listed - `account_not_allowed`.
+A malformed setting refuses every project (`agent_policy_missing`) and logs one clear error. The worker
+re-checks the same policy before it starts a queued run (`run.failed` with the same code, no CLI start,
+no `billing.attested`). The CLI model catalog stays an additional check when it is readable; when it is
+not, the already-enforced allowlist decides - the id is never passed through unchecked. The project's
+daily cap stays plain metadata (no run quota). Compose passes the variable to `api` and `agent-worker`.
+
 ## Readiness and quota rules (hard requirements)
 
 - **The subscription route must not be declared ready from fake tests alone.** Everything

@@ -14,6 +14,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from aibroker import __version__
 from aibroker.agent.constants import AgentProjectNotAllowed
+from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
@@ -138,6 +139,12 @@ app.add_middleware(_RequestIdMiddleware)
 async def _agent_project_not_allowed(_: Request, exc: AgentProjectNotAllowed) -> JSONResponse:
     """403 with a stable body: the project is not in AGENT_ALLOWED_PROJECT_IDS (fail-closed)."""
     return JSONResponse({"error": "agent_project_not_allowed"}, status_code=403)
+
+
+@app.exception_handler(AgentPolicyViolation)
+async def _agent_policy_violation(_: Request, exc: AgentPolicyViolation) -> JSONResponse:
+    """403 {"error": agent_policy_missing | model_not_allowed | account_not_allowed}."""
+    return JSONResponse({"error": exc.error}, status_code=403)
 
 
 @app.exception_handler(RequestCapExhausted)

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachments
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.runs import (
     RunConflict,
     RunRejected,
@@ -155,8 +156,12 @@ def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None) -> AgentR
 async def agent_run_submit(
     body: AgentRunRequest, response: Response, ctx: ProjectCtx = Depends(require_project),
 ) -> AgentRunSubmitResponse:
-    """Queue an agent run. Owner-only: needs the llm:agent scope."""
+    """Queue an agent run. Owner-only: needs the llm:agent scope, the project on the allowlist and a
+    policy that lists this exact model and account."""
     _require_agent_scope(ctx)
+    violation = policy_violation(ctx.project.id, body.model, body.account_id)
+    if violation:
+        raise AgentPolicyViolation(violation)
     for tool in body.allowed_tools:
         problem = tool_problem(tool)
         if problem:

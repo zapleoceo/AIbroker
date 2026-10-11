@@ -249,6 +249,8 @@ services:
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
       # Agent-run allowlist (fail-closed when empty); the agent-worker needs the same value.
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      # Per-project model/account policy (JSON, fail-closed); the agent-worker re-checks it.
+      AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
     ports:
       - "127.0.0.1:8004:8000"
     # 235-490MiB observed (2 uvicorn workers + the in-process job dispatcher);
@@ -338,6 +340,7 @@ services:
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
     volumes:
       - agent_claude_auth:/home/app/claude-state
     tmpfs:

@@ -164,7 +164,12 @@ Agent runs are fail-closed behind `AGENT_ALLOWED_PROJECT_IDS` (comma-separated p
 read by BOTH the `api` and the `agent-worker` service from the compose `.env`). Empty or unset
 = every `/v1/agent/runs` call gets 403 `agent_project_not_allowed`. **Before deploying the
 commit that introduces it, add `AGENT_ALLOWED_PROJECT_IDS=11` to `.env`**, otherwise the owner
-test project (`owner-agent-test`) is locked out. See [agent-runs.md](agent-runs.md).
+test project (`owner-agent-test`) is locked out.
+
+Second fail-closed gate, same deploy: `AGENT_PROJECT_POLICY` (JSON, read by `api` and `agent-worker`)
+must list the exact model and account of every project that may run agents, otherwise creates get 403
+`agent_policy_missing`. **Before deploying, add to `.env` (single-quoted so the JSON survives):**
+`AGENT_PROJECT_POLICY='{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}'`. See [agent-runs.md](agent-runs.md).
 
 ## Redis container (2026-07-16)
 

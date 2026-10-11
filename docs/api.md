@@ -110,7 +110,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
-| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | owner-only agent runs, scope `llm:agent` AND the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty = everyone gets 403 `{"error": "agent_project_not_allowed"}`) - see [agent-runs.md](agent-runs.md) |
+| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | owner-only agent runs, scope `llm:agent` AND the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty = everyone gets 403 `{"error": "agent_project_not_allowed"}`) AND an entry in `AGENT_PROJECT_POLICY` listing the exact `model` and `account_id` (403 `agent_policy_missing` / `model_not_allowed` / `account_not_allowed`) - see [agent-runs.md](agent-runs.md) |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |

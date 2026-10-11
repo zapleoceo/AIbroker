@@ -132,6 +132,18 @@ class _EveryProject:
         return True
 
 
+class _AnyPolicy:
+    """A policy that allows anything (the real one is fail-closed; tests/test_agent_policy.py covers it)."""
+
+    models = accounts = frozenset({"*"})
+
+    def allows_model(self, model) -> bool:
+        return True
+
+    def allows_account(self, account_id) -> bool:
+        return True
+
+
 @pytest.fixture(autouse=True)
 def _agent_allowlist(request, monkeypatch):
     """AGENT_ALLOWED_PROJECT_IDS is fail-closed (empty = nobody). The agent test modules run with
@@ -139,3 +151,5 @@ def _agent_allowlist(request, monkeypatch):
     name = request.module.__name__.rsplit(".", 1)[-1]
     if name.startswith("test_agent_") and name != "test_agent_allowlist":
         monkeypatch.setattr("aibroker.agent.constants.allowed_project_ids", lambda: _EveryProject())
+    if name.startswith("test_agent_") and name != "test_agent_policy":
+        monkeypatch.setattr("aibroker.agent.policy.policy_for", lambda project_id: _AnyPolicy())

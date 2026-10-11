@@ -22,6 +22,7 @@ from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
+from aibroker.agent.policy import policy_violation
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import (
     RunConflict,
@@ -105,6 +106,10 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunFailed(
             error_class="project_not_allowed",
             message="project is not in AGENT_ALLOWED_PROJECT_IDS"), totals)
+    violation = policy_violation(run.project_id, run.model, run.account_id)
+    if violation:                              # the policy changed while the run was queued
+        return await _finish(run_id, ev.RunFailed(
+            error_class=violation, message="outside the project's AGENT_PROJECT_POLICY"), totals)
     if _now() >= job.created_at + timedelta(seconds=float(req.get("deadline_s", 21600))):
         return await _finish(run_id, ev.RunTimedOut(limit="deadline"), totals)
     if run.cancel_requested:
@@ -139,12 +144,14 @@ async def _held_drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg:
 
 async def _check_model(adapter: AgentCLI, model: str | None) -> ev.RunFailed | None:
     """An explicit model id is passed through EXACTLY or the run fails - never swapped
-    for another/latest. `latest` is honoured only because the caller wrote it."""
+    for another/latest. The project's model allowlist (policy_violation) is MANDATORY and has
+    already been enforced; this CLI-catalog check is additional, when the catalog is readable.
+    `latest` is honoured only because the caller wrote it AND the policy lists it."""
     if not model or model == "latest":
         return None
     try:
         catalog = await adapter.list_models()
-    except Exception:  # noqa: BLE001 - catalog unreadable: pass the id through unchanged
+    except Exception:  # noqa: BLE001 - catalog unreadable: the (already enforced) allowlist decides
         return None
     if catalog is not None and model not in {m.id for m in catalog}:
         return ev.RunFailed(error_class="model_unavailable",
