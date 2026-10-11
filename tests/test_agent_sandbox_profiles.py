@@ -369,7 +369,7 @@ async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_pa
     assert await execute_run(rid, cfg) == "completed"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         got = (await c.get(f"/v1/agent/runs/{rid}", headers={"X-Project-Key": key})).json()
-    (f,) = [x for x in got["files"] if x["path"].startswith("out/")]
+    (f,) = (x for x in got["files"] if x["path"].startswith("out/"))
     assert (f["width"], f["height"]) == (11, 7) and f["sha256"] == hashlib.sha256(data).hexdigest()
     assert base64.b64decode(f["content_b64"]) == data and f["size"] == len(data)
     from PIL import Image
