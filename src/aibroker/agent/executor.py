@@ -47,6 +47,8 @@ class ExecConfig:
     files_total_bytes: int = 1024 * 1024
     files_max_count: int = 20
     files_ttl_s: int = 3600
+    image_max_bytes: int = 2 * 1024 * 1024
+    image_max_count: int = 4
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
     lease_ttl_s: float = 120.0         # > 3 x heartbeat: a crashed worker's lease expires
@@ -63,7 +65,8 @@ def exec_config_from_settings() -> ExecConfig:
         workspace_root=s.AGENT_WORKSPACE_ROOT, cancel_poll_s=s.AGENT_CANCEL_POLL_S,
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
-        files_ttl_s=s.AGENT_FILES_TTL_S, lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
+        files_ttl_s=s.AGENT_FILES_TTL_S, image_max_bytes=s.AGENT_IMAGE_MAX_BYTES,
+        image_max_count=s.AGENT_IMAGES_MAX_COUNT, lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
         lease_heartbeat_s=s.AGENT_SESSION_LEASE_HEARTBEAT_S,
         paid_continuation_verified_off=s.AGENT_PAID_CONTINUATION_VERIFIED_OFF,
     )
@@ -229,6 +232,8 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             workspace=workspace, account_id=run.account_id, session_id=run.resume_session_id,
             allowed_tools=list(req.get("allowed_tools") or []), model=run.model,
             attachments=attached)
+        # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
+        started_at = time.time() - 1.0
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
             float(req.get("idle_timeout_s", 300)), cfg, lease)
@@ -240,10 +245,25 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                 collect_files, workspace, paths, max_bytes=cfg.file_max_bytes,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
-            terminal = ev.RunCompleted(final_text=terminal.final_text, files=files)
+            images = await asyncio.to_thread(_export_images, adapter, spec, started_at, cfg)
+            terminal = ev.RunCompleted(final_text=terminal.final_text, files=[*files, *images])
         return await _finish(run_id, terminal, totals, mode, lease)
     finally:
         cleanup_workspace(workspace)
+
+
+def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
+                   cfg: ExecConfig) -> list[ev.FileRef]:
+    """The worker collects the CLI's out-of-workspace artifacts (Codex: generated PNGs)."""
+    for attr, value in (("image_max_bytes", cfg.image_max_bytes), ("image_max_count", cfg.image_max_count),
+                        ("image_ttl_s", cfg.files_ttl_s)):
+        if hasattr(adapter, attr):
+            setattr(adapter, attr, value)
+    try:
+        return adapter.export_artifacts(spec, since)
+    except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
+        log.exception("artifact export failed for run %d", spec.run_id)
+        return []
 
 
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,

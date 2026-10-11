@@ -12,6 +12,7 @@ from aibroker.agent.adapter import (
     ModelInfo,
     StreamEvent,
 )
+from aibroker.agent.events import FileRef
 
 
 class FakeAgentCLI:
@@ -34,6 +35,9 @@ class FakeAgentCLI:
 
     def attestation(self) -> AuthAttestation | None:
         return self.auth if self.mode == "subscription" else None
+
+    def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
+        return []
 
     async def list_models(self) -> list[ModelInfo] | None:
         return self.models

@@ -399,7 +399,16 @@ services:
     # OpenAI. ACCEPTED RISK (see docs/agent-runs.md).
     networks: [agent_db]
     cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
+    # The Codex sandbox (bubblewrap) needs user+mount namespaces: Docker's default seccomp profile plus
+    # ONE documented addition, and docker-default AppArmor with only the mount rules bwrap needs inside its
+    # own userns (infra/agent-worker/{codex-seccomp.json,apparmor-codex}; docs/agent-runs.md). No
+    # "unconfined", no privileged, no added capability. The AppArmor profile must be loaded on the host
+    # first (operator: apparmor_parser -r). ROLLBACK: remove the seccomp= and apparmor= lines (the Codex
+    # sandbox then fails closed as sandbox_unavailable) and `docker compose --profile agent up -d`.
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./infra/agent-worker/codex-seccomp.json
+      - apparmor=aibroker-codex
     # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
     # The Codex sandbox needs unprivileged user namespaces: if the host/seccomp profile forbids them,
     # every run fails closed as sandbox_unavailable (see docs/agent-runs.md).

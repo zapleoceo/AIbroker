@@ -28,6 +28,9 @@ class FileRef(BaseModel):
     skipped: str | None = None   # too_large | cap_reached | unsafe_path | missing
     expires_at: str | None = None   # ISO UTC; past it the content is no longer served
     expired: bool = False
+    sha256: str | None = None       # set for exported images
+    width: int | None = None
+    height: int | None = None
 
 
 class RunStarted(_Event):
