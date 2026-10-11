@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,13 +33,24 @@ def _now() -> datetime:
 WORKER_MARKER = "/etc/aibroker-agent-worker"
 
 
-def worker_image_problem(env: Mapping[str, str] | None = None,
-                         marker: str = WORKER_MARKER) -> str | None:
+_REQUIRED_HOME = {"agent:claude": "CLAUDE_CONFIG_DIR", "agent:codex": "CODEX_HOME"}
+
+
+def worker_capabilities() -> tuple[str, ...]:
+    """The capabilities this worker claims (AGENT_WORKER_CAPABILITIES, known ones only)."""
+    wanted = {c.strip() for c in get_settings().AGENT_WORKER_CAPABILITIES.split(",")}
+    return tuple(c for c in AGENT_CAPABILITIES if c in wanted)
+
+
+def worker_image_problem(env: Mapping[str, str] | None = None, marker: str = WORKER_MARKER,
+                         capabilities: Iterable[str] = ("agent:claude",)) -> str | None:
     """The agent lane may only run inside the worker image (CLI + auth volume + minimal
     privileges); anywhere else it refuses to start."""
     e = os.environ if env is None else env
-    if not e.get("CLAUDE_CONFIG_DIR"):
-        return "CLAUDE_CONFIG_DIR is not set"
+    for cap in capabilities:
+        home = _REQUIRED_HOME.get(cap)
+        if home and not e.get(home):
+            return f"{home} is not set"
     if not Path(marker).exists():
         return f"{marker} is missing - not the agent-worker image"
     return None
@@ -114,7 +125,7 @@ async def drain_agent_once(cfg: ExecConfig) -> int:
     """One pass: claim within each capability's free slots and run them to completion
     (deterministic; used by tests). Returns how many were claimed."""
     total = 0
-    for cap in AGENT_CAPABILITIES:
+    for cap in worker_capabilities():
         ids = await claim_agent_runs(cap, concurrency_for(cap))
         total += len(ids)
         await asyncio.gather(*(execute_run(i, cfg) for i in ids), return_exceptions=True)
@@ -130,18 +141,19 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
 
 async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - loop harness
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
-    problem = worker_image_problem()
+    caps = worker_capabilities()
+    problem = worker_image_problem(capabilities=caps) if caps else "AGENT_WORKER_CAPABILITIES is empty"
     if problem:
         raise RuntimeError(f"agent lane refused to start: {problem}")
-    register_real_adapters()
+    register_real_adapters(caps)
     cfg = exec_config_from_settings()
-    inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in AGENT_CAPABILITIES}
+    inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in caps}
     log.info("agent worker started (workspace=%s)", cfg.workspace_root)
     while not stop.is_set():
         try:
             await fail_stale_agent_runs()
             await expire_overdue_waiting()
-            for cap in AGENT_CAPABILITIES:
+            for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
                 for run_id in await claim_agent_runs(cap, free):
                     t = asyncio.create_task(_guarded(run_id, cfg))

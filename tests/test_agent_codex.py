@@ -40,6 +40,17 @@ UUID = "123e4567-e89b-12d3-a456-426614174000"
 SECRET = "sk-super-secret-token-value"
 
 
+HOME_DIR = "/home/app/codex-state"
+
+
+async def _sandbox_ok(argv, env, cwd):
+    return 0, ""
+
+
+def _argv(run):
+    return build_codex_argv(run, codex_home=HOME_DIR)
+
+
 def _spec(**kw):
     base = {"run_id": 1, "capability": "agent:codex", "prompt": "SECRET PROMPT",
             "workspace": "/w/run-1", "account_id": "a"}
@@ -58,11 +69,13 @@ def _adapters():
 
 
 def test_fresh_argv_shape_overrides_and_stdin_prompt():
-    argv = build_codex_argv(_spec())
+    argv = _argv(_spec())
     assert argv[:3] == ["codex", "exec", "--json"] and argv[-1] == "-"
     assert "SECRET PROMPT" not in argv
     pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
-    assert tuple(pairs) == CONFIG_OVERRIDES
+    assert tuple(pairs[:len(CONFIG_OVERRIDES)]) == CONFIG_OVERRIDES
+    assert 'default_permissions="broker"' in pairs
+    assert any(p.startswith("permissions={broker={extends=") for p in pairs)
     assert 'sandbox_mode="workspace-write"' in pairs and 'approval_policy="never"' in pairs
     assert 'forced_login_method="chatgpt"' in pairs and 'cli_auth_credentials_store="file"' in pairs
     for flag in ("--skip-git-repo-check", "--ignore-user-config", "--ignore-rules"):
@@ -73,7 +86,7 @@ def test_fresh_argv_shape_overrides_and_stdin_prompt():
 @pytest.mark.parametrize("model", [None, "gpt-5.1-codex"])
 @pytest.mark.parametrize("attach", [[], ["inputs/a.png"]])
 def test_argv_never_bypasses_the_sandbox_or_approvals(session, model, attach):
-    argv = build_codex_argv(_spec(session_id=session, model=model, attachments=attach))
+    argv = _argv(_spec(session_id=session, model=model, attachments=attach))
     flat = " ".join(argv).lower()
     for banned in ("dangerously", "bypass", "yolo", "full-auto", "danger-full-access",
                    "network_access", "--last", "--oss", "--worktree", "--add-dir", "--profile"):
@@ -84,20 +97,20 @@ def test_argv_never_bypasses_the_sandbox_or_approvals(session, model, attach):
 
 
 def test_resume_uses_the_exact_thread_id_only():
-    argv = build_codex_argv(_spec(session_id=UUID))
+    argv = _argv(_spec(session_id=UUID))
     assert argv[:4] == ["codex", "exec", "resume", UUID]
     for bad in ("last", "--last", "my thread name", "sess-1", UUID + "x", "../x", "-c"):
         with pytest.raises(ValueError, match="thread id"):
-            build_codex_argv(_spec(session_id=bad))
+            _argv(_spec(session_id=bad))
 
 
 def test_codex_has_no_tool_allow_list_so_any_tool_is_refused():
     with pytest.raises(ValueError, match="allowed_tools must be empty"):
-        build_codex_argv(_spec(allowed_tools=["Read(src/**)"]))
+        _argv(_spec(allowed_tools=["Read(src/**)"]))
 
 
 def test_attachments_are_real_image_flags_before_the_other_options():
-    argv = build_codex_argv(_spec(attachments=["inputs/a.png", "inputs/b.png"]))
+    argv = _argv(_spec(attachments=["inputs/a.png", "inputs/b.png"]))
     assert argv.index("--image=inputs/a.png") < argv.index("--json")
     assert "--image=inputs/b.png" in argv
     prompt = build_codex_prompt(_spec(attachments=["inputs/a.png"]))
@@ -325,7 +338,8 @@ def test_login_status_parser_is_conservative():
 
 class _Stand(CodexCLI):
     def __init__(self, script, home, **kw):
-        super().__init__(env={"CODEX_HOME": str(home), "PATH": os.environ.get("PATH", "")}, **kw)
+        super().__init__(env={"CODEX_HOME": str(home), "PATH": os.environ.get("PATH", "")},
+                         sandbox_probe=_sandbox_ok, **kw)
         self.script = script
 
     def build_argv(self, run):
@@ -367,7 +381,7 @@ async def test_preflight_refuses_without_codex_home_or_with_a_project_codex_dir(
 
 
 async def test_a_bad_resume_id_fails_the_run_before_spawning(tmp_path):
-    cli = CodexCLI(env={"CODEX_HOME": str(tmp_path)})
+    cli = CodexCLI(env={"CODEX_HOME": str(tmp_path)}, sandbox_probe=_sandbox_ok)
     got = [e async for e in cli.start(_spec(workspace=str(tmp_path), session_id="last"))]
     assert got[0].error_class == "tool_invalid" and cli._proc is None
 

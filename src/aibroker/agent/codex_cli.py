@@ -20,25 +20,61 @@ Safety, by construction (mirrors ClaudeCLI):
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 
 from aibroker.agent.adapter import AgentRunSpec, AuthAttestation, BillingMode
-from aibroker.agent.parsers import CodexParser, parse_codex_login_status
+from aibroker.agent.parsers import CodexParser, parse_codex_login_status, sandbox_failure
 from aibroker.agent.real_cli import Probe, SubprocessCLI
 
 CODEX_ENV_KEYS = ("PATH", "HOME", "CODEX_HOME", "LANG", "TMPDIR")
-UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 # Constant overrides - never built from caller input.
 CONFIG_OVERRIDES = (
     'sandbox_mode="workspace-write"', 'approval_policy="never"',
     'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
 )
+PERMISSION_PROFILE = "broker"
+_ABS_PATH = re.compile(r"^/[A-Za-z0-9_./-]+\Z")
+
+
+def permission_overrides(codex_home: str | None) -> list[str]:
+    """`-c` values for the READ-isolation profile (Codex permission profiles, 0.162.1): the profile
+    extends `:workspace` (writes only in the workspace) and DENIES reads+writes of CODEX_HOME (the
+    ChatGPT auth.json) and /proc (other processes' environ) to every command the model runs. The CLI
+    itself still reads its own auth - the sandbox only wraps the model's commands. The whole profile is
+    one inline TOML table because `-c` does not unquote dotted keys (paths contain dots/slashes) and a
+    `/proc/*/environ` glob makes Codex scan /proc and fail. ValueError for an unusable CODEX_HOME."""
+    if not codex_home or not _ABS_PATH.match(codex_home) or ".." in codex_home.split("/"):
+        raise ValueError("CODEX_HOME must be an absolute plain path to build the read-deny profile")
+    deny = f'{{"{codex_home.rstrip("/")}"="deny","/proc"="deny"}}'
+    return [f'default_permissions="{PERMISSION_PROFILE}"',
+            f'permissions={{{PERMISSION_PROFILE}={{extends=":workspace",filesystem={deny}}}}}']
 _LOGIN_OVERRIDES = ('forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"')
 SUBSCRIPTION_PROVIDER = "openai-chatgpt-subscription"
+
+
+SandboxProbe = Callable[[list[str], Mapping[str, str], str], Awaitable[tuple[int, str]]]
+AGENT_HOME_DIR = ".agent-home"      # per-run empty HOME, inside the run workspace
+
+
+async def _run_sandbox_probe(argv: list[str], env: Mapping[str, str],
+                             cwd: str) -> tuple[int, str]:  # pragma: no cover - runs the real CLI
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, cwd=cwd, env=dict(env), start_new_session=True)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        return 124, "sandbox self-test timed out"
+    return proc.returncode or 0, out.decode(errors="replace")
 
 
 def codex_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -61,7 +97,8 @@ def read_auth_mode(codex_home: str | None) -> str | None:
     return mode if isinstance(mode, str) else None
 
 
-def build_codex_argv(run: AgentRunSpec, binary: str = "codex") -> list[str]:
+def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
+                     codex_home: str | None = None) -> list[str]:
     """`codex exec [resume <thread id>] --json ... -` with constant overrides; ValueError when
     the request cannot be expressed safely."""
     if run.allowed_tools:
@@ -75,7 +112,7 @@ def build_codex_argv(run: AgentRunSpec, binary: str = "codex") -> list[str]:
     argv.append("--json")
     if run.model:
         argv.append(f"--model={run.model}")
-    for override in CONFIG_OVERRIDES:
+    for override in (*CONFIG_OVERRIDES, *permission_overrides(codex_home)):
         argv += ["-c", override]
     argv += ["--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-"]
     return argv
@@ -92,14 +129,16 @@ class CodexCLI(SubprocessCLI):
     """OpenAI Codex CLI (`codex exec --json`). UNVERIFIED against a real run."""
 
     def __init__(self, binary: str = "codex", probe: Probe | None = None,
-                 kill_grace_s: float = 5.0, env: Mapping[str, str] | None = None) -> None:
+                 kill_grace_s: float = 5.0, env: Mapping[str, str] | None = None,
+                 sandbox_probe: SandboxProbe | None = None) -> None:
         super().__init__(binary, probe, kill_grace_s, env)
+        self._sandbox_probe = sandbox_probe or _run_sandbox_probe
 
     def make_env(self, source: Mapping[str, str] | None) -> dict[str, str]:
         return codex_env(source)
 
     def build_argv(self, run: AgentRunSpec) -> list[str]:
-        return build_codex_argv(run, self.binary)
+        return build_codex_argv(run, self.binary, self._env.get("CODEX_HOME"))
 
     def new_parser(self, run: AgentRunSpec) -> CodexParser:
         return CodexParser()
@@ -112,6 +151,29 @@ class CodexCLI(SubprocessCLI):
             return "settings_refused", "CODEX_HOME is not set"
         if (Path(run.workspace) / ".codex").exists():       # project-level config layer
             return "settings_refused", "the run workspace carries a .codex directory"
+        return None
+
+    def process_env(self, run: AgentRunSpec) -> dict[str, str]:
+        """HOME is a fresh EMPTY directory inside the run workspace - never the Claude state dir and
+        never CODEX_HOME (auth stays reachable only through CODEX_HOME itself)."""
+        home = Path(run.workspace) / AGENT_HOME_DIR
+        home.mkdir(mode=0o700, exist_ok=True)
+        return {**self._env, "HOME": str(home)}
+
+    async def preflight_async(self, run: AgentRunSpec) -> tuple[str, str] | None:
+        """Sandbox self-test before EVERY run (`codex sandbox -P broker -c ... true` executes `true`
+        under the Codex Linux sandbox WITH the read-deny profile, so a profile Codex cannot apply fails
+        here too): if the sandbox cannot be applied (no user namespaces, landlock,
+        seccomp, ...) the run fails closed as `sandbox_unavailable` - there is no retry without it."""
+        try:
+            argv = [self.binary, "sandbox", "-P", PERMISSION_PROFILE,
+                    *(a for o in permission_overrides(self._env.get("CODEX_HOME")) for a in ("-c", o)),
+                    "true"]
+            rc, text = await self._sandbox_probe(argv, self.process_env(run), run.workspace)
+        except Exception as exc:  # noqa: BLE001 - cannot tell -> unavailable (fail closed)
+            return "sandbox_unavailable", f"sandbox self-test could not run: {exc}"[:300]
+        if rc != 0 or sandbox_failure(text):
+            return "sandbox_unavailable", (text.strip() or f"sandbox self-test exited {rc}")[:300]
         return None
 
     async def billing_mode(self) -> BillingMode:

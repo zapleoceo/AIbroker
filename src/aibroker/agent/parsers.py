@@ -20,6 +20,19 @@ _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many reque
                     r"credit balance|exceeded your", re.I)
 
 
+_SANDBOX = re.compile(
+    r"bwrap:|landlock|seccomp|no permissions to create a new namespace|user namespace|"
+    r"sandbox (?:could not|couldn't|failed|is unavailable|error|denied to start)|"
+    r"failed to (?:apply|create|enter|set up) (?:the )?sandbox", re.IGNORECASE)
+
+
+def sandbox_failure(text: str) -> bool:
+    """True when `text` says the Codex sandbox could not be applied (landlock / seccomp / user
+    namespace / bwrap). Such a run fails closed as `sandbox_unavailable` - never retried without
+    the sandbox. Wording UNVERIFIED beyond the bwrap message seen on the pinned image."""
+    return bool(_SANDBOX.search(text or ""))
+
+
 def classify_failure(message: str) -> str:
     """quota_exhausted for limit/quota wording, else cli_error. Never triggers a fallback."""
     return "quota_exhausted" if _QUOTA.search(message or "") else "cli_error"
@@ -194,8 +207,11 @@ class CodexParser:
                 {"arguments": item.get("arguments")}
             ok = item.get("exit_code", 0) in (0, None) and item.get("status") != "failed"
             out = str(item.get("aggregated_output") or item.get("result") or "")
-            return [ev.ToolCall(call_id=cid, name=name, input=inp),
-                    ev.ToolResult(call_id=cid, ok=bool(ok), output=out)]
+            events: list[StreamEvent] = [ev.ToolCall(call_id=cid, name=name, input=inp),
+                                         ev.ToolResult(call_id=cid, ok=bool(ok), output=out)]
+            if not ok and sandbox_failure(out):      # the sandbox could not be applied: stop, fail closed
+                events.append(ev.RunFailed(error_class="sandbox_unavailable", message=out[:500]))
+            return events
         if t == "file_change":
             kinds = {"add": "created", "update": "modified", "delete": "deleted"}
             return [ev.FileChanged(path=str(c.get("path")), action=kinds.get(c.get("kind"), "modified"))
@@ -206,6 +222,8 @@ class CodexParser:
         if self.turn_done and returncode == 0 and self.error is None:
             return ev.RunCompleted(final_text=self.final_text)
         msg = self.error or stderr_tail.strip() or f"codex exited {returncode} without a finished turn"
+        if sandbox_failure(msg) or sandbox_failure(stderr_tail):
+            return ev.RunFailed(error_class="sandbox_unavailable", message=msg[:2000])
         return ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000],
                             reset_at=parse_reset_at(msg))
 

@@ -383,7 +383,8 @@ async def test_session_lock_holder_blocks_second_run_end_to_end(cfg):
 
 
 def _settings(**over):
-    base = {"AGENT_CONCURRENCY_CODEX": 1, "AGENT_CONCURRENCY_CLAUDE": 1}
+    base = {"AGENT_CONCURRENCY_CODEX": 1, "AGENT_CONCURRENCY_CLAUDE": 1,
+            "AGENT_WORKER_CAPABILITIES": "agent:claude,agent:codex"}
     base.update(over)
     return SimpleNamespace(**base)
 

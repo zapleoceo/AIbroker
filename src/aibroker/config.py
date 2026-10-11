@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.
     AGENT_ALLOWED_PROJECT_IDS: str = ""
+    # Which agent capabilities THIS worker process claims (comma-separated). Production runs one
+    # container per CLI (agent-worker: agent:claude, agent-worker-codex: agent:codex) so each CLI
+    # sees only its own auth volume; the default claims both (dev / single container).
+    AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

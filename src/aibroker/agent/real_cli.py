@@ -25,7 +25,7 @@ import asyncio
 import contextlib
 import os
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from aibroker.agent import events as ev
@@ -127,6 +127,14 @@ class SubprocessCLI:
         """(error_class, message) when the run must be refused before any process starts."""
         return None
 
+    async def preflight_async(self, run: AgentRunSpec) -> tuple[str, str] | None:
+        """Like preflight, for checks that run a process (e.g. the sandbox self-test)."""
+        return None
+
+    def process_env(self, run: AgentRunSpec) -> dict[str, str]:
+        """The environment of THIS run's process (default: the adapter's minimal env)."""
+        return dict(self._env)
+
     # --- shared ------------------------------------------------------------------------------
     def attestation(self) -> AuthAttestation | None:
         """Method/provider of the last successful subscription probe (None otherwise)."""
@@ -166,7 +174,7 @@ class SubprocessCLI:
             del self._stderr[:-8192]
 
     async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
-        problem = self.preflight(run)
+        problem = self.preflight(run) or await self.preflight_async(run)
         if problem:
             yield ev.RunFailed(error_class=problem[0], message=problem[1][:500])
             return
@@ -177,7 +185,7 @@ class SubprocessCLI:
             return
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=run.workspace, env=dict(self._env),
+            stderr=asyncio.subprocess.PIPE, cwd=run.workspace, env=self.process_env(run),
             limit=1 << 24, start_new_session=True)
         self._proc = proc
         stderr_task = asyncio.create_task(self._drain_stderr(proc))
@@ -240,8 +248,11 @@ class ClaudeCLI(SubprocessCLI):
         return mode
 
 
-def register_real_adapters() -> None:
+def register_real_adapters(capabilities: Iterable[str] = ("agent:claude", "agent:codex")) -> None:
     """Called by the worker lane at startup (only when AGENT_WORKER_ENABLED)."""
     from aibroker.agent.codex_cli import CodexCLI  # local import: codex_cli builds on this module
-    register_adapter("agent:claude", ClaudeCLI)
-    register_adapter("agent:codex", CodexCLI)
+    caps = set(capabilities)
+    if "agent:claude" in caps:
+        register_adapter("agent:claude", ClaudeCLI)
+    if "agent:codex" in caps:
+        register_adapter("agent:codex", CodexCLI)

@@ -483,6 +483,68 @@ the device-code flow, then check with
 (expect a ChatGPT login; `Not logged in` before the login). Whether paid "extra usage" can continue a
 ChatGPT-plan run is the same open billing gate as for Claude (`AGENT_PAID_CONTINUATION_VERIFIED_OFF`).
 
+## Codex: container split, read isolation, redaction (independent review fixes)
+
+**One container per CLI.** Per-run containers would need `docker.sock`, which is forbidden. Instead
+compose has two identically hardened services (profile `agent`; non-root, `read_only`, `cap_drop: ALL`,
+`no-new-privileges`, tmpfs workspaces, network `agent_db` only, 1 CPU / 1 GB / 256 pids, `init`):
+`agent-worker` (`AGENT_WORKER_CAPABILITIES=agent:claude`, mounts ONLY `agent_claude_auth`) and
+`agent-worker-codex` (`AGENT_WORKER_CAPABILITIES=agent:codex`, mounts ONLY `agent_codex_auth`, `HOME`
+is a tmpfs path, `CLAUDE_CONFIG_DIR` blanked). A worker claims only the capabilities it is configured
+for (`worker_capabilities`), registers only those adapters (`register_real_adapters`), checks only its
+own home variable (`worker_image_problem`) and refuses to start with an empty list. The Codex CLI also
+gets a per-run EMPTY `HOME` inside the run workspace (`.agent-home`), never the Claude state dir and
+never `CODEX_HOME`; only `CODEX_HOME` leads to the login. Static tests pin the volumes and `HOME`.
+
+**Does Codex 0.162.1 have READ isolation? Yes, through permission profiles - enforcement is not
+verified here.** Sources: the official page `learn.chatgpt.com/codex/permissions` (the
+`agent-approvals-security` page documents bwrap + seccomp and profiles but no read rules; `/docs/config`
+returned 404) and the pinned binary (`codex sandbox --help`, config strings, `-c` parse probes, all
+offline in a throwaway container):
+- Profiles: `default_permissions = "<name>"` and `[permissions.<name>]` (`extends = ":workspace"` ...),
+  filesystem rules `[permissions.<name>.filesystem]` mapping a path to `read`, `write` or `deny`
+  (`deny` blocks reads AND writes; the most specific path wins; globs only for `deny`; path forms
+  `:root`, `:minimal`, `:workspace_roots`, absolute, `~/`). `codex sandbox -P <profile> <cmd>` exists.
+  A separate `deny_read` exists only at the managed `requirements.toml` level.
+- What we apply (`permission_overrides`, passed as `-c` inline tables because `-c` does not unquote
+  dotted keys, and a `/proc/*/environ` glob makes Codex scan `/proc` and fail): profile `broker`
+  extending `:workspace` that DENIES `CODEX_HOME` (the ChatGPT `auth.json`) and `/proc` (other
+  processes' environ) to every command the model runs, next to `sandbox_mode="workspace-write"`. The
+  CLI itself still reads its own auth: the sandbox wraps only the model's commands.
+- NOT available: a separate uid for the auth files (same uid as the worker; the CLI reads auth
+  outside the sandbox). Redaction is only a second net.
+- Verified on the image: the profile syntax is accepted (an unknown access value is rejected, an
+  undefined profile is rejected). NOT verified: that the deny rules are actually enforced - the
+  sandbox cannot start in this container (`bwrap: No permissions to create a new namespace` - the
+  kernel/Docker default forbids **unprivileged user namespaces**).
+
+**Sandbox start check (fail closed).** Before EVERY Codex run `CodexCLI.preflight_async` runs
+`codex sandbox -P broker -c ... true` (a documented command in 0.162.1: it executes `true` under the
+Linux sandbox WITH the read-deny profile). A non-zero exit, a bwrap/landlock/seccomp/namespace message,
+a timeout or a missing binary ends the run with `run.failed error_class=sandbox_unavailable` before any
+process starts; the same classification applies to such wording in events (`sandbox_failure`,
+`CodexParser`) and stderr. It is final: no retry, no requeue, never without the sandbox. On this host
+every Codex run will therefore be refused until the owner decides how to allow unprivileged user
+namespaces for that one container (a seccomp profile / sysctl change - security-sensitive, not done).
+
+**Redaction.** Everything an agent run persists passes `redact` / `redact_obj` / `redact_bytes`
+(`aibroker.agent.redact`) first: event payloads, `final_text`, the job error text and returned file
+content (UTF-8 text files; binary untouched). Masked with `[REDACTED]`: JWT-like strings
+(`eyJ..<dot>..<dot>..`), `refresh_token` / `access_token` / `id_token` values (JSON or `key=value`),
+`sk-...` keys and `sess-...` tokens. Pattern based and best effort: defence in depth, not the control.
+
+**Codex acceptance run (canaries only).** `scripts/agent_codex_acceptance.sh` is for a SEPARATE test
+stack with no real login. The harness places a throwaway `CODEX_HOME` with a FAKE `auth.json`
+(`auth_mode: "chatgpt"`, `CANARY-...` tokens), a FAKE claude-state canary file and a fake parent process
+holding a canary environment variable. The script only builds the request JSON and checks the
+response: the task runs `cat <canary> >/dev/null` for each item and prints `<label>:READABLE` or
+`<label>:DENIED` - no content is requested, stored or printed, the script prints only per-item verdicts
+(never a body, header or the project key) and refuses any path that does not contain `canary` or points
+at a real state directory or pid 1. Pass = every item DENIED and no `CANARY-` value anywhere in the
+stored data; exit 2 means the run did not complete (e.g. `sandbox_unavailable`: fail closed, nothing was
+read). It never touches the real `auth.json`, the real claude-state or any real `/proc/*/environ`, not
+even expecting a refusal.
+
 ## Not done yet
 
 Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),
