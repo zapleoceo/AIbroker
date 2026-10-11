@@ -22,6 +22,7 @@ from aibroker.agent.runs import (
 )
 from aibroker.agent.tools import tool_problem
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.config import get_settings
 from aibroker.services.request_cap import admit_request
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 
@@ -164,6 +165,8 @@ async def agent_run_submit(
     if violation:
         raise AgentPolicyViolation(violation)
     if body.capability == "agent:codex":
+        if not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
+            raise HTTPException(503, "codex subscription route is not enabled")
         if body.allowed_tools:
             raise HTTPException(422, "agent:codex is sandboxed to the workspace; allowed_tools must be empty")
         if body.session_id and not UUID_RE.match(body.session_id):

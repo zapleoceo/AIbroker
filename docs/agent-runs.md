@@ -494,7 +494,9 @@ authorization** in the ChatGPT security settings first, then
 the device-code flow, then check with
 `docker compose --profile agent run --rm agent-worker-codex codex login -c cli_auth_credentials_store="file" status`
 (expect a ChatGPT login; `Not logged in` before the login). Whether paid "extra usage" can continue a
-ChatGPT-plan run is the same open billing gate as for Claude (`AGENT_PAID_CONTINUATION_VERIFIED_OFF`).
+ChatGPT-plan run requires a separate owner check. Codex uses
+`AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF` (default false), never Claude's
+`AGENT_PAID_CONTINUATION_VERIFIED_OFF`.
 
 ## Codex: container split, read isolation, redaction (independent review fixes)
 
@@ -608,7 +610,9 @@ After a Codex run the WORKER process - not the model, not the sandbox - copies n
 `$CODEX_HOME/generated_images` into the run's `out/` (`export_generated_pngs`, called through
 `export_artifacts`). `CODEX_HOME` is never given to the model (the sandbox profile denies it and the
 prompt never names it). Accepted files: regular files only (no symlinked file, directory or source
-directory; depth <= 3; no traversal out of the directory), created or modified during THIS run, at most
+directory; depth <= 3; no traversal out of the directory), with a new path since this run's
+pre-start snapshot. A shared-home DB lease serializes Codex runs across workers; an existing path
+modified during a run is excluded. Each image is at most
 `AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
 de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
 `width`, `height` and the content, subject to the usual TTL. A failing export never fails the run.

@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     # refused; a manual run needs its own explicit per-run acknowledgement. We never change
     # account settings.
     AGENT_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # Separate owner confirmation for the Codex account. Claude's confirmation never
+    # authorizes an autonomous Codex run.
+    AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: bool = False
     # Server-side allowlist of project ids that may use agent runs (comma-separated ints). EMPTY =
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.

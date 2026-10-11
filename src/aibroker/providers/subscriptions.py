@@ -5,7 +5,7 @@ import json
 import logging
 import re
 
-from aibroker.config import get_settings
+from aibroker.config import Settings, get_settings
 from aibroker.providers.registry import ModelSpec
 
 log = logging.getLogger(__name__)
@@ -18,7 +18,10 @@ _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 def subscription_models() -> list[ModelSpec]:
     """Malformed configuration fails closed instead of exposing an unverified model."""
     try:
-        data = json.loads(get_settings().AGENT_SUBSCRIPTION_MODELS)
+        configured = get_settings().AGENT_SUBSCRIPTION_MODELS
+        raw = (Settings.model_fields["AGENT_SUBSCRIPTION_MODELS"].default
+               if configured == "default" else configured)
+        data = json.loads(raw)
         if not isinstance(data, dict) or set(data) - PROVIDERS.keys():
             raise ValueError("expected claude-sub/codex-sub lists")
         models = []

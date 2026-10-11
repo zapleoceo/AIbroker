@@ -17,7 +17,7 @@ from aibroker.agent.constants import AGENT_CAPABILITIES, AGENT_SCOPE, OWNER_ONLY
 from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.runs import RunConflict, append_event
 from aibroker.auth import generate_project_key, hash_project_key
-from aibroker.config import Settings
+from aibroker.config import Settings, get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.main import app
@@ -285,7 +285,8 @@ async def test_resume_rejects_session_still_in_use():
     assert (await _submit(key, session_id="sess-live", prompt="again")).status_code == 409
 
 
-async def test_resume_rejects_session_of_other_capability():
+async def test_resume_rejects_session_of_other_capability(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     key, _ = await _project([AGENT_SCOPE])
     uuid = "123e4567-e89b-12d3-a456-426614174000"
     await _finished_with_session(key, sid=uuid)                  # produced by an agent:claude run

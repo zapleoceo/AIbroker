@@ -24,7 +24,8 @@ Access requires the capability's existing scope plus `llm:agent`, the server
 project allowlist, and the exact CLI model and `owner` account in
 `AGENT_PROJECT_POLICY`. The worker rechecks these. The configured list of
 subscription models is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
-`claude-sub`/`codex-sub`); malformed input exposes none. The default Codex
+`claude-sub`/`codex-sub`); malformed input exposes none. Compose uses the
+`default` sentinel when no override is provided. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
 

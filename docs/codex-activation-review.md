@@ -25,23 +25,23 @@ unverified; a supervised canary must confirm that model commands cannot read
 the auth file, Claude state, or another process's environment. Do not use
 `unconfined` or `privileged` for that test.
 
-## Review blockers before activation
+## Code fixes prepared for repeat review
 
-1. `images.py` scans a shared `$CODEX_HOME/generated_images` by mtime. Overlapping
-   runs can attach another run's PNG. Bind export to a run: serialize all Codex
-   runs sharing that home with a fenced lease, snapshot candidate paths before
-   the CLI starts, and export only new paths. Verify the real CLI output path.
-2. `agent-worker-codex` does not receive `AGENT_PROJECT_POLICY`, so its worker
-   policy recheck refuses submitted runs. Add the existing exact policy setting
-   only after approval; do not broaden project or model access.
-3. The Codex worker currently inherits Claude's
-   `AGENT_PAID_CONTINUATION_VERIFIED_OFF` setting. Codex needs a separate
-   owner-verified flag, default false, before autonomous runs. API-billed
-   fallback stays prohibited.
-4. The API Compose environment does not forward
-   `AGENT_SUBSCRIPTION_CODEX_ENABLED` or `AGENT_SUBSCRIPTION_MODELS`. Keep the
-   first flag false until approval and canaries pass. The direct
-   `/v1/agent/runs` Codex path needs the same activation gate.
+1. A fenced shared-home lease now serializes Codex runs across workers. The
+   worker snapshots PNG paths immediately before a run and exports only new
+   paths; touched pre-existing files stay excluded. The real CLI output path
+   and absence of concurrent owner CLI activity still need a supervised check.
+2. Compose now passes the existing exact `AGENT_PROJECT_POLICY` to the Codex
+   worker. No project or model policy was broadened.
+3. Codex now uses its own
+   `AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF` setting, default false;
+   Claude's approval cannot authorize a Codex run. API fallback stays prohibited.
+4. Compose now forwards `AGENT_SUBSCRIPTION_MODELS` and the default-off
+   `AGENT_SUBSCRIPTION_CODEX_ENABLED` to the API. Both Codex submission paths
+   and queued Codex runs check the activation gate.
+
+These fixes still require repeat independent review and the real sandbox/PNG
+canary. They do not approve or apply the profile.
 
 ## Minimal project access decision
 

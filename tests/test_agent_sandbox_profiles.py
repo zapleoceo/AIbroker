@@ -2,6 +2,7 @@
 loaded or run), and the worker-side export of generated PNGs."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -22,11 +23,12 @@ from aibroker.agent.codex_cli import CodexCLI, build_codex_prompt
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
-from aibroker.agent.images import GENERATED_DIR, export_generated_pngs
+from aibroker.agent.images import GENERATED_DIR, export_generated_pngs, snapshot_generated_paths
 from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.agent.runs import create_run
 from aibroker.agent.workspace import create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.main import app
@@ -45,7 +47,8 @@ def _service(name: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -307,14 +310,30 @@ def test_no_directory_or_no_home_is_just_empty(tmp_path):
 
 def test_codex_cli_exports_from_its_fixed_codex_home_only(tmp_path):
     home, ws = _setup(tmp_path)
+    cli = CodexCLI(env={"CODEX_HOME": str(home)})
+    cli.snapshot_artifacts()
     (home / GENERATED_DIR / "a.png").write_bytes(_png(6, 6))
     (home / "elsewhere.png").write_bytes(_png(9, 9, (3, 3, 3)))            # outside generated_images
     (tmp_path / "other-dir").mkdir()
     (tmp_path / "other-dir" / "b.png").write_bytes(_png(8, 8, (4, 4, 4)))
-    cli = CodexCLI(env={"CODEX_HOME": str(home)})
     spec = AgentRunSpec(run_id=1, capability="agent:codex", prompt="p", workspace=str(ws), account_id="a")
     refs = cli.export_artifacts(spec, time.time() - 5)
     assert [(r.width, r.height) for r in refs] == [(6, 6)]
+
+
+def test_a_touched_preexisting_png_cannot_be_attributed_to_the_next_run(tmp_path):
+    home, ws = _setup(tmp_path)
+    old = home / GENERATED_DIR / "previous.png"
+    old.write_bytes(_png(3, 3))
+    baseline = snapshot_generated_paths(str(home))
+    old.write_bytes(_png(4, 4))  # changed during this run, but the path is not its own
+    fresh = home / GENERATED_DIR / "current.png"
+    fresh.write_bytes(_png(5, 5))
+    refs = export_generated_pngs(str(home), str(ws), time.time() - 5,
+                                 max_bytes=1_000_000, max_count=4, ttl_s=60,
+                                 baseline=baseline)
+    assert len(refs) == 1 and (refs[0].width, refs[0].height) == (5, 5)
+    assert refs[0].sha256 == hashlib.sha256(fresh.read_bytes()).hexdigest()
 
 
 def test_the_model_never_sees_codex_home_in_its_prompt():
@@ -352,6 +371,39 @@ class _ImageFake(FakeAgentCLI):
                                      max_count=self.image_max_count, ttl_s=self.image_ttl_s)
 
 
+async def test_two_codex_runs_sharing_a_home_cannot_execute_concurrently(tmp_path):
+    _, first = await _project(9310)
+    _, second = await _project(9311)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    begun: list[int] = []
+
+    class Blocking(FakeAgentCLI):
+        async def start(self, run):
+            begun.append(run.run_id)
+            if run.run_id == first:
+                started.set()
+                await release.wait()
+            yield ev.RunCompleted(final_text="ok")
+
+    register_adapter("agent:codex", lambda: Blocking([]))
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={},
+                     codex_paid_continuation_verified_off=True)
+    first_task = asyncio.create_task(execute_run(first, cfg))
+    await asyncio.wait_for(started.wait(), 5)
+    assert await execute_run(second, cfg) is None
+    assert begun == [first]
+    async with get_session() as s:
+        queued = await s.get(DeepJobRow, second)
+        assert queued.status == "pending" and queued.retry_count == 1
+    release.set()
+    assert await asyncio.wait_for(first_task, 5) == "completed"
+    async with get_session() as s:
+        (await s.get(DeepJobRow, second)).status = "running"
+    assert await execute_run(second, cfg) == "completed"
+    assert begun == [first, second]
+
+
 async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_path):
     key, rid = await _project()
     home = tmp_path / "codex-home"
@@ -365,7 +417,7 @@ async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_pa
                 yield e
 
     register_adapter("agent:codex", lambda: WritesImage([ev.RunCompleted(final_text="drawn")], home))
-    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "completed"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         got = (await c.get(f"/v1/agent/runs/{rid}", headers={"X-Project-Key": key})).json()
@@ -384,7 +436,7 @@ async def test_an_image_from_before_the_run_is_not_returned(tmp_path):
     stale.write_bytes(_png(3, 3))
     os.utime(stale, (time.time() - 7200, time.time() - 7200))
     register_adapter("agent:codex", lambda: _ImageFake([ev.RunCompleted()], home))
-    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "completed"
     async with get_session() as s:
         job = await s.get(DeepJobRow, rid)
@@ -399,7 +451,7 @@ async def test_a_failing_export_never_fails_the_run(tmp_path):
             raise OSError("disk gone")
 
     register_adapter("agent:codex", lambda: Broken([ev.RunCompleted(final_text="ok")]))
-    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "completed"
 
 

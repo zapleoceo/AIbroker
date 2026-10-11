@@ -251,6 +251,9 @@ services:
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       # Per-project model/account policy (JSON, fail-closed); the agent-worker re-checks it.
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
+      # "default" retains the Settings default without nesting JSON in Compose interpolation.
+      AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
+      AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}
     ports:
       - "127.0.0.1:8004:8000"
     # 235-490MiB observed (2 uvicorn workers + the in-process job dispatcher);
@@ -386,11 +389,13 @@ services:
       AGENT_WORKER_ENABLED: "true"
       # This container claims ONLY Codex runs and mounts ONLY the Codex auth volume (never Claude's).
       AGENT_WORKER_CAPABILITIES: "agent:codex"
+      AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}
       HOME: /tmp/agent-codex-home    # never the Claude state dir; each run gets its own empty HOME
       CLAUDE_CONFIG_DIR: ""
-      # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
-      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+      # Independent owner check of the Codex account; never inherit Claude's approval.
+      AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
     volumes:
       - agent_codex_auth:/home/app/codex-state
     tmpfs:

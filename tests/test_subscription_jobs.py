@@ -14,9 +14,11 @@ from aibroker.agent.events import FileRef, RunCompleted
 from aibroker.agent.runs import append_event, create_run, get_run, record_usage
 from aibroker.agent.subscription_job import output_problem
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 from aibroker.providers.catalog import UnknownModel, listing, resolve_pin
+from aibroker.providers.subscriptions import subscription_models
 from aibroker.routes import proxy
 
 
@@ -38,6 +40,14 @@ def test_catalog_keeps_route_identity_and_unknown_subscription_price():
         resolve_pin(claude["id"], "chat:fast", ["groq"])
     with pytest.raises(UnknownModel):
         resolve_pin("claude-sonnet-5-5", "chat:fast", ["groq", "claude-sub"])
+
+
+def test_compose_default_catalog_sentinel_keeps_defaults_and_malformed_fails_closed(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    assert {m.id for m in subscription_models()} == {
+        "claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"}
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "broken")
+    assert subscription_models() == []
 
 
 @pytest.mark.asyncio

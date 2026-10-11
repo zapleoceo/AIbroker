@@ -28,6 +28,7 @@ from aibroker.agent.parsers import (
 from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.agent.runs import create_run, list_events
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 
@@ -35,7 +36,8 @@ _PID = [9500]
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -66,7 +68,8 @@ async def _run(cap="agent:codex") -> int:
 
 def _cfg(tmp_path, env):
     return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05, env=env,
-                      paid_continuation_verified_off=True)
+                      paid_continuation_verified_off=True,
+                      codex_paid_continuation_verified_off=True)
 
 
 # --- billing guard --------------------------------------------------------------

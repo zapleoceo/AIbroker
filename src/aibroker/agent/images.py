@@ -53,8 +53,30 @@ def _candidates(root: Path) -> list[Path]:
     return found
 
 
+def snapshot_generated_paths(codex_home: str | None) -> set[str] | None:
+    """Record names before a run, without reading image contents or auth state.
+
+    None means the directory cannot be trusted; the live Codex adapter then exports
+    nothing. Existing paths stay excluded even if another process touches them.
+    """
+    if not codex_home:
+        return None
+    root = Path(codex_home) / GENERATED_DIR
+    if root.is_symlink():
+        return None
+    if not root.exists():
+        return set()
+    if not root.is_dir():
+        return None
+    try:
+        return {p.relative_to(root).as_posix() for p in _candidates(root)}
+    except OSError:
+        return None
+
+
 def export_generated_pngs(codex_home: str | None, workspace: str, since: float, *,
-                          max_bytes: int, max_count: int, ttl_s: int) -> list[FileRef]:
+                          max_bytes: int, max_count: int, ttl_s: int,
+                          baseline: set[str] | None = None) -> list[FileRef]:
     """Copy new PNGs from <codex_home>/generated_images into <workspace>/out and describe them.
     `since` is the run's start (epoch seconds): older files are not this run's. Anything unsafe,
     oversized, undecodable or over the count is skipped silently (never partially copied)."""
@@ -71,6 +93,8 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     for path in _candidates(root):
         if len(refs) >= max_count:
             break
+        if baseline is not None and path.relative_to(root).as_posix() in baseline:
+            continue
         try:
             st = os.lstat(path)
             if (not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes or st.st_size == 0

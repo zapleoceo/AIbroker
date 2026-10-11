@@ -31,6 +31,7 @@ from aibroker.agent.parsers import CodexParser, parse_codex_login_status
 from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.agent.runs import list_events
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.main import app
@@ -59,7 +60,8 @@ def _spec(**kw):
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -245,6 +247,20 @@ async def test_api_rejects_tools_and_non_uuid_resume_for_codex_only():
                         task_id="ok2")).status_code == 202
 
 
+async def test_direct_codex_submission_and_queued_run_fail_closed_while_disabled(monkeypatch, tmp_path):
+    key = await _project()
+    rid = (await _post(key)).json()["run_id"]
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", False)
+    assert (await _post(key, task_id="blocked")).status_code == 503
+    async with get_session() as s:
+        (await s.get(DeepJobRow, rid)).status = "running"
+    fake = FakeAgentCLI([ev.RunCompleted(final_text="must not run")])
+    register_adapter("agent:codex", lambda: fake)
+    assert await execute_run(rid, ExecConfig(workspace_root=str(tmp_path))) == "failed"
+    assert fake.started is None
+    assert (await list_events(rid))[-1].payload["error_class"] == "route_disabled"
+
+
 async def test_a_codex_run_attests_chatgpt_and_reports_it(tmp_path):
     key = await _project()
     rid = (await _post(key)).json()["run_id"]
@@ -253,13 +269,28 @@ async def test_a_codex_run_attests_chatgpt_and_reports_it(tmp_path):
     fake = FakeAgentCLI([ev.SessionAssigned(session_id=UUID), ev.RunCompleted(final_text="ok")])
     fake.auth = AuthAttestation("chatgpt", "openai-chatgpt-subscription")
     register_adapter("agent:codex", lambda: fake)
-    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "completed"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         got = (await c.get(f"/v1/agent/runs/{rid}", headers={"X-Project-Key": key})).json()
     assert (got["auth_method"], got["api_provider"], got["fallback"]) == (
         "chatgpt", "openai-chatgpt-subscription", "none")
     assert got["session_id"] == UUID
+
+
+async def test_claude_paid_continuation_approval_does_not_authorize_codex(tmp_path):
+    key = await _project()
+    rid = (await _post(key)).json()["run_id"]
+    async with get_session() as s:
+        (await s.get(DeepJobRow, rid)).status = "running"
+    fake = FakeAgentCLI([ev.RunCompleted(final_text="must not run")])
+    fake.auth = AuthAttestation("chatgpt", "openai-chatgpt-subscription")
+    register_adapter("agent:codex", lambda: fake)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={},
+                     paid_continuation_verified_off=True,
+                     codex_paid_continuation_verified_off=False)
+    assert await execute_run(rid, cfg) == "failed" and fake.started is None
+    assert (await list_events(rid))[-1].payload["error_class"] == "billing_mode_refused"
 
 
 @pytest.mark.parametrize("env", [{"OPENAI_API_KEY": "x"}, {"CODEX_API_KEY": "x"}])
@@ -270,7 +301,7 @@ async def test_a_codex_run_is_refused_when_api_env_is_present(tmp_path, env):
         (await s.get(DeepJobRow, rid)).status = "running"
     fake = FakeAgentCLI([ev.RunCompleted()])
     register_adapter("agent:codex", lambda: fake)
-    cfg = ExecConfig(workspace_root=str(tmp_path), env=env, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env=env, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "failed" and fake.started is None
     events = await list_events(rid)
     assert events[-1].payload["error_class"] == "billing_mode_refused"

@@ -36,6 +36,7 @@ from aibroker.agent.registry import clear_adapters, make_adapter, register_adapt
 from aibroker.agent.runs import append_event, create_run, list_events
 from aibroker.agent.workspace import collect_files, create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.main import app
@@ -55,6 +56,17 @@ def _service(name: str) -> str:
     return "\n".join(ln for ln in m.group(1).splitlines() if not ln.strip().startswith("#"))
 
 
+def test_compose_keeps_codex_policy_and_billing_gate_separate_from_claude():
+    api, claude, codex = (_service(name) for name in ("api", "agent-worker", "agent-worker-codex"))
+    assert "AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}" in api
+    assert "AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}" in api
+    assert "AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}" in codex
+    assert "AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}" in claude
+    assert "AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}" in codex
+    assert "AGENT_PAID_CONTINUATION_VERIFIED_OFF:" not in codex
+    assert "AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:" not in claude
+
+
 def _spec(**kw):
     base = {"run_id": 1, "capability": "agent:codex", "prompt": "p", "workspace": "/w", "account_id": "a"}
     base.update(kw)
@@ -62,7 +74,8 @@ def _spec(**kw):
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -159,7 +172,7 @@ async def test_a_lane_claims_only_its_own_capability(monkeypatch, tmp_path):
             account_id="a", session_id=None, idempotency_key=None, wall_timeout_s=30,
             idle_timeout_s=30, allowed_tools=[])
         register_adapter(cap, lambda: FakeAgentCLI([ev.RunCompleted()]))
-    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, codex_paid_continuation_verified_off=True)
     assert await worker.drain_agent_once(cfg) == 1
     async with get_session() as s:
         assert (await s.get(DeepJobRow, ids["agent:codex"])).status == "done"
@@ -267,7 +280,7 @@ async def test_every_persisted_event_final_text_error_and_api_response_is_redact
         ("write", "auth_copy.json", json.dumps({"id_token": JWT, "auth_mode": "chatgpt"})),
         ev.FileChanged(path="auth_copy.json", action="created"),
         ev.RunCompleted(final_text=dirty)]))
-    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "completed"
     stored = json.dumps([e.payload for e in await list_events(rid)])
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
@@ -343,7 +356,7 @@ async def test_sandbox_unavailable_is_final_never_requeued_or_retried(tmp_path):
     key, rid = await _run(9412)
     register_adapter("agent:codex", lambda: FakeAgentCLI([
         ev.RunFailed(error_class="sandbox_unavailable", message="bwrap: no namespace")]))
-    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+    cfg = ExecConfig(workspace_root=str(tmp_path), env={}, codex_paid_continuation_verified_off=True)
     assert await execute_run(rid, cfg) == "failed"
     async with get_session() as s:
         job = await s.get(DeepJobRow, rid)

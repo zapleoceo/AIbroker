@@ -23,6 +23,7 @@ from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.agent.runs import append_event, cancel_run, create_run, get_run, list_events
 from aibroker.agent.workspace import collect_files, create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 
@@ -30,7 +31,8 @@ _PID = [9000]
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -41,7 +43,8 @@ def cfg(tmp_path):
     return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05,
                       cancel_grace_s=1.0, file_max_bytes=100, files_total_bytes=150,
                       files_max_count=3, files_ttl_s=3600, env={},
-                      paid_continuation_verified_off=True)
+                      paid_continuation_verified_off=True,
+                      codex_paid_continuation_verified_off=True)
 
 
 async def _project() -> int:
