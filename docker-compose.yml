@@ -247,6 +247,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Empty/unreachable degrades safely to gemini/openrouter/openai.
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
+      # Agent-run allowlist (fail-closed when empty); the agent-worker needs the same value.
+      AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
     ports:
       - "127.0.0.1:8004:8000"
     # 235-490MiB observed (2 uvicorn workers + the in-process job dispatcher);
@@ -335,6 +337,7 @@ services:
       AGENT_WORKER_ENABLED: "true"
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+      AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
     volumes:
       - agent_claude_auth:/home/app/claude-state
     tmpfs:

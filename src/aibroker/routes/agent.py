@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachments
-from aibroker.agent.constants import AGENT_SCOPE
+from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.runs import (
     RunConflict,
     RunRejected,
@@ -109,8 +109,11 @@ class AgentEventsResponse(BaseModel):
 
 
 def _require_agent_scope(ctx: ProjectCtx) -> None:
+    """Scope first, then the server-side project allowlist (fail closed when it is empty)."""
     if not ctx.has_scope(AGENT_SCOPE):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"project lacks scope: {AGENT_SCOPE}")
+    if not project_allowed(ctx.project.id):
+        raise AgentProjectNotAllowed(ctx.project.id)
 
 
 def _live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:

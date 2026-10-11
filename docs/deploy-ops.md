@@ -158,6 +158,14 @@ recorded from the first request. The index line should be run separately with
 `CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
 `AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
 
+## Agent runs: operator step before deploying the allowlist
+
+Agent runs are fail-closed behind `AGENT_ALLOWED_PROJECT_IDS` (comma-separated project ids,
+read by BOTH the `api` and the `agent-worker` service from the compose `.env`). Empty or unset
+= every `/v1/agent/runs` call gets 403 `agent_project_not_allowed`. **Before deploying the
+commit that introduces it, add `AGENT_ALLOWED_PROJECT_IDS=11` to `.env`**, otherwise the owner
+test project (`owner-agent-test`) is locked out. See [agent-runs.md](agent-runs.md).
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —

@@ -20,6 +20,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
+from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import (
@@ -100,6 +101,10 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return run.outcome
     req = dict(job.request)
     totals: dict[str, int | None] = {}
+    if not project_allowed(run.project_id):    # removed from the allowlist while queued
+        return await _finish(run_id, ev.RunFailed(
+            error_class="project_not_allowed",
+            message="project is not in AGENT_ALLOWED_PROJECT_IDS"), totals)
     if _now() >= job.created_at + timedelta(seconds=float(req.get("deadline_s", 21600))):
         return await _finish(run_id, ev.RunTimedOut(limit="deadline"), totals)
     if run.cancel_requested:

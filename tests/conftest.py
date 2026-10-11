@@ -125,3 +125,17 @@ async def db():
     await e.dispose()
     engine_mod._engine = None
     engine_mod._sessionmaker = None
+
+
+class _EveryProject:
+    def __contains__(self, project_id: object) -> bool:
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _agent_allowlist(request, monkeypatch):
+    """AGENT_ALLOWED_PROJECT_IDS is fail-closed (empty = nobody). The agent test modules run with
+    every project allowed; tests/test_agent_allowlist.py covers the real parsing and opts out."""
+    name = request.module.__name__.rsplit(".", 1)[-1]
+    if name.startswith("test_agent_") and name != "test_agent_allowlist":
+        monkeypatch.setattr("aibroker.agent.constants.allowed_project_ids", lambda: _EveryProject())

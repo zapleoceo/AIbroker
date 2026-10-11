@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from aibroker import __version__
+from aibroker.agent.constants import AgentProjectNotAllowed
 from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
@@ -131,6 +132,12 @@ class _RequestIdMiddleware:
 
 
 app.add_middleware(_RequestIdMiddleware)
+
+
+@app.exception_handler(AgentProjectNotAllowed)
+async def _agent_project_not_allowed(_: Request, exc: AgentProjectNotAllowed) -> JSONResponse:
+    """403 with a stable body: the project is not in AGENT_ALLOWED_PROJECT_IDS (fail-closed)."""
+    return JSONResponse({"error": "agent_project_not_allowed"}, status_code=403)
 
 
 @app.exception_handler(RequestCapExhausted)

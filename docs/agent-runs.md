@@ -12,6 +12,16 @@ third parties or be offered as a service. Access needs the `llm:agent` scope
 (`aibroker.agent.constants`) and is stripped from `SIGNUP_DEFAULT_SCOPES`, so self-signup
 can never grant it. Capabilities: `agent:codex`, `agent:claude` (`AGENT_CAPABILITIES`).
 
+**Server-side allowlist (fail-closed).** The scope alone is not enough: the project id must also
+be in `AGENT_ALLOWED_PROJECT_IDS` (comma-separated integers; `allowed_project_ids`,
+`project_allowed`). Empty or unset means NOBODY: every `/v1/agent/runs` endpoint (create, get,
+events, cancel) answers 403 `{"error": "agent_project_not_allowed"}` (`AgentProjectNotAllowed`)
+right after the scope check, even with `llm:agent`. The worker re-checks before it starts a
+run: a queued run of a project removed from the list fails with `run.failed
+project_not_allowed` - no CLI start, no `billing.attested`. Compose passes the variable to both
+`api` and `agent-worker`; the operator sets `AGENT_ALLOWED_PROJECT_IDS=11` in `.env` BEFORE
+deploying this change, otherwise the owner test project is locked out (by design).
+
 ## Readiness and quota rules (hard requirements)
 
 - **The subscription route must not be declared ready from fake tests alone.** Everything
@@ -263,7 +273,8 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 4. Only after step 2, set `AGENT_PAID_CONTINUATION_VERIFIED_OFF=true` in the compose `.env`.
    Until then `autonomous` / `exam` runs are refused (`billing_mode_refused`); a single manual
    run needs `run_mode: "manual"` plus `accept_paid_continuation_risk: true` in the request.
-5. Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`; grant a project the
+5. Set `AGENT_ALLOWED_PROJECT_IDS` (e.g. `11`) in the compose `.env` (empty = nobody may use agent runs).
+   Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`; grant a project the
    `llm:agent` scope through the admin API.
 
 6. **Enabling the worker only, with the owner's confirmation** - attach pgbouncer (the ONLY

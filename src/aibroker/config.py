@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # refused; a manual run needs its own explicit per-run acknowledgement. We never change
     # account settings.
     AGENT_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # Server-side allowlist of project ids that may use agent runs (comma-separated ints). EMPTY =
+    # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
+    # llm:agent scope, and the worker refuses queued runs of other projects.
+    AGENT_ALLOWED_PROJECT_IDS: str = ""
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0
