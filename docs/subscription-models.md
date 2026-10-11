@@ -40,7 +40,7 @@ infer subscription availability from API-model catalogs. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
 
-The implementation keeps candidate parsing in `subscription_models()`, exact
+The implementation exposes configured candidates through `subscription_models()`, exact
 pin lookup in `subscription_model()`, and the availability check in
 `subscription_model_verified()`. For a subscription job,
 `prompt_for_messages()` preserves text turns and roles;
