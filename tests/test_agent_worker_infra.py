@@ -47,7 +47,7 @@ def test_agent_worker_has_no_privilege_expansion():
     for banned in ("docker.sock", "privileged", "network_mode", "pid: host", "/home/", "devices",
                    "ANTHROPIC_", "OPENAI_", "CODEX_API"):
         assert banned not in code, banned
-    assert "agent_claude_auth:STATE" in code and "agent_codex_auth:STATE2" in code and "cap_drop: [ALL]" in code
+    assert "agent_claude_auth:STATE" in code and "agent_codex_auth" not in code and "cap_drop: [ALL]" in code
     assert "no-new-privileges:true" in code
     assert re.search(r"cpus: 1\b", code) and "mem_limit: 1g" in code and "pids_limit: 256" in code
     assert "NEEDS OWNER OK" in svc and "AGENT_PAID_CONTINUATION_VERIFIED_OFF" in svc

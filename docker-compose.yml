@@ -337,13 +337,14 @@ services:
       INTERNAL_SECRET: agent-worker-placeholder-internal-secret
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AGENT_WORKER_ENABLED: "true"
+      # This container claims ONLY Claude runs and mounts ONLY the Claude auth volume.
+      AGENT_WORKER_CAPABILITIES: "agent:claude"
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
     volumes:
       - agent_claude_auth:/home/app/claude-state
-      - agent_codex_auth:/home/app/codex-state
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
       - /tmp:size=64m,uid=10001,gid=10001,mode=1777
@@ -355,6 +356,56 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 256
+    restart: "no"
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
+  agent-worker-codex:
+    profiles: ["agent"]
+    build:
+      context: .
+      dockerfile: infra/agent-worker/Dockerfile
+      args:
+        BASE_IMAGE: ${AGENT_BASE_IMAGE:-aibroker-api:latest}
+    image: aibroker-agent-worker
+    container_name: aibroker-agent-worker-codex
+    # Only pgbouncer (transaction pooling): no direct postgres connection, no LISTEN, no session lock.
+    depends_on:
+      pgbouncer:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # The settings model requires these three, but the agent lane uses none of them: inert
+      # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
+      TOKEN_SECRET: agent-worker-placeholder-token-secret
+      ADMIN_KEY: agent-worker-placeholder-admin-key
+      INTERNAL_SECRET: agent-worker-placeholder-internal-secret
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_WORKER_ENABLED: "true"
+      # This container claims ONLY Codex runs and mounts ONLY the Codex auth volume (never Claude's).
+      AGENT_WORKER_CAPABILITIES: "agent:codex"
+      HOME: /tmp/agent-codex-home    # never the Claude state dir; each run gets its own empty HOME
+      CLAUDE_CONFIG_DIR: ""
+      # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
+      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+      AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+    volumes:
+      - agent_codex_auth:/home/app/codex-state
+    tmpfs:
+      - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
+      - /tmp:size=64m,uid=10001,gid=10001,mode=1777
+    read_only: true
+    init: true   # reaps tool children; with the CLI's own process group, no orphans survive a run
+    # Reaches only pgbouncer (not api/redis/vision). Internet egress stays open: the CLI must reach
+    # OpenAI. ACCEPTED RISK (see docs/agent-runs.md).
+    networks: [agent_db]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
+    # The Codex sandbox needs unprivileged user namespaces: if the host/seccomp profile forbids them,
+    # every run fails closed as sandbox_unavailable (see docs/agent-runs.md).
     cpus: 1
     mem_limit: 1g
     pids_limit: 256

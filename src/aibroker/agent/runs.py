@@ -21,6 +21,7 @@ from aibroker.agent.events import (
     RunWaitingQuota,
 )
 from aibroker.agent.lock import Lease, check_fence
+from aibroker.agent.redact import redact, redact_obj
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash
@@ -175,7 +176,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
         run.last_event_at = now
         s.add(AgentRunEventRow(
             run_id=run_id, seq=run.last_seq, ts=now, type=event.type,
-            payload=_clip(event.model_dump(mode="json")),
+            payload=_clip(redact_obj(event.model_dump(mode="json"))),
         ))
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
@@ -186,10 +187,10 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                 job.status = "done" if event.type == "run.completed" else "error"
                 job.completed_at = now
                 if event.type == "run.completed":
-                    job.result_text = event.final_text
+                    job.result_text = redact(event.final_text)
                     job.result_meta = {"files": [f.model_dump() for f in event.files]}
                 elif event.type == "run.failed":
-                    job.error_message = f"{event.error_class}: {event.message}"
+                    job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.error_message = event.type
             if isinstance(job.request, dict) and job.request.get("attachments"):
