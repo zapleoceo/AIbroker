@@ -1,6 +1,7 @@
 # Subscription models in the universal jobs API
 
-`GET /v1/models` includes explicit route ids such as
+`GET /v1/models` (the Broker catalog endpoint; there is no
+`/v1/models/catalog` route) includes explicit route ids such as
 `claude-sub/claude-sonnet-5-5` and `codex-sub/gpt-6.1-sol`. Each row retains
 its distinct `id`, `owned_by`, `capabilities`, `source: "broker"`,
 `billing_type: "subscription"`, and `price: {"kind": "subscription"}`. The
@@ -30,7 +31,7 @@ requires separate approval of its sandbox profile and a live CLI canary.
 Subscription jobs accept text role turns and `response_format` `json_object`
 or `json_schema`; the final JSON is validated, with invalid output ending in
 an error. Tool definitions, tool history, image input, vision, nondefault
-temperature and max_tokens are rejected before enqueue because the CLI path
+temperature, max_tokens, and `stream: true` are rejected before enqueue because the CLI path
 does not implement those controls. `GET /v1/jobs/{id}` can return `files` for
 worker-exported artifacts. Generated images must be decodable PNG bytes in
 `content_b64` with a `.png` path and, for Codex export, sha256 and dimensions;
