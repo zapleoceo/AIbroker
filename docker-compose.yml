@@ -340,6 +340,7 @@ services:
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
     volumes:
       - agent_claude_auth:/home/app/claude-state
+      - agent_codex_auth:/home/app/codex-state
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
       - /tmp:size=64m,uid=10001,gid=10001,mode=1777
@@ -368,4 +369,7 @@ volumes:
     driver: local
   # CLI subscription login of the agent worker (named volume; never an image layer or a host mount).
   agent_claude_auth:
+    driver: local
+  # Codex CLI ChatGPT login (CODEX_HOME; Codex refreshes auth.json, so it must stay writable).
+  agent_codex_auth:
     driver: local

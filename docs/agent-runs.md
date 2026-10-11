@@ -433,6 +433,56 @@ What is guaranteed, and what is not.
   `CLAUDE_CONFIG_DIR` is set and the marker `/etc/aibroker-agent-worker` (written by the
   Dockerfile, `WORKER_MARKER`) exists.
 
+## Codex adapter (`agent:codex`)
+
+`aibroker.agent.codex_cli.CodexCLI` runs the official `codex exec --json` (pinned `@openai/codex@0.162.1`,
+installed with its optional native-binary dependency) next to `ClaudeCLI`; both build on
+`SubprocessCLI` in `real_cli.py` (own process group, group kill on cancel, minimal environment).
+Argv (`build_codex_argv`, prompt on stdin via `-`, cwd = the run workspace):
+`codex exec [resume <thread id>] [--image=<file>...] --json [--model=<id>] -c sandbox_mode="workspace-write"
+-c approval_policy="never" -c forced_login_method="chatgpt" -c cli_auth_credentials_store="file"
+--skip-git-repo-check --ignore-user-config --ignore-rules -`. Verified against the 0.162.1 help text:
+there is **no `-a` flag on `codex exec`** (so the approval policy is a constant `-c` override) and
+`resume` has no `--sandbox`/`-C` (so the sandbox is a `-c` override for fresh and resumed runs alike).
+Never `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`, a wider sandbox or a
+`network_access` override (network stays off); `--ignore-user-config` means `CODEX_HOME/config.toml` is
+not read at all (auth still uses `CODEX_HOME`), so the forced login method travels as `-c`.
+Resume uses ONLY the exact thread id from `thread.started` and it must be a UUID (the CLI would also
+resolve a thread *name*); never `--last`. The sandbox, resume-with-overrides and sandbox-inside-a-
+locked-down-container behaviour are unverified until the first supervised run (if the sandbox cannot
+start, the run fails; nothing bypasses it).
+
+- **No per-tool allow-list.** `allowed_tools` must be empty for `agent:codex` (422 at submit, `ValueError`
+  in the argv builder): Codex is confined by the workspace-write sandbox and the workspace as cwd.
+  Image attachments become `--image=<file>` flags plus a path listing in the prompt (`build_codex_prompt`; headless `$imagegen`
+  is unverified).
+- **Environment** (`codex_env`): `PATH, HOME, CODEX_HOME, LANG, TMPDIR` only. The billing guard refuses a
+  run if `OPENAI_*`, `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` exist in the worker environment
+  (`CODEX_HOME` is legitimate).
+- **Billing probe.** `CodexCLI.billing_mode` reports a subscription only if BOTH `codex login -c ... status`
+  states a ChatGPT login (`parse_codex_login_status`; wording unverified, anything else is "unknown")
+  AND `$CODEX_HOME/auth.json` says `auth_mode == "chatgpt"`. The auth file is read for that ONE key
+  (`read_auth_mode`); tokens are never read into a variable, returned or logged. Otherwise the run is
+  refused (`billing_mode_refused`). Attestation: `auth_method="chatgpt"`,
+  `api_provider="openai-chatgpt-subscription"`, plus the same five `billing.attested` fields.
+- **Events** (`CodexParser`, doc-derived, UNVERIFIED against a real run): `thread.started` ->
+  `session.assigned`; `agent_message` -> `message.delta`/final text; `command_execution`,
+  `mcp_tool_call` -> `tool.call`/`tool.result`; `file_change` -> `file.changed`; `turn.completed.usage`
+  -> `usage` (incl. `reasoning_tokens`); `turn.failed`/`error` -> `run.failed`, with usage-limit wording
+  mapped to `quota_exhausted` (format undocumented), anything else `cli_error`. A quota failure waits
+  and retries on the same thread, exactly like Claude.
+- **Auth state** lives in the named volume `agent_codex_auth` (`CODEX_HOME=/home/app/codex-state`; Codex
+  refreshes `auth.json`, so it stays writable). Rollback is stopping the worker, not deleting the volume.
+
+Owner login handoff for Codex (once, interactive, after the Claude steps): enable **device code
+authorization** in the ChatGPT security settings first, then
+`docker compose --profile agent run --rm agent-worker codex login --device-auth -c cli_auth_credentials_store="file" -c forced_login_method="chatgpt"`
+(the `-c` overrides force the file store; plain `codex login --device-auth` is the same command), follow
+the device-code flow, then check with
+`docker compose --profile agent run --rm agent-worker codex login -c cli_auth_credentials_store="file" status`
+(expect a ChatGPT login; `Not logged in` before the login). Whether paid "extra usage" can continue a
+ChatGPT-plan run is the same open billing gate as for Claude (`AGENT_PAID_CONTINUATION_VERIFIED_OFF`).
+
 ## Not done yet
 
 Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),

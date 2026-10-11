@@ -26,6 +26,7 @@ import contextlib
 import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from typing import Any
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import (
@@ -93,36 +94,40 @@ async def _run_probe(argv: list[str], env: Mapping[str, str]) -> str:  # pragma:
     return out.decode(errors="replace")
 
 
-class ClaudeCLI:
-    """Anthropic Claude Code CLI (`claude -p`). UNVERIFIED against the real CLI."""
+class SubprocessCLI:
+    """Shared subprocess plumbing of the real adapters (Claude, Codex): own process group, group
+    kill on cancel, stderr tail, JSON-lines parser loop. Subclasses give the argv, the parser,
+    the stdin payload, the environment and the billing probe."""
     supports_resume = True
 
-    def __init__(self, binary: str = "claude", probe: Probe | None = None,
-                 kill_grace_s: float = 5.0, env: Mapping[str, str] | None = None) -> None:
+    def __init__(self, binary: str, probe: Probe | None = None, kill_grace_s: float = 5.0,
+                 env: Mapping[str, str] | None = None) -> None:
         self.binary = binary
         self._probe = probe or _run_probe
         self.kill_grace_s = kill_grace_s
-        self._env = cli_env(env)
+        self._env = self.make_env(env)
         self._auth: AuthAttestation | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr = bytearray()
 
+    # --- hooks -------------------------------------------------------------------------------
+    def make_env(self, source: Mapping[str, str] | None) -> dict[str, str]:
+        raise NotImplementedError
+
     def build_argv(self, run: AgentRunSpec) -> list[str]:
-        return build_claude_argv(run, self.binary, self._env.get("CLAUDE_CONFIG_DIR"))
+        raise NotImplementedError
 
-    async def billing_mode(self) -> BillingMode:
-        """`claude auth status`; anything but a positive claude.ai login is not subscription."""
-        self._auth = None
-        try:
-            text = await self._probe([self.binary, "auth", "status"], self._env)
-            mode = parse_claude_auth_status(text)
-            details = parse_claude_auth_details(text)
-        except Exception:  # noqa: BLE001 - cannot tell -> unknown -> the guard refuses
-            return "unknown"
-        if mode == "subscription" and details is not None:
-            self._auth = AuthAttestation(*details)
-        return mode
+    def new_parser(self, run: AgentRunSpec) -> Any:
+        raise NotImplementedError
 
+    def stdin_payload(self, run: AgentRunSpec) -> str:
+        return run.prompt
+
+    def preflight(self, run: AgentRunSpec) -> tuple[str, str] | None:
+        """(error_class, message) when the run must be refused before any process starts."""
+        return None
+
+    # --- shared ------------------------------------------------------------------------------
     def attestation(self) -> AuthAttestation | None:
         """Method/provider of the last successful subscription probe (None otherwise)."""
         return self._auth
@@ -161,9 +166,9 @@ class ClaudeCLI:
             del self._stderr[:-8192]
 
     async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
-        problem = settings_problem(self._env.get("CLAUDE_CONFIG_DIR"), run.workspace)
+        problem = self.preflight(run)
         if problem:
-            yield ev.RunFailed(error_class="settings_refused", message=problem[:500])
+            yield ev.RunFailed(error_class=problem[0], message=problem[1][:500])
             return
         try:
             argv = self.build_argv(run)
@@ -176,10 +181,10 @@ class ClaudeCLI:
             limit=1 << 24, start_new_session=True)
         self._proc = proc
         stderr_task = asyncio.create_task(self._drain_stderr(proc))
-        parser = ClaudeParser(run.workspace)
+        parser = self.new_parser(run)
         try:
             assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write(build_claude_prompt(run).encode())
+            proc.stdin.write(self.stdin_payload(run).encode())
             await proc.stdin.drain()
             proc.stdin.close()
             async for raw in proc.stdout:
@@ -198,6 +203,45 @@ class ClaudeCLI:
                 await stderr_task
 
 
+class ClaudeCLI(SubprocessCLI):
+    """Anthropic Claude Code CLI (`claude -p`). UNVERIFIED against the real CLI."""
+
+    def __init__(self, binary: str = "claude", probe: Probe | None = None,
+                 kill_grace_s: float = 5.0, env: Mapping[str, str] | None = None) -> None:
+        super().__init__(binary, probe, kill_grace_s, env)
+
+    def make_env(self, source: Mapping[str, str] | None) -> dict[str, str]:
+        return cli_env(source)
+
+    def build_argv(self, run: AgentRunSpec) -> list[str]:
+        return build_claude_argv(run, self.binary, self._env.get("CLAUDE_CONFIG_DIR"))
+
+    def new_parser(self, run: AgentRunSpec) -> ClaudeParser:
+        return ClaudeParser(run.workspace)
+
+    def stdin_payload(self, run: AgentRunSpec) -> str:
+        return build_claude_prompt(run)
+
+    def preflight(self, run: AgentRunSpec) -> tuple[str, str] | None:
+        problem = settings_problem(self._env.get("CLAUDE_CONFIG_DIR"), run.workspace)
+        return ("settings_refused", problem) if problem else None
+
+    async def billing_mode(self) -> BillingMode:
+        """`claude auth status`; anything but a positive claude.ai login is not subscription."""
+        self._auth = None
+        try:
+            text = await self._probe([self.binary, "auth", "status"], self._env)
+            mode = parse_claude_auth_status(text)
+            details = parse_claude_auth_details(text)
+        except Exception:  # noqa: BLE001 - cannot tell -> unknown -> the guard refuses
+            return "unknown"
+        if mode == "subscription" and details is not None:
+            self._auth = AuthAttestation(*details)
+        return mode
+
+
 def register_real_adapters() -> None:
     """Called by the worker lane at startup (only when AGENT_WORKER_ENABLED)."""
+    from aibroker.agent.codex_cli import CodexCLI  # local import: codex_cli builds on this module
     register_adapter("agent:claude", ClaudeCLI)
+    register_adapter("agent:codex", CodexCLI)
