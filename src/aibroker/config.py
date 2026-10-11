@@ -139,6 +139,10 @@ class Settings(BaseSettings):
     # container per CLI (agent-worker: agent:claude, agent-worker-codex: agent:codex) so each CLI
     # sees only its own auth volume; the default claims both (dev / single container).
     AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
+    # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
+    # isolated worker profile is separately approved and deployed.
+    AGENT_SUBSCRIPTION_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}'
+    AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

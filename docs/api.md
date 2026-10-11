@@ -114,7 +114,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
-| `GET` | `/v1/models` | — | `{object:"list", data:[model…]}` — every model a caller can pin (see "Pinning a model") |
+| `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids (see [subscription-models.md](subscription-models.md)) |
 
 ### Agent run billing attestation (`GET /v1/agent/runs/{id}`)
 
