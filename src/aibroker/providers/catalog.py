@@ -133,6 +133,34 @@ def price_info(spec: ModelSpec) -> dict[str, object]:
     return info
 
 
+def input_modalities(spec: ModelSpec) -> list[str] | None:
+    """Input types accepted by the Broker on this model's configured lanes."""
+    if "vision" in spec.capabilities:
+        return ["text", "image"]
+    if "transcription" in spec.capabilities:
+        return ["audio"]
+    if spec.pricing == "subscription" or "embedding" in spec.capabilities or any(
+        capability_family(cap) == "chat" for cap in spec.capabilities
+    ):
+        return ["text"]
+    return None
+
+
+def supports_tools(spec: ModelSpec) -> bool | None:
+    """Native tools require both a Broker-enabled adapter and model support."""
+    from aibroker.services.tool_contract import TOOL_PROVIDERS
+
+    if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
+            or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):
+        return False
+    try:
+        import litellm
+        value = litellm.get_model_info(spec.id).get("supports_function_calling")
+    except Exception:  # noqa: BLE001 - absent from the model map means unverified
+        return None
+    return value if isinstance(value, bool) else None
+
+
 def listing() -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
@@ -148,6 +176,8 @@ def listing() -> list[dict[str, object]]:
                              "local" if m.pricing == "local" else "api"),
             "name": canonical_name(m.id),
             "capabilities": sorted(m.capabilities),
+            "supports_tools": supports_tools(m),
+            "modalities": input_modalities(m),
             "also_served_by": also,
             "price": price_info(m),
             **({"available": subscription_model_verified(m.id) and
