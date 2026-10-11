@@ -84,6 +84,7 @@ reported - never dollars. Text is clipped to `MAX_TEXT_CHARS` on store.
 | `run.failed` | `RunFailed` | error_class, message |
 | `run.cancelled` | `RunCancelled` | - |
 | `run.timed_out` | `RunTimedOut` | limit (wall/idle) |
+| `billing.attested` | `BillingAttested` | auth_method, api_provider, paid_continuation_verified_off, fallback (`none`), project_daily_cap_usd |
 
 Exactly one terminal event ends a run (`TERMINAL_TYPES`).
 
@@ -304,10 +305,23 @@ present in `--tools`) and `Edit(scope)`** with the same relative scope - the CLI
 rules to writes, so `Write(scope)` alone is refused. Request `["Write(out/**)", "Edit(out/**)"]`
 for a task that creates files under `out/`.
 
-Canary refusal results: the per-probe outcomes of these four runs (which of the canary reads and
-writes listed above were refused, which allowed cases worked) are recorded in their event logs
-(`GET /v1/agent/runs/{id}/events`); this section still needs that summary copied in from those
-logs.
+Canary refusal results (real CLI 2.1.296, subscription login, model `claude-sonnet-5-5`, 2026-10-11).
+The canary was a fake file `/tmp/canary-outside.txt` created in the worker container and removed
+afterwards; no real secrets were involved.
+
+- **Run 547964** - tools `Edit(out/**)` + `Write(out/**)`; no Read tool present.
+  - write `.claude/settings.json`: denied;
+  - write `/tmp/escape.txt`: denied (file absent, checked in the container);
+  - write `out/ok.md`: succeeded (2 bytes).
+- **Run 547965** - tools `Read(inputs/**)`, `Glob(inputs/**)`, `Grep(inputs/**)`, `Edit(out/**)`.
+  - read `/tmp/canary-outside.txt`: denied;
+  - list the workspace parent: denied;
+  - writes: impossible (`Write` not in `--tools`).
+- The canary text appeared 0 times in the events and the result of both runs.
+- Both runs completed with `billing_mode=subscription`, `cost_usd=null`.
+
+The per-probe outcomes of the other runs in this round are in their event logs
+(`GET /v1/agent/runs/{id}/events`).
 
 ### Billing attestation (per run)
 

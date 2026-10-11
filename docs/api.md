@@ -116,6 +116,24 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `GET` | `/v1/models` | — | `{object:"list", data:[model…]}` — every model a caller can pin (see "Pinning a model") |
 
+### Agent run billing attestation (`GET /v1/agent/runs/{id}`)
+
+The response (also the cancel response) carries five per-run billing fields, read from the run's
+latest `billing.attested` event (type `billing.attested`, schema_version 1, written after the
+billing guard passes and before the CLI starts; see [agent-runs.md](agent-runs.md)):
+
+| Field | Type | Semantics |
+|---|---|---|
+| `auth_method` | `string \| null` | `claude auth status` method of this run (e.g. `claude.ai`); `null` if the guard did not pass |
+| `api_provider` | `string \| null` | `claude auth status` provider of this run (e.g. `firstParty`); `null` if the guard did not pass |
+| `paid_continuation_verified_off` | `boolean \| null` | worker setting at run start; `null` if the guard did not pass |
+| `fallback` | `string \| null` | always `none` when present (API fallback is refused); `null` if the guard did not pass |
+| `project_daily_cap_usd` | `number \| null` | project's `daily_cost_cap_usd` at run start; `null` = no cap, or the guard did not pass |
+
+All five are `null` for a run that never reached the attestation (for example a refused run:
+`run.failed billing_mode_refused`, with no `billing.attested` event). The event carries no
+email or token.
+
 ### Chat is async-only (2026-07-10)
 
 **Sync `POST /v1/chat` was removed — it returns `410 Gone`.** Do all chat via
