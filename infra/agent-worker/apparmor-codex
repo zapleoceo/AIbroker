@@ -68,6 +68,7 @@ profile "aibroker-codex" flags=(attach_disconnected,mediate_deleted) {
   # BEGIN aibroker-codex additions (replaces docker-default's `deny mount,`)
   # propagation changes on / (bwrap: make / a slave, then private)
   mount options=(rw, rslave) -> /,
+  mount options=(rw, silent, rslave) -> /,
   mount options=(rw, rprivate) -> /,
   # new root and runtime mounts bwrap builds
   mount fstype=tmpfs,

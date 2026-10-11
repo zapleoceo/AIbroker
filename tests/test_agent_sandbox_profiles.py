@@ -153,7 +153,8 @@ def test_apparmor_keeps_every_docker_default_deny_and_adds_no_blanket_rule():
 def test_apparmor_additions_are_the_expected_bwrap_set():
     prof = (INFRA / "apparmor-codex").read_text(encoding="utf-8")
     block = prof.split("# BEGIN aibroker-codex additions", 1)[1].split("# END aibroker-codex additions", 1)[0]
-    for rule in ("mount options=(rw, rslave) -> /,", "mount options=(rw, rprivate) -> /,", "pivot_root,",
+    for rule in ("mount options=(rw, rslave) -> /,", "mount options=(rw, silent, rslave) -> /,",
+                 "mount options=(rw, rprivate) -> /,", "pivot_root,",
                  "mount fstype=tmpfs,", "mount fstype=proc -> /**,"):
         assert rule in block, rule
     assert "apparmor_parser -r" in prof and "UNVERIFIED" in prof
