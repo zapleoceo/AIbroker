@@ -100,6 +100,7 @@ class ChatRequest(BaseModel):
     workflow: str | None = None
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
     tool_choice: str | dict[str, Any] | None = None
+    stream: bool | None = None
 
     @model_validator(mode="after")
     def valid_tools(self) -> ChatRequest:
@@ -552,6 +553,8 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if body.tools or body.tool_choice is not None:
             raise HTTPException(400, "unsupported_for_subscription_model: tools")
+        if body.stream:
+            raise HTTPException(400, "unsupported_for_subscription_model: stream")
         if any(m.tool_calls or m.tool_call_id or m.role not in ("system", "user", "assistant")
                or not isinstance(m.content, str) for m in body.messages):
             raise HTTPException(400, "unsupported_for_subscription_model: tool history or image input")

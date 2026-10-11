@@ -80,6 +80,25 @@ async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enq
     create.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_codex_disabled_and_streaming_rejected_before_enqueue(monkeypatch):
+    create = AsyncMock()
+    monkeypatch.setattr(proxy, "create_run", create)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    codex = proxy.ChatRequest(messages=[proxy.ChatMessage(role="user", content="hi")],
+                              model="codex-sub/gpt-6.1-sol")
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(codex, Response(), capability="chat:fast", ctx=_ctx())
+    assert exc.value.status_code == 503
+    claude = proxy.ChatRequest(messages=[proxy.ChatMessage(role="user", content="hi")],
+                               model="claude-sub/claude-sonnet-5-5", stream=True)
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(claude, Response(), capability="chat:fast", ctx=_ctx())
+    assert exc.value.status_code == 400
+    create.assert_not_awaited()
+
+
 def test_subscription_json_is_checked_without_model_fallback():
     fmt = {"type": "json_schema", "json_schema": {"schema": {
         "type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}}}
