@@ -36,6 +36,7 @@ from aibroker.agent.adapter import (
     ModelInfo,
     StreamEvent,
 )
+from aibroker.agent.events import FileRef
 from aibroker.agent.parsers import ClaudeParser, parse_claude_auth_details, parse_claude_auth_status
 from aibroker.agent.registry import register_adapter
 from aibroker.agent.settings_guard import settings_problem
@@ -139,6 +140,9 @@ class SubprocessCLI:
     def attestation(self) -> AuthAttestation | None:
         """Method/provider of the last successful subscription probe (None otherwise)."""
         return self._auth
+
+    def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
+        return []
 
     async def list_models(self) -> list[ModelInfo] | None:
         return None   # catalog from the CLI itself is later work

@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 
 from aibroker.agent.events import (
     FileChanged,
+    FileRef,
     MessageDelta,
     RunCompleted,
     RunFailed,
@@ -60,6 +61,11 @@ class AgentCLI(Protocol):
     def attestation(self) -> AuthAttestation | None:
         """Auth method / provider of the probe `billing_mode()` just ran; None = no probe result
         (the executor then refuses the run - never a success with "unknown")."""
+        ...
+
+    def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
+        """After a run, the WORKER (not the model) collects artifacts the CLI produced outside the
+        workspace (Codex: generated images) -> ready file refs. No artifacts = []."""
         ...
 
     async def list_models(self) -> list[ModelInfo] | None:

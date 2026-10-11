@@ -558,6 +558,64 @@ stored data; exit 2 means the run did not complete (e.g. `sandbox_unavailable`: 
 read). It never touches the real `auth.json`, the real claude-state or any real `/proc/*/environ`, not
 even expecting a refusal.
 
+## Codex sandbox profiles (seccomp + AppArmor) - static, NOT loaded or run
+
+Diagnosed on the target host: under Docker's default seccomp profile the Codex sandbox (bubblewrap,
+which needs user + mount namespaces) fails with "Operation not permitted"; with the seccomp addition
+below user namespaces work, but bwrap then fails with "Failed to make / slave" under docker-default
+AppArmor (its blanket `deny mount,`). Both profiles are repo files only; nothing was applied on the
+server and no container was started with them.
+
+**Seccomp: `infra/agent-worker/codex-seccomp.json`** = Docker's default profile
+(`moby-seccomp-default.json`, verbatim copy of moby/profiles main `seccomp/default.json`, last commit
+`6fe7deb1b9fb7c0397a4593480d7d22b9ee8caef`, 2026-09-17, "seccomp: Disable AF_AX25 socket domain") PLUS two
+appended `SCMP_ACT_ALLOW` entries, and nothing else changed (a test pins this):
+1. `unshare` - only when `(flags & 0x81FDFFFF) == 0`, i.e. the flags are a subset of the namespace
+   flags (NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET, moby's own mask 0x7E020000).
+   `CLONE_NEWTIME` and every non-namespace flag stay refused (32-bit mask, so register garbage in the
+   upper half is ignored).
+2. `clone`, `setns`, `mount`, `umount2`, `pivot_root` - unconditional. `clone` cannot be narrowed: the
+   default rule already allows every non-namespace `clone`, so adding the namespace flags makes it
+   unconditional. Without CAP_SYS_ADMIN (`cap_drop: ALL`) these act only inside a user namespace the
+   process created itself.
+**Widened:** user/mount/pid/net namespace creation and in-namespace mount/pivot_root for the Codex
+container only. **Not widened:** `clone3` (kept ENOSYS so libc falls back to `clone`; its flags live in a
+struct seccomp cannot inspect - a deliberate deviation from the first request), `bpf`, `ptrace`, `keyctl`,
+module loading, `perf_event_open`, ...
+
+**AppArmor: `infra/agent-worker/apparmor-codex`** (profile `aibroker-codex`) = docker-default rendered from
+moby/profiles main `apparmor/template.go` @ `a21872828a8e5745d79e2fc1a07ee6dad8aedffa` (2026-09-29;
+rendered baseline `apparmor-docker-default.rendered`) with exactly ONE block replacing `deny mount,`:
+`mount` rules making `/` a slave/private mount and building the new root (tmpfs, proc, bind/rbind and
+read-only remounts) and `pivot_root`. Everything else - the `/proc` write denies, `/sys` denies, sysrq,
+kcore, network family denies, signals, ptrace - is unchanged (a test compares the two files). The rule
+set is written statically from bwrap's known mount sequence and is UNVERIFIED: the first supervised
+attempt may reveal one more denial (audit log / dmesg); add only that rule.
+Operator, not executed by any code here: `sudo apparmor_parser -r -W infra/agent-worker/apparmor-codex`,
+check `sudo aa-status | grep aibroker-codex`; unload with `sudo apparmor_parser -R ...`.
+
+**Compose.** Only `agent-worker-codex` has
+`security_opt: [no-new-privileges:true, seccomp=./infra/agent-worker/codex-seccomp.json, apparmor=aibroker-codex]`
+(whether compose resolves the `seccomp=` path relative to the project directory is unverified on the
+installed compose version); `cap_drop: ALL`, `read_only`, no privileged, no docker.sock, network
+`agent_db` only are kept, and `agent-worker` (Claude) is unchanged. ROLLBACK: remove the `seccomp=` and
+`apparmor=` entries and `docker compose --profile agent up -d agent-worker-codex` - the Codex sandbox then
+fails closed again (`sandbox_unavailable`); unload the AppArmor profile if desired.
+
+## Codex generated images (worker-side export)
+
+After a Codex run the WORKER process - not the model, not the sandbox - copies new PNGs from the fixed
+`$CODEX_HOME/generated_images` into the run's `out/` (`export_generated_pngs`, called through
+`export_artifacts`). `CODEX_HOME` is never given to the model (the sandbox profile denies it and the
+prompt never names it). Accepted files: regular files only (no symlinked file, directory or source
+directory; depth <= 3; no traversal out of the directory), created or modified during THIS run, at most
+`AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
+de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
+`width`, `height` and the content, subject to the usual TTL. A failing export never fails the run.
+**Readiness criterion:** a real decodable PNG (dimensions + sha256 in the run result) that the critic
+receives as an actual image - not a description. Headless `$imagegen` support stays unverified until a
+supervised run produces such a file.
+
 ## Not done yet
 
 Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),

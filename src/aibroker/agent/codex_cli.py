@@ -29,6 +29,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 
 from aibroker.agent.adapter import AgentRunSpec, AuthAttestation, BillingMode
+from aibroker.agent.events import FileRef
+from aibroker.agent.images import export_generated_pngs
 from aibroker.agent.parsers import CodexParser, parse_codex_login_status, sandbox_failure
 from aibroker.agent.real_cli import Probe, SubprocessCLI
 
@@ -133,6 +135,9 @@ class CodexCLI(SubprocessCLI):
                  sandbox_probe: SandboxProbe | None = None) -> None:
         super().__init__(binary, probe, kill_grace_s, env)
         self._sandbox_probe = sandbox_probe or _run_sandbox_probe
+        self.image_max_bytes = 2 * 1024 * 1024        # set by the executor from ExecConfig
+        self.image_max_count = 4
+        self.image_ttl_s = 3600
 
     def make_env(self, source: Mapping[str, str] | None) -> dict[str, str]:
         return codex_env(source)
@@ -152,6 +157,13 @@ class CodexCLI(SubprocessCLI):
         if (Path(run.workspace) / ".codex").exists():       # project-level config layer
             return "settings_refused", "the run workspace carries a .codex directory"
         return None
+
+    def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
+        """Generated images: copied by THIS (worker) process from the fixed
+        $CODEX_HOME/generated_images into the run's out/ - the model never sees CODEX_HOME."""
+        return export_generated_pngs(
+            self._env.get("CODEX_HOME"), run.workspace, since, max_bytes=self.image_max_bytes,
+            max_count=self.image_max_count, ttl_s=self.image_ttl_s)
 
     def process_env(self, run: AgentRunSpec) -> dict[str, str]:
         """HOME is a fresh EMPTY directory inside the run workspace - never the Claude state dir and
