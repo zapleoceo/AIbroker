@@ -23,6 +23,7 @@ from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.agent.runs import append_event, cancel_run, create_run, get_run, list_events
 from aibroker.agent.workspace import collect_files, create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 
@@ -30,7 +31,8 @@ _PID = [9000]
 
 
 @pytest.fixture(autouse=True)
-def _adapters():
+def _adapters(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     clear_adapters()
     yield
     clear_adapters()
@@ -41,7 +43,8 @@ def cfg(tmp_path):
     return ExecConfig(workspace_root=str(tmp_path / "ws"), cancel_poll_s=0.05,
                       cancel_grace_s=1.0, file_max_bytes=100, files_total_bytes=150,
                       files_max_count=3, files_ttl_s=3600, env={},
-                      paid_continuation_verified_off=True)
+                      paid_continuation_verified_off=True,
+                      codex_paid_continuation_verified_off=True)
 
 
 async def _project() -> int:
@@ -372,7 +375,10 @@ async def test_session_lock_holder_blocks_second_run_end_to_end(cfg):
     gate = FakeAgentCLI([("hang",)])
     _use(gate)
     t1 = asyncio.create_task(execute_run(r1, cfg))
-    await asyncio.sleep(0.2)
+    async def first_started():
+        while gate.started is None:
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(first_started(), 5)
     r2 = await _run(pid, session_id="SE", task="T3")
     assert await execute_run(r2, cfg) is None          # blocked while r1 holds the session
     await gate.cancel()
@@ -383,7 +389,8 @@ async def test_session_lock_holder_blocks_second_run_end_to_end(cfg):
 
 
 def _settings(**over):
-    base = {"AGENT_CONCURRENCY_CODEX": 1, "AGENT_CONCURRENCY_CLAUDE": 1}
+    base = {"AGENT_CONCURRENCY_CODEX": 1, "AGENT_CONCURRENCY_CLAUDE": 1,
+            "AGENT_WORKER_CAPABILITIES": "agent:claude,agent:codex"}
     base.update(over)
     return SimpleNamespace(**base)
 

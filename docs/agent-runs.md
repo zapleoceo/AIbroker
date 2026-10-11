@@ -446,6 +446,186 @@ What is guaranteed, and what is not.
   `CLAUDE_CONFIG_DIR` is set and the marker `/etc/aibroker-agent-worker` (written by the
   Dockerfile, `WORKER_MARKER`) exists.
 
+## Codex adapter (`agent:codex`)
+
+`aibroker.agent.codex_cli.CodexCLI` runs the official `codex exec --json` (pinned `@openai/codex@0.162.1`,
+installed with its optional native-binary dependency) next to `ClaudeCLI`; both build on
+`SubprocessCLI` in `real_cli.py` (own process group, group kill on cancel, minimal environment).
+Argv (`build_codex_argv`, prompt on stdin via `-`, cwd = the run workspace):
+`codex exec [resume <thread id>] [--image=<file>...] --json [--model=<id>] -c sandbox_mode="workspace-write"
+-c approval_policy="never" -c forced_login_method="chatgpt" -c cli_auth_credentials_store="file"
+--skip-git-repo-check --ignore-user-config --ignore-rules -`. Verified against the 0.162.1 help text:
+there is **no `-a` flag on `codex exec`** (so the approval policy is a constant `-c` override) and
+`resume` has no `--sandbox`/`-C` (so the sandbox is a `-c` override for fresh and resumed runs alike).
+Never `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`, a wider sandbox or a
+`network_access` override (network stays off); `--ignore-user-config` means `CODEX_HOME/config.toml` is
+not read at all (auth still uses `CODEX_HOME`), so the forced login method travels as `-c`.
+Resume uses ONLY the exact thread id from `thread.started` and it must be a UUID (the CLI would also
+resolve a thread *name*); never `--last`. The sandbox, resume-with-overrides and sandbox-inside-a-
+locked-down-container behaviour are unverified until the first supervised run (if the sandbox cannot
+start, the run fails; nothing bypasses it).
+
+- **No per-tool allow-list.** `allowed_tools` must be empty for `agent:codex` (422 at submit, `ValueError`
+  in the argv builder): Codex is confined by the workspace-write sandbox and the workspace as cwd.
+  Image attachments become `--image=<file>` flags plus a path listing in the prompt (`build_codex_prompt`; headless `$imagegen`
+  is unverified).
+- **Environment** (`codex_env`): `PATH, HOME, CODEX_HOME, LANG, TMPDIR` only. The billing guard refuses a
+  run if `OPENAI_*`, `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` exist in the worker environment
+  (`CODEX_HOME` is legitimate).
+- **Billing probe.** `CodexCLI.billing_mode` reports a subscription only if BOTH `codex login -c ... status`
+  states a ChatGPT login (`parse_codex_login_status`; wording unverified, anything else is "unknown")
+  AND `$CODEX_HOME/auth.json` says `auth_mode == "chatgpt"`. The auth file is read for that ONE key
+  (`read_auth_mode`); tokens are never read into a variable, returned or logged. Otherwise the run is
+  refused (`billing_mode_refused`). Attestation: `auth_method="chatgpt"`,
+  `api_provider="openai-chatgpt-subscription"`, plus the same five `billing.attested` fields.
+- **Events** (`CodexParser`, doc-derived, UNVERIFIED against a real run): `thread.started` ->
+  `session.assigned`; `agent_message` -> `message.delta`/final text; `command_execution`,
+  `mcp_tool_call` -> `tool.call`/`tool.result`; `file_change` -> `file.changed`; `turn.completed.usage`
+  -> `usage` (incl. `reasoning_tokens`); `turn.failed`/`error` -> `run.failed`, with usage-limit wording
+  mapped to `quota_exhausted` (format undocumented), anything else `cli_error`. A quota failure waits
+  and retries on the same thread, exactly like Claude.
+- **Auth state** lives in the named volume `agent_codex_auth` (`CODEX_HOME=/home/app/codex-state`; Codex
+  refreshes `auth.json`, so it stays writable). Rollback is stopping the worker, not deleting the volume.
+
+Owner login handoff for Codex (once, interactive, after the Claude steps): enable **device code
+authorization** in the ChatGPT security settings first, then
+`docker compose --profile agent run --rm agent-worker-codex codex login --device-auth -c cli_auth_credentials_store="file" -c forced_login_method="chatgpt"`
+(the `-c` overrides force the file store; plain `codex login --device-auth` is the same command), follow
+the device-code flow, then check with
+`docker compose --profile agent run --rm agent-worker-codex codex login -c cli_auth_credentials_store="file" status`
+(expect a ChatGPT login; `Not logged in` before the login). Whether paid "extra usage" can continue a
+ChatGPT-plan run requires a separate owner check. Codex uses
+`AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF` (default false), never Claude's
+`AGENT_PAID_CONTINUATION_VERIFIED_OFF`.
+
+## Codex: container split, read isolation, redaction (independent review fixes)
+
+**One container per CLI.** Per-run containers would need `docker.sock`, which is forbidden. Instead
+compose has two identically hardened services (profile `agent`; non-root, `read_only`, `cap_drop: ALL`,
+`no-new-privileges`, tmpfs workspaces, network `agent_db` only, 1 CPU / 1 GB / 256 pids, `init`):
+`agent-worker` (`AGENT_WORKER_CAPABILITIES=agent:claude`, mounts ONLY `agent_claude_auth`) and
+`agent-worker-codex` (`AGENT_WORKER_CAPABILITIES=agent:codex`, mounts ONLY `agent_codex_auth`, `HOME`
+is a tmpfs path, `CLAUDE_CONFIG_DIR` blanked). A worker claims only the capabilities it is configured
+for (`worker_capabilities`), registers only those adapters (`register_real_adapters`), checks only its
+own home variable (`worker_image_problem`) and refuses to start with an empty list. The Codex CLI also
+gets a per-run EMPTY `HOME` inside the run workspace (`.agent-home`), never the Claude state dir and
+never `CODEX_HOME`; only `CODEX_HOME` leads to the login. Static tests pin the volumes and `HOME`.
+
+**Does Codex 0.162.1 have READ isolation? Yes, through permission profiles - enforcement is not
+verified here.** Sources: the official page `learn.chatgpt.com/codex/permissions` (the
+`agent-approvals-security` page documents bwrap + seccomp and profiles but no read rules; `/docs/config`
+returned 404) and the pinned binary (`codex sandbox --help`, config strings, `-c` parse probes, all
+offline in a throwaway container):
+- Profiles: `default_permissions = "<name>"` and `[permissions.<name>]` (`extends = ":workspace"` ...),
+  filesystem rules `[permissions.<name>.filesystem]` mapping a path to `read`, `write` or `deny`
+  (`deny` blocks reads AND writes; the most specific path wins; globs only for `deny`; path forms
+  `:root`, `:minimal`, `:workspace_roots`, absolute, `~/`). `codex sandbox -P <profile> <cmd>` exists.
+  A separate `deny_read` exists only at the managed `requirements.toml` level.
+- What we apply (`permission_overrides`, passed as `-c` inline tables because `-c` does not unquote
+  dotted keys, and a `/proc/*/environ` glob makes Codex scan `/proc` and fail): profile `broker`
+  extending `:workspace` that DENIES `CODEX_HOME` (the ChatGPT `auth.json`) and `/proc` (other
+  processes' environ) to every command the model runs, next to `sandbox_mode="workspace-write"`. The
+  CLI itself still reads its own auth: the sandbox wraps only the model's commands.
+- NOT available: a separate uid for the auth files (same uid as the worker; the CLI reads auth
+  outside the sandbox). Redaction is only a second net.
+- Verified on the image: the profile syntax is accepted (an unknown access value is rejected, an
+  undefined profile is rejected). NOT verified: that the deny rules are actually enforced - the
+  sandbox cannot start in this container (`bwrap: No permissions to create a new namespace` - the
+  kernel/Docker default forbids **unprivileged user namespaces**).
+
+**Sandbox start check (fail closed).** Before EVERY Codex run `CodexCLI.preflight_async` runs
+`codex sandbox -P broker -c ... true` (a documented command in 0.162.1: it executes `true` under the
+Linux sandbox WITH the read-deny profile). A non-zero exit, a bwrap/landlock/seccomp/namespace message,
+a timeout or a missing binary ends the run with `run.failed error_class=sandbox_unavailable` before any
+process starts; the same classification applies to such wording in events (`sandbox_failure`,
+`CodexParser`) and stderr. It is final: no retry, no requeue, never without the sandbox. On this host
+every Codex run will therefore be refused until the owner decides how to allow unprivileged user
+namespaces for that one container (a seccomp profile / sysctl change - security-sensitive, not done).
+
+**Redaction.** Everything an agent run persists passes `redact` / `redact_obj` / `redact_bytes`
+(`aibroker.agent.redact`) first: event payloads, `final_text`, the job error text and returned file
+content (UTF-8 text files; binary untouched). Masked with `[REDACTED]`: JWT-like strings
+(`eyJ..<dot>..<dot>..`), `refresh_token` / `access_token` / `id_token` values (JSON or `key=value`),
+`sk-...` keys and `sess-...` tokens. Pattern based and best effort: defence in depth, not the control.
+
+**Codex acceptance run (canaries only).** `scripts/agent_codex_acceptance.sh` is for a SEPARATE test
+stack with no real login. The harness places a throwaway `CODEX_HOME` with a FAKE `auth.json`
+(`auth_mode: "chatgpt"`, `CANARY-...` tokens), a FAKE claude-state canary file and a fake parent process
+holding a canary environment variable. The script only builds the request JSON and checks the
+response: the task runs `cat <canary> >/dev/null` for each item and prints `<label>:READABLE` or
+`<label>:DENIED` - no content is requested, stored or printed, the script prints only per-item verdicts
+(never a body, header or the project key) and refuses any path that does not contain `canary` or points
+at a real state directory or pid 1. Pass = every item DENIED and no `CANARY-` value anywhere in the
+stored data; exit 2 means the run did not complete (e.g. `sandbox_unavailable`: fail closed, nothing was
+read). It never touches the real `auth.json`, the real claude-state or any real `/proc/*/environ`, not
+even expecting a refusal.
+
+## Codex sandbox profiles (seccomp + AppArmor) - static, NOT loaded or run
+
+Diagnosed on the target host: under Docker's default seccomp profile the Codex sandbox (bubblewrap,
+which needs user + mount namespaces) fails with "Operation not permitted"; with the seccomp addition
+below user namespaces work, but bwrap then fails with "Failed to make / slave" under docker-default
+AppArmor (its blanket `deny mount,`). Both profiles are repo files only; nothing was applied on the
+server and no container was started with them.
+
+**Seccomp: `infra/agent-worker/codex-seccomp.json`** = Docker's default profile
+(`moby-seccomp-default.json`, verbatim copy of moby/profiles main `seccomp/default.json`, last commit
+`6fe7deb1b9fb7c0397a4593480d7d22b9ee8caef`, 2026-09-17, "seccomp: Disable AF_AX25 socket domain") PLUS two
+appended `SCMP_ACT_ALLOW` entries, and nothing else changed (a test pins this):
+1. `unshare` - only when `(flags & 0x81FDFFFF) == 0`, i.e. the flags are a subset of the namespace
+   flags (NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET, moby's own mask 0x7E020000).
+   `CLONE_NEWTIME` and every non-namespace flag stay refused (32-bit mask, so register garbage in the
+   upper half is ignored).
+2. `clone`, `setns`, `mount`, `umount2`, `pivot_root` - unconditional. `clone` cannot be narrowed: the
+   default rule already allows every non-namespace `clone`, so adding the namespace flags makes it
+   unconditional. Without CAP_SYS_ADMIN (`cap_drop: ALL`) these act only inside a user namespace the
+   process created itself.
+**Widened:** user/mount/pid/net namespace creation and in-namespace mount/pivot_root for the Codex
+container only. **Not widened:** `clone3` (kept ENOSYS so libc falls back to `clone`; its flags live in a
+struct seccomp cannot inspect - a deliberate deviation from the first request), `bpf`, `ptrace`, `keyctl`,
+module loading, `perf_event_open`, ...
+
+**AppArmor: `infra/agent-worker/apparmor-codex`** (profile `aibroker-codex`) = docker-default rendered from
+moby/profiles main `apparmor/template.go` @ `a21872828a8e5745d79e2fc1a07ee6dad8aedffa` (2026-09-29;
+rendered baseline `apparmor-docker-default.rendered`) with exactly ONE block replacing `deny mount,`:
+`mount` rules making `/` a slave/private mount and building the new root (tmpfs, proc, bind/rbind and
+read-only remounts) and `pivot_root`. Everything else - the `/proc` write denies, `/sys` denies, sysrq,
+kcore, network family denies, signals, ptrace - is unchanged (a test compares the two files). The rule
+set is written statically from bwrap's known mount sequence and is UNVERIFIED: the first supervised
+attempt may reveal one more denial (audit log / dmesg); add only that rule.
+Operator, not executed by any code here: `sudo apparmor_parser -r -W infra/agent-worker/apparmor-codex`,
+check `sudo aa-status | grep aibroker-codex`; unload with `sudo apparmor_parser -R ...`.
+
+**Compose.** Only `agent-worker-codex` has
+`security_opt: [no-new-privileges:true, seccomp=./infra/agent-worker/codex-seccomp.json, apparmor=aibroker-codex]`
+(whether compose resolves the `seccomp=` path relative to the project directory is unverified on the
+installed compose version); `cap_drop: ALL`, `read_only`, no privileged, no docker.sock, network
+`agent_db` only are kept, and `agent-worker` (Claude) is unchanged. ROLLBACK: remove the `seccomp=` and
+`apparmor=` entries and `docker compose --profile agent up -d agent-worker-codex` - the Codex sandbox then
+fails closed again (`sandbox_unavailable`); unload the AppArmor profile if desired.
+
+## Codex generated images (worker-side export)
+
+After a fresh Codex thread, the WORKER process copies PNGs only from
+`$CODEX_HOME/generated_images/<thread UUID>` into the run's `out/` (`export_generated_pngs`, called through
+`export_artifacts`). `CODEX_HOME` is never given to the model (the sandbox profile denies it and the
+prompt never names it). The thread UUID must come from this CLI process's single `thread.started` event;
+duplicate or conflicting thread identities disable PNG export;
+the pinned Codex 0.162.1 image extension writes `generated_images/<thread UUID>/<call ID>.png`.
+Resumed threads export no PNG because a stale CLI can still write into their shared thread directory
+after a lease takeover. An already populated directory for a claimed new thread also exports nothing.
+Accepted files: regular files only (no symlinked file, directory or source directory; depth <= 3;
+no traversal out of the directory), with a new path since this run's pre-start snapshot. A shared-home
+DB lease still serializes normal Codex runs across workers. Each image is at most
+`AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
+de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
+`width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
+metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though
+the API hides them after the 1-hour file TTL. A failing export never fails the run.
+**Readiness criterion:** a real decodable PNG (dimensions + sha256 in the run result) that the critic
+receives as an actual image - not a description. Headless `$imagegen` support stays unverified until a
+supervised run produces such a file.
+
 ## Not done yet
 
 Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),

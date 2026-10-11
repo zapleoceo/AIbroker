@@ -21,7 +21,7 @@ from typing import Any, Literal
 from aibroker.providers.adapters import ProviderAdapter
 
 JsonReliability = Literal["reliable", "unreliable", "incapable"]
-Pricing = Literal["litellm", "override", "per_minute", "free", "local"]
+Pricing = Literal["litellm", "override", "per_minute", "free", "local", "subscription"]
 AuthStyle = Literal["bearer", "anthropic", "gemini", "gemini_key"]
 
 DEFAULT_COOLDOWN_S = 300

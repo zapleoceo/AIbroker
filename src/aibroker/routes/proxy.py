@@ -15,10 +15,20 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
+from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.policy import AgentPolicyViolation, policy_violation
+from aibroker.agent.runs import RunRejected, create_run
+from aibroker.agent.subscription_job import live_files, prompt_for_messages, response_format_problem
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.config import get_settings
 from aibroker.providers import catalog
 from aibroker.providers.catalog import UnknownModel
 from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
+from aibroker.providers.subscriptions import (
+    PROVIDERS,
+    subscription_model,
+    subscription_model_verified,
+)
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
     DecisionFailed,
@@ -94,11 +104,13 @@ class ChatRequest(BaseModel):
     workflow: str | None = None
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
     tool_choice: str | dict[str, Any] | None = None
+    stream: bool | None = None
 
     @model_validator(mode="after")
     def valid_tools(self) -> ChatRequest:
         if self.tools:
-            tool_model_provider(self.model)
+            if subscription_model(self.model) is None:
+                tool_model_provider(self.model)
             if self.response_format:
                 raise ValueError("tools and response_format are mutually exclusive")
             validate_choice([tool.model_dump(exclude_none=True) for tool in self.tools],
@@ -399,6 +411,7 @@ class DeepJobResponse(BaseModel):
     tokens_out: int | None = None
     cache_read_tokens: int | None = None
     cost_usd: float | None = None
+    billing_type: str | None = None
     latency_ms: int | None = None
     key_label: str | None = None
     request_id: int | None = None
@@ -406,6 +419,7 @@ class DeepJobResponse(BaseModel):
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
     refusal: str | None = None
+    files: list[dict[str, Any]] | None = None
     # Vision only, and only when the self-hosted `local` provider answered:
     # what the image was, and what shape `text` is in. Additive on purpose —
     # `text` stays prose for every provider, so a client that only reads `text`
@@ -472,11 +486,13 @@ def _job_response(row: Any) -> DeepJobResponse:
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         cache_read_tokens=meta.get("cache_read_tokens"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
+        billing_type=meta.get("billing_type"),
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),
         vision_type=meta.get("vision_type"),
         vision_format=meta.get("vision_format"),
         tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
         refusal=meta.get("refusal"),
+        files=live_files(meta.get("files")),
     )
 
 
@@ -526,6 +542,52 @@ async def jobs_submit(
             f"{sorted(_JOB_CAPABILITIES)}",
         )
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    subscription = subscription_model(body.model)
+    if subscription is not None:
+        _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
+        if not ctx.has_scope(AGENT_SCOPE):
+            raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
+        if not project_allowed(ctx.project.id):
+            raise AgentProjectNotAllowed(ctx.project.id)
+        if subscription.provider == "codex-sub" and not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
+            raise HTTPException(503, "codex subscription route is not enabled")
+        if not subscription_model_verified(subscription.id):
+            raise HTTPException(503, "subscription model availability is not verified")
+        cli_model = subscription.id.split("/", 1)[1]
+        violation = policy_violation(ctx.project.id, cli_model, "owner")
+        if violation:
+            raise AgentPolicyViolation(violation)
+        if body.tools or body.tool_choice is not None:
+            raise HTTPException(400, "unsupported_for_subscription_model: tools")
+        if body.stream:
+            raise HTTPException(400, "unsupported_for_subscription_model: stream")
+        if any(m.tool_calls or m.tool_call_id or m.role not in ("system", "user", "assistant")
+               or not isinstance(m.content, str) for m in body.messages):
+            raise HTTPException(400, "unsupported_for_subscription_model: tool history or image input")
+        if capability == "vision":
+            raise HTTPException(400, "unsupported_for_subscription_model: vision")
+        if problem := response_format_problem(body.response_format):
+            raise HTTPException(400, problem)
+        if body.temperature != 0.7 or body.max_tokens != 1024:
+            raise HTTPException(400, "unsupported_for_subscription_model: temperature or max_tokens")
+        messages = [m.model_dump(exclude_unset=True) for m in body.messages]
+        prompt = prompt_for_messages(messages, body.response_format)
+        if len(prompt) > 200_000:
+            raise HTTPException(400, "subscription prompt exceeds 200000 characters")
+        await admit_request(ctx.project)
+        try:
+            job_id, _ = await create_run(
+                project=ctx.project, capability=PROVIDERS[subscription.provider], prompt=prompt,
+                task_id="jobs", account_id="owner", session_id=None, idempotency_key=None,
+                wall_timeout_s=1800, idle_timeout_s=300, allowed_tools=[], model=cli_model,
+                client_job={"capability": capability, "provider": subscription.provider,
+                            "model": subscription.id, "response_format": body.response_format,
+                            "workflow": body.workflow},
+            )
+        except RunRejected as exc:
+            raise HTTPException(400, str(exc)) from exc
+        response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+        return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2)
     _validate_pin(body.model, capability)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
     if capability == "vision" and (problem := inline_image_problem(messages)):
@@ -592,6 +654,15 @@ async def jobs_poll(
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
+    if row.capability.startswith("agent:"):
+        if not ctx.has_scope(AGENT_SCOPE):
+            raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
+        if not project_allowed(ctx.project.id):
+            raise AgentProjectNotAllowed(ctx.project.id)
+        violation = policy_violation(ctx.project.id, row.request.get("model"),
+                                     row.request.get("account_id", ""))
+        if violation:
+            raise AgentPolicyViolation(violation)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return _job_response(row)  # pragma: no cover
 

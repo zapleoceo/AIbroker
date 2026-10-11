@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aibroker.agent.events import FileRef
+from aibroker.agent.redact import redact_bytes
 
 
 def create_workspace(root: str, run_id: int) -> str:
@@ -67,6 +68,7 @@ def collect_files(workspace: str, paths: list[str], *, max_bytes: int, total_byt
         else:
             used += size
             delivered += 1
-            out.append(FileRef(path=rel, size=size, expires_at=expires,
-                               content_b64=base64.b64encode(real.read_bytes()).decode()))
+            content = redact_bytes(real.read_bytes())      # no token leaves in a returned file
+            out.append(FileRef(path=rel, size=len(content), expires_at=expires,
+                               content_b64=base64.b64encode(content).decode()))
     return out

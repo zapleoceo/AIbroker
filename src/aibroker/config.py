@@ -128,6 +128,9 @@ class Settings(BaseSettings):
     # refused; a manual run needs its own explicit per-run acknowledgement. We never change
     # account settings.
     AGENT_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # Separate owner confirmation for the Codex account. Claude's confirmation never
+    # authorizes an autonomous Codex run.
+    AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: bool = False
     # Server-side allowlist of project ids that may use agent runs (comma-separated ints). EMPTY =
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.
@@ -135,6 +138,17 @@ class Settings(BaseSettings):
     # Per-project agent policy, JSON: {"11": {"models": ["<exact id>"], "accounts": ["owner"]}}.
     # Fail-closed: no entry / empty lists -> 403 agent_policy_missing; malformed -> everyone refused.
     AGENT_PROJECT_POLICY: str = ""
+    # Which agent capabilities THIS worker process claims (comma-separated). Production runs one
+    # container per CLI (agent-worker: agent:claude, agent-worker-codex: agent:codex) so each CLI
+    # sees only its own auth volume; the default claims both (dev / single container).
+    AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
+    # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
+    # isolated worker profile is separately approved and deployed.
+    AGENT_SUBSCRIPTION_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}'
+    # Exact account-confirmed route ids. Candidate models remain visible but unavailable until
+    # confirmed; confirmation never overrides project policy or the Codex worker gate.
+    AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'
+    AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0
@@ -144,6 +158,8 @@ class Settings(BaseSettings):
     AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
     AGENT_FILES_TOTAL_BYTES: int = 1024 * 1024
     AGENT_FILES_MAX_COUNT: int = 20
+    AGENT_IMAGE_MAX_BYTES: int = 2 * 1024 * 1024   # per exported generated image
+    AGENT_IMAGES_MAX_COUNT: int = 4
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
 
     # Host

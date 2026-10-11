@@ -13,11 +13,17 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 
+from aibroker.config import get_settings
 from aibroker.providers.registry import (
     ModelSpec,
     all_models,
     model_spec,
     spec_or_default,
+)
+from aibroker.providers.subscriptions import (
+    subscription_model,
+    subscription_model_verified,
+    subscription_models,
 )
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
@@ -69,7 +75,7 @@ def _order(specs: list[ModelSpec]) -> list[ModelSpec]:
 
 def pinnable_models() -> list[ModelSpec]:
     """Every model a caller can pin: wired for at least one capability."""
-    return _order([m for m in all_models() if m.capabilities])
+    return _order([m for m in [*all_models(), *subscription_models()] if m.capabilities])
 
 
 def _suggest(model: str, pool: list[ModelSpec]) -> list[str]:
@@ -84,12 +90,12 @@ def resolve_pin(model: str, capability: str, chain: list[str]) -> list[PinTarget
     it cannot serve the lane. Raises UnknownModel (-> HTTP 400) with suggestions
     when nothing matches."""
     name = model.strip()
-    exact = model_spec(name)
+    exact = model_spec(name) or subscription_model(name)
     if exact is not None:
         matches = [exact]
     else:
         key = name.lower().removesuffix(":free")
-        matches = [m for m in all_models()
+        matches = [m for m in pinnable_models() if m.provider not in ("claude-sub", "codex-sub")
                    if canonical_name(m.id) == key
                    or m.id.split("/", 1)[-1].lower().removesuffix(":free") == key]
     if not matches:
@@ -137,10 +143,16 @@ def listing() -> list[dict[str, object]]:
             "id": m.id,
             "object": "model",
             "owned_by": m.provider,
+            "source": "broker",
+            "billing_type": ("subscription" if m.pricing == "subscription" else
+                             "local" if m.pricing == "local" else "api"),
             "name": canonical_name(m.id),
             "capabilities": sorted(m.capabilities),
             "also_served_by": also,
             "price": price_info(m),
+            **({"available": subscription_model_verified(m.id) and
+               (m.provider != "codex-sub" or get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED)}
+               if m.pricing == "subscription" else {}),
         })
     return rows
 

@@ -21,6 +21,8 @@ from aibroker.agent.events import (
     RunWaitingQuota,
 )
 from aibroker.agent.lock import Lease, check_fence
+from aibroker.agent.redact import redact, redact_obj
+from aibroker.agent.subscription_job import output_problem
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash
@@ -87,6 +89,7 @@ async def create_run(
     idle_timeout_s: int, allowed_tools: list[str], model: str | None = None,
     deadline_s: int = 21600, attachments: list[dict[str, Any]] | None = None,
     run_mode: str = "autonomous", accept_paid_continuation_risk: bool = False,
+    client_job: dict[str, Any] | None = None,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight)."""
@@ -96,6 +99,7 @@ async def create_run(
         "idle_timeout_s": idle_timeout_s, "allowed_tools": allowed_tools, "model": model,
         "deadline_s": deadline_s, "attachments": attachments or [],
         "run_mode": run_mode, "accept_paid_continuation_risk": accept_paid_continuation_risk,
+        "client_job": client_job,
     }
     phash = payload_hash(project.id, capability, request)
     if idempotency_key:
@@ -171,25 +175,49 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
             raise LookupError(f"agent run {run_id} not found")
         if run.outcome is not None:
             raise RunConflict(f"agent run {run_id} already finished ({run.outcome})")
+        job = await s.get(DeepJobRow, run_id)
+        client_job = (job.request or {}).get("client_job") if job is not None else None
+        if event.type == "run.completed" and client_job:
+            problem = output_problem(event.final_text, client_job.get("response_format"))
+            if problem:
+                from aibroker.agent.events import RunFailed
+                event = RunFailed(error_class="invalid_json", message=problem)
         run.last_seq += 1
         run.last_event_at = now
+        payload = event.model_dump(mode="json")
+        if event.type == "run.completed":
+            # Keep the event stream metadata-only. Full PNG bytes are returned
+            # through the job result, whose retention follows the job purge.
+            for file in payload.get("files", []):
+                file.pop("content_b64", None)
         s.add(AgentRunEventRow(
             run_id=run_id, seq=run.last_seq, ts=now, type=event.type,
-            payload=_clip(event.model_dump(mode="json")),
+            payload=_clip(redact_obj(payload)),
         ))
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
         if event.type in TERMINAL_TYPES:
             run.outcome = OUTCOME_BY_TYPE[event.type]
-            job = await s.get(DeepJobRow, run_id)
             if job is not None:
                 job.status = "done" if event.type == "run.completed" else "error"
                 job.completed_at = now
                 if event.type == "run.completed":
-                    job.result_text = event.final_text
+                    job.result_text = redact(event.final_text)
                     job.result_meta = {"files": [f.model_dump() for f in event.files]}
+                    if client_job:
+                        job.result_meta.update({
+                            "provider": client_job["provider"],
+                            "model": client_job["model"],
+                            "model_served": run.model,
+                            "tokens_in": run.usage_input_tokens,
+                            "tokens_out": run.usage_output_tokens,
+                            "cache_read_tokens": run.usage_cache_read_tokens,
+                            "cost_usd": None,
+                            "billing_type": run.billing_mode,
+                            "finish_reason": "stop",
+                        })
                 elif event.type == "run.failed":
-                    job.error_message = f"{event.error_class}: {event.message}"
+                    job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.error_message = event.type
             if isinstance(job.request, dict) and job.request.get("attachments"):

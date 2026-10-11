@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachments
+from aibroker.agent.codex_cli import UUID_RE
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.runs import (
@@ -21,6 +22,7 @@ from aibroker.agent.runs import (
 )
 from aibroker.agent.tools import tool_problem
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.config import get_settings
 from aibroker.services.request_cap import admit_request
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 
@@ -162,7 +164,14 @@ async def agent_run_submit(
     violation = policy_violation(ctx.project.id, body.model, body.account_id)
     if violation:
         raise AgentPolicyViolation(violation)
-    for tool in body.allowed_tools:
+    if body.capability == "agent:codex":
+        if not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
+            raise HTTPException(503, "codex subscription route is not enabled")
+        if body.allowed_tools:
+            raise HTTPException(422, "agent:codex is sandboxed to the workspace; allowed_tools must be empty")
+        if body.session_id and not UUID_RE.match(body.session_id):
+            raise HTTPException(422, "agent:codex resumes only an exact thread id (UUID)")
+    for tool in body.allowed_tools if body.capability == "agent:claude" else ():
         problem = tool_problem(tool)
         if problem:
             raise HTTPException(422, problem)
