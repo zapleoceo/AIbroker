@@ -277,3 +277,14 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
 def _waiting_payload(not_before: datetime, attempt: int, reset_reported: bool) -> dict[str, Any]:
     return RunWaitingQuota(not_before=not_before.replace(tzinfo=UTC).isoformat(),
                            attempt=attempt, reset_reported=reset_reported).model_dump(mode="json")
+
+
+async def get_attestation(run_id: int) -> dict[str, Any] | None:
+    """The latest `billing.attested` payload of a run (what the broker checked), or None when
+    the run never got past the billing guard."""
+    async with get_session() as s:
+        row = (await s.execute(
+            select(AgentRunEventRow).where(AgentRunEventRow.run_id == run_id,
+                                           AgentRunEventRow.type == "billing.attested")
+            .order_by(AgentRunEventRow.seq.desc()).limit(1))).scalar_one_or_none()
+    return dict(row.payload) if row else None

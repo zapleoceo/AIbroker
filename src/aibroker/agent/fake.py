@@ -5,7 +5,13 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from aibroker.agent.adapter import AgentRunSpec, BillingMode, ModelInfo, StreamEvent
+from aibroker.agent.adapter import (
+    AgentRunSpec,
+    AuthAttestation,
+    BillingMode,
+    ModelInfo,
+    StreamEvent,
+)
 
 
 class FakeAgentCLI:
@@ -18,12 +24,16 @@ class FakeAgentCLI:
         self.script = script
         self.models = models
         self.mode: BillingMode = mode
+        self.auth: AuthAttestation | None = AuthAttestation("claude.ai", "firstParty")
         self.cancel_calls = 0
         self.started: AgentRunSpec | None = None
         self._cancelled = asyncio.Event()
 
     async def billing_mode(self) -> BillingMode:
         return self.mode
+
+    def attestation(self) -> AuthAttestation | None:
+        return self.auth if self.mode == "subscription" else None
 
     async def list_models(self) -> list[ModelInfo] | None:
         return self.models

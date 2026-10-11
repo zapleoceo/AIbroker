@@ -296,6 +296,41 @@ The run's real login is a separate step and is not part of this probe.
 - afterwards: `settings_problem` passes for a clean config dir and refuses the canary
   `settings.json`, and the canary files are unchanged.
 
+### Verified on the real CLI (2026-10-11)
+
+Runs 547957, 547962, 547964 and 547965 ran against the real pinned CLI. Finding that changes how
+callers must request tools: **creating a file needs BOTH `Write(scope)` (so the `Write` tool is
+present in `--tools`) and `Edit(scope)`** with the same relative scope - the CLI applies its Edit
+rules to writes, so `Write(scope)` alone is refused. Request `["Write(out/**)", "Edit(out/**)"]`
+for a task that creates files under `out/`.
+
+Canary refusal results: the per-probe outcomes of these four runs (which of the canary reads and
+writes listed above were refused, which allowed cases worked) are recorded in their event logs
+(`GET /v1/agent/runs/{id}/events`); this section still needs that summary copied in from those
+logs.
+
+### Billing attestation (per run)
+
+After the billing guard passes - and before the CLI starts - the executor stores a typed
+`billing.attested` event (`BillingAttested`, schema_version 1) and `GET /v1/agent/runs/{id}`
+(also the cancel response) derives these exact fields from the run's latest such event:
+
+| field | source |
+|---|---|
+| `auth_method` | the `claude auth status` probe of THIS run (e.g. `claude.ai`) |
+| `api_provider` | the same probe (e.g. `firstParty`) |
+| `paid_continuation_verified_off` | `AGENT_PAID_CONTINUATION_VERIFIED_OFF` at run start |
+| `fallback` | `none`, written by the code path that refuses API fallback (the only value the event accepts) |
+| `project_daily_cap_usd` | the project's `daily_cost_cap_usd` at run start (null = no cap) |
+
+All five are null for a run that never got that far. A refused run (probe says anything but a
+subscription login, no probe result - `AgentCLI.attestation()` / `AuthAttestation` -, API
+environment variables, unverified paid continuation) gets `run.failed billing_mode_refused` and
+NO attestation event: never a success with "unknown". The event carries only these fields (no
+email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the probe JSON
+(`parse_claude_auth_details`), and the route reads the stored event with `get_attestation`.
+`billing_mode`, `usage_source` and `cost_usd` are unchanged. No migration.
+
 ### Rollback
 
 Routine rollback is: stop the worker (`docker compose --profile agent stop agent-worker`)

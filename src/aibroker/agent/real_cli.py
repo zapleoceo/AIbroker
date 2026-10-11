@@ -28,8 +28,14 @@ import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
 from aibroker.agent import events as ev
-from aibroker.agent.adapter import AgentRunSpec, BillingMode, ModelInfo, StreamEvent
-from aibroker.agent.parsers import ClaudeParser, parse_claude_auth_status
+from aibroker.agent.adapter import (
+    AgentRunSpec,
+    AuthAttestation,
+    BillingMode,
+    ModelInfo,
+    StreamEvent,
+)
+from aibroker.agent.parsers import ClaudeParser, parse_claude_auth_details, parse_claude_auth_status
 from aibroker.agent.registry import register_adapter
 from aibroker.agent.settings_guard import settings_problem
 from aibroker.agent.tools import disallowed_tools, tool_names, validate_tools
@@ -97,6 +103,7 @@ class ClaudeCLI:
         self._probe = probe or _run_probe
         self.kill_grace_s = kill_grace_s
         self._env = cli_env(env)
+        self._auth: AuthAttestation | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr = bytearray()
 
@@ -105,11 +112,20 @@ class ClaudeCLI:
 
     async def billing_mode(self) -> BillingMode:
         """`claude auth status`; anything but a positive claude.ai login is not subscription."""
+        self._auth = None
         try:
-            return parse_claude_auth_status(
-                await self._probe([self.binary, "auth", "status"], self._env))
+            text = await self._probe([self.binary, "auth", "status"], self._env)
+            mode = parse_claude_auth_status(text)
+            details = parse_claude_auth_details(text)
         except Exception:  # noqa: BLE001 - cannot tell -> unknown -> the guard refuses
             return "unknown"
+        if mode == "subscription" and details is not None:
+            self._auth = AuthAttestation(*details)
+        return mode
+
+    def attestation(self) -> AuthAttestation | None:
+        """Method/provider of the last successful subscription probe (None otherwise)."""
+        return self._auth
 
     async def list_models(self) -> list[ModelInfo] | None:
         return None   # catalog from the CLI itself is later work

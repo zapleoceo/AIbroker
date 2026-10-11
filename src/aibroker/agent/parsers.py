@@ -126,6 +126,15 @@ def _text(content: Any) -> str:
     return str(content or "")
 
 
+def parse_claude_auth_details(text: str) -> tuple[str, str] | None:
+    """(authMethod, apiProvider) from `claude auth status` JSON of a logged-in CLI, else None.
+    Only these two non-secret fields are read."""
+    data = _json(text)
+    if data is None or not data.get("loggedIn") or not data.get("authMethod"):
+        return None
+    return str(data["authMethod"]), str(data.get("apiProvider") or "firstParty")
+
+
 def parse_claude_auth_status(text: str) -> BillingMode:
     """`claude auth status` JSON -> subscription only for a claude.ai login on first party."""
     data = _json(text)

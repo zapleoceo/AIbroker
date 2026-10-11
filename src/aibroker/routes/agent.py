@@ -14,6 +14,7 @@ from aibroker.agent.runs import (
     RunRejected,
     cancel_run,
     create_run,
+    get_attestation,
     get_run,
     list_events,
 )
@@ -83,6 +84,12 @@ class AgentRunResponse(BaseModel):
     billing_mode: str | None = None
     usage: dict[str, int | None] | None = None
     usage_source: str | None = None
+    auth_method: str | None = Field(None, description="`claude auth status` method of THIS run")
+    api_provider: str | None = Field(None, description="`claude auth status` provider of THIS run")
+    paid_continuation_verified_off: bool | None = Field(
+        None, description="the worker setting at run start")
+    fallback: str | None = Field(None, description="`none`: API fallback is refused, recorded per run")
+    project_daily_cap_usd: float | None = Field(None, description="the project's cap at run start")
     cost_usd: float | None = Field(
         None, description="NULL unless a cost is confirmed; subscription usage is not priced")
 
@@ -119,7 +126,7 @@ def _live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | No
     return out
 
 
-def _shape(run: Any, job: Any) -> AgentRunResponse:
+def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None) -> AgentRunResponse:
     state = run.outcome or ("running" if job.status == "running" else (
         "waiting_quota" if run.quota_waits else "pending"))
     files = _live_files((job.result_meta or {}).get("files"))
@@ -135,6 +142,9 @@ def _shape(run: Any, job: Any) -> AgentRunResponse:
         not_before=job.run_after.isoformat() if state == "waiting_quota" and job.run_after else None,
         billing_mode=run.billing_mode, usage=usage, usage_source=run.usage_source,
         cost_usd=run.cost_usd,
+        **{k: (attested or {}).get(k) for k in (
+            "auth_method", "api_provider", "paid_continuation_verified_off", "fallback",
+            "project_daily_cap_usd")},
     )
 
 
@@ -179,7 +189,7 @@ async def agent_run_get(run_id: int, ctx: ProjectCtx = Depends(require_project))
     hit = await get_run(run_id, ctx.project.id)
     if hit is None:
         raise HTTPException(404, "run not found")
-    return _shape(*hit)
+    return _shape(*hit, await get_attestation(run_id))
 
 
 @router.get("/runs/{run_id}/events", response_model=AgentEventsResponse)
@@ -208,4 +218,4 @@ async def agent_run_cancel(run_id: int, ctx: ProjectCtx = Depends(require_projec
     hit = await cancel_run(run_id, ctx.project.id)
     if hit is None:
         raise HTTPException(404, "run not found")
-    return _shape(*hit)
+    return _shape(*hit, await get_attestation(run_id))

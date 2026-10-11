@@ -94,7 +94,7 @@ async def test_run_completes_with_ordered_events_and_usage_without_cost(cfg):
     rid = await _run()
     _use(FakeAgentCLI(list(OK)))
     assert await execute_run(rid, cfg) == "completed"
-    assert await _types(rid) == ["run.started", "session.assigned", "message.delta",
+    assert await _types(rid) == ["run.started", "billing.attested", "session.assigned", "message.delta",
                                  "usage", "usage", "run.completed"]
     run, job = await _row(rid)
     assert (run.session_id, job.status, job.result_text) == ("S1", "done", "done")

@@ -42,12 +42,24 @@ class ModelInfo:
     capabilities: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class AuthAttestation:
+    """The non-secret facts of the auth probe behind `billing_mode()`."""
+    auth_method: str
+    api_provider: str
+
+
 class AgentCLI(Protocol):
     """One adapter instance serves ONE run (cancel() targets that run)."""
     supports_resume: bool
 
     async def billing_mode(self) -> BillingMode:
         """Positively report the auth mode; anything unsure is "unknown" (refused)."""
+        ...
+
+    def attestation(self) -> AuthAttestation | None:
+        """Auth method / provider of the probe `billing_mode()` just ran; None = no probe result
+        (the executor then refuses the run - never a success with "unknown")."""
         ...
 
     async def list_models(self) -> list[ModelInfo] | None:

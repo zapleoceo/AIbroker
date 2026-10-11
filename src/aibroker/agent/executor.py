@@ -32,7 +32,7 @@ from aibroker.agent.runs import (
 from aibroker.agent.workspace import cleanup_workspace, collect_files, create_workspace
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import AgentRunRow, DeepJobRow
+from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 
 log = logging.getLogger(__name__)
 
@@ -197,8 +197,20 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             run_mode=str(req.get("run_mode", "autonomous")),
             risk_ack=bool(req.get("accept_paid_continuation_risk", False)),
             verified_off=cfg.paid_continuation_verified_off)
+        auth = adapter.attestation() if refusal is None else None
+        if refusal is None and auth is None:
+            refusal = ev.RunFailed(error_class="billing_mode_refused",
+                                   message="no auth attestation from the CLI probe")
         if refusal is not None:   # fail closed, before the CLI is ever started
             return await _finish(run_id, refusal, totals, mode, lease)
+        async with get_session() as s:
+            project = await s.get(ProjectRow, run.project_id)
+        await append_event(run_id, ev.BillingAttested(
+            auth_method=auth.auth_method, api_provider=auth.api_provider,
+            paid_continuation_verified_off=cfg.paid_continuation_verified_off,
+            fallback="none",       # this path never falls back to API billing; recorded per run
+            project_daily_cap_usd=(None if project is None or project.daily_cost_cap_usd is None
+                                   else float(project.daily_cost_cap_usd))), lease)
         bad_model = await _check_model(adapter, run.model)
         if bad_model is not None:
             return await _finish(run_id, bad_model, totals, mode, lease)

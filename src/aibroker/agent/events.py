@@ -85,6 +85,18 @@ class RunWaitingQuota(_Event):
     reset_reported: bool = False
 
 
+class BillingAttested(_Event):
+    """What the broker actually checked on THIS run, written after the billing guard passed and
+    before the CLI starts. Never written when the guard refuses. No secrets: only the auth
+    method / provider the `auth status` probe reported, the setting, and the project cap."""
+    type: Literal["billing.attested"] = "billing.attested"
+    auth_method: str
+    api_provider: str
+    paid_continuation_verified_off: bool
+    fallback: Literal["none"]            # set by the code path that refuses API fallback
+    project_daily_cap_usd: float | None = None
+
+
 class RunCompleted(_Event):
     type: Literal["run.completed"] = "run.completed"
     final_text: str = ""
@@ -108,7 +120,8 @@ class RunTimedOut(_Event):
 
 
 AnyEvent = (RunStarted | SessionAssigned | MessageDelta | ToolCall | ToolResult | FileChanged
-            | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota)
+            | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota
+            | BillingAttested)
 AgentEvent = Annotated[AnyEvent, Field(discriminator="type")]
 _ADAPTER: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)
 
