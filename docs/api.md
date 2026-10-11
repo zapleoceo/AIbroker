@@ -585,6 +585,7 @@ when the enabled model's support is unknown. Subscription routes report
 `supports_tools: false` because the universal jobs route rejects tool input for them.
 These fields summarize the model across its configured lanes; tools still require
 a chat capability and cannot be combined with `response_format`.
+The catalog builds the fields with `input_modalities()` and `supports_tools()`.
 
 ### Cache affinity (2026-10-03)
 
