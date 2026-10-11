@@ -222,3 +222,59 @@ def test_docs_describe_the_attestation_and_the_write_edit_rule():
     for needle in ("billing.attested", "auth_method", "api_provider", "project_daily_cap_usd",
                    "Write(scope)", "Edit(scope)", "547957"):
         assert needle in docs, needle
+
+
+# --- quota wait -> retry re-attests ---------------------------------------------------------------------------
+
+
+async def test_a_quota_retry_attests_again_and_resumes_the_session(tmp_path):
+    from datetime import timedelta
+
+    from aibroker.agent.runs import _now
+
+    key = await _project(cap=5.0)
+    rid = await _submit(key)
+    seen_at_start: list[list[str]] = []
+    probes: list[int] = []
+
+    class Counting(FakeAgentCLI):
+        async def billing_mode(self):
+            probes.append(1)
+            return await super().billing_mode()
+
+        async def start(self, run):
+            seen_at_start.append([e.type for e in await list_events(rid)])
+            async for e in super().start(run):
+                yield e
+
+    first = Counting([ev.SessionAssigned(session_id="S1"),
+                      ev.RunFailed(error_class="quota_exhausted", message="usage limit reached")])
+    first.auth = AuthAttestation("claude.ai", "firstParty")
+    register_adapter("agent:claude", lambda: first)
+    assert await execute_run(rid, _cfg(tmp_path)) == "waiting_quota"
+    waiting = await _get(key, rid)
+    assert waiting["status"] == "waiting_quota" and waiting["api_provider"] == "firstParty"
+
+    async with get_session() as s:                                # the wait is over; worker re-claims
+        job = await s.get(DeepJobRow, rid)
+        job.run_after = _now() - timedelta(seconds=1)
+        job.status = "running"
+    second = Counting([ev.RunCompleted(final_text="done")])
+    second.auth = AuthAttestation("claude.ai", "firstParty-second-probe")   # the probe changed
+    register_adapter("agent:claude", lambda: second)
+    assert await execute_run(rid, _cfg(tmp_path)) == "completed"
+
+    types = [e.type for e in await list_events(rid)]
+    assert types == ["run.started", "billing.attested", "session.assigned", "run.waiting_quota",
+                     "run.started", "billing.attested", "run.completed"]
+    assert types.count("billing.attested") == 2                   # one per attempt
+    assert seen_at_start == [["run.started", "billing.attested"],
+                             types[:5] + ["billing.attested"]]    # each stored BEFORE its CLI start
+    assert len(probes) == 2                                       # the probe ran on both attempts
+    assert second.started.session_id == "S1"                      # resumed, not lost
+    restart = [e for e in await list_events(rid) if e.type == "run.started"][1]
+    assert restart.payload["resumed_session_id"] == "S1"
+    final = await _get(key, rid)
+    assert final["status"] == "completed" and final["session_id"] == "S1"
+    assert final["api_provider"] == "firstParty-second-probe"     # GET shows the 2nd attempt
+    assert final["fallback"] == "none" and final["project_daily_cap_usd"] == 5.0

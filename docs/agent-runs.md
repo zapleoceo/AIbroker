@@ -343,7 +343,8 @@ environment variables, unverified paid continuation) gets `run.failed billing_mo
 NO attestation event: never a success with "unknown". The event carries only these fields (no
 email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the probe JSON
 (`parse_claude_auth_details`), and the route reads the stored event with `get_attestation`.
-`billing_mode`, `usage_source` and `cost_usd` are unchanged. No migration.
+`billing_mode`, `usage_source` and `cost_usd` are unchanged. No migration. A quota-wait retry runs the probe and writes a fresh `billing.attested` event on every attempt
+(tested in `test_a_quota_retry_attests_again_and_resumes_the_session`); the GET shows the latest.
 
 ### Rollback
 
