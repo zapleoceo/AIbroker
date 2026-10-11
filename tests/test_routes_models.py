@@ -29,10 +29,31 @@ async def test_models_lists_every_pinnable_model_with_provider_and_price():
     assert flash["price"]["kind"] in ("litellm", "unknown")
     assert by_id["voyage/voyage-4"]["price"]["input_usd_per_mtok"] == 0.06
     assert by_id["local/qwen3vl"]["price"]["kind"] == "local"
+    assert by_id["local/qwen3vl"]["modalities"] == ["text", "image"]
+    assert by_id["local/qwen3vl"]["supports_tools"] is False
+    assert flash["modalities"] == ["text", "image"]
+    assert by_id["cerebras/gpt-oss-120b"]["supports_tools"] is False
+    assert by_id["groq/whisper-large-v3-turbo"]["modalities"] == ["audio"]
     assert by_id["groq/whisper-large-v3-turbo"]["price"]["usd_per_minute"] > 0
     oss = by_id["cerebras/gpt-oss-120b"]
     assert {"groq/openai/gpt-oss-120b", "cloudflare/@cf/openai/gpt-oss-120b"} <= set(oss["also_served_by"])
     assert "groq/whisper-large-v3" not in by_id        # price-only entry, nothing to pin
+
+
+def test_tool_metadata_requires_broker_adapter_and_verified_model_map(monkeypatch):
+    import litellm
+
+    from aibroker.providers.catalog import supports_tools
+    from aibroker.providers.registry import model_spec
+
+    gemini = model_spec("gemini/gemini-2.5-flash")
+    assert gemini is not None
+    monkeypatch.setattr(litellm, "get_model_info", lambda _mid: {"supports_function_calling": True})
+    assert supports_tools(gemini) is True
+    monkeypatch.setattr(litellm, "get_model_info", lambda _mid: {})
+    assert supports_tools(gemini) is None
+    monkeypatch.setattr(litellm, "get_model_info", lambda _mid: {"supports_function_calling": False})
+    assert supports_tools(gemini) is False
 
 
 async def test_unknown_pinned_model_is_a_400_with_suggestions_before_anything_is_queued():

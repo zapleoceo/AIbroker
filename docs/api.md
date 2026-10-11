@@ -564,6 +564,7 @@ new registry entry shows up here with no other change.
   {"id": "cerebras/gpt-oss-120b", "object": "model", "owned_by": "cerebras",
    "name": "gpt-oss-120b",
    "capabilities": ["chat:code", "chat:fast", "chat:smart", "structured"],
+   "supports_tools": false, "modalities": ["text"],
    "also_served_by": ["groq/openai/gpt-oss-120b", "cloudflare/@cf/openai/gpt-oss-120b"],
    "price": {"kind": "litellm", "input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75}}
 ]}
@@ -573,6 +574,17 @@ new registry entry shows up here with no other change.
 (`usd_per_minute`), `free`, `local`, or `unknown` (not priced anywhere — a bug the registry
 test catches). Entries are ordered the way a bare name resolves (free providers by rank,
 paid last). Free-tier keys bill $0 whatever the nominal price shows.
+
+`modalities` lists input types accepted on this route's configured Broker lanes:
+`["text", "image"]` for a vision lane, `["audio"]` for transcription, and
+`["text"]` for chat and embedding. It is `null` when the lane does not define
+one of these inputs. `supports_tools` is `true` only when native tools are
+enabled for the provider in Broker and the installed LiteLLM model map confirms
+function calling. It is `false` when Broker's adapter rejects tools, and `null`
+when the enabled model's support is unknown. Subscription routes report
+`supports_tools: false` because the universal jobs route rejects tool input for them.
+These fields summarize the model across its configured lanes; tools still require
+a chat capability and cannot be combined with `response_format`.
 
 ### Cache affinity (2026-10-03)
 
