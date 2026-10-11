@@ -27,10 +27,13 @@ the auth file, Claude state, or another process's environment. Do not use
 
 ## Code fixes prepared for repeat review
 
-1. A fenced shared-home lease now serializes Codex runs across workers. The
-   worker snapshots PNG paths immediately before a run and exports only new
-   paths; touched pre-existing files stay excluded. The real CLI output path
-   and absence of concurrent owner CLI activity still need a supervised check.
+1. A fenced shared-home lease serializes normal Codex runs across workers. PNG
+   export is restricted to the fresh thread UUID reported by this CLI process;
+   resumed threads and pre-populated thread directories fail closed for PNGs.
+   The [pinned 0.162.1 source](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/ext/image-generation/src/artifact.rs)
+   places generated PNGs under
+   `generated_images/<thread UUID>/<call ID>.png`. Real headless output and
+   absence of concurrent owner CLI activity still need a supervised check.
 2. Compose now passes the existing exact `AGENT_PROJECT_POLICY` to the Codex
    worker. No project or model policy was broadened.
 3. Codex now uses its own
@@ -40,7 +43,9 @@ the auth file, Claude state, or another process's environment. Do not use
    `AGENT_SUBSCRIPTION_CODEX_ENABLED` to the API. Both Codex submission paths
    and queued Codex runs check the activation gate.
 
-These fixes still require repeat independent review and the real sandbox/PNG
+`run.completed` events are metadata-only for PNGs; full bytes remain in the job
+result until its normal 7-day purge even though API content expires after one
+hour. These fixes still require repeat independent review and the real sandbox/PNG
 canary. They do not approve or apply the profile.
 
 ## Minimal project access decision

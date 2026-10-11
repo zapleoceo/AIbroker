@@ -24,8 +24,9 @@ from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.images import GENERATED_DIR, export_generated_pngs, snapshot_generated_paths
+from aibroker.agent.real_cli import SubprocessCLI
 from aibroker.agent.registry import clear_adapters, register_adapter
-from aibroker.agent.runs import create_run
+from aibroker.agent.runs import create_run, list_events
 from aibroker.agent.workspace import create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
@@ -37,6 +38,8 @@ ROOT = Path(__file__).resolve().parent.parent
 INFRA = ROOT / "infra" / "agent-worker"
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8").replace("\r\n", "\n")
 DOCS = (ROOT / "docs" / "agent-runs.md").read_text(encoding="utf-8")
+THREAD = "123e4567-e89b-12d3-a456-426614174000"
+OTHER_THREAD = "123e4567-e89b-12d3-a456-426614174001"
 
 
 def _service(name: str) -> str:
@@ -214,13 +217,13 @@ def _png(w=4, h=3, color=(200, 10, 10)) -> bytes:
 
 def _setup(tmp_path):
     home = tmp_path / "codex-home"
-    (home / GENERATED_DIR).mkdir(parents=True)
+    (home / GENERATED_DIR / THREAD).mkdir(parents=True)
     ws = create_workspace(str(tmp_path / "ws"), 1)
     return home, Path(ws)
 
 
 def _export(home, ws, since=None, **kw):
-    args = {"max_bytes": 1_000_000, "max_count": 4, "ttl_s": 60}
+    args = {"max_bytes": 1_000_000, "max_count": 4, "ttl_s": 60, "session_id": THREAD}
     args.update(kw)
     return export_generated_pngs(str(home), str(ws), time.time() - 5 if since is None else since, **args)
 
@@ -228,7 +231,7 @@ def _export(home, ws, since=None, **kw):
 def test_a_new_png_is_copied_to_out_with_dimensions_and_sha256(tmp_path):
     home, ws = _setup(tmp_path)
     data = _png(7, 5)
-    (home / GENERATED_DIR / "a.png").write_bytes(data)
+    (home / GENERATED_DIR / THREAD / "a.png").write_bytes(data)
     (ref,) = _export(home, ws)
     assert (ref.width, ref.height, ref.size) == (7, 5, len(data))
     assert ref.sha256 == hashlib.sha256(data).hexdigest()
@@ -239,10 +242,10 @@ def test_a_new_png_is_copied_to_out_with_dimensions_and_sha256(tmp_path):
 
 def test_nested_session_dirs_are_found_but_not_too_deep(tmp_path):
     home, ws = _setup(tmp_path)
-    nest = home / GENERATED_DIR / "sess-1"
+    nest = home / GENERATED_DIR / THREAD / "nested"
     nest.mkdir()
     (nest / "ok.png").write_bytes(_png(2, 2, (1, 2, 3)))
-    deep = home / GENERATED_DIR / "a" / "b" / "c" / "d"
+    deep = home / GENERATED_DIR / THREAD / "a" / "b" / "c" / "d"
     deep.mkdir(parents=True)
     (deep / "too-deep.png").write_bytes(_png(3, 3, (9, 9, 9)))
     assert [(r.width, r.height) for r in _export(home, ws)] == [(2, 2)]
@@ -250,10 +253,10 @@ def test_nested_session_dirs_are_found_but_not_too_deep(tmp_path):
 
 def test_only_files_created_during_this_run_are_taken(tmp_path):
     home, ws = _setup(tmp_path)
-    old = home / GENERATED_DIR / "old.png"
+    old = home / GENERATED_DIR / THREAD / "old.png"
     old.write_bytes(_png(2, 2, (1, 1, 1)))
     os.utime(old, (time.time() - 3600, time.time() - 3600))
-    (home / GENERATED_DIR / "new.png").write_bytes(_png(3, 3, (2, 2, 2)))
+    (home / GENERATED_DIR / THREAD / "new.png").write_bytes(_png(3, 3, (2, 2, 2)))
     assert [(r.width) for r in _export(home, ws, since=time.time() - 60)] == [3]
 
 
@@ -261,7 +264,7 @@ def test_symlinks_traversal_and_special_files_are_rejected(tmp_path):
     home, ws = _setup(tmp_path)
     secret = tmp_path / "outside.png"
     secret.write_bytes(_png(5, 5, (7, 7, 7)))
-    gen = home / GENERATED_DIR
+    gen = home / GENERATED_DIR / THREAD
     try:
         (gen / "link.png").symlink_to(secret)                    # symlinked file
         (gen / "linkdir").symlink_to(tmp_path)                   # symlinked directory
@@ -280,7 +283,7 @@ def test_symlinks_traversal_and_special_files_are_rejected(tmp_path):
 
 def test_undecodable_oversized_and_excess_files_are_skipped(tmp_path):
     home, ws = _setup(tmp_path)
-    gen = home / GENERATED_DIR
+    gen = home / GENERATED_DIR / THREAD
     good = _png(4, 4)
     (gen / "truncated.png").write_bytes(good[:len(good) // 2])
     (gen / "fake.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"not really an image")
@@ -294,7 +297,7 @@ def test_undecodable_oversized_and_excess_files_are_skipped(tmp_path):
 
 def test_count_cap_and_duplicate_content(tmp_path):
     home, ws = _setup(tmp_path)
-    gen = home / GENERATED_DIR
+    gen = home / GENERATED_DIR / THREAD
     for i in range(5):
         (gen / f"i{i}.png").write_bytes(_png(2 + i, 2))
     (gen / "dup.png").write_bytes(_png(2, 2))
@@ -312,7 +315,8 @@ def test_codex_cli_exports_from_its_fixed_codex_home_only(tmp_path):
     home, ws = _setup(tmp_path)
     cli = CodexCLI(env={"CODEX_HOME": str(home)})
     cli.snapshot_artifacts()
-    (home / GENERATED_DIR / "a.png").write_bytes(_png(6, 6))
+    (home / GENERATED_DIR / THREAD / "a.png").write_bytes(_png(6, 6))
+    cli._image_session_id = THREAD
     (home / "elsewhere.png").write_bytes(_png(9, 9, (3, 3, 3)))            # outside generated_images
     (tmp_path / "other-dir").mkdir()
     (tmp_path / "other-dir" / "b.png").write_bytes(_png(8, 8, (4, 4, 4)))
@@ -323,17 +327,70 @@ def test_codex_cli_exports_from_its_fixed_codex_home_only(tmp_path):
 
 def test_a_touched_preexisting_png_cannot_be_attributed_to_the_next_run(tmp_path):
     home, ws = _setup(tmp_path)
-    old = home / GENERATED_DIR / "previous.png"
+    old = home / GENERATED_DIR / THREAD / "previous.png"
     old.write_bytes(_png(3, 3))
     baseline = snapshot_generated_paths(str(home))
     old.write_bytes(_png(4, 4))  # changed during this run, but the path is not its own
-    fresh = home / GENERATED_DIR / "current.png"
+    fresh = home / GENERATED_DIR / THREAD / "current.png"
     fresh.write_bytes(_png(5, 5))
     refs = export_generated_pngs(str(home), str(ws), time.time() - 5,
                                  max_bytes=1_000_000, max_count=4, ttl_s=60,
-                                 baseline=baseline)
+                                 baseline=baseline, session_id=THREAD)
     assert len(refs) == 1 and (refs[0].width, refs[0].height) == (5, 5)
     assert refs[0].sha256 == hashlib.sha256(fresh.read_bytes()).hexdigest()
+
+
+def test_concurrent_other_thread_and_lease_takeover_cannot_export_its_png(tmp_path):
+    home, ws = _setup(tmp_path)
+    other = home / GENERATED_DIR / OTHER_THREAD
+    other.mkdir()
+    other_png = _png(9, 9, (7, 8, 9))
+    (other / "late.png").write_bytes(other_png)  # stale CLI writes after lease takeover
+    own_png = _png(4, 6, (1, 2, 3))
+    (home / GENERATED_DIR / THREAD / "own.png").write_bytes(own_png)
+    refs = _export(home, ws)
+    assert [base64.b64decode(ref.content_b64) for ref in refs] == [own_png]
+
+
+def test_missing_or_invalid_thread_identity_exports_nothing(tmp_path):
+    home, ws = _setup(tmp_path)
+    (home / GENERATED_DIR / THREAD / "own.png").write_bytes(_png(4, 4))
+    assert _export(home, ws, session_id=None) == []
+    assert _export(home, ws, session_id="../" + THREAD) == []
+    assert _export(home, ws, session_id=OTHER_THREAD) == []
+
+
+def test_codex_resume_and_preexisting_thread_directory_export_nothing(tmp_path):
+    home, ws = _setup(tmp_path)
+    cli = CodexCLI(env={"CODEX_HOME": str(home)})
+    (home / GENERATED_DIR / THREAD / "preexisting.png").write_bytes(_png(2, 2))
+    cli.snapshot_artifacts()
+    cli._image_session_id = THREAD
+    (home / GENERATED_DIR / THREAD / "new.png").write_bytes(_png(3, 3))
+    fresh = AgentRunSpec(run_id=1, capability="agent:codex", prompt="p", workspace=str(ws), account_id="a")
+    assert cli.export_artifacts(fresh, time.time() - 5) == []
+    resumed = AgentRunSpec(run_id=2, capability="agent:codex", prompt="p", workspace=str(ws),
+                           account_id="a", session_id=THREAD)
+    assert cli.export_artifacts(resumed, time.time() - 5) == []
+
+
+async def test_codex_uses_only_the_thread_id_emitted_by_its_own_process(tmp_path, monkeypatch):
+    home, ws = _setup(tmp_path)
+    cli = CodexCLI(env={"CODEX_HOME": str(home)})
+    cli.snapshot_artifacts()
+    spec = AgentRunSpec(run_id=1, capability="agent:codex", prompt="p", workspace=str(ws), account_id="a")
+
+    async def fake_start(self, run):
+        yield ev.SessionAssigned(session_id=THREAD)
+        yield ev.RunCompleted(final_text="done")
+
+    monkeypatch.setattr(SubprocessCLI, "start", fake_start)
+    assert [e.type async for e in cli.start(spec)] == ["session.assigned", "run.completed"]
+    assert cli._image_session_id == THREAD
+    resumed = AgentRunSpec(run_id=2, capability="agent:codex", prompt="p", workspace=str(ws),
+                           account_id="a", session_id=THREAD)
+    assert [e.type async for e in cli.start(resumed)] == ["session.assigned", "run.completed"]
+    assert cli._image_session_id is None
 
 
 def test_the_model_never_sees_codex_home_in_its_prompt():
@@ -368,7 +425,8 @@ class _ImageFake(FakeAgentCLI):
 
     def export_artifacts(self, run, since):
         return export_generated_pngs(str(self.home), run.workspace, since, max_bytes=self.image_max_bytes,
-                                     max_count=self.image_max_count, ttl_s=self.image_ttl_s)
+                                     max_count=self.image_max_count, ttl_s=self.image_ttl_s,
+                                     session_id=THREAD)
 
 
 async def test_two_codex_runs_sharing_a_home_cannot_execute_concurrently(tmp_path):
@@ -407,12 +465,12 @@ async def test_two_codex_runs_sharing_a_home_cannot_execute_concurrently(tmp_pat
 async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_path):
     key, rid = await _project()
     home = tmp_path / "codex-home"
-    (home / GENERATED_DIR).mkdir(parents=True)
+    (home / GENERATED_DIR / THREAD).mkdir(parents=True)
     data = _png(11, 7, (5, 6, 7))
 
     class WritesImage(_ImageFake):
         async def start(self, run):
-            (home / GENERATED_DIR / "pic.png").write_bytes(data)        # "the CLI generated it" in-run
+            (home / GENERATED_DIR / THREAD / "pic.png").write_bytes(data)
             async for e in super().start(run):
                 yield e
 
@@ -426,13 +484,16 @@ async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_pa
     assert base64.b64decode(f["content_b64"]) == data and f["size"] == len(data)
     from PIL import Image
     assert Image.open(io.BytesIO(base64.b64decode(f["content_b64"]))).size == (11, 7)  # decodable by the critic
+    completed = [row for row in await list_events(rid) if row.type == "run.completed"]
+    assert len(completed) == 1
+    assert "content_b64" not in completed[0].payload["files"][0]
 
 
 async def test_an_image_from_before_the_run_is_not_returned(tmp_path):
     key, rid = await _project(9301)
     home = tmp_path / "codex-home"
-    (home / GENERATED_DIR).mkdir(parents=True)
-    stale = home / GENERATED_DIR / "stale.png"
+    (home / GENERATED_DIR / THREAD).mkdir(parents=True)
+    stale = home / GENERATED_DIR / THREAD / "stale.png"
     stale.write_bytes(_png(3, 3))
     os.utime(stale, (time.time() - 7200, time.time() - 7200))
     register_adapter("agent:codex", lambda: _ImageFake([ev.RunCompleted()], home))

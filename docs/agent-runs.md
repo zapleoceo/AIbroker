@@ -606,16 +606,21 @@ fails closed again (`sandbox_unavailable`); unload the AppArmor profile if desir
 
 ## Codex generated images (worker-side export)
 
-After a Codex run the WORKER process - not the model, not the sandbox - copies new PNGs from the fixed
-`$CODEX_HOME/generated_images` into the run's `out/` (`export_generated_pngs`, called through
+After a fresh Codex thread, the WORKER process copies PNGs only from
+`$CODEX_HOME/generated_images/<thread UUID>` into the run's `out/` (`export_generated_pngs`, called through
 `export_artifacts`). `CODEX_HOME` is never given to the model (the sandbox profile denies it and the
-prompt never names it). Accepted files: regular files only (no symlinked file, directory or source
-directory; depth <= 3; no traversal out of the directory), with a new path since this run's
-pre-start snapshot. A shared-home DB lease serializes Codex runs across workers; an existing path
-modified during a run is excluded. Each image is at most
+prompt never names it). The thread UUID must come from this CLI process's `thread.started` event;
+the pinned Codex 0.162.1 image extension writes `generated_images/<thread UUID>/<call ID>.png`.
+Resumed threads export no PNG because a stale CLI can still write into their shared thread directory
+after a lease takeover. An already populated directory for a claimed new thread also exports nothing.
+Accepted files: regular files only (no symlinked file, directory or source directory; depth <= 3;
+no traversal out of the directory), with a new path since this run's pre-start snapshot. A shared-home
+DB lease still serializes normal Codex runs across workers. Each image is at most
 `AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
 de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
-`width`, `height` and the content, subject to the usual TTL. A failing export never fails the run.
+`width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
+metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though
+the API hides them after the 1-hour file TTL. A failing export never fails the run.
 **Readiness criterion:** a real decodable PNG (dimensions + sha256 in the run result) that the critic
 receives as an actual image - not a description. Headless `$imagegen` support stays unverified until a
 supervised run produces such a file.

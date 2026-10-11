@@ -25,11 +25,11 @@ import contextlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 
-from aibroker.agent.adapter import AgentRunSpec, AuthAttestation, BillingMode
-from aibroker.agent.events import FileRef
+from aibroker.agent.adapter import AgentRunSpec, AuthAttestation, BillingMode, StreamEvent
+from aibroker.agent.events import FileRef, SessionAssigned
 from aibroker.agent.images import export_generated_pngs, snapshot_generated_paths
 from aibroker.agent.parsers import CodexParser, parse_codex_login_status, sandbox_failure
 from aibroker.agent.real_cli import Probe, SubprocessCLI
@@ -139,6 +139,7 @@ class CodexCLI(SubprocessCLI):
         self.image_max_count = 4
         self.image_ttl_s = 3600
         self._image_baseline: set[str] | None = None
+        self._image_session_id: str | None = None
 
     def snapshot_artifacts(self) -> None:
         """Called under the shared-home lease just before this run starts."""
@@ -153,6 +154,20 @@ class CodexCLI(SubprocessCLI):
     def new_parser(self, run: AgentRunSpec) -> CodexParser:
         return CodexParser()
 
+    async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        """Bind artifacts to the fresh thread ID emitted by this CLI process.
+
+        A resumed thread can also be driven by a stale process after lease expiry;
+        its shared image directory has no per-run ownership marker, so no PNG is
+        exported for resumes until the CLI supplies exact per-call provenance.
+        """
+        self._image_session_id = None
+        async for item in super().start(run):
+            if isinstance(item, SessionAssigned) and run.session_id is None \
+                    and UUID_RE.fullmatch(item.session_id):
+                self._image_session_id = item.session_id
+            yield item
+
     def stdin_payload(self, run: AgentRunSpec) -> str:
         return build_codex_prompt(run)
 
@@ -166,12 +181,14 @@ class CodexCLI(SubprocessCLI):
     def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
         """Generated images: copied by THIS (worker) process from the fixed
         $CODEX_HOME/generated_images into the run's out/ - the model never sees CODEX_HOME."""
-        if self._image_baseline is None:
+        if run.session_id is not None or self._image_baseline is None or self._image_session_id is None:
             return []
+        if any(p.startswith(f"{self._image_session_id}/") for p in self._image_baseline):
+            return []  # a claimed new thread already has artifacts: cannot prove ownership
         return export_generated_pngs(
             self._env.get("CODEX_HOME"), run.workspace, since, max_bytes=self.image_max_bytes,
             max_count=self.image_max_count, ttl_s=self.image_ttl_s,
-            baseline=self._image_baseline)
+            baseline=self._image_baseline, session_id=self._image_session_id)
 
     def process_env(self, run: AgentRunSpec) -> dict[str, str]:
         """HOME is a fresh EMPTY directory inside the run workspace - never the Claude state dir and

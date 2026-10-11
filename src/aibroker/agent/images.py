@@ -1,8 +1,9 @@
 """Export of images a Codex run generated (`$CODEX_HOME/generated_images`) - done by the WORKER
 process after the run, never by the model or the sandbox: CODEX_HOME is never handed to the model.
 
-Only real, decodable PNG files are taken: fixed source directory, no symlinks (files or directories),
-regular files only, inside the directory after resolving, created/modified during THIS run, size and
+Only real, decodable PNG files are taken: the fresh CLI thread's UUID directory, no symlinks
+(files or directories), regular files only, inside the directory after resolving, new since this
+run's snapshot, size and
 count capped, content verified with Pillow (dimensions come from the decoded image). Each is copied into
 the run's `out/` and reported with its sha256, width and height so a critic can be given the real image.
 """
@@ -12,6 +13,7 @@ import base64
 import hashlib
 import io
 import os
+import re
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +25,7 @@ OUT_DIR = "out"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _MAX_DEPTH = 3
 _MAX_PIXELS = 50_000_000
+_SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 def _decode_png(data: bytes) -> tuple[int, int] | None:
@@ -76,13 +79,19 @@ def snapshot_generated_paths(codex_home: str | None) -> set[str] | None:
 
 def export_generated_pngs(codex_home: str | None, workspace: str, since: float, *,
                           max_bytes: int, max_count: int, ttl_s: int,
-                          baseline: set[str] | None = None) -> list[FileRef]:
-    """Copy new PNGs from <codex_home>/generated_images into <workspace>/out and describe them.
-    `since` is the run's start (epoch seconds): older files are not this run's. Anything unsafe,
+                          baseline: set[str] | None = None,
+                          session_id: str | None = None) -> list[FileRef]:
+    """Copy PNGs from this new Codex thread's directory into <workspace>/out.
+    `since` is the run's start (epoch seconds): older files are excluded. Anything unsafe,
     oversized, undecodable or over the count is skipped silently (never partially copied)."""
-    if not codex_home:
+    if not codex_home or not session_id or not _SESSION_ID.fullmatch(session_id):
         return []
     root = Path(codex_home) / GENERATED_DIR
+    if root.is_symlink() or not root.is_dir():
+        return []
+    # Codex 0.162.1 writes generated_images/<thread UUID>/<call ID>.png.
+    # Never scan a sibling thread directory, including during a lease takeover.
+    root = root / session_id
     if root.is_symlink() or not root.is_dir():
         return []
     real_root = root.resolve()
@@ -93,7 +102,7 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     for path in _candidates(root):
         if len(refs) >= max_count:
             break
-        if baseline is not None and path.relative_to(root).as_posix() in baseline:
+        if baseline is not None and f"{session_id}/{path.relative_to(root).as_posix()}" in baseline:
             continue
         try:
             st = os.lstat(path)

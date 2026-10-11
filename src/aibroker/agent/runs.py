@@ -184,9 +184,15 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                 event = RunFailed(error_class="invalid_json", message=problem)
         run.last_seq += 1
         run.last_event_at = now
+        payload = event.model_dump(mode="json")
+        if event.type == "run.completed":
+            # Keep the event stream metadata-only. Full PNG bytes are returned
+            # through the job result, whose retention follows the job purge.
+            for file in payload.get("files", []):
+                file.pop("content_b64", None)
         s.add(AgentRunEventRow(
             run_id=run_id, seq=run.last_seq, ts=now, type=event.type,
-            payload=_clip(redact_obj(event.model_dump(mode="json"))),
+            payload=_clip(redact_obj(payload)),
         ))
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
