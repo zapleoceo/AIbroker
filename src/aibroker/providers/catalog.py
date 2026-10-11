@@ -20,7 +20,11 @@ from aibroker.providers.registry import (
     model_spec,
     spec_or_default,
 )
-from aibroker.providers.subscriptions import subscription_model, subscription_models
+from aibroker.providers.subscriptions import (
+    subscription_model,
+    subscription_model_verified,
+    subscription_models,
+)
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
 # can legitimately be pinned on another (callers pin a specific gemini version).
@@ -146,8 +150,9 @@ def listing() -> list[dict[str, object]]:
             "capabilities": sorted(m.capabilities),
             "also_served_by": also,
             "price": price_info(m),
-            **({"available": False} if m.provider == "codex-sub" and not
-               get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED else {}),
+            **({"available": subscription_model_verified(m.id) and
+               (m.provider != "codex-sub" or get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED)}
+               if m.pricing == "subscription" else {}),
         })
     return rows
 

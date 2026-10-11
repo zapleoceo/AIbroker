@@ -44,10 +44,46 @@ def test_catalog_keeps_route_identity_and_unknown_subscription_price():
 
 def test_compose_default_catalog_sentinel_keeps_defaults_and_malformed_fails_closed(monkeypatch):
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS", "default")
     assert {m.id for m in subscription_models()} == {
         "claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"}
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "broken")
     assert subscription_models() == []
+
+
+def test_account_verified_catalog_expands_without_an_allow_all_pin(monkeypatch):
+    from aibroker.providers.subscriptions import subscription_model_verified
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5","claude-opus-example"],'
+                        '"codex-sub":["gpt-6.1-sol","gpt-example"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5","claude-opus-example"],'
+                        '"codex-sub":["gpt-example"]}')
+    rows = {r["id"]: r for r in listing()}
+    assert rows["claude-sub/claude-opus-example"]["available"] is True
+    assert rows["codex-sub/gpt-example"]["available"] is False  # route gate remains off
+    assert subscription_model_verified("codex-sub/gpt-6.1-sol") is False
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["not-a-candidate"]}')
+    assert subscription_models() == []
+
+
+@pytest.mark.asyncio
+async def test_unverified_candidate_cannot_enqueue_even_if_project_policy_allows(monkeypatch):
+    create = AsyncMock()
+    monkeypatch.setattr(proxy, "create_run", create)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5","claude-opus-example"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5"]}')
+    body = proxy.ChatRequest(messages=[proxy.ChatMessage(role="user", content="hi")],
+                             model="claude-sub/claude-opus-example")
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
+    assert exc.value.status_code == 503
+    create.assert_not_awaited()
 
 
 @pytest.mark.asyncio

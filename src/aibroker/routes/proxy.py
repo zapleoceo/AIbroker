@@ -24,7 +24,11 @@ from aibroker.config import get_settings
 from aibroker.providers import catalog
 from aibroker.providers.catalog import UnknownModel
 from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
-from aibroker.providers.subscriptions import PROVIDERS, subscription_model
+from aibroker.providers.subscriptions import (
+    PROVIDERS,
+    subscription_model,
+    subscription_model_verified,
+)
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
     DecisionFailed,
@@ -547,6 +551,8 @@ async def jobs_submit(
             raise AgentProjectNotAllowed(ctx.project.id)
         if subscription.provider == "codex-sub" and not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
             raise HTTPException(503, "codex subscription route is not enabled")
+        if not subscription_model_verified(subscription.id):
+            raise HTTPException(503, "subscription model availability is not verified")
         cli_model = subscription.id.split("/", 1)[1]
         violation = policy_violation(ctx.project.id, cli_model, "owner")
         if violation:

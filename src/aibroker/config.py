@@ -145,6 +145,9 @@ class Settings(BaseSettings):
     # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
     # isolated worker profile is separately approved and deployed.
     AGENT_SUBSCRIPTION_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}'
+    # Exact account-confirmed route ids. Candidate models remain visible but unavailable until
+    # confirmed; confirmation never overrides project policy or the Codex worker gate.
+    AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.

@@ -5,9 +5,10 @@
 `claude-sub/claude-sonnet-5-5` and `codex-sub/gpt-6.1-sol`. Each row retains
 its distinct `id`, `owned_by`, `capabilities`, `source: "broker"`,
 `billing_type: "subscription"`, and `price: {"kind": "subscription"}`. The
-subscription price has no invented per-token amount. A configured Codex model
-is listed with `available: false` until the separately approved worker route
-is enabled. A client merging catalogs should key by `(source, id)`, not the
+subscription price has no invented per-token amount. Each subscription row
+has `available: true` only after its exact id is in the owner-confirmed
+`AGENT_SUBSCRIPTION_VERIFIED_MODELS` list; a Codex row additionally needs its
+separately approved worker route enabled. A client merging catalogs should key by `(source, id)`, not the
 bare `name`: an API model and subscription model can have different billing.
 
 Submit using the existing `POST /v1/jobs?capability=chat:fast` and the ordinary
@@ -23,9 +24,19 @@ there is no API-billed fallback.
 Access requires the capability's existing scope plus `llm:agent`, the server
 project allowlist, and the exact CLI model and `owner` account in
 `AGENT_PROJECT_POLICY`. The worker rechecks these. The configured list of
-subscription models is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
-`claude-sub`/`codex-sub`); malformed input exposes none. Compose uses the
-`default` sentinel when no override is provided. The default Codex
+subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
+`claude-sub`/`codex-sub`). `AGENT_SUBSCRIPTION_VERIFIED_MODELS` uses the same
+shape and must be a subset. Malformed or inconsistent input exposes no
+subscription models. Compose uses the `default` sentinel when no override is
+provided. The default verified list contains only the completed Claude Sonnet
+smoke model; the Codex model remains unverified. To add all models actually
+available on the owner's subscriptions, obtain their exact ids from the owner's
+account and set both lists explicitly. Codex App Server `model/list` supports
+account-aware discovery; Claude Code has no documented read-only model-list
+CLI, so the owner must confirm Claude models in the interactive account. These
+lists do not grant project access: enumerate each desired exact CLI id in
+`AGENT_PROJECT_POLICY` for each approved project. Never use a wildcard or
+infer subscription availability from API-model catalogs. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
 

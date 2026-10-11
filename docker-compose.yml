@@ -253,6 +253,7 @@ services:
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       # "default" retains the Settings default without nesting JSON in Compose interpolation.
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
+      AGENT_SUBSCRIPTION_VERIFIED_MODELS: ${AGENT_SUBSCRIPTION_VERIFIED_MODELS:-default}
       AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}
     ports:
       - "127.0.0.1:8004:8000"
