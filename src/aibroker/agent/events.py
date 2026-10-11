@@ -73,6 +73,7 @@ class Usage(_Event):
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     turns: int | None = None
+    reasoning_tokens: int | None = None
     source: str = "cli_reported"   # where the numbers come from; never a price
 
 

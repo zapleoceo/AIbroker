@@ -145,3 +145,75 @@ def parse_claude_auth_status(text: str) -> BillingMode:
         return "subscription"
     return "api" if method in ("api_key", "console", "oauth_token") or provider != "firstParty" \
         else "unknown"
+
+
+class CodexParser:
+    """`codex exec --json` JSONL: thread.started, item.completed (agent_message, command_execution,
+    file_change, mcp_tool_call), turn.completed(usage), turn.failed, error. Shapes from the public
+    docs (UNVERIFIED against a real run); quota wording is classified by `classify_failure`."""
+
+    def __init__(self) -> None:
+        self.final_text = ""
+        self.turn_done = False
+        self.error: str | None = None
+        self._calls = 0
+
+    def feed(self, line: str) -> list[StreamEvent]:
+        data = _json(line)
+        if data is None:
+            return []
+        kind = data.get("type")
+        if kind == "thread.started" and data.get("thread_id"):
+            return [ev.SessionAssigned(session_id=str(data["thread_id"]))]
+        if kind == "turn.completed":
+            self.turn_done = True
+            u = data.get("usage") or {}
+            return [ev.Usage(input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
+                             cache_read_tokens=u.get("cached_input_tokens"),
+                             reasoning_tokens=u.get("reasoning_output_tokens"), turns=1)]
+        if kind == "turn.failed":
+            self.error = str((data.get("error") or {}).get("message") or "turn failed")
+            return []
+        if kind == "error":
+            self.error = str(data.get("message") or "error")
+            return []
+        if kind == "item.completed":
+            return self._item(data.get("item") or {})
+        return []
+
+    def _item(self, item: dict[str, Any]) -> list[StreamEvent]:
+        t = item.get("type")
+        if t == "agent_message":
+            self.final_text = str(item.get("text") or "")
+            return [ev.MessageDelta(text=self.final_text)]
+        if t in ("command_execution", "mcp_tool_call"):
+            self._calls += 1
+            cid = str(item.get("id") or f"call-{self._calls}")
+            name = "shell" if t == "command_execution" else str(item.get("tool") or "mcp")
+            inp = {"command": item.get("command")} if t == "command_execution" else \
+                {"arguments": item.get("arguments")}
+            ok = item.get("exit_code", 0) in (0, None) and item.get("status") != "failed"
+            out = str(item.get("aggregated_output") or item.get("result") or "")
+            return [ev.ToolCall(call_id=cid, name=name, input=inp),
+                    ev.ToolResult(call_id=cid, ok=bool(ok), output=out)]
+        if t == "file_change":
+            kinds = {"add": "created", "update": "modified", "delete": "deleted"}
+            return [ev.FileChanged(path=str(c.get("path")), action=kinds.get(c.get("kind"), "modified"))
+                    for c in item.get("changes") or [] if c.get("path")]
+        return []
+
+    def finish(self, returncode: int, stderr_tail: str = "") -> StreamEvent:
+        if self.turn_done and returncode == 0 and self.error is None:
+            return ev.RunCompleted(final_text=self.final_text)
+        msg = self.error or stderr_tail.strip() or f"codex exited {returncode} without a finished turn"
+        return ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000],
+                            reset_at=parse_reset_at(msg))
+
+
+def parse_codex_login_status(text: str) -> BillingMode:
+    """`codex login status` text -> "subscription" only when it states a ChatGPT login (exact
+    wording UNVERIFIED, so anything else is "unknown"); an API-key login is "api"."""
+    low = text.lower()
+    if "api key" in low or "apikey" in low:
+        return "api"
+    return "subscription" if "chatgpt" in low and "not logged in" not in low else "unknown"

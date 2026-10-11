@@ -19,12 +19,15 @@ FORBIDDEN_ENV: dict[str, tuple[str, ...]] = {
                      "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
                      "ANTHROPIC_VERTEX_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK",
                      "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN"),
-    "agent:codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+    "agent:codex": ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"),
 }
 
 
 # Whole families are blocked too, so a variable added by a newer CLI is refused by default.
-FORBIDDEN_PREFIXES: dict[str, tuple[str, ...]] = {"agent:claude": ("ANTHROPIC_", "CLAUDE_CODE_USE_")}
+FORBIDDEN_PREFIXES: dict[str, tuple[str, ...]] = {
+    "agent:claude": ("ANTHROPIC_", "CLAUDE_CODE_USE_"),
+    "agent:codex": ("OPENAI_",),     # CODEX_HOME itself is legitimate, so no CODEX_ prefix
+}
 
 
 def forbidden_env_present(capability: str, env: Mapping[str, str]) -> list[str]:

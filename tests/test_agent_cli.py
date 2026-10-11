@@ -16,6 +16,7 @@ from aibroker.agent import events as ev
 from aibroker.agent import real_cli
 from aibroker.agent.adapter import AgentRunSpec
 from aibroker.agent.billing import FORBIDDEN_ENV, check_billing_mode, forbidden_env_present
+from aibroker.agent.codex_cli import CodexCLI
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
@@ -91,7 +92,8 @@ def test_forbidden_env_sets_match_the_policy():
         "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL",
         "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "AWS_BEARER_TOKEN_BEDROCK",
         "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN"}
-    assert set(FORBIDDEN_ENV["agent:codex"]) == {"OPENAI_API_KEY", "CODEX_API_KEY"}
+    assert set(FORBIDDEN_ENV["agent:codex"]) == {"OPENAI_API_KEY", "CODEX_API_KEY",
+                                                 "CODEX_ACCESS_TOKEN"}
     assert forbidden_env_present("agent:codex", {"ANTHROPIC_API_KEY": "x"}) == []   # other CLI's var
     assert forbidden_env_present("agent:codex", {"OPENAI_API_KEY": ""}) == ["OPENAI_API_KEY"]
 
@@ -283,8 +285,8 @@ async def test_billing_mode_uses_injected_probe_and_unknown_on_error():
     assert await real_cli.ClaudeCLI(probe=claude).list_models() is None
 
 
-def test_register_real_adapters_registers_claude_only_without_spawning():
+def test_register_real_adapters_registers_both_without_spawning():
     from aibroker.agent.registry import make_adapter
     real_cli.register_real_adapters()
     assert isinstance(make_adapter("agent:claude"), real_cli.ClaudeCLI)
-    assert make_adapter("agent:codex") is None
+    assert isinstance(make_adapter("agent:codex"), CodexCLI)
