@@ -591,10 +591,17 @@ rendered baseline `apparmor-docker-default.rendered`) with exactly ONE block rep
 `mount` rules making `/` a slave/private mount and building the new root (tmpfs, proc, bind/rbind and
 read-only remounts) and `pivot_root`. Everything else - the `/proc` write denies, `/sys` denies, sysrq,
 kcore, network family denies, signals, ptrace - is unchanged (a test compares the two files). The rule
-set is written statically from bwrap's known mount sequence and is UNVERIFIED: the first supervised
-attempt may reveal one more denial (audit log / dmesg); add only that rule.
+set is written statically from bwrap's known mount sequence and remains UNVERIFIED. The first fake-data
+canary on 2026-10-11 was blocked by an AppArmor audit denial for `mount` on `/` with flags
+`rw,silent,rslave`; the reviewed rule allowed `rw,rslave` only. A separate exact
+`(rw, silent, rslave) -> /` rule is proposed for owner review, not loaded. It
+permits the same recursive slave propagation with the kernel's silent flag;
+subsequent mount operations remain unverified and any further denial needs a separate narrow review.
 Operator, not executed by any code here: `sudo apparmor_parser -r -W infra/agent-worker/apparmor-codex`,
-check `sudo aa-status | grep aibroker-codex`; unload with `sudo apparmor_parser -R ...`.
+check `sudo aa-status | grep aibroker-codex`. To roll back this additional rule, stop the
+Codex canary/container, reload the previously deployed profile with `apparmor_parser -r -W`,
+and verify `aibroker-codex (enforce)` again. Keep seccomp, dropped capabilities, and
+the AppArmor selector in place throughout the test.
 
 **Compose.** Only `agent-worker-codex` has
 `security_opt: [no-new-privileges:true, seccomp=./infra/agent-worker/codex-seccomp.json, apparmor=aibroker-codex]`
