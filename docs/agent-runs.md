@@ -33,7 +33,8 @@ the project has no entry or an empty `models` / `accounts` list - `agent_policy_
 `latest` only if listed) - `model_not_allowed`; the `account_id` is not listed - `account_not_allowed`.
 For a project explicitly configured with `"models": ["*"]`, the wildcard admits only
 model ids listed as candidates for the requested Claude or Codex subscription
-provider. It does not mark a model verified, grant tools or vision, change the
+provider. Exact model entries retain their previous policy behavior. The
+wildcard does not mark a model verified, grant tools or vision, change the
 project's account allowlist, or override the ordinary jobs route's availability
 check. Keep this policy entry limited to the project the owner approved.
 A malformed setting refuses every project (`agent_policy_missing`) and logs one clear error. The worker
@@ -59,9 +60,10 @@ path in `aibroker.agent.rpc`.
 
 ## Readiness and quota rules (hard requirements)
 
-- **The subscription route must not be declared ready from fake tests alone.** Everything
-  here is tested against `FakeAgentCLI`; a real CLI on a real subscription login has not
-  been run. Readiness requires the phase-4 verification against the real CLIs.
+- **Do not declare an individual model or modality ready from fake tests alone.**
+  Production has completed real subscription CLI text runs for Sonnet 5.5,
+  GPT 6.1 Sol, and GPT 6 Luna, and exported a real PNG from a GPT 6.1 Sol
+  Codex run. Each additional model or modality still needs its own verification.
 - On **quota exhaustion** the run WAITS (see below), visible as `waiting_quota`.
   **No fallback to API billing/OpenRouter, no "extra usage", no rotation to another account.**
   An account is chosen by the caller (`account_id`) and never swapped by the broker.
