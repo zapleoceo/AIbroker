@@ -85,6 +85,8 @@ class AgentRunResponse(BaseModel):
     files: list[dict[str, Any]] | None = None
     error: str | None = None
     model: str | None = None
+    model_served: str | None = Field(
+        None, description="actual served model, if independently attested by the CLI; unknown for current subscription runs")
     billing_mode: str | None = None
     usage: dict[str, int | None] | None = None
     usage_source: str | None = None
@@ -145,7 +147,8 @@ def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None) -> AgentR
         run_id=run.run_id, status=state, capability=run.capability, task_id=run.task_id,
         account_id=run.account_id, session_id=run.session_id,
         cancel_requested=run.cancel_requested, final_text=job.result_text,
-        files=files, error=job.error_message, model=run.model, quota_waits=run.quota_waits,
+        files=files, error=job.error_message, model=run.model, model_served=None,
+        quota_waits=run.quota_waits,
         not_before=job.run_after.isoformat() if state == "waiting_quota" and job.run_after else None,
         billing_mode=run.billing_mode, usage=usage, usage_source=run.usage_source,
         cost_usd=run.cost_usd,

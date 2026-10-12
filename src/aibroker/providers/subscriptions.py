@@ -64,6 +64,19 @@ def subscription_model_verified(model: str) -> bool:
     return model in _catalog()[1]
 
 
+def subscription_tool_model_verified(model: str) -> bool:
+    """Advertise client tools only after a live callback for this exact Codex id."""
+    try:
+        value = json.loads(get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS)
+    except ValueError:
+        return False
+    return (isinstance(value, list) and all(isinstance(mid, str) for mid in value)
+            and len(value) == len(set(value))
+            and all(mid.startswith("codex-sub/") and subscription_model_verified(mid)
+                    for mid in value)
+            and model in value)
+
+
 def subscription_model(model: str | None) -> ModelSpec | None:
     if model is None:
         return None

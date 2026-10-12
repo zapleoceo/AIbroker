@@ -59,12 +59,11 @@ execute the client's tools.
 No database migration is needed: tool contracts participate in the existing
 JSONB request payload and dedup hash; results use existing result metadata.
 
-Subscription CLI pins still reject `tools` and tool history. Their current
-JSONL events describe tools executed inside the CLI process; they do not pause
-for a client-authorized function call and resume with its result. A prompt that
-asks the CLI to print a JSON call would not provide that control boundary,
-especially for Codex, whose sandbox still permits internal workspace tools.
-The existing API `tool_calls` contract remains available on native-tool
-providers. A subscription implementation needs a separately verified CLI
-handoff with no model-executed client operation before Broker may advertise
-`supports_tools: true`.
+Claude subscription pins reject `tools` and tool history. Codex subscription
+pins have a separate, disabled-by-default App Server callback path described
+in [subscription tool loop](subscription-tool-loop.md). Unlike the native API
+provider's terminal tool result, its pending `GET /v1/jobs/{id}` response has
+`tool_calls` and `finish_reason: tool_calls`; the same project submits the
+result to `POST /v1/jobs/{id}/tool-results` and polls the same job for a final
+answer. Its catalog row must remain `supports_tools: false` until that exact
+model passes a live callback canary and is listed in the verified tool IDs.
