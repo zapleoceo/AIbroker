@@ -23,7 +23,9 @@ The pinned schema proves protocol availability, not live model conformance.
    `tool_choice`. The server validates the same tool definitions as native
    providers. The job remains pinned to its exact subscription account/model.
 2. The worker starts App Server over stdio inside its existing isolated Codex
-   container, with the existing workspace and permission profile. It advertises
+   container, with the existing workspace and permission profile. Its
+   `initialize` request opts in with `capabilities.experimentalApi: true`,
+   which the protocol requires for `thread/start.dynamicTools`. It advertises
    *only* the functions declared by this job as dynamic tools. It does not
    expose a host port, store a new credential, or call Orchestra directly.
 3. On `item/tool/call`, the worker persists the call ID, name, arguments,
