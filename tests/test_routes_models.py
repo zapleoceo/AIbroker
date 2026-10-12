@@ -40,6 +40,21 @@ async def test_models_lists_every_pinnable_model_with_provider_and_price():
     assert "groq/whisper-large-v3" not in by_id        # price-only entry, nothing to pin
 
 
+def test_missing_api_price_is_unknown_not_zero(monkeypatch):
+    import litellm
+
+    from aibroker.providers.catalog import price_info
+    from aibroker.providers.registry import model_spec
+
+    def missing_price(_model):
+        raise LookupError("price unavailable")
+
+    monkeypatch.setattr(litellm, "get_model_info", missing_price)
+    model = model_spec("gemini/gemini-2.5-flash")
+    assert model is not None
+    assert price_info(model) == {"kind": "unknown"}
+
+
 def test_tool_metadata_requires_broker_adapter_and_verified_model_map(monkeypatch):
     import litellm
 

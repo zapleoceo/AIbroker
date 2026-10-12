@@ -4,8 +4,10 @@
 `/v1/models/catalog` route) includes explicit route ids such as
 `claude-sub/claude-sonnet-5-5` and `codex-sub/gpt-6.1-sol`. Each row retains
 its distinct `id`, `owned_by`, `capabilities`, `source: "broker"`,
-`billing_type: "subscription"`, and `price: {"kind": "subscription"}`. The
-subscription price has no invented per-token amount. Each subscription row
+`billing_type: "subscription"`, and `price` with `kind: "subscription"`,
+`input_usd_per_mtok: 0`, `output_usd_per_mtok: 0`, and
+`subscription_fee_excluded: true`. These zeroes describe variable token cost;
+they do not claim the subscription itself is free. Each subscription row
 has `available: true` only after its exact id is in the owner-confirmed
 `AGENT_SUBSCRIPTION_VERIFIED_MODELS` list; a Codex row additionally needs its
 separately approved worker route enabled. A client merging catalogs should key by `(source, id)`, not the

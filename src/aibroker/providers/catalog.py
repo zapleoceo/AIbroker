@@ -130,6 +130,10 @@ def price_info(spec: ModelSpec) -> dict[str, object]:
         info["output_usd_per_mtok"] = spec.output_usd_per_mtok
     elif spec.pricing == "per_minute":
         info["usd_per_minute"] = spec.usd_per_minute
+    elif spec.pricing == "subscription":
+        info["input_usd_per_mtok"] = 0.0
+        info["output_usd_per_mtok"] = 0.0
+        info["subscription_fee_excluded"] = True
     return info
 
 

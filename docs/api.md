@@ -571,8 +571,12 @@ new registry entry shows up here with no other change.
 ```
 
 `price.kind`: `litellm` (litellm's map), `override` (our list price), `per_minute`
-(`usd_per_minute`), `free`, `local`, or `unknown` (not priced anywhere — a bug the registry
-test catches). Entries are ordered the way a bare name resolves (free providers by rank,
+(`usd_per_minute`), `free`, `local`, `subscription`, or `unknown` (not priced anywhere —
+a bug the registry test catches). A subscription price has
+`input_usd_per_mtok: 0`, `output_usd_per_mtok: 0`, and
+`subscription_fee_excluded: true`: token usage has no variable API charge, while
+the subscription fee is outside this price. An unknown price has no invented zero.
+Entries are ordered the way a bare name resolves (free providers by rank,
 paid last). Free-tier keys bill $0 whatever the nominal price shows.
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
