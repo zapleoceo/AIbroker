@@ -76,7 +76,7 @@ def test_every_model_is_priced_or_explicitly_marked():
             assert m.pricing in ("free", "local"), m.id
     assert not unpriced, (
         "models litellm cannot price — give each an explicit price or mark it "
-        f"pricing='free'/'local' in providers/specs.py: {unpriced}")
+        f"pricing='free'/'local' in providers/provider_specs/: {unpriced}")
 
 
 def test_registered_overrides_reach_litellm():
@@ -111,6 +111,30 @@ def test_every_model_transport_exists_and_implements_its_protocol():
     assert isinstance(table["openrouter_decisions"], t.DecideTransport)
 
 
+def test_provider_module_can_register_its_own_transport(monkeypatch):
+    from aibroker.providers import transport as t
+
+    spec = build_provider(
+        "example", defaults={"chat:fast": "example/model"},
+        model_meta={"example/model": {"transport": "example_chat", "pricing": "free"}},
+        transport_factories={
+            "example_chat": "aibroker.providers.local_vision:LocalVisionTransport"})
+    monkeypatch.setitem(REGISTRY, "example", spec)
+    monkeypatch.setattr(t, "_transports", {})
+    assert type(t.transport_for("example/model")).__name__ == "LocalVisionTransport"
+
+
+def test_invalid_provider_transport_does_not_publish_partial_table(monkeypatch):
+    from aibroker.providers import transport as t
+
+    spec = build_provider("broken", transport_factories={"broken_transport": "invalid"})
+    monkeypatch.setitem(REGISTRY, "broken", spec)
+    monkeypatch.setattr(t, "_transports", {})
+    with pytest.raises(ValueError, match="invalid transport factory"):
+        t._load()
+    assert t._transports == {}
+
+
 def test_transport_for_unknown_model_defaults_to_litellm():
     from aibroker.providers.transport import transport_for
 
@@ -123,6 +147,10 @@ def test_transport_for_unknown_model_defaults_to_litellm():
 
 
 def test_views_match_the_tables_they_replaced():
+    from aibroker.services.tool_contract import TOOL_PROVIDERS
+
+    assert {n for n, s in REGISTRY.items() if s.native_tools} == TOOL_PROVIDERS
+    assert {"openai", "anthropic", "gemini", "mistral"} == TOOL_PROVIDERS
     assert registry.paid_providers() == {"deepseek", "anthropic", "openai"}
     assert registry.cache_sticky_providers() == {"deepseek", "anthropic"}
     assert registry.providers_with_json("unreliable") == {"cerebras", "cohere", "openrouter", "groq"}

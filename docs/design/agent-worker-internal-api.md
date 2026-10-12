@@ -49,7 +49,10 @@ is introduced.
   directory.
 - Directories would be owned by uid 10001 and mode `0700`; sockets mode `0600`.
   The API and workers already run as uid 10001. A worker would remove only its
-  own stale socket path at startup. Neither auth volume is mounted into API.
+  own stale socket path at startup. These volumes hold only the RPC socket;
+  CLI auth files remain in the existing separate worker-only auth volumes.
+  Neither auth volume is mounted into API, and no credential content crosses
+  the proposed RPC boundary.
 - **Docker networks:** no new network or attachment. Workers remain only on
   `agent_db`; Broker retains its current network attachments.
 - **TCP/UDP ports and host exposure:** none. No `ports:`, `expose:`, host
