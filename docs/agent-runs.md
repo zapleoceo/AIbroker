@@ -1,8 +1,10 @@
 # Agent runs (owner-only CLI workers)
 
 Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the broker queue.
-Status: **phase 1, C1 + C2-min** - data model, event schema, adapter contract, fake adapter,
-API, worker lane, session leases, workspaces, timeouts. One real adapter (`ClaudeCLI`) and the billing guard are in; Codex, the model catalog and multi-account are later.
+Status: the universal jobs API, Claude and Codex CLI adapters, and subscription
+catalog routes are implemented. The Codex route remains disabled pending owner
+login, billing checks, and real text/PNG verification. Multi-account config
+directories remain later work.
 
 ## Legal / scope note
 
@@ -511,8 +513,9 @@ own home variable (`worker_image_problem`) and refuses to start with an empty li
 gets a per-run EMPTY `HOME` inside the run workspace (`.agent-home`), never the Claude state dir and
 never `CODEX_HOME`; only `CODEX_HOME` leads to the login. Static tests pin the volumes and `HOME`.
 
-**Does Codex 0.162.1 have READ isolation? Yes, through permission profiles - enforcement is not
-verified here.** Sources: the official page `learn.chatgpt.com/codex/permissions` (the
+**Codex 0.162.1 uses permission profiles for read isolation.** A supervised
+fake-data canary confirmed the denials below with the seven-rule AppArmor
+profile; real authenticated runs have not been tested. Sources: the official page `learn.chatgpt.com/codex/permissions` (the
 `agent-approvals-security` page documents bwrap + seccomp and profiles but no read rules; `/docs/config`
 returned 404) and the pinned binary (`codex sandbox --help`, config strings, `-c` parse probes, all
 offline in a throwaway container):
@@ -529,18 +532,20 @@ offline in a throwaway container):
 - NOT available: a separate uid for the auth files (same uid as the worker; the CLI reads auth
   outside the sandbox). Redaction is only a second net.
 - Verified on the image: the profile syntax is accepted (an unknown access value is rejected, an
-  undefined profile is rejected). NOT verified: that the deny rules are actually enforced - the
-  sandbox cannot start in this container (`bwrap: No permissions to create a new namespace` - the
-  kernel/Docker default forbids **unprivileged user namespaces**).
+  undefined profile is rejected). On 2026-10-12 a network-disabled canary using
+  fake auth reported `auth:DENIED`, `parent:DENIED`, and `claude:ABSENT`. This
+  verifies those isolation checks in that container; it does not prove a real
+  model run or prevent all possible reads.
 
 **Sandbox start check (fail closed).** Before EVERY Codex run `CodexCLI.preflight_async` runs
 `codex sandbox -P broker -c ... true` (a documented command in 0.162.1: it executes `true` under the
 Linux sandbox WITH the read-deny profile). A non-zero exit, a bwrap/landlock/seccomp/namespace message,
 a timeout or a missing binary ends the run with `run.failed error_class=sandbox_unavailable` before any
 process starts; the same classification applies to such wording in events (`sandbox_failure`,
-`CodexParser`) and stderr. It is final: no retry, no requeue, never without the sandbox. On this host
-every Codex run will therefore be refused until the owner decides how to allow unprivileged user
-namespaces for that one container (a seccomp profile / sysctl change - security-sensitive, not done).
+`CodexParser`) and stderr. It is final: no retry, no requeue, never without the sandbox. The
+fake-data canary started with unprivileged user namespaces under the dedicated
+seccomp and AppArmor profiles, but
+the worker remains stopped and the real preflight remains unverified.
 
 **Redaction.** Everything an agent run persists passes `redact` / `redact_obj` / `redact_bytes`
 (`aibroker.agent.redact`) first: event payloads, `final_text`, the job error text and returned file
@@ -560,13 +565,15 @@ stored data; exit 2 means the run did not complete (e.g. `sandbox_unavailable`: 
 read). It never touches the real `auth.json`, the real claude-state or any real `/proc/*/environ`, not
 even expecting a refusal.
 
-## Codex sandbox profiles (seccomp + AppArmor) - static, NOT loaded or run
+## Codex sandbox profiles (seccomp + AppArmor)
 
-Diagnosed on the target host: under Docker's default seccomp profile the Codex sandbox (bubblewrap,
-which needs user + mount namespaces) fails with "Operation not permitted"; with the seccomp addition
-below user namespaces work, but bwrap then fails with "Failed to make / slave" under docker-default
-AppArmor (its blanket `deny mount,`). Both profiles are repo files only; nothing was applied on the
-server and no container was started with them.
+Under Docker's default seccomp profile the Codex sandbox (bubblewrap, which
+needs user and mount namespaces) failed with "Operation not permitted". With
+the dedicated seccomp profile it reached Docker's AppArmor `deny mount,` and
+reported `Failed to make / slave`. The seven-rule `aibroker-codex` addition below
+passed one isolated fake-data canary on 2026-10-12. The tested profile was
+loaded in enforce mode on the host; this change brings the deployed file into
+line with it. The Codex worker and subscription route remain off.
 
 **Seccomp: `infra/agent-worker/codex-seccomp.json`** = Docker's default profile
 (`moby-seccomp-default.json`, verbatim copy of moby/profiles main `seccomp/default.json`, last commit
@@ -591,25 +598,47 @@ rendered baseline `apparmor-docker-default.rendered`) with exactly ONE block rep
 `mount` rules making `/` a slave/private mount and building the new root (tmpfs, proc, bind/rbind and
 read-only remounts) and `pivot_root`. Everything else - the `/proc` write denies, `/sys` denies, sysrq,
 kcore, network family denies, signals, ptrace - is unchanged (a test compares the two files). The rule
-set is written statically from bwrap's known mount sequence and remains UNVERIFIED. The first fake-data
-canary on 2026-10-11 was blocked by an AppArmor audit denial for `mount` on `/` with flags
-`rw,silent,rslave`; the reviewed rule allowed `rw,rslave` only. A separate exact
-`(rw, silent, rslave) -> /` rule is proposed for owner review, not loaded. It
-permits the same recursive slave propagation with the kernel's silent flag;
-subsequent mount operations remain unverified and any further denial needs a separate narrow review.
-Operator, not executed by any code here: `sudo apparmor_parser -r -W infra/agent-worker/apparmor-codex`,
-check `sudo aa-status | grep aibroker-codex`. To roll back this additional rule, stop the
-Codex canary/container, reload the previously deployed profile with `apparmor_parser -r -W`,
-and verify `aibroker-codex (enforce)` again. Keep seccomp, dropped capabilities, and
-the AppArmor selector in place throughout the test.
+set includes seven additions relative to the original baseline: silent
+`rslave` on `/`, a `devpts` mount on `/newroot/dev/pts/`, one exact read-only
+remount on `/newroot/`, three exact-flag read-only remount rules on
+`/newroot/**`, and silent `rprivate` on `/oldroot/`. The three subtree rules
+also match other descendants with the same flags; they are wider in path than
+the ten child paths in the earlier audit, so do not describe them as the
+strict minimum path scope. The reviewed file's SHA-256 is
+`63389ed14e3e9cb0e7c3a610f7625474dc34ee836537099b8c6f98fe94931052`.
+The fake-data canary exited 0 with `claude:ABSENT`, `auth:DENIED`, and
+`parent:DENIED`; no new `aibroker-codex` AppArmor denial appeared in the
+following audit window. This does not verify real login, model billing, text
+completion, or decodable PNG output. The profile file retains historical
+pre-canary comments so its tested bytes remain unchanged.
+
+The standard application deploy updates the repository file but does not
+install AppArmor profiles. On this host `apparmor.service` is enabled, but the
+named file was absent from `/etc/apparmor.d` before this delivery. After CI
+and deploy succeed, keep the Codex worker stopped and install only the
+reviewed file at `/etc/apparmor.d/aibroker-codex` (mode 0644). Check that its
+SHA-256 equals the value above, syntax-check it with
+`apparmor_parser -Q /etc/apparmor.d/aibroker-codex`, then load it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex` and verify
+`aibroker-codex (enforce)`. The enabled AppArmor service will load that file
+again after reboot; merely leaving it in the application checkout will not.
+If a later run fails, stop the Codex worker, restore
+`/var/backups/aibroker-codex-apparmor-530ff54.profile` (SHA-256
+`a6c4303751234861502f9f85f6517ede09576afbfc296046ef53efc23ef9acf4`)
+to `/etc/apparmor.d/aibroker-codex`, reload it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex`, and verify enforce
+before further testing. Keep seccomp, dropped capabilities,
+and the AppArmor selector in place; do not use `unconfined` or `privileged`.
 
 **Compose.** Only `agent-worker-codex` has
 `security_opt: [no-new-privileges:true, seccomp=./infra/agent-worker/codex-seccomp.json, apparmor=aibroker-codex]`
 (whether compose resolves the `seccomp=` path relative to the project directory is unverified on the
 installed compose version); `cap_drop: ALL`, `read_only`, no privileged, no docker.sock, network
-`agent_db` only are kept, and `agent-worker` (Claude) is unchanged. ROLLBACK: remove the `seccomp=` and
-`apparmor=` entries and `docker compose --profile agent up -d agent-worker-codex` - the Codex sandbox then
-fails closed again (`sandbox_unavailable`); unload the AppArmor profile if desired.
+`agent_db` only are kept, and `agent-worker` (Claude) is unchanged. ROLLBACK:
+disable the Codex route, stop its worker, and reload the known prior AppArmor
+profile in enforce mode. Leave the worker stopped while diagnosing the issue.
+Removing `seccomp=` and `apparmor=` later would make Codex's sandbox preflight
+fail closed as `sandbox_unavailable`; it is not a way to run the worker.
 
 ## Codex generated images (worker-side export)
 
@@ -637,6 +666,7 @@ supervised run produces such a file.
 
 ## Not done yet
 
-Codex adapter, model catalog from the CLI (`ClaudeCLI.list_models` returns `None`),
-multi-account config dirs. Phase 2+: `$imagegen` headless support is unproven; the Claude
-critic must receive real image bytes.
+Owner Codex device login, paid-continuation verification, and real text/PNG
+checks remain. `$imagegen` headless support is unproven; the Claude critic
+must receive decodable PNG bytes. Multi-account config directories and
+account-aware CLI catalog discovery remain later work.
