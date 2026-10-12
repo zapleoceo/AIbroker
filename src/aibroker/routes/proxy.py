@@ -484,7 +484,7 @@ def _job_response(row: Any) -> DeepJobResponse:
     would hand back status=done with text=null and the client would stop
     polling on an empty answer. Any unexpected status defaults to pending for
     the same fail-safe reason."""
-    request = row.request or {}
+    request = getattr(row, "request", None) or {}
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
