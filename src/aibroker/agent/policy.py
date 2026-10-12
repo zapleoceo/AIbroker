@@ -32,12 +32,14 @@ class ProjectPolicy:
     models: frozenset[str]
     accounts: frozenset[str]
 
-    def allows_model(self, model: str | None, capability: str | None = None) -> bool:
-        """An exact id or a known subscription candidate under an explicit wildcard."""
+    def allows_model(self, model: str | None) -> bool:
+        """An exact model id allowed by this project."""
+        return model is not None and model in self.models
+
+    def allows_candidate(self, model: str | None, capability: str | None) -> bool:
+        """A known candidate of the requested provider under an explicit wildcard."""
         if model is None:
             return False
-        if model in self.models:
-            return True
         if "*" not in self.models or capability not in PROVIDERS.values():
             return False
         return any(PROVIDERS[spec.provider] == capability
@@ -86,7 +88,10 @@ def policy_violation(project_id: int, model: str | None, account_id: str,
     policy = policy_for(project_id)
     if policy is None:
         return "agent_policy_missing"
-    if not policy.allows_model(model, capability):
+    allowed = policy.allows_model(model)
+    if not allowed and isinstance(policy, ProjectPolicy):
+        allowed = policy.allows_candidate(model, capability)
+    if not allowed:
         return "model_not_allowed"
     if not policy.allows_account(account_id):
         return "account_not_allowed"
