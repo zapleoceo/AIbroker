@@ -46,6 +46,11 @@ The pinned schema proves protocol availability, not live model conformance.
 The pending call and result use `deep_jobs.result_meta` under row locks. The
 worker checks its lease fence before publishing or consuming a callback and
 never replays a possibly executed client operation after lease loss.
+`run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
+and `take_result` manage the durable handoff and raise `ClientToolConflict` for
+invalid state. `ClientToolResultIn` validates the HTTP payload and
+`jobs_tool_result` enforces project ownership. The catalog uses
+`subscription_tool_model_verified` to require an exact verified Codex ID.
 Cancellation and deadlines terminate the waiting App Server process. A client
 should use the Broker call ID as its own idempotency key. One outstanding call,
 16 calls per run, 64 KiB arguments/results, and exact-result idempotent retries
