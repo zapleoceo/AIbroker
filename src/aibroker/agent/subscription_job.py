@@ -17,8 +17,9 @@ def _has_ref(value: Any) -> bool:
 
 
 def prompt_for_messages(messages: list[dict[str, Any]], response_format: dict[str, Any] | None) -> str:
-    """Keep every text turn and its role; the CLI gets no tools or image input."""
-    turns = [{"role": m["role"], "content": m["content"]} for m in messages]
+    """Keep role and tool history; input images use separate attachments."""
+    turns = [{k: m[k] for k in ("role", "content", "tool_calls", "tool_call_id") if k in m}
+             for m in messages]
     prompt = "Continue this conversation. Respect the roles in the JSON transcript:\n"
     prompt += json.dumps(turns, ensure_ascii=False)
     if response_format:

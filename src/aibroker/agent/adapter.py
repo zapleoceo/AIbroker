@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from aibroker.agent.events import (
     FileChanged,
@@ -16,6 +16,7 @@ from aibroker.agent.events import (
     ToolResult,
     Usage,
 )
+from aibroker.agent.lock import Lease
 
 BillingMode = Literal["subscription", "api", "unknown"]
 StreamEvent = (SessionAssigned | MessageDelta | ToolCall | ToolResult | FileChanged
@@ -34,6 +35,9 @@ class AgentRunSpec:
     allowed_tools: list[str] = field(default_factory=list)
     model: str | None = None               # EXACT id the caller chose; never substituted
     attachments: list[str] = field(default_factory=list)   # workspace-relative input files
+    client_tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_choice: str | dict[str, Any] | None = None
+    fence_leases: tuple[Lease, ...] = ()
 
 
 @dataclass(frozen=True)

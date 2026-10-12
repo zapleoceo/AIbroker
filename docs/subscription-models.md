@@ -18,7 +18,8 @@ Submit using the existing `POST /v1/jobs?capability=chat:fast` and the ordinary
 `job_id`, `poll_url`, and `poll_after_s`; poll the existing `GET /v1/jobs/{id}`.
 The job goes to the dedicated CLI worker and is never inserted into a normal
 provider fallback chain. `provider` on success is `claude-sub` or `codex-sub`;
-`model` is the route id, `model_served` is the exact CLI model passed, and
+`model` is the route id, `model_served` is `null` until the CLI supplies
+independent served-model evidence, and
 `cost_usd` remains null. A successful subscription attestation is reflected in
 `billing_type: "subscription"`. Quota waits stay pending on the same account;
 there is no API-billed fallback.
@@ -28,7 +29,7 @@ Every catalog row now has a `job_request` field. Subscription rows report
 with `forwarded: false`: omit these fields, or send exactly those defaults.
 For example, `max_tokens: 16` fits the generic `ChatRequest` range but is
 rejected by the subscription route before enqueue. The same contract marks
-tools, tool history, and streaming unsupported. Codex input images are accepted
+tools and tool history unsupported by default, and streaming unsupported. Codex input images are accepted
 only for separately verified vision model IDs. JSON schemas cannot contain
 references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
@@ -77,9 +78,11 @@ file bytes when the client polls the job.
 Subscription jobs accept text role turns and `response_format` `json_object`
 or `json_schema`; the final JSON is validated, with invalid output ending in
 an error. Tool declarations, tool history, nondefault temperature, max_tokens,
-and `stream: true` are rejected before enqueue. The CLI has no verified
-client tool-call handoff, so its internal tool telemetry is not mapped to
-public `tool_calls`.
+and `stream: true` are rejected before enqueue by default. The Codex App Server
+client-tool path can be enabled separately with
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED` and advertised per exact ID with
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS`; see
+[subscription tool loop](subscription-tool-loop.md). Claude still rejects them.
 Claude subscription jobs still reject image input and `vision`. A Codex model
 with separately verified vision accepts up to five embedded, single-frame PNG,
 JPEG, WebP, or GIF images, each at most 5 MiB,
@@ -99,8 +102,10 @@ text or SVG is not an image result. File content expires under the worker's
 normal artifact TTL. A direct Codex subscription worker run (`551063`)
 generated and exported a decodable 1254x1254 PNG, 1,689,768 bytes, SHA-256
 `9e8545d12421b78c41ca6a06b58d7f4d223eaeb053b2d5b32ee7b90e3ca56521`.
-The universal HTTP route still needs an Orchestra client request. This result
-does not verify input vision or client tool-call conformance.
+The universal HTTP route was also exercised by Orchestra: job `551214` produced
+a decodable 1254x1254 PNG with SHA-256
+`d19fae578ae4d4c0a03c3e5466ff197b4b3bde4c5a0447e44d1ab1e810e685a`.
+This does not verify input vision or client tool-call conformance.
 
 For the Orchestra adapter, submit the ordinary text request (no `tools`,
 `response_format`, `stream`, nondefault `temperature`, or nondefault
@@ -112,7 +117,7 @@ For the Orchestra adapter, submit the ordinary text request (no `tools`,
 
 Use `POST /v1/jobs?capability=chat:fast`, then poll the returned `poll_url`.
 On success, `status` is `done`, `provider` is `codex-sub`, `model` is the
-catalog id, `model_served` is `gpt-6.1-sol`, `billing_type` is
+catalog id, `model_served` is `null`, `billing_type` is
 `subscription`, and `cost_usd` is null. A generated image is in `files` as
 `path` ending in `.png`, `content_b64`, `size`, `sha256`, `width`, `height`,
 and `expires_at`. Decode `content_b64` and check the PNG signature, SHA-256,

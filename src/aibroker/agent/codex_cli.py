@@ -163,7 +163,12 @@ class CodexCLI(SubprocessCLI):
         """
         self._image_session_id = None
         session_seen = False
-        async for item in super().start(run):
+        if run.client_tools:
+            from aibroker.agent.codex_app_server import run_tool_turn
+            stream = run_tool_turn(self, run)
+        else:
+            stream = super().start(run)
+        async for item in stream:
             if isinstance(item, SessionAssigned):
                 if session_seen:
                     self._image_session_id = None  # ambiguous CLI identity

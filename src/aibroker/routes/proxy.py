@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
+from aibroker.agent.client_tools import MAX_RESULT_BYTES, ClientToolConflict, submit_result
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.rpc import wake_worker
@@ -485,9 +486,17 @@ def _job_response(row: Any) -> DeepJobResponse:
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
     if row.status != "done":
+        pending_tool = (row.result_meta or {}).get("client_tool") or {}
+        call = None
+        if pending_tool.get("state") == "waiting":
+            call = {"id": pending_tool["call_id"], "type": "function",
+                    "function": {"name": pending_tool["name"],
+                                 "arguments": pending_tool["arguments"]}}
         return DeepJobResponse(
             job_id=row.id, status="pending",
-            poll_after_s=next_poll_after_s(row.created_at),
+            poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
+            tool_calls=[call] if call else None,
+            finish_reason="tool_calls" if call else None,
         )
     meta = row.result_meta or {}
     return DeepJobResponse(
@@ -571,6 +580,8 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
+        if body.tools and not catalog.supports_tools(subscription):
+            raise HTTPException(503, "Codex subscription client tools are not verified for this model")
         if any(isinstance(message.content, list) and any(
             isinstance(block, dict) and block.get("type") == "image_url"
             for block in message.content) for message in body.messages):
@@ -594,7 +605,9 @@ async def jobs_submit(
                 attachments=attachments,
                 client_job={"capability": capability, "provider": subscription.provider,
                             "model": subscription.id, "response_format": body.response_format,
-                            "workflow": body.workflow},
+                            "workflow": body.workflow,
+                            "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
+                            "tool_choice": body.tool_choice},
             )
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -681,6 +694,40 @@ async def jobs_poll(
 
 
 # ─── Model catalog ──────────────────────────────────────────────────────────
+
+
+class ClientToolResultIn(BaseModel):
+    call_id: str = Field(min_length=1, max_length=128)
+    success: bool
+    content: str = Field(max_length=MAX_RESULT_BYTES)
+
+
+@router.post("/jobs/{job_id}/tool-results", status_code=status.HTTP_202_ACCEPTED)
+async def jobs_tool_result(
+    job_id: int, body: ClientToolResultIn,
+    ctx: ProjectCtx = Depends(require_project),
+) -> dict[str, bool]:
+    """Accept one caller-executed result for a pending tool on that caller's job."""
+    _require_capability_scope(ctx, AGENT_SCOPE)
+    if not project_allowed(ctx.project.id):
+        raise AgentProjectNotAllowed(ctx.project.id)
+    row = await get_job(job_id, ctx.project.id)
+    if row is None:
+        raise HTTPException(404, "job not found")
+    violation = policy_violation(ctx.project.id, row.request.get("model"),
+                                 row.request.get("account_id", ""), row.capability)
+    if violation:
+        raise AgentPolicyViolation(violation)
+    try:
+        accepted = await submit_result(job_id, ctx.project.id, body.call_id,
+                                       body.success, body.content)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except ClientToolConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"accepted": accepted}
 
 
 @router.get("/models", response_model=ModelsResponse)

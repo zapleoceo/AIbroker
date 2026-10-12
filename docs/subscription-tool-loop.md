@@ -1,8 +1,9 @@
 # Subscription client tools: implementation boundary
 
-Status: design for review. Subscription catalog rows still report
-`supports_tools: false`; `POST /v1/jobs` rejects `tools` for `claude-sub` and
-`codex-sub`. Native API-provider tools retain their existing contract.
+Status: implemented behind `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED=false` and
+an empty `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` list. The default
+catalog reports `supports_tools: false`. Claude subscription jobs still reject
+tools. Native API-provider tools retain their existing contract.
 
 ## Verified transport capability
 
@@ -16,7 +17,7 @@ describe operations already performed inside the CLI. Mapping those events to
 public `tool_calls` would falsely imply that Orchestra authorized execution.
 The pinned schema proves protocol availability, not live model conformance.
 
-## Proposed universal jobs exchange
+## Universal jobs exchange
 
 1. An authorized client submits the existing `POST /v1/jobs?capability=...`
    request with a subscription model, declared function schemas, and
@@ -28,13 +29,13 @@ The pinned schema proves protocol availability, not live model conformance.
    which the protocol requires for `thread/start.dynamicTools`. It advertises
    *only* the functions declared by this job as dynamic tools. It does not
    expose a host port, store a new credential, or call Orchestra directly.
-3. On `item/tool/call`, the worker persists the call ID, name, arguments,
-   thread/turn IDs, and a bounded deadline before exposing it. `GET
+3. On `item/tool/call`, the worker checks the thread and turn IDs, then persists
+   the call ID, name, arguments, and a 300-second deadline before exposing it. `GET
    /v1/jobs/{id}` reports `status: pending`, `tool_calls`, and a distinct
    `finish_reason: tool_calls` while the call waits. The model process remains
    paused. The client authorizes and executes the function under its own
    policy; Broker never executes that client function.
-4. An authenticated, same-project `POST /v1/jobs/{id}/tool-results` would
+4. An authenticated, same-project `POST /v1/jobs/{id}/tool-results`
    accept exactly one result per pending call ID. It must reject an unknown,
    expired, duplicate-with-different-content, or already-terminal call.
    The worker sends the bounded result as `DynamicToolCallResponse` and
@@ -42,18 +43,24 @@ The pinned schema proves protocol availability, not live model conformance.
    After the final model answer, the existing `GET /v1/jobs/{id}` returns
    `status: done` and `finish_reason: stop`.
 
-The pending call and result need durable, fenced database state. On worker
-loss or deployment, Broker must fail the run without replaying a possibly
-executed client operation. Cancellation and deadlines must resolve the waiting
-App Server request and terminate its process. A client should use the Broker
-call ID as its own idempotency key. `tools`, tool history, and `supports_tools`
-must stay rejected until this exchange has passed protocol, restart, auth,
-timeout, and live Orchestra checks. The current `deep_jobs` pending/done/error
-status values remain intact for clients that do not use tools.
+The pending call and result use `deep_jobs.result_meta` under row locks. The
+worker checks its lease fence before publishing or consuming a callback and
+never replays a possibly executed client operation after lease loss.
+Cancellation and deadlines terminate the waiting App Server process. A client
+should use the Broker call ID as its own idempotency key. One outstanding call,
+16 calls per run, 64 KiB arguments/results, and exact-result idempotent retries
+are enforced. The current `deep_jobs` pending/done/error status values remain
+intact for clients that do not use tools. A completed subscription result has
+`model_served: null`: the CLI model pin is not independent evidence of the
+model actually served. The raw client tool result is removed from pending
+metadata when consumed and withheld from the persistent tool event.
 
 This is a new authenticated write endpoint and a new path for client-provided
-tool output into the worker. Review its exact route, database migration,
-authorization, size caps, and timeout behavior before enabling it. No new
+tool output into the worker. Independent review and CI precede enabling one
+exact model ID for a controlled canary under the existing owner-only project
+policy; that first enablement is the live callback canary window. Leave the
+feature disabled if the canary fails, and do not add other model IDs without
+their own canary. No new
 scope, external port, credential, API-paid fallback, or wider Linux sandbox is
 part of this design. Claude subscription tools require a separate adapter:
 the current Claude headless CLI does not expose this client-response pause;

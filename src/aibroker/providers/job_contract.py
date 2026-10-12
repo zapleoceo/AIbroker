@@ -49,11 +49,11 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
                            "accepted": {"const": DEFAULT_MAX_TOKENS}, "forwarded": False},
             "temperature": {"default": DEFAULT_TEMPERATURE,
                             "accepted": {"const": DEFAULT_TEMPERATURE}, "forwarded": False},
-            "message_roles": list(SUBSCRIPTION_ROLES),
+            "message_roles": [*SUBSCRIPTION_ROLES, "tool"] if tools_supported else list(SUBSCRIPTION_ROLES),
             "message_content": (["text", "image_data_url"] if "vision" in spec.capabilities
                                 else ["text"]),
-            "tools": False,
-            "tool_history": False,
+            "tools": tools_supported,
+            "tool_history": bool(tools_supported),
             "stream": False,
             "response_format_types": list(SUBSCRIPTION_RESPONSE_FORMATS),
             "json_schema_refs": False,
@@ -79,12 +79,17 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
 
 def subscription_request_problem(body: _JobBody, capability: str, provider: str) -> str | None:
     """Reject controls that the Claude/Codex CLI route cannot apply."""
-    if body.tools or body.tool_choice is not None:
+    if body.tools and capability == "vision":
+        return "unsupported_for_subscription_model: tools on vision"
+    if body.tools and provider != "codex-sub":
         return "unsupported_for_subscription_model: tools"
     if body.stream:
         return "unsupported_for_subscription_model: stream"
-    if any(m.tool_calls or m.tool_call_id or m.role not in SUBSCRIPTION_ROLES
-            or not isinstance(m.content, str | list)
+    with_tools = bool(body.tools and provider == "codex-sub")
+    if any((m.role not in (*SUBSCRIPTION_ROLES, "tool") if with_tools
+            else m.role not in SUBSCRIPTION_ROLES or bool(m.tool_calls or m.tool_call_id))
+           or not (isinstance(m.content, str | list) or
+                   (with_tools and m.role == "assistant" and m.content is None and m.tool_calls))
            or (isinstance(m.content, list) and provider != "codex-sub")
            for m in body.messages):
         return "unsupported_for_subscription_model: tool history or image input"

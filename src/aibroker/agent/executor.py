@@ -263,14 +263,18 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             run_id=run_id, capability=run.capability, prompt=req["prompt"],
             workspace=workspace, account_id=run.account_id, session_id=run.resume_session_id,
             allowed_tools=list(req.get("allowed_tools") or []), model=run.model,
-            attachments=attached)
+            attachments=attached,
+            client_tools=list((req.get("client_job") or {}).get("tools") or []),
+            tool_choice=(req.get("client_job") or {}).get("tool_choice"),
+            fence_leases=tuple(held for held in (lease, image_lease) if held is not None))
         if isinstance(adapter, CodexCLI):
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
         started_at = time.time() - 1.0
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
-            float(req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
+            float(req.get("wall_timeout_s", 1800) if spec.client_tools else
+                  req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
             return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
         if isinstance(terminal, ev.RunCompleted):
