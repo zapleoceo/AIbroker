@@ -29,6 +29,11 @@ def _input_items(run: AgentRunSpec) -> list[dict[str, str]]:
     return items
 
 
+def _reported_count(usage: dict[str, Any], name: str) -> int | None:
+    value = usage.get(name)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
     """Only dynamic tool callbacks cross into the client; no worker tool execution."""
     home = adapter._env.get("CODEX_HOME")
@@ -93,6 +98,7 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         final_text = ""
         calls = 0
         turn_id: str | None = None
+        thread_usage: dict[str, Any] | None = None
         async for raw in proc.stdout:
             message = json.loads(raw)
             if message.get("id") == 3:
@@ -135,7 +141,19 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
             elif "id" in message and method:
                 raise ClientToolConflict("App Server requested an unapproved operation")
             elif method == "model/rerouted":
+                if (params.get("threadId") != thread_id or params.get("turnId") != turn_id
+                        or not isinstance(params.get("fromModel"), str)
+                        or not isinstance(params.get("toModel"), str)):
+                    raise ClientToolConflict("invalid model reroute notification")
+                yield ev.ModelRerouted(from_model=params["fromModel"],
+                                       to_model=params["toModel"])
                 raise ClientToolConflict("App Server reported a model reroute")
+            elif method == "thread/tokenUsage/updated":
+                if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
+                    raise ClientToolConflict("usage notification has wrong turn identity")
+                observed = (params.get("tokenUsage") or {}).get("total")
+                if isinstance(observed, dict):
+                    thread_usage = observed
             elif method == "item/completed":
                 if (params.get("threadId") not in (None, thread_id)
                         or params.get("turnId") not in (None, turn_id)):
@@ -153,6 +171,17 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 if calls == 0 and (run.tool_choice == "required"
                                    or isinstance(run.tool_choice, dict)):
                     raise ClientToolConflict("required client tool was not called")
+                if thread_usage is not None:
+                    usage = ev.Usage(input_tokens=_reported_count(thread_usage, "inputTokens"),
+                                     output_tokens=_reported_count(thread_usage, "outputTokens"),
+                                     total_tokens=_reported_count(thread_usage, "totalTokens"),
+                                     cache_read_tokens=_reported_count(thread_usage, "cachedInputTokens"),
+                                     reasoning_tokens=_reported_count(thread_usage, "reasoningOutputTokens"),
+                                     turns=1, source="codex_app_server")
+                    if any(getattr(usage, key) is not None for key in
+                           ("input_tokens", "output_tokens", "total_tokens",
+                            "cache_read_tokens", "reasoning_tokens")):
+                        yield usage
                 yield ev.RunCompleted(final_text=final_text)
                 return
         raise ClientToolConflict("App Server closed before turn completion")

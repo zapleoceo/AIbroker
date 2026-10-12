@@ -194,18 +194,30 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
             run_id=run_id, seq=run.last_seq, ts=now, type=event.type,
             payload=_clip(redact_obj(payload)),
         ))
+        if event.type == "usage" and job is not None:
+            meta = dict(job.result_meta or {})
+            observed = dict(meta.get("usage_observed") or {})
+            for key in ("total_tokens", "reasoning_tokens"):
+                value = getattr(event, key)
+                if value is not None:
+                    observed[key] = (observed.get(key) or 0) + value
+            if observed:
+                meta["usage_observed"] = observed
+                job.result_meta = meta
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
         if event.type in TERMINAL_TYPES:
             run.outcome = OUTCOME_BY_TYPE[event.type]
             if job is not None:
                 history = (job.result_meta or {}).get("client_tool_history") or []
+                usage_observed = (job.result_meta or {}).get("usage_observed") or {}
                 job.status = "done" if event.type == "run.completed" else "error"
                 job.completed_at = now
                 if event.type == "run.completed":
                     job.result_text = redact(event.final_text)
                     job.result_meta = {"files": [f.model_dump() for f in event.files],
-                                       "client_tool_history": history}
+                                       "client_tool_history": history,
+                                       "usage_observed": usage_observed}
                     if client_job:
                         job.result_meta.update({
                             "provider": client_job["provider"],
@@ -214,15 +226,19 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                             "tokens_in": run.usage_input_tokens,
                             "tokens_out": run.usage_output_tokens,
                             "cache_read_tokens": run.usage_cache_read_tokens,
+                            "total_tokens": usage_observed.get("total_tokens"),
+                            "reasoning_tokens": usage_observed.get("reasoning_tokens"),
                             "cost_usd": None,
                             "billing_type": run.billing_mode,
                             "finish_reason": "stop",
                         })
                 elif event.type == "run.failed":
-                    job.result_meta = {"client_tool_history": history}
+                    job.result_meta = {"client_tool_history": history,
+                                       "usage_observed": usage_observed}
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
-                    job.result_meta = {"client_tool_history": history}
+                    job.result_meta = {"client_tool_history": history,
+                                       "usage_observed": usage_observed}
                     job.error_message = event.type
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,

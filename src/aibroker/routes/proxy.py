@@ -42,6 +42,7 @@ from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
     subscription_model_verified,
+    subscription_tool_model_canary,
 )
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
@@ -411,17 +412,17 @@ class DeepJobResponse(BaseModel):
     text: str | None = None
     provider: str | None = None
     model: str | None = None
+    requested_model: str | None = Field(None, description="requested model pin, if provided")
     model_served: str | None = Field(
         None,
-        description="the EXACT model that answered, when it says more than "
-                    "`model` (the routing name) does — e.g. DeepSeek-V4.1-Flash "
-                    "behind deepseek/deepseek-flash, or the loaded gguf behind "
-                    "local/qwen3vl. Null when the routing name is already the "
-                    "exact model id.",
+        description="independently reported served model, when available; null also means "
+                    "unknown for subscription CLI runs, never inferred from the requested pin",
     )
     tokens_in: int | None = None
     tokens_out: int | None = None
+    total_tokens: int | None = None
     cache_read_tokens: int | None = None
+    reasoning_tokens: int | None = None
     cost_usd: float | None = None
     billing_type: str | None = None
     latency_ms: int | None = None
@@ -483,8 +484,11 @@ def _job_response(row: Any) -> DeepJobResponse:
     would hand back status=done with text=null and the client would stop
     polling on an empty answer. Any unexpected status defaults to pending for
     the same fail-safe reason."""
+    request = getattr(row, "request", None) or {}
+    requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     if row.status == "error":
-        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message)
+        return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
+                               requested_model=requested_model)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -494,6 +498,7 @@ def _job_response(row: Any) -> DeepJobResponse:
                                  "arguments": pending_tool["arguments"]}}
         return DeepJobResponse(
             job_id=row.id, status="pending",
+            requested_model=requested_model,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
@@ -502,9 +507,12 @@ def _job_response(row: Any) -> DeepJobResponse:
     return DeepJobResponse(
         job_id=row.id, status="done", text=row.result_text,
         provider=meta.get("provider"), model=meta.get("model"),
+        requested_model=requested_model,
         model_served=meta.get("model_served"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
+        total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
+        reasoning_tokens=meta.get("reasoning_tokens"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
         billing_type=meta.get("billing_type"),
         key_label=meta.get("key_label"), request_id=meta.get("request_id"),
@@ -580,8 +588,11 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
-        if body.tools and not catalog.supports_tools(subscription):
-            raise HTTPException(503, "Codex subscription client tools are not verified for this model")
+        if body.tools and not (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
+                               and (catalog.supports_tools(subscription)
+                                    or subscription_tool_model_canary(subscription.id,
+                                                                      ctx.project.id))):
+            raise HTTPException(503, "Codex subscription client tools are not enabled for this project and model")
         if any(isinstance(message.content, list) and any(
             isinstance(block, dict) and block.get("type") == "image_url"
             for block in message.content) for message in body.messages):

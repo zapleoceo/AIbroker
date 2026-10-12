@@ -182,6 +182,7 @@ class CodexParser:
             self.turn_done = True
             u = data.get("usage") or {}
             return [ev.Usage(input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
+                             total_tokens=u.get("total_tokens"),
                              cache_read_tokens=u.get("cached_input_tokens"),
                              reasoning_tokens=u.get("reasoning_output_tokens"), turns=1)]
         if kind == "turn.failed":

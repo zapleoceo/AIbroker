@@ -85,6 +85,7 @@ class AgentRunResponse(BaseModel):
     files: list[dict[str, Any]] | None = None
     error: str | None = None
     model: str | None = None
+    requested_model: str | None = Field(None, description="exact CLI model requested for this run")
     model_served: str | None = Field(
         None, description="actual served model, if independently attested by the CLI; unknown for current subscription runs")
     billing_mode: str | None = None
@@ -141,13 +142,17 @@ def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None) -> AgentR
     files = _live_files((job.result_meta or {}).get("files"))
     usage = None
     if run.usage_source is not None:
+        observed = (job.result_meta or {}).get("usage_observed") or {}
         usage = {"input_tokens": run.usage_input_tokens, "output_tokens": run.usage_output_tokens,
-                 "cache_read_tokens": run.usage_cache_read_tokens, "turns": run.usage_turns}
+                 "total_tokens": observed.get("total_tokens"),
+                 "cache_read_tokens": run.usage_cache_read_tokens,
+                 "reasoning_tokens": observed.get("reasoning_tokens"), "turns": run.usage_turns}
     return AgentRunResponse(
         run_id=run.run_id, status=state, capability=run.capability, task_id=run.task_id,
         account_id=run.account_id, session_id=run.session_id,
         cancel_requested=run.cancel_requested, final_text=job.result_text,
-        files=files, error=job.error_message, model=run.model, model_served=None,
+        files=files, error=job.error_message, model=run.model,
+        requested_model=run.model, model_served=None,
         quota_waits=run.quota_waits,
         not_before=job.run_after.isoformat() if state == "waiting_quota" and job.run_after else None,
         billing_mode=run.billing_mode, usage=usage, usage_source=run.usage_source,

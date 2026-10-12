@@ -15,6 +15,7 @@ from aibroker.agent.client_tools import (
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
+from aibroker.providers import subscriptions
 from aibroker.routes import proxy
 
 TOOLS = [{"type": "function", "function": {"name": "lookup",
@@ -88,3 +89,15 @@ async def test_pending_job_exposes_only_declared_call_and_deadline_blocks_result
         await submit_result(job_id, 91, "c1", True, "too late")
     with pytest.raises(ClientToolConflict, match="expired"):
         await take_result(job_id, "c1")
+
+
+def test_tool_canary_is_exact_project_and_model(monkeypatch):
+    settings = SimpleNamespace(AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS="12",
+                               AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS='["codex-sub/gpt-6.1-sol"]')
+    monkeypatch.setattr(subscriptions, "get_settings", lambda: settings)
+    monkeypatch.setattr(subscriptions, "subscription_model_verified", lambda _: True)
+    assert subscriptions.subscription_tool_model_canary("codex-sub/gpt-6.1-sol", 12)
+    assert not subscriptions.subscription_tool_model_canary("codex-sub/gpt-6.1-sol", 11)
+    assert not subscriptions.subscription_tool_model_canary("codex-sub/gpt-6-luna", 12)
+    settings.AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS = "12,12"
+    assert not subscriptions.subscription_tool_model_canary("codex-sub/gpt-6.1-sol", 12)

@@ -7,16 +7,28 @@ live text and generated-PNG requests through the production Broker and
 Orchestra. Input vision and client-controlled subscription tools remain
 separate rollout gates; see `docs/subscription-tool-loop.md`.
 
-`GET /v1/agent/runs/{id}` reports `model` as the exact requested CLI pin and
-`model_served: null` when the actual served model is not independently attested.
+`GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
+requested CLI pin and `model_served: null` when the actual served model is not
+independently attested.
 The same distinction applies to subscription results from `GET /v1/jobs/{id}`.
 Codex App Server `thread/start.model` and `turn/start.model` are requested
 settings; `turn/completed` does not report a general served-model identity.
 `model/rerouted` reports a reroute when one occurs; the App Server tool path
 rejects an observed reroute. Its absence cannot prove the original model
-served the turn. Neither a successful answer nor an
-image result changes `model_served` to the requested ID by inference. Input
-vision must remain unverified until a trustworthy per-run source exists.
+served the turn. An observed reroute is recorded as a `model.rerouted` event
+with `from_model`, `to_model`, and `source: codex_app_server`, then the tool turn
+fails. Neither a successful answer nor an image result changes `model_served`
+to the requested ID by inference. Unknown served-model identity does not block
+a functional callback or input-vision probe. Report functional success for the
+requested route separately from model identity.
+
+The `usage` event and `GET /v1/agent/runs/{id}.usage` carry input, output,
+total, cache-read, and reasoning tokens only when the CLI reports them; absent
+counts remain `null`. `codex exec --json` uses its final turn usage, while the
+App Server callback path uses `thread/tokenUsage/updated.tokenUsage.total` from
+the pinned 0.162.1 protocol. A structured worker log line correlates these
+non-secret counts with `job_id` and `run_id`, without prompt or credentials.
+`cost_usd` remains `null` when no price is confirmed.
 
 ## Legal / scope note
 

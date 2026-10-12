@@ -799,6 +799,19 @@ def test_job_response_done_returns_cache_read_tokens():
     assert resp.model_dump()["cache_read_tokens"] == 512
 
 
+def test_job_response_keeps_requested_model_separate_from_served_identity():
+    from aibroker.routes.proxy import _job_response
+    row = _fake_job_row(
+        status="done", request={"client_job": {"model": "codex-sub/gpt-6.1-sol"}},
+        result_meta={"model": "codex-sub/gpt-6.1-sol", "model_served": None,
+                     "total_tokens": 16, "reasoning_tokens": 3, "cost_usd": None},
+    )
+    resp = _job_response(row)
+    assert resp.requested_model == "codex-sub/gpt-6.1-sol"
+    assert resp.model_served is None
+    assert (resp.total_tokens, resp.reasoning_tokens, resp.cost_usd) == (16, 3, None)
+
+
 def test_job_response_error_returns_message():
     from aibroker.routes.proxy import _job_response
     resp = _job_response(_fake_job_row(status="error", error_message="boom"))
