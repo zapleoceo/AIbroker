@@ -118,7 +118,8 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids (see [subscription-models.md](subscription-models.md)) |
 
 For a subscription job, `requested_model` is the exact route pin from the
-request. `model_served` remains `null` without independent CLI evidence; this
+request. Older jobs without a request pin retain `requested_model: null` in
+their poll response. `model_served` remains `null` without independent CLI evidence; this
 does not prevent a functional result. `tokens_in`, `tokens_out`,
 `total_tokens`, `cache_read_tokens`, and `reasoning_tokens` contain only counts
 reported by the CLI, with `null` for unavailable counts. An unknown
