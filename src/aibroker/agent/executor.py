@@ -36,6 +36,7 @@ from aibroker.agent.workspace import cleanup_workspace, collect_files, create_wo
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
+from aibroker.providers.subscriptions import subscription_tool_model_verified
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +111,12 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunFailed(
             error_class="route_disabled", message="codex subscription route is not enabled"), {})
     req = dict(job.request)
+    client_tools = (req.get("client_job") or {}).get("tools") or []
+    if client_tools and (not get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
+                         or not run.model
+                         or not subscription_tool_model_verified(f"codex-sub/{run.model}")):
+        return await _finish(run_id, ev.RunFailed(
+            error_class="route_disabled", message="codex client tools are not verified"), {})
     totals: dict[str, int | None] = {}
     if not project_allowed(run.project_id):    # removed from the allowlist while queued
         return await _finish(run_id, ev.RunFailed(

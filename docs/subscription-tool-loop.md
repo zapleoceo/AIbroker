@@ -49,7 +49,8 @@ never replays a possibly executed client operation after lease loss.
 Cancellation and deadlines terminate the waiting App Server process. A client
 should use the Broker call ID as its own idempotency key. One outstanding call,
 16 calls per run, 64 KiB arguments/results, and exact-result idempotent retries
-are enforced. The current `deep_jobs` pending/done/error status values remain
+while the job runs are enforced. A result sent after terminal state is rejected.
+The current `deep_jobs` pending/done/error status values remain
 intact for clients that do not use tools. A completed subscription result has
 `model_served: null`: the CLI model pin is not independent evidence of the
 model actually served. The raw client tool result is removed from pending

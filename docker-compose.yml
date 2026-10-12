@@ -400,6 +400,7 @@ services:
       AGENT_WORKER_CAPABILITIES: "agent:codex"
       AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}
       AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED:-false}
+      AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: ${AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS:-[]}
       HOME: /tmp/agent-codex-home    # never the Claude state dir; each run gets its own empty HOME
       CLAUDE_CONFIG_DIR: ""
       # Independent owner check of the Codex account; never inherit Claude's approval.
