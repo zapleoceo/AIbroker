@@ -84,7 +84,7 @@ def subscription_request_problem(body: _JobBody, capability: str, provider: str)
     if body.stream:
         return "unsupported_for_subscription_model: stream"
     if any(m.tool_calls or m.tool_call_id or m.role not in SUBSCRIPTION_ROLES
-           or not isinstance(m.content, (str, list))
+            or not isinstance(m.content, str | list)
            or (isinstance(m.content, list) and provider != "codex-sub")
            for m in body.messages):
         return "unsupported_for_subscription_model: tool history or image input"
