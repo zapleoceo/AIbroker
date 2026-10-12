@@ -19,6 +19,7 @@ from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, projec
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run
+from aibroker.agent.subscription_input import subscription_messages
 from aibroker.agent.subscription_job import live_files, prompt_for_messages
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.config import get_settings
@@ -568,9 +569,19 @@ async def jobs_submit(
                                      PROVIDERS[subscription.provider])
         if violation:
             raise AgentPolicyViolation(violation)
-        if problem := subscription_request_problem(body, capability):
+        if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
+        if any(isinstance(message.content, list) and any(
+            isinstance(block, dict) and block.get("type") == "image_url"
+            for block in message.content) for message in body.messages):
+            _require_capability_scope(ctx, scope_for("vision"))
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
+        try:
+            messages, attachments = subscription_messages(messages)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if attachments and "vision" not in subscription.capabilities:
+            raise HTTPException(503, "subscription model input vision is not verified")
         prompt = prompt_for_messages(messages, body.response_format)
         if problem := subscription_prompt_problem(prompt):
             raise HTTPException(400, problem)
@@ -580,6 +591,7 @@ async def jobs_submit(
                 project=ctx.project, capability=PROVIDERS[subscription.provider], prompt=prompt,
                 task_id="jobs", account_id="owner", session_id=None, idempotency_key=None,
                 wall_timeout_s=1800, idle_timeout_s=300, allowed_tools=[], model=cli_model,
+                attachments=attachments,
                 client_job={"capability": capability, "provider": subscription.provider,
                             "model": subscription.id, "response_format": body.response_format,
                             "workflow": body.workflow},

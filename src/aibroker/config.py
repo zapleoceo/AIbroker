@@ -151,6 +151,8 @@ class Settings(BaseSettings):
     # Exact account-confirmed route ids. Candidate models remain visible but unavailable until
     # confirmed; confirmation never overrides project policy or the Codex worker gate.
     AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'
+    # Input image capability is confirmed separately from a model's text availability.
+    AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS: str = '{"codex-sub":[]}'
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.

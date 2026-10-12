@@ -588,11 +588,13 @@ paid last). Free-tier keys bill $0 whatever the nominal price shows.
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
 `["text"]` for chat and embedding. It is `null` when the lane does not define
-one of these inputs. `supports_tools` is `true` only when native tools are
-enabled for the provider in Broker and the installed LiteLLM model map confirms
-function calling. It is `false` when Broker's adapter rejects tools, and `null`
+one of these inputs. For API models, `supports_tools` is `true` only when native
+tools are enabled for the provider in Broker and the installed LiteLLM model
+map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
 when the enabled model's support is unknown. Subscription routes report
-`supports_tools: false` because the universal jobs route rejects tool input for them.
+`supports_tools: false`; no client tool-call handoff is verified. Only exact
+Codex IDs separately verified for input vision list image input on the
+`vision` lane, limited to embedded data URLs.
 These fields summarize the model across its configured lanes; tools still require
 a chat capability and cannot be combined with `response_format`.
 The catalog builds the fields with `input_modalities()` and `supports_tools()`.
