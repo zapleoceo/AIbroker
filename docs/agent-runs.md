@@ -543,7 +543,8 @@ Linux sandbox WITH the read-deny profile). A non-zero exit, a bwrap/landlock/sec
 a timeout or a missing binary ends the run with `run.failed error_class=sandbox_unavailable` before any
 process starts; the same classification applies to such wording in events (`sandbox_failure`,
 `CodexParser`) and stderr. It is final: no retry, no requeue, never without the sandbox. The
-fake-data canary started with the dedicated seccomp and AppArmor profiles, but
+fake-data canary started with unprivileged user namespaces under the dedicated
+seccomp and AppArmor profiles, but
 the worker remains stopped and the real preflight remains unverified.
 
 **Redaction.** Everything an agent run persists passes `redact` / `redact_obj` / `redact_bytes`
@@ -611,10 +612,22 @@ following audit window. This does not verify real login, model billing, text
 completion, or decodable PNG output. The profile file retains historical
 pre-canary comments so its tested bytes remain unchanged.
 
-After reviewed deploy, verify the on-disk SHA-256 above and
-`aibroker-codex (enforce)` on the host. If a later run fails, stop the Codex
-worker, reload the known prior profile with `apparmor_parser -r -W`, and
-verify enforce before further testing. Keep seccomp, dropped capabilities,
+The standard application deploy updates the repository file but does not
+install AppArmor profiles. On this host `apparmor.service` is enabled, but the
+named file was absent from `/etc/apparmor.d` before this delivery. After CI
+and deploy succeed, keep the Codex worker stopped and install only the
+reviewed file at `/etc/apparmor.d/aibroker-codex` (mode 0644). Check that its
+SHA-256 equals the value above, syntax-check it with
+`apparmor_parser -Q /etc/apparmor.d/aibroker-codex`, then load it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex` and verify
+`aibroker-codex (enforce)`. The enabled AppArmor service will load that file
+again after reboot; merely leaving it in the application checkout will not.
+If a later run fails, stop the Codex worker, restore
+`/var/backups/aibroker-codex-apparmor-530ff54.profile` (SHA-256
+`a6c4303751234861502f9f85f6517ede09576afbfc296046ef53efc23ef9acf4`)
+to `/etc/apparmor.d/aibroker-codex`, reload it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex`, and verify enforce
+before further testing. Keep seccomp, dropped capabilities,
 and the AppArmor selector in place; do not use `unconfined` or `privileged`.
 
 **Compose.** Only `agent-worker-codex` has

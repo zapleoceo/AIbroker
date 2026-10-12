@@ -78,8 +78,16 @@ or image endpoint. The only scope addition proposed for project 12 is
 ## Operator sequence after explicit approval
 
 Keep both Codex submission paths disabled and the worker stopped through the
-profile deploy. Verify the on-disk file SHA-256 above, reload only the named
-profile if the deploy has not done so, and verify `aibroker-codex (enforce)`.
+profile deploy. The normal application deploy does not install AppArmor
+profiles. After it succeeds, install the reviewed checkout file at
+`/etc/apparmor.d/aibroker-codex` with mode 0644, verify that copy's SHA-256
+against the value above, syntax-check it with
+`apparmor_parser -Q /etc/apparmor.d/aibroker-codex`, load it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex`, and verify
+`aibroker-codex (enforce)`.
+`apparmor.service` is enabled on this host; the `/etc/apparmor.d` copy is what
+will reload after reboot. The enabled service does not read the repository
+checkout automatically.
 Check Broker health and the other worker before the owner begins login. The
 owner alone enables device-code authorization in ChatGPT settings and runs the
 interactive `codex login --device-auth` command documented in
@@ -89,7 +97,11 @@ codes, auth files, or tokens. Run supervised text and real decodable PNG checks
 before enabling the route; preserve the existing universal jobs contract.
 
 For rollback, disable both Codex submission paths, drain or cancel active
-runs, stop `agent-worker-codex`, and reload the known prior AppArmor profile
-in enforce mode. Leave the worker stopped and the named auth volume intact.
+runs, stop `agent-worker-codex`, restore
+`/var/backups/aibroker-codex-apparmor-530ff54.profile` (SHA-256
+`a6c4303751234861502f9f85f6517ede09576afbfc296046ef53efc23ef9acf4`)
+to `/etc/apparmor.d/aibroker-codex`, and reload it with
+`apparmor_parser -r -W /etc/apparmor.d/aibroker-codex` in enforce mode. Leave the
+worker stopped and the named auth volume intact.
 If the `seccomp=` and `apparmor=` options are later removed, the sandbox
 preflight must fail closed as `sandbox_unavailable`.
