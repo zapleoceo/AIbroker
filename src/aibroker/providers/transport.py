@@ -11,9 +11,10 @@ model, model_served, tokens_in, tokens_out, cost_usd, latency_ms.
 """
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any, Protocol, runtime_checkable
 
-from aibroker.providers.registry import model_spec
+from aibroker.providers.registry import REGISTRY, model_spec
 
 
 @runtime_checkable
@@ -46,20 +47,23 @@ _transports: dict[str, Any] = {}
 def _load() -> dict[str, Any]:
     """Build the name -> instance table on first use (heavy imports: litellm, httpx)."""
     if not _transports:
-        from aibroker.providers.decisions import OpenRouterDecisions
-        from aibroker.providers.gemini_asr import GeminiAsrTransport
         from aibroker.providers.litellm_client import (
             LiteLLMChatAudioTransport,
             LiteLLMTransport,
         )
-        from aibroker.providers.local_vision import LocalVisionTransport
-        _transports.update({
+        loaded: dict[str, Any] = {
             "litellm": LiteLLMTransport(),
             "litellm_chat_audio": LiteLLMChatAudioTransport(),
-            "local_vision": LocalVisionTransport(),
-            "gemini_asr": GeminiAsrTransport(),
-            "openrouter_decisions": OpenRouterDecisions(),
-        })
+        }
+        for spec in REGISTRY.values():
+            for name, path in spec.transport_factories.items():
+                if name in loaded:
+                    raise ValueError(f"transport {name!r} registered twice")
+                module_name, separator, class_name = path.partition(":")
+                if not separator or not module_name or not class_name:
+                    raise ValueError(f"invalid transport factory {path!r}")
+                loaded[name] = getattr(import_module(module_name), class_name)()
+        _transports.update(loaded)
     return _transports
 
 

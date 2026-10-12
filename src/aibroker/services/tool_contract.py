@@ -10,7 +10,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-TOOL_PROVIDERS = frozenset({"openai", "anthropic", "gemini", "mistral"})
+from aibroker.providers.registry import REGISTRY
+
+TOOL_PROVIDERS = frozenset(name for name, spec in REGISTRY.items() if spec.native_tools)
 
 
 def tool_model_provider(model: str | None) -> str | None:

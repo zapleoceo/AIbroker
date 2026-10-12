@@ -5,7 +5,7 @@ from aibroker.providers.provider_specs.common import chat_probe
 from aibroker.providers.registry import Quota, build_provider
 
 SPEC = build_provider(
-    "openai", rank=220, paid=True, cooldown_base_s=120,
+    "openai", rank=220, paid=True, cooldown_base_s=120, native_tools=True,
     cache_key_param="prompt_cache_key",   # docs: platform.openai.com/docs/guides/prompt-caching
     quota_headers="openai", quota=Quota(doc="https://platform.openai.com/docs/guides/rate-limits"),
     probe=chat_probe("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
