@@ -1,9 +1,10 @@
-# Codex worker activation review (2026-10-11)
+# Codex worker activation review (updated 2026-10-12)
 
 This is a review package, not an instruction to activate the worker. The Codex
-subscription route is disabled by default. No sandbox profile has been loaded,
-no owner login has been performed for this worker, and no real headless PNG has
-been verified.
+subscription route is disabled by default. A seven-rule AppArmor profile
+passed one fake-data isolation canary and is loaded in enforce mode on the
+host. The worker is stopped; owner login, real text completion, and a real
+headless PNG have not been verified.
 
 ## Exact profile change proposed
 
@@ -20,10 +21,23 @@ workspaces, a dedicated Codex auth volume, no Docker socket, and only the
 possible for the CLI.
 
 The change increases the kernel namespace and mount surface available to this
-container. Its real enforcement and compatibility with bubblewrap remain
-unverified; a supervised canary must confirm that model commands cannot read
-the auth file, Claude state, or another process's environment. Do not use
-`unconfined` or `privileged` for that test.
+container. The exact profile with SHA-256
+`63389ed14e3e9cb0e7c3a610f7625474dc34ee836537099b8c6f98fe94931052`
+adds seven rules relative to the original Docker-derived baseline. Silent
+`rslave` on `/` was deployed earlier; this change adds the six remaining
+rules: a `devpts` mount at `/newroot/dev/pts/`, an exact read-only remount at
+`/newroot/`, three exact-flag read-only remounts at `/newroot/**`, and silent
+`rprivate` at `/oldroot/`. The subtree patterns match other descendants with
+the same flags beyond the ten paths in the earlier audit. They do not grant a
+general `mount,` rule, `unconfined`, `privileged`, or an extra capability.
+
+The owner-authorized network-disabled canary on 2026-10-12 used only fake auth
+and exited 0: `claude:ABSENT`, `auth:DENIED`, `parent:DENIED`. No
+`aibroker-codex` AppArmor denial appeared in the following audit window. The
+loaded profile has these seven rules; the deployed file still has only silent
+`rslave` until this exact profile is merged and deployed. A reload from that
+older file would lose the six tested additions. The canary is evidence for
+those three fake-data checks, not proof of all reads or a real model run.
 
 ## Code fixes prepared for repeat review
 
@@ -45,8 +59,9 @@ the auth file, Claude state, or another process's environment. Do not use
 
 `run.completed` events are metadata-only for PNGs; full bytes remain in the job
 result until its normal 7-day purge even though API content expires after one
-hour. These fixes still require repeat independent review and the real sandbox/PNG
-canary. They do not approve or apply the profile.
+hour. The profile in this change needs independent diff review and CI. Real
+text and PNG checks still require owner login; these fixes alone do not
+activate the route.
 
 ## Minimal project access decision
 
@@ -62,15 +77,19 @@ or image endpoint. The only scope addition proposed for project 12 is
 
 ## Operator sequence after explicit approval
 
-Drain both Codex submission paths, allow active runs to finish or cancel them,
-then stop `agent-worker-codex`. Review and load only the named profile on the
-host, start only that worker, and perform the isolated canary without real
-credentials. The owner alone performs interactive device login in
-`agent-worker-codex` and separately checks Codex paid continuation settings.
-Enable the route only after billing, read isolation, exact model routing, and
-real decodable PNG tests pass. Do not log, print, or transfer auth contents.
+Keep both Codex submission paths disabled and the worker stopped through the
+profile deploy. Verify the on-disk file SHA-256 above, reload only the named
+profile if the deploy has not done so, and verify `aibroker-codex (enforce)`.
+Check Broker health and the other worker before the owner begins login. The
+owner alone enables device-code authorization in ChatGPT settings and runs the
+interactive `codex login --device-auth` command documented in
+`docs/agent-runs.md` inside `agent-worker-codex`. The owner then checks the
+ChatGPT login status and paid continuation setting without sharing device
+codes, auth files, or tokens. Run supervised text and real decodable PNG checks
+before enabling the route; preserve the existing universal jobs contract.
 
 For rollback, disable both Codex submission paths, drain or cancel active
-runs, stop `agent-worker-codex`, remove its `seccomp=` and `apparmor=` options,
-and unload `aibroker-codex`. Leave the named auth volume intact. Without the
-profiles the sandbox preflight must fail closed as `sandbox_unavailable`.
+runs, stop `agent-worker-codex`, and reload the known prior AppArmor profile
+in enforce mode. Leave the worker stopped and the named auth volume intact.
+If the `seccomp=` and `apparmor=` options are later removed, the sandbox
+preflight must fail closed as `sandbox_unavailable`.
