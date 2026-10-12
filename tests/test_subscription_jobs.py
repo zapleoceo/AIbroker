@@ -27,13 +27,16 @@ def _ctx(scopes: tuple[str, ...] = ("llm:chat", "llm:agent")) -> SimpleNamespace
                            has_scope=lambda scope: scope in scopes)
 
 
-def test_catalog_keeps_route_identity_and_unknown_subscription_price():
+def test_catalog_keeps_route_identity_and_subscription_variable_price():
     rows = {r["id"]: r for r in listing()}
     claude = rows["claude-sub/claude-sonnet-5-5"]
     codex = rows["codex-sub/gpt-6.1-sol"]
     assert claude["source"] == codex["source"] == "broker"
     assert claude["billing_type"] == codex["billing_type"] == "subscription"
-    assert claude["price"] == codex["price"] == {"kind": "subscription"}
+    assert claude["price"] == codex["price"] == {
+        "kind": "subscription", "input_usd_per_mtok": 0.0,
+        "output_usd_per_mtok": 0.0, "subscription_fee_excluded": True,
+    }
     assert codex["available"] is False
     assert resolve_pin(claude["id"], "chat:fast", ["groq", "claude-sub"])[0].provider == "claude-sub"
     with pytest.raises(UnknownModel):
