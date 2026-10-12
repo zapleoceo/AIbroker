@@ -54,7 +54,8 @@ so the owner must confirm further Claude models in the interactive account. Thes
 lists do not grant project access. A project may enumerate exact CLI ids or,
 with explicit owner approval, use `"models":["*"]` to admit only configured
 candidates for the requested Claude or Codex provider. The account allowlist
-and global verified-model check still apply. Never infer subscription
+still applies. The universal jobs route also requires the global verified-model
+check; direct diagnostic agent runs have their own CLI model guards. Never infer subscription
 availability from API-model catalogs. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
