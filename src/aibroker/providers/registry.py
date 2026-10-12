@@ -112,6 +112,8 @@ class ProviderSpec:
     paid: bool = False                         # billed per token (paid-tier tail)
     rank: int = 1000                           # deterministic order among providers of one model
     empty_is_failure: bool = False             # an empty body is never a real answer (local)
+    native_tools: bool = False                  # Broker may forward native tool calls
+    transport_factories: Mapping[str, str] = field(default_factory=dict)
     defaults: Mapping[str, str] = field(default_factory=dict)       # capability -> model id
     rotation: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     models: Mapping[str, ModelSpec] = field(default_factory=dict)   # id -> spec

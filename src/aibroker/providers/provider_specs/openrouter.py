@@ -6,6 +6,7 @@ from aibroker.providers.registry import ProbeSpec, Quota, build_provider
 
 SPEC = build_provider(
     "openrouter", rank=70, cooldown_base_s=300, json_reliability="unreliable",
+    transport_factories={"openrouter_decisions": "aibroker.providers.decisions:OpenRouterDecisions"},
     cache_key_param="session_id",         # docs: openrouter.ai/docs/guides/best-practices/prompt-caching
     quota_headers="openai",
     quota=Quota(req_per_day=200, doc="https://openrouter.ai/docs/api-reference/limits"),

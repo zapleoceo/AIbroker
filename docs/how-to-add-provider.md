@@ -50,7 +50,9 @@ A model served by a non-litellm endpoint sets `transport` in its `model_meta`
    | `cooldown_base_s` | base cooldown after a 429 (the provider's reset cadence) |
    | `max_keys` | keys tried before the walk moves on (default 5) |
    | `json_reliability` | `reliable` / `unreliable` (sunk behind reliable ones on JSON requests) / `incapable` (excluded from JSON requests) |
-   | `adapter` | a `ProviderAdapter` subclass from `providers/adapters.py`, only when the provider has request quirks |
+   | `adapter` | a `ProviderAdapter` subclass, only when the provider has request quirks |
+   | `native_tools` | whether Broker may forward native tool calls for this provider |
+   | `transport_factories` | transport name to import path, for non-LiteLLM endpoints |
    | `probe` | `ProbeSpec(url, body, auth=..., needs_account_id=...)` — the cheapest call that proves a key alive |
    | `quota_headers` | `"openai"` / `"anthropic"` when its rate-limit headers can seed the daily quota |
    | `cache_sticky`, `explicit_cache`, `cache_key_param` | prompt-cache behaviour — set `cache_key_param` ONLY if the provider documents a stable-cache-key request parameter |
@@ -76,8 +78,10 @@ Implement the Protocol(s) it serves from `providers/transport.py` —
 `gemini_asr.py`), return `(payload, meta)` with at least `model`, `model_served`,
 `tokens_in`, `tokens_out`, `cost_usd`, `latency_ms`, raise errors whose text
 `classify_provider_error` understands (reclassify transport failures as `TimeoutError`
-so the key cools), register the instance in `transport._load()` and point the model's
-`transport` at it. If it needs a longer call ceiling, add `call_timeout(capability)`.
+so the key cools), declare the class in the provider module's
+`transport_factories={"acme_http": "package.module:TransportClass"}`, and point the
+model's `transport` at `acme_http`. If it needs a longer call ceiling, add
+`call_timeout(capability)`.
 The attempt template, cost guard, usage rows, affinity and the catalog then work for it
 unchanged.
 

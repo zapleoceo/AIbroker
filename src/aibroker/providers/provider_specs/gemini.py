@@ -16,6 +16,8 @@ GEMINI_CHAT_LANES = ("chat:fast", "chat:smart", "chat:sales", "chat:code",
 
 SPEC = build_provider(
     "gemini", rank=30, max_keys=3, cooldown_base_s=60, adapter=_GeminiAdapter(),
+    native_tools=True,
+    transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport"},
     quota=Quota(req_per_day=1_500, doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
     # Free-quota providers (gemini 20/day/model, cohere 1000/month, mistral monthly,
     # openrouter :free ~50/day) probe via free unmetered key-list endpoints, never a

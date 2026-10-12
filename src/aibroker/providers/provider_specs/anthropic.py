@@ -7,6 +7,7 @@ from aibroker.providers.registry import ProbeSpec, Quota, build_provider
 
 SPEC = build_provider(
     "anthropic", rank=210, paid=True, cache_sticky=True, explicit_cache=True, cooldown_base_s=120,
+    native_tools=True,
     adapter=_AnthropicAdapter(), quota_headers="anthropic",
     quota=Quota(doc="https://docs.claude.com/en/docs/about-claude/usage-limits"),
     probe=ProbeSpec("https://api.anthropic.com/v1/messages",

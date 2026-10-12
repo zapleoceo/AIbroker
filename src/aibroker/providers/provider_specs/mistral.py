@@ -5,7 +5,7 @@ from aibroker.providers.provider_specs.common import chat_probe
 from aibroker.providers.registry import ProbeSpec, Quota, build_provider
 
 SPEC = build_provider(
-    "mistral", rank=80, cooldown_base_s=10,           # 1 RPS — recovers instantly
+    "mistral", rank=80, cooldown_base_s=10, native_tools=True,  # 1 RPS
     cache_key_param="prompt_cache_key",   # docs: docs.mistral.ai/api/endpoint/chat
     rate_limit_signs=("unauthorized",), monthly_signs=("unauthorized",),
     quota_headers="openai",               # bare 401 = monthly plan exhaustion (not a revoked key)

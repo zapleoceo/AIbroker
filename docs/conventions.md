@@ -31,7 +31,7 @@ src/aibroker/
     specs.py           ordered registration of provider definitions
     provider_specs/    one build_provider(...) definition per provider
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
-    transport.py       Chat/Embed/Transcribe/Decide Protocols + dispatch facades
+    transport.py       Chat/Embed/Transcribe/Decide Protocols + registered dispatch
     litellm_client.py  litellm chat/embed/whisper transport
     local_vision.py / gemini_asr.py   raw-HTTP transports
     cost.py            pricing (litellm map + registry overrides, per-minute audio)
