@@ -134,14 +134,18 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                                     output="[client tool result withheld]")
             elif "id" in message and method:
                 raise ClientToolConflict("App Server requested an unapproved operation")
+            elif method == "model/rerouted":
+                raise ClientToolConflict("App Server reported a model reroute")
             elif method == "item/completed":
-                if params.get("threadId") != thread_id or params.get("turnId") != turn_id:
+                if (params.get("threadId") not in (None, thread_id)
+                        or params.get("turnId") not in (None, turn_id)):
                     raise ClientToolConflict("item notification has wrong turn identity")
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage":
                     final_text = str(item.get("text") or "")
             elif method == "turn/completed":
-                if params.get("threadId") != thread_id or (params.get("turn") or {}).get("id") != turn_id:
+                if (params.get("threadId") not in (None, thread_id)
+                        or (params.get("turn") or {}).get("id") != turn_id):
                     raise ClientToolConflict("completion has wrong turn identity")
                 turn = params.get("turn") or {}
                 if turn.get("status") != "completed":

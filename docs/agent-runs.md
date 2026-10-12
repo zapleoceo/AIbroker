@@ -7,6 +7,17 @@ live text and generated-PNG requests through the production Broker and
 Orchestra. Input vision and client-controlled subscription tools remain
 separate rollout gates; see `docs/subscription-tool-loop.md`.
 
+`GET /v1/agent/runs/{id}` reports `model` as the exact requested CLI pin and
+`model_served: null` when the actual served model is not independently attested.
+The same distinction applies to subscription results from `GET /v1/jobs/{id}`.
+Codex App Server `thread/start.model` and `turn/start.model` are requested
+settings; `turn/completed` does not report a general served-model identity.
+`model/rerouted` reports a reroute when one occurs; the App Server tool path
+rejects an observed reroute. Its absence cannot prove the original model
+served the turn. Neither a successful answer nor an
+image result changes `model_served` to the requested ID by inference. Input
+vision must remain unverified until a trustworthy per-run source exists.
+
 ## Legal / scope note
 
 Owner-only, personal-subscription use. This is **not a product backend**: it must not serve
