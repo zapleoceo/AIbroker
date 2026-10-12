@@ -51,9 +51,12 @@ Account-aware discovery supports adding a candidate; it does not prove a run
 will complete. Add each exact ID to the verified list only after a successful
 live subscription run. Claude Code has no documented read-only model-list CLI,
 so the owner must confirm further Claude models in the interactive account. These
-lists do not grant project access: enumerate each desired exact CLI id in
-`AGENT_PROJECT_POLICY` for each approved project. Never use a wildcard or
-infer subscription availability from API-model catalogs. The default Codex
+lists do not grant project access. A project may enumerate exact CLI ids or,
+with explicit owner approval, use `"models":["*"]` to admit only configured
+candidates for the requested Claude or Codex provider. The account allowlist
+still applies. The universal jobs route also requires the global verified-model
+check; direct diagnostic agent runs have their own CLI model guards. Never infer subscription
+availability from API-model catalogs. The default Codex
 route is disabled by `AGENT_SUBSCRIPTION_CODEX_ENABLED=false`. Enabling it
 requires separate approval of its sandbox profile and a live CLI canary.
 
@@ -73,8 +76,29 @@ does not implement those controls. `GET /v1/jobs/{id}` can return `files` for
 worker-exported artifacts. Generated images must be decodable PNG bytes in
 `content_b64` with a `.png` path and, for Codex export, sha256 and dimensions;
 text or SVG is not an image result. File content expires under the worker's
-normal artifact TTL. No result is asserted to contain a PNG until a real
-headless Codex run proves it.
+normal artifact TTL. A direct Codex subscription worker run (`551063`)
+generated and exported a decodable 1254x1254 PNG, 1,689,768 bytes, SHA-256
+`9e8545d12421b78c41ca6a06b58d7f4d223eaeb053b2d5b32ee7b90e3ca56521`.
+The universal HTTP route still needs an Orchestra client request. This result
+does not grant tool calls, image input, or vision capability.
+
+For the Orchestra adapter, submit the ordinary text request (no `tools`,
+`response_format`, `stream`, nondefault `temperature`, or nondefault
+`max_tokens`):
+
+```json
+{"messages":[{"role":"user","content":"$imagegen Generate exactly one real PNG image of a red apple on a white background. Use the built-in GPT image generation tool; do not draw it with code or SVG."}],"model":"codex-sub/gpt-6.1-sol"}
+```
+
+Use `POST /v1/jobs?capability=chat:fast`, then poll the returned `poll_url`.
+On success, `status` is `done`, `provider` is `codex-sub`, `model` is the
+catalog id, `model_served` is `gpt-6.1-sol`, `billing_type` is
+`subscription`, and `cost_usd` is null. A generated image is in `files` as
+`path` ending in `.png`, `content_b64`, `size`, `sha256`, `width`, `height`,
+and `expires_at`. Decode `content_b64` and check the PNG signature, SHA-256,
+and dimensions; `text` alone is not an image result. After file expiry,
+`content_b64` becomes null and `expired` becomes true. A run may complete
+without an image, so the adapter must check `files` explicitly.
 
 `/v1/agent/runs` remains available for diagnostics and features specific to
 agent sessions. Clients of the universal jobs contract do not need it.

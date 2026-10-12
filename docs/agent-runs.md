@@ -683,12 +683,12 @@ de-duplicated by content. Each is returned by the API as a normal run file under
 metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though
 the API hides them after the 1-hour file TTL. A failing export never fails the run.
 **Readiness criterion:** a real decodable PNG (dimensions + sha256 in the run result) that the critic
-receives as an actual image - not a description. Headless `$imagegen` support stays unverified until a
-supervised run produces such a file.
+receives as an actual image - not a description. Direct worker run `551063`
+met the PNG generation and export criterion. Delivery through the universal
+HTTP route and Orchestra remains to be checked by its client.
 
 ## Not done yet
 
-Owner Codex device login, paid-continuation verification, and real text/PNG
-checks remain. `$imagegen` headless support is unproven; the Claude critic
-must receive decodable PNG bytes. Multi-account config directories and
+Orchestra's authenticated end-to-end image request and the Claude critic's
+receipt of decodable PNG bytes remain. Multi-account config directories and
 account-aware CLI catalog discovery remain later work.
