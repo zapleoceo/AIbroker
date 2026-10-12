@@ -110,7 +110,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}` |
-| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | owner-only agent runs, scope `llm:agent` AND the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty = everyone gets 403 `{"error": "agent_project_not_allowed"}`) AND an entry in `AGENT_PROJECT_POLICY` listing the exact `model` and `account_id` (403 `agent_policy_missing` / `model_not_allowed` / `account_not_allowed`) - see [agent-runs.md](agent-runs.md) |
+| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | Owner-only agent runs require `llm:agent` and the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty denies all). Submission also requires `AGENT_PROJECT_POLICY` to allow the model and `account_id` (exact model, or an explicitly approved candidate-only `"models":["*"]`). See [agent-runs.md](agent-runs.md). |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
@@ -490,7 +490,7 @@ instead of grepping timestamps against provider/model/workflow.
 
 | Endpoint | Required scope |
 |---|---|
-| `/v1/jobs?capability=chat:*` | `llm:chat` |
+| `/v1/jobs?capability=chat:*` | `llm:chat`; an inline image on a subscription Codex pin also requires `llm:vision` |
 | `/v1/jobs?capability=vision` | `llm:vision` |
 | `/v1/jobs?capability=<cap>` | scope per capability (`chat:*`→`llm:chat`, `vision`→`llm:vision`, `chat:deep`→`llm:deep`) |
 | `/v1/deep` | `llm:deep` |
@@ -588,11 +588,15 @@ paid last). Free-tier keys bill $0 whatever the nominal price shows.
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
 `["text"]` for chat and embedding. It is `null` when the lane does not define
-one of these inputs. `supports_tools` is `true` only when native tools are
-enabled for the provider in Broker and the installed LiteLLM model map confirms
-function calling. It is `false` when Broker's adapter rejects tools, and `null`
+one of these inputs. For API models, `supports_tools` is `true` only when native
+tools are enabled for the provider in Broker and the installed LiteLLM model
+map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
 when the enabled model's support is unknown. Subscription routes report
-`supports_tools: false` because the universal jobs route rejects tool input for them.
+`supports_tools: false`; no client tool-call handoff is verified. Only exact
+Codex IDs separately verified for input vision list image input on the
+`vision` lane, limited to embedded data URLs. The input-vision verified list
+defaults to empty. Image blocks require `llm:vision` even on a `chat:*` job;
+`llm:agent` and the capability's usual scope are also required for subscription pins.
 These fields summarize the model across its configured lanes; tools still require
 a chat capability and cannot be combined with `response_format`.
 The catalog builds the fields with `input_modalities()` and `supports_tools()`.

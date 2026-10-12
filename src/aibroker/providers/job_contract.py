@@ -50,7 +50,8 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
             "temperature": {"default": DEFAULT_TEMPERATURE,
                             "accepted": {"const": DEFAULT_TEMPERATURE}, "forwarded": False},
             "message_roles": list(SUBSCRIPTION_ROLES),
-            "message_content": ["text"],
+            "message_content": (["text", "image_data_url"] if "vision" in spec.capabilities
+                                else ["text"]),
             "tools": False,
             "tool_history": False,
             "stream": False,
@@ -76,16 +77,18 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
     }
 
 
-def subscription_request_problem(body: _JobBody, capability: str) -> str | None:
+def subscription_request_problem(body: _JobBody, capability: str, provider: str) -> str | None:
     """Reject controls that the Claude/Codex CLI route cannot apply."""
     if body.tools or body.tool_choice is not None:
         return "unsupported_for_subscription_model: tools"
     if body.stream:
         return "unsupported_for_subscription_model: stream"
     if any(m.tool_calls or m.tool_call_id or m.role not in SUBSCRIPTION_ROLES
-           or not isinstance(m.content, str) for m in body.messages):
+           or not isinstance(m.content, (str, list))
+           or (isinstance(m.content, list) and provider != "codex-sub")
+           for m in body.messages):
         return "unsupported_for_subscription_model: tool history or image input"
-    if capability == "vision":
+    if capability == "vision" and provider != "codex-sub":
         return "unsupported_for_subscription_model: vision"
     if problem := response_format_problem(body.response_format):
         return problem

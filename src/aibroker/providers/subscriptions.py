@@ -34,13 +34,21 @@ def _catalog() -> tuple[list[ModelSpec], frozenset[str]]:
     try:
         data = _configured_ids("AGENT_SUBSCRIPTION_MODELS")
         verified = _configured_ids("AGENT_SUBSCRIPTION_VERIFIED_MODELS")
+        vision = _configured_ids("AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS")
         if any(set(ids) - set(data.get(provider, [])) for provider, ids in verified.items()):
             raise ValueError("verified models must be catalog candidates")
+        if set(vision) - {"codex-sub"} or any(
+            set(ids) - set(verified.get(provider, [])) for provider, ids in vision.items()
+        ):
+            raise ValueError("input vision models must be verified Codex models")
         models = []
         for provider, ids in data.items():
-            models.extend(ModelSpec(id=f"{provider}/{mid}", provider=provider,
-                                    capabilities=CHAT_CAPABILITIES, transport="agent",
-                                    pricing="subscription", register=False) for mid in ids)
+            for mid in ids:
+                capabilities = CHAT_CAPABILITIES | ({"vision"} if mid in vision.get(provider, [])
+                                                    else set())
+                models.append(ModelSpec(id=f"{provider}/{mid}", provider=provider,
+                                        capabilities=frozenset(capabilities), transport="agent",
+                                        pricing="subscription", register=False))
         return models, frozenset(f"{provider}/{mid}" for provider, ids in verified.items()
                                  for mid in ids)
     except ValueError:

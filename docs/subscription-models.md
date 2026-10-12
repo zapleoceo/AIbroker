@@ -28,9 +28,9 @@ Every catalog row now has a `job_request` field. Subscription rows report
 with `forwarded: false`: omit these fields, or send exactly those defaults.
 For example, `max_tokens: 16` fits the generic `ChatRequest` range but is
 rejected by the subscription route before enqueue. The same contract marks
-tools, tool history, and streaming unsupported; only text roles
-`system`/`user`/`assistant` and `json_object`/`json_schema` response formats
-are accepted. JSON schemas cannot contain references. These values come from
+tools, tool history, and streaming unsupported. Codex input images are accepted
+only for separately verified vision model IDs. JSON schemas cannot contain
+references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
 
 Access requires the capability's existing scope plus `llm:agent`, the server
@@ -39,7 +39,11 @@ project allowlist, and the exact CLI model and `owner` account in
 subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
 `claude-sub`/`codex-sub`). `AGENT_SUBSCRIPTION_VERIFIED_MODELS` uses the same
 shape and must be a subset. Malformed or inconsistent input exposes no
-subscription models. Compose uses the `default` sentinel when no override is
+subscription models. `AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS` is an
+independent subset of verified Codex IDs; its default is empty. Only entries
+in that list gain the `vision` capability and image input in the catalog.
+The direct diagnostic agent route can be used to verify an input image before
+enabling its exact model ID. Compose uses the `default` sentinel when no override is
 provided. The default verified list contains only the completed Claude Sonnet
 smoke model; other candidates remain unavailable until confirmed by a live run.
 The default Codex candidate list contains the seven picker-visible exact IDs
@@ -64,15 +68,31 @@ The implementation exposes configured candidates through `subscription_models()`
 pin lookup in `subscription_model()`, and the availability check in
 `subscription_model_verified()`. For a subscription job,
 `prompt_for_messages()` preserves text turns and roles;
+`subscription_messages()` converts verified Codex image blocks into bounded
+temporary attachments without placing base64 bytes in the CLI prompt;
 `response_format_problem()` rejects unsupported formats before enqueue and
 `output_problem()` validates the final JSON. `live_files()` hides expired
 file bytes when the client polls the job.
 
 Subscription jobs accept text role turns and `response_format` `json_object`
 or `json_schema`; the final JSON is validated, with invalid output ending in
-an error. Tool definitions, tool history, image input, vision, nondefault
-temperature, max_tokens, and `stream: true` are rejected before enqueue because the CLI path
-does not implement those controls. `GET /v1/jobs/{id}` can return `files` for
+an error. Tool declarations, tool history, nondefault temperature, max_tokens,
+and `stream: true` are rejected before enqueue. The CLI has no verified
+client tool-call handoff, so its internal tool telemetry is not mapped to
+public `tool_calls`.
+Claude subscription jobs still reject image input and `vision`. A Codex model
+with separately verified vision accepts up to five embedded, single-frame PNG,
+JPEG, WebP, or GIF images, each at most 5 MiB,
+10 MiB total, and 25 million pixels per image. Only `data:<type>;base64,...`
+URLs are accepted; remote URLs are not fetched. The server fully decodes each
+image, stores it as a temporary run attachment, passes the actual file through
+Codex CLI `--image`, and removes the workspace after the run. An image requires
+the existing `llm:vision` scope even when sent on a chat capability; this
+change does not grant that scope to any project. A model-level
+live input-vision canary is required before adding an ID to the vision list;
+the authenticated Orchestra request is a further integration check.
+
+`GET /v1/jobs/{id}` can return `files` for
 worker-exported artifacts. Generated images must be decodable PNG bytes in
 `content_b64` with a `.png` path and, for Codex export, sha256 and dimensions;
 text or SVG is not an image result. File content expires under the worker's
@@ -80,7 +100,7 @@ normal artifact TTL. A direct Codex subscription worker run (`551063`)
 generated and exported a decodable 1254x1254 PNG, 1,689,768 bytes, SHA-256
 `9e8545d12421b78c41ca6a06b58d7f4d223eaeb053b2d5b32ee7b90e3ca56521`.
 The universal HTTP route still needs an Orchestra client request. This result
-does not grant tool calls, image input, or vision capability.
+does not verify input vision or client tool-call conformance.
 
 For the Orchestra adapter, submit the ordinary text request (no `tools`,
 `response_format`, `stream`, nondefault `temperature`, or nondefault

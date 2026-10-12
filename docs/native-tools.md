@@ -58,3 +58,13 @@ execute the client's tools.
 
 No database migration is needed: tool contracts participate in the existing
 JSONB request payload and dedup hash; results use existing result metadata.
+
+Subscription CLI pins still reject `tools` and tool history. Their current
+JSONL events describe tools executed inside the CLI process; they do not pause
+for a client-authorized function call and resume with its result. A prompt that
+asks the CLI to print a JSON call would not provide that control boundary,
+especially for Codex, whose sandbox still permits internal workspace tools.
+The existing API `tool_calls` contract remains available on native-tool
+providers. A subscription implementation needs a separately verified CLI
+handoff with no model-executed client operation before Broker may advertise
+`supports_tools: true`.
