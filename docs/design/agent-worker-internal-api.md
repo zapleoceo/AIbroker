@@ -13,8 +13,8 @@ uses its dedicated seccomp and AppArmor profiles.
 
 ## Worker API boundary
 
-Each worker listens on its own Unix domain socket. Broker is the
-only client. The API exposes provider metadata and a bounded wake signal
+Each worker listens on its own Unix domain socket. The Broker API connects
+through its matching mounted volume. The RPC exposes provider metadata and a bounded wake signal
 for a job already accepted and stored by Broker. The worker's normal database
 claim and execution path repeats its existing capability, project, model,
 billing, and policy checks. A wake never carries a prompt, credential, or

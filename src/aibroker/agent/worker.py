@@ -151,6 +151,8 @@ async def agent_worker_loop(stop: asyncio.Event,
     inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in caps}
     log.info("agent worker started (workspace=%s)", cfg.workspace_root)
     while not stop.is_set():
+        if wake is not None:
+            wake.clear()
         try:
             await fail_stale_agent_runs()
             await expire_overdue_waiting()
@@ -166,7 +168,6 @@ async def agent_worker_loop(stop: asyncio.Event,
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=1.0)
         else:
-            wake.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(wake.wait(), timeout=1.0)
     pending = [t for ts in inflight.values() for t in ts]
