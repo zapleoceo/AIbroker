@@ -11,6 +11,7 @@ from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachm
 from aibroker.agent.codex_cli import UUID_RE
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
+from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import (
     RunConflict,
     RunRejected,
@@ -161,7 +162,7 @@ async def agent_run_submit(
     """Queue an agent run. Owner-only: needs the llm:agent scope, the project on the allowlist and a
     policy that lists this exact model and account."""
     _require_agent_scope(ctx)
-    violation = policy_violation(ctx.project.id, body.model, body.account_id)
+    violation = policy_violation(ctx.project.id, body.model, body.account_id, body.capability)
     if violation:
         raise AgentPolicyViolation(violation)
     if body.capability == "agent:codex":
@@ -195,6 +196,7 @@ async def agent_run_submit(
         raise HTTPException(409, str(e)) from e
     if created:
         await admit_request(ctx.project)
+    await wake_worker(body.capability, run_id)
     response.headers[REQUEST_ID_HEADER] = job_request_id(run_id)
     return AgentRunSubmitResponse(run_id=run_id, status="pending", deduplicated=not created,
                                   poll_url=f"/v1/agent/runs/{run_id}")

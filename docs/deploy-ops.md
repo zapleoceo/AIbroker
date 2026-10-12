@@ -171,6 +171,21 @@ must list the exact model and account of every project that may run agents, othe
 `agent_policy_missing`. **Before deploying, add to `.env` (single-quoted so the JSON survives):**
 `AGENT_PROJECT_POLICY='{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}'`. See [agent-runs.md](agent-runs.md).
 
+For the separately approved Orchestra project 12, `"models": ["*"]` allows
+only candidate ids of the requested subscription provider; keep its
+`"accounts": ["owner"]` and every other project entry unchanged. This does
+not mark a candidate verified for ordinary jobs, change scope or budget, or
+permit API-billed fallback. A live model still needs the usual billing guard.
+
+The approved internal RPC uses `agent_claude_rpc` and `agent_codex_rpc` named
+volumes. The ordinary deploy recreates the API with both mounts. Since the
+workers are behind the `agent` Compose profile, build and recreate those two
+containers separately after the API deploy; otherwise database polling remains
+active and no socket is used. The volumes contain only `worker.sock`, owned by
+uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
+auth volumes into API. No new Docker network, host port, capability, or sandbox
+relaxation is required.
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —

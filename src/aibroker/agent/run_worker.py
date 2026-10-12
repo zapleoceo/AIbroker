@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ctypes
+import logging
 import signal
 
-from aibroker.agent.worker import agent_worker_loop
+from aibroker.agent.rpc import start_worker_rpc, stop_worker_rpc
+from aibroker.agent.worker import agent_worker_loop, worker_capabilities
 from aibroker.db import close_engine, init_engine
 
 PR_SET_DUMPABLE = 4
+log = logging.getLogger(__name__)
 
 
 def set_non_dumpable(libc: object | None = None) -> bool:
@@ -33,9 +36,19 @@ async def run_worker() -> None:  # pragma: no cover - process harness
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
+    caps = worker_capabilities()
+    wake = asyncio.Event()
+    rpc = None
+    if len(caps) == 1:
+        try:
+            rpc = await start_worker_rpc(caps[0], wake)
+        except (OSError, RuntimeError):
+            log.exception("worker RPC unavailable; database polling remains active")
     try:
-        await agent_worker_loop(stop)
+        await agent_worker_loop(stop, wake)
     finally:
+        if len(caps) == 1:
+            await stop_worker_rpc(rpc, caps[0])
         await close_engine()
 
 

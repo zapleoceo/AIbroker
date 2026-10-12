@@ -257,6 +257,9 @@ services:
       AGENT_SUBSCRIPTION_CODEX_ENABLED: ${AGENT_SUBSCRIPTION_CODEX_ENABLED:-false}
     ports:
       - "127.0.0.1:8004:8000"
+    volumes:
+      - agent_claude_rpc:/run/aibroker-agent-rpc/claude
+      - agent_codex_rpc:/run/aibroker-agent-rpc/codex
     # 235-490MiB observed (2 uvicorn workers + the in-process job dispatcher);
     # 2x the observed peak — a cgroup kill here restarts the API, so err wide.
     mem_limit: 1024m
@@ -347,8 +350,10 @@ services:
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
+      AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
     volumes:
       - agent_claude_auth:/home/app/claude-state
+      - agent_claude_rpc:/run/aibroker-agent-rpc/claude
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
       - /tmp:size=64m,uid=10001,gid=10001,mode=1777
@@ -397,8 +402,10 @@ services:
       AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
+      AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
     volumes:
       - agent_codex_auth:/home/app/codex-state
+      - agent_codex_rpc:/run/aibroker-agent-rpc/codex
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
       - /tmp:size=64m,uid=10001,gid=10001,mode=1777
@@ -441,4 +448,9 @@ volumes:
     driver: local
   # Codex CLI ChatGPT login (CODEX_HOME; Codex refreshes auth.json, so it must stay writable).
   agent_codex_auth:
+    driver: local
+  # Internal Unix sockets only. No CLI auth material or host ports in these volumes.
+  agent_claude_rpc:
+    driver: local
+  agent_codex_rpc:
     driver: local

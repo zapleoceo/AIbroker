@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
+from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run
 from aibroker.agent.subscription_job import live_files, prompt_for_messages
 from aibroker.auth import ProjectCtx, require_project
@@ -563,7 +564,8 @@ async def jobs_submit(
         if not subscription_model_verified(subscription.id):
             raise HTTPException(503, "subscription model availability is not verified")
         cli_model = subscription.id.split("/", 1)[1]
-        violation = policy_violation(ctx.project.id, cli_model, "owner")
+        violation = policy_violation(ctx.project.id, cli_model, "owner",
+                                     PROVIDERS[subscription.provider])
         if violation:
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability):
@@ -585,6 +587,7 @@ async def jobs_submit(
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
         response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+        await wake_worker(PROVIDERS[subscription.provider], job_id)
         return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2)
     _validate_pin(body.model, capability)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
@@ -658,7 +661,7 @@ async def jobs_poll(
         if not project_allowed(ctx.project.id):
             raise AgentProjectNotAllowed(ctx.project.id)
         violation = policy_violation(ctx.project.id, row.request.get("model"),
-                                     row.request.get("account_id", ""))
+                                     row.request.get("account_id", ""), row.capability)
         if violation:
             raise AgentPolicyViolation(violation)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover

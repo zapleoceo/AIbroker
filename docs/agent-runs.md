@@ -31,11 +31,31 @@ allowlist checks, a request is refused with 403 `{"error": ...}` (`AgentPolicyVi
 the project has no entry or an empty `models` / `accounts` list - `agent_policy_missing`; the request's
 `model` is absent or not EXACTLY one of the project's models (no prefix match, no implicit default,
 `latest` only if listed) - `model_not_allowed`; the `account_id` is not listed - `account_not_allowed`.
+For a project explicitly configured with `"models": ["*"]`, the wildcard admits only
+model ids listed as candidates for the requested Claude or Codex subscription
+provider. It does not mark a model verified, grant tools or vision, change the
+project's account allowlist, or override the ordinary jobs route's availability
+check. Keep this policy entry limited to the project the owner approved.
 A malformed setting refuses every project (`agent_policy_missing`) and logs one clear error. The worker
 re-checks the same policy before it starts a queued run (`run.failed` with the same code, no CLI start,
 no `billing.attested`). The CLI model catalog stays an additional check when it is readable; when it is
 not, the already-enforced allowlist decides - the id is never passed through unchecked. The project's
 daily cap stays plain metadata (no run quota). Compose passes the variable to `api` and `agent-worker`.
+
+**Internal worker RPC.** The API and each subscription worker share only that
+worker's named Unix-socket volume. The socket directory is uid 10001 mode
+`0700`; `worker.sock` is mode `0600`. `GET /internal/v1/provider` reports
+configured candidate ids and the text-only jobs contract;
+`GET /internal/v1/health` reports queue readiness; and
+`POST /internal/v1/wake` accepts only a numeric job id and returns `202` even
+when the job is unknown or belongs elsewhere. The worker checks the database
+and project policy when claiming it. No prompt or credential crosses RPC.
+The ordinary `/v1/jobs` and `/v1/agent/runs` clients are unchanged. If RPC is
+unavailable, the worker still polls the database. The RPC volumes contain no
+CLI auth files, have no host port, and do not change worker networks or the
+Codex seccomp/AppArmor profile.
+`wake_worker`, `start_worker_rpc`, and `stop_worker_rpc` implement this optional
+path in `aibroker.agent.rpc`.
 
 ## Readiness and quota rules (hard requirements)
 

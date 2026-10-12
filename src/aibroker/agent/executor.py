@@ -115,7 +115,7 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunFailed(
             error_class="project_not_allowed",
             message="project is not in AGENT_ALLOWED_PROJECT_IDS"), totals)
-    violation = policy_violation(run.project_id, run.model, run.account_id)
+    violation = policy_violation(run.project_id, run.model, run.account_id, run.capability)
     if violation:                              # the policy changed while the run was queued
         return await _finish(run_id, ev.RunFailed(
             error_class=violation, message="outside the project's AGENT_PROJECT_POLICY"), totals)

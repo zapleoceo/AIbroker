@@ -136,6 +136,7 @@ class Settings(BaseSettings):
     # llm:agent scope, and the worker refuses queued runs of other projects.
     AGENT_ALLOWED_PROJECT_IDS: str = ""
     # Per-project agent policy, JSON: {"11": {"models": ["<exact id>"], "accounts": ["owner"]}}.
+    # "*" admits known subscription candidates of the requested agent capability only.
     # Fail-closed: no entry / empty lists -> 403 agent_policy_missing; malformed -> everyone refused.
     AGENT_PROJECT_POLICY: str = ""
     # Which agent capabilities THIS worker process claims (comma-separated). Production runs one

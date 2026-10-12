@@ -139,7 +139,8 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
         log.exception("agent run %d crashed", run_id)
 
 
-async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - loop harness
+async def agent_worker_loop(stop: asyncio.Event,
+                            wake: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
     caps = worker_capabilities()
     problem = worker_image_problem(capabilities=caps) if caps else "AGENT_WORKER_CAPABILITIES is empty"
@@ -161,8 +162,13 @@ async def agent_worker_loop(stop: asyncio.Event) -> None:  # pragma: no cover - 
                     t.add_done_callback(inflight[cap].discard)
         except Exception:  # noqa: BLE001 - a bad tick must not kill the lane
             log.exception("agent worker tick failed")
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=1.0)
+        if wake is None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=1.0)
+        else:
+            wake.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), timeout=1.0)
     pending = [t for ts in inflight.values() for t in ts]
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
