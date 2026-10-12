@@ -23,6 +23,16 @@ provider fallback chain. `provider` on success is `claude-sub` or `codex-sub`;
 `billing_type: "subscription"`. Quota waits stay pending on the same account;
 there is no API-billed fallback.
 
+Every catalog row now has a `job_request` field. Subscription rows report
+`max_tokens.accepted.const: 1024` and `temperature.accepted.const: 0.7`, both
+with `forwarded: false`: omit these fields, or send exactly those defaults.
+For example, `max_tokens: 16` fits the generic `ChatRequest` range but is
+rejected by the subscription route before enqueue. The same contract marks
+tools, tool history, and streaming unsupported; only text roles
+`system`/`user`/`assistant` and `json_object`/`json_schema` response formats
+are accepted. JSON schemas cannot contain references. These values come from
+the same constants and validator used by `POST /v1/jobs`.
+
 Access requires the capability's existing scope plus `llm:agent`, the server
 project allowlist, and the exact CLI model and `owner` account in
 `AGENT_PROJECT_POLICY`. The worker rechecks these. The configured list of

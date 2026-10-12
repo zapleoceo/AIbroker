@@ -18,12 +18,23 @@ from pydantic import BaseModel, Field, model_validator
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.runs import RunRejected, create_run
-from aibroker.agent.subscription_job import live_files, prompt_for_messages, response_format_problem
+from aibroker.agent.subscription_job import live_files, prompt_for_messages
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.config import get_settings
 from aibroker.providers import catalog
 from aibroker.providers.catalog import UnknownModel
 from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
+from aibroker.providers.job_contract import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TEMPERATURE,
+    JOB_CAPABILITIES,
+    JOB_MAX_TOKENS_MAX,
+    JOB_MAX_TOKENS_MIN,
+    JOB_TEMPERATURE_MAX,
+    JOB_TEMPERATURE_MIN,
+    subscription_prompt_problem,
+    subscription_request_problem,
+)
 from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
@@ -55,10 +66,7 @@ from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 # async too, but through its own multipart route (/v1/transcribe/jobs) since
 # its payload is an audio file, not messages — it is polled via the same
 # GET /v1/jobs/{id}. chat:deep is the one capability that is async-ONLY.
-_JOB_CAPABILITIES = frozenset({
-    "chat:fast", "chat:smart", "chat:sales", "chat:code", "chat:edit",
-    "chat:deep", "structured", "prefilter", "translate", "vision",
-})
+_JOB_CAPABILITIES = JOB_CAPABILITIES
 
 router = APIRouter(tags=["proxy"])
 
@@ -98,8 +106,9 @@ class ChatRequest(BaseModel):
     # silently knocks every capped paid key out of the chain — the paid tail
     # vanishes and the request 503s with keys sitting idle. 16384 covers every
     # real caller; temperature beyond [0, 2] is rejected by providers anyway.
-    max_tokens: int = Field(1024, ge=1, le=16384)
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
+    max_tokens: int = Field(DEFAULT_MAX_TOKENS, ge=JOB_MAX_TOKENS_MIN, le=JOB_MAX_TOKENS_MAX)
+    temperature: float = Field(DEFAULT_TEMPERATURE, ge=JOB_TEMPERATURE_MIN,
+                               le=JOB_TEMPERATURE_MAX)
     response_format: dict[str, Any] | None = None
     workflow: str | None = None
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
@@ -557,23 +566,12 @@ async def jobs_submit(
         violation = policy_violation(ctx.project.id, cli_model, "owner")
         if violation:
             raise AgentPolicyViolation(violation)
-        if body.tools or body.tool_choice is not None:
-            raise HTTPException(400, "unsupported_for_subscription_model: tools")
-        if body.stream:
-            raise HTTPException(400, "unsupported_for_subscription_model: stream")
-        if any(m.tool_calls or m.tool_call_id or m.role not in ("system", "user", "assistant")
-               or not isinstance(m.content, str) for m in body.messages):
-            raise HTTPException(400, "unsupported_for_subscription_model: tool history or image input")
-        if capability == "vision":
-            raise HTTPException(400, "unsupported_for_subscription_model: vision")
-        if problem := response_format_problem(body.response_format):
+        if problem := subscription_request_problem(body, capability):
             raise HTTPException(400, problem)
-        if body.temperature != 0.7 or body.max_tokens != 1024:
-            raise HTTPException(400, "unsupported_for_subscription_model: temperature or max_tokens")
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
         prompt = prompt_for_messages(messages, body.response_format)
-        if len(prompt) > 200_000:
-            raise HTTPException(400, "subscription prompt exceeds 200000 characters")
+        if problem := subscription_prompt_problem(prompt):
+            raise HTTPException(400, problem)
         await admit_request(ctx.project)
         try:
             job_id, _ = await create_run(

@@ -565,6 +565,12 @@ new registry entry shows up here with no other change.
    "name": "gpt-oss-120b",
    "capabilities": ["chat:code", "chat:fast", "chat:smart", "structured"],
    "supports_tools": false, "modalities": ["text"],
+   "job_request": {"max_tokens": {"default": 1024, "accepted": {"minimum": 1,
+     "maximum": 16384}, "forwarded": true}, "temperature": {"default": 0.7,
+     "accepted": {"minimum": 0.0, "maximum": 2.0}, "forwarded": true},
+     "message_roles": null, "message_content": null, "tools": false,
+     "tool_history": null, "stream": null, "response_format_types": null,
+     "json_schema_refs": null, "max_prompt_chars": null},
    "also_served_by": ["groq/openai/gpt-oss-120b", "cloudflare/@cf/openai/gpt-oss-120b"],
    "price": {"kind": "litellm", "input_usd_per_mtok": 0.35, "output_usd_per_mtok": 0.75}}
 ]}
@@ -590,6 +596,14 @@ when the enabled model's support is unknown. Subscription routes report
 These fields summarize the model across its configured lanes; tools still require
 a chat capability and cannot be combined with `response_format`.
 The catalog builds the fields with `input_modalities()` and `supports_tools()`.
+`job_request` describes the Broker's validation of `POST /v1/jobs` for each
+model. It is `null` for routes served by other endpoints, such as embedding or
+multipart transcription. `accepted.const` means the field may be omitted (the
+shown default is inserted), or sent with exactly that value. `forwarded: false`
+means the backend does not apply the field. A `null` feature means Broker makes
+no model-specific support claim; it does not mean the feature works. The range
+for ordinary API jobs is Broker's input range, not a guarantee that every
+upstream model accepts its extremes.
 
 ### Cache affinity (2026-10-03)
 
