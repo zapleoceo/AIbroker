@@ -144,7 +144,9 @@ class Settings(BaseSettings):
     AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
     # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
     # isolated worker profile is separately approved and deployed.
-    AGENT_SUBSCRIPTION_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}'
+    AGENT_SUBSCRIPTION_MODELS: str = ('{"claude-sub":["claude-sonnet-5-5"],"codex-sub":['
+                                      '"gpt-6.1-sol","gpt-6-astra","gpt-6-sol","gpt-6-luna",'
+                                      '"gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"]}')
     # Exact account-confirmed route ids. Candidate models remain visible but unavailable until
     # confirmed; confirmation never overrides project policy or the Codex worker gate.
     AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'

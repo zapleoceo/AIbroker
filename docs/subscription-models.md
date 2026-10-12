@@ -29,11 +29,16 @@ subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
 shape and must be a subset. Malformed or inconsistent input exposes no
 subscription models. Compose uses the `default` sentinel when no override is
 provided. The default verified list contains only the completed Claude Sonnet
-smoke model; the Codex model remains unverified. To add all models actually
-available on the owner's subscriptions, obtain their exact ids from the owner's
-account and set both lists explicitly. Codex App Server `model/list` supports
-account-aware discovery; Claude Code has no documented read-only model-list
-CLI, so the owner must confirm Claude models in the interactive account. These
+smoke model; other candidates remain unavailable until confirmed by a live run.
+The default Codex candidate list contains the seven picker-visible exact IDs
+returned by the owner's Codex App Server `model/list` on 2026-10-12:
+`gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
+`gpt-5.6-terra`, and `gpt-5.6-luna`. The response marked all seven
+`hidden: false`. Hidden internal and legacy entries are not Broker candidates.
+Account-aware discovery supports adding a candidate; it does not prove a run
+will complete. Add each exact ID to the verified list only after a successful
+live subscription run. Claude Code has no documented read-only model-list CLI,
+so the owner must confirm further Claude models in the interactive account. These
 lists do not grant project access: enumerate each desired exact CLI id in
 `AGENT_PROJECT_POLICY` for each approved project. Never use a wildcard or
 infer subscription availability from API-model catalogs. The default Codex

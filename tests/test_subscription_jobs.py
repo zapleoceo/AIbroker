@@ -46,7 +46,11 @@ def test_compose_default_catalog_sentinel_keeps_defaults_and_malformed_fails_clo
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS", "default")
     assert {m.id for m in subscription_models()} == {
-        "claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"}
+        "claude-sub/claude-sonnet-5-5",
+        "codex-sub/gpt-6.1-sol", "codex-sub/gpt-6-astra", "codex-sub/gpt-6-sol",
+        "codex-sub/gpt-6-luna", "codex-sub/gpt-5.6-sol", "codex-sub/gpt-5.6-terra",
+        "codex-sub/gpt-5.6-luna",
+    }
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "broken")
     assert subscription_models() == []
 
