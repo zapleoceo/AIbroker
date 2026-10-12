@@ -4,7 +4,7 @@ All prices end up in `cost_usd` on `usage_log`, which feeds the per-key, per-pro
 and global daily caps. Free-tier keys are zeroed afterwards by `_billed_cost`; the
 numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 (helpers + override tables) and `providers/cost.py` (`estimate_llm_cost`,
-`whisper_cost`, `register_price_overrides`; the override table itself is the registry, `providers/specs.py`).
+`whisper_cost`, `register_price_overrides`; the override table itself is the registry, `providers/provider_specs/`).
 
 ## Rules, in order of precedence
 
@@ -59,7 +59,7 @@ Anthropic `claude-sonnet-5` is permanently $2/$10 per M.
 
 `tests/test_pricing.py` fails for any model reachable from a
 `ProviderSpec` (`defaults` / `rotation`) that LiteLLM (or a `register_model` entry, or the ASR table) does not
-price. Free models are marked `pricing="free"` in `providers/specs.py` (registered at 0.0 by `providers/cost.register_price_overrides`) with a `note` naming the source.
+price. Free models are marked `pricing="free"` in `providers/provider_specs/` (registered at 0.0 by `providers/cost.register_price_overrides`) with a `note` naming the source.
 
 ## Code map (`providers/pricing.py`)
 

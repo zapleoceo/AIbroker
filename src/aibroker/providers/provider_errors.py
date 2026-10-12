@@ -88,7 +88,7 @@ def is_billing_error(text: str | None) -> bool:
 
 # Provider-SCOPED signatures (narrow strings that must not penalise another
 # provider's key) live on ProviderSpec: rate_limit_signs / auth_signs /
-# monthly_signs - see providers/specs.py; history in docs/history/provider-choices.md.
+# monthly_signs - see providers/provider_specs/; history in docs/history/provider-choices.md.
 
 
 # HTTP status as it appears in provider/litellm message bodies: "Error code:

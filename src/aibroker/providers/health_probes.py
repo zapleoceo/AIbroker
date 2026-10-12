@@ -194,7 +194,7 @@ def extract_quota_headers(
     return None, None
 
 
-# Probe request shapes live on ProviderSpec.probe (providers/specs.py).
+# Probe request shapes live on ProviderSpec.probe (providers/provider_specs/).
 
 
 async def probe_all(

@@ -1,14 +1,15 @@
 # How to add a provider or a model
 
 Since the core refactor (see [design/core-refactor.md](design/core-refactor.md))
-every provider *fact* lives in ONE place: a `ProviderSpec` in
-`src/aibroker/providers/specs.py` (types and accessors in
-`providers/registry.py`). Order/policy — which provider serves which capability
-and in what sequence — stays in `routing/chains.py`.
+every provider *fact* lives in ONE `ProviderSpec` definition in
+`src/aibroker/providers/provider_specs/<provider>.py` (types and accessors in
+`providers/registry.py`). `providers/specs.py` registers those definitions in
+the historical order. Routing policy - which provider serves which capability
+and in what sequence - stays in `routing/chains.py`.
 
 ## Add a new model to an existing provider
 
-1. In the provider's `build_provider(...)` entry:
+1. In the provider's `provider_specs/<provider>.py` `build_provider(...)` entry:
    - make it the lane's default: `defaults={"chat:smart": "gemini/gemini-4-flash", ...}`, or
    - add it to a rotation: `rotation={"chat:fast": (..., "gemini/gemini-4-flash")}`
      (use a rotation only when the provider meters quota per model — Gemini).
@@ -33,7 +34,9 @@ A model served by a non-litellm endpoint sets `transport` in its `model_meta`
 ## Add a new provider
 
 1. Check litellm supports it (`litellm.provider_list`) — or plan a raw-HTTP transport.
-2. Add `register(build_provider("acme", ...))` to `providers/specs.py`. The fields:
+2. Add `provider_specs/acme.py` with `SPEC = build_provider("acme", ...)`, then
+   import it and call `register(acme.SPEC)` in `providers/specs.py` at its intended
+   position. The fields:
 
    | field | what it is |
    |---|---|

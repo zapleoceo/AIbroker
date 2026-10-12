@@ -5,7 +5,7 @@
 >
 > | old name in the notes below | now |
 > |---|---|
-> | `DEFAULT_MODEL`, `MODEL_ROTATION`, `models_for`, `model_for` | `ProviderSpec.defaults` / `.rotation` (`providers/registry.py`, data in `providers/specs.py`) |
+> | `DEFAULT_MODEL`, `MODEL_ROTATION`, `models_for`, `model_for` | `ProviderSpec.defaults` / `.rotation` (`providers/registry.py`, data in `providers/provider_specs/`) |
 > | `COOLDOWN_BASE_S` | `ProviderSpec.cooldown_base_s` |
 > | `PROVIDER_QUOTAS` | `ProviderSpec.quota` |
 > | `SEED_MAX_REQUEST_TOKENS` | `ProviderSpec.max_request_tokens` |

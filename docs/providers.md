@@ -3,7 +3,7 @@
 LiteLLM SDK does the per-provider HTTP. Our config maps capabilities to
 default models.
 
-Source: the provider registry — `src/aibroker/providers/specs.py` (`ProviderSpec.defaults` /
+Source: the provider registry — `src/aibroker/providers/provider_specs/` (`ProviderSpec.defaults` /
 `.rotation`); `GET /v1/models` lists the resulting catalog. Dated incident history for
 every choice: [history/provider-choices.md](history/provider-choices.md).
 
