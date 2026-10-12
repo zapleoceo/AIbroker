@@ -18,7 +18,8 @@ Submit using the existing `POST /v1/jobs?capability=chat:fast` and the ordinary
 `job_id`, `poll_url`, and `poll_after_s`; poll the existing `GET /v1/jobs/{id}`.
 The job goes to the dedicated CLI worker and is never inserted into a normal
 provider fallback chain. `provider` on success is `claude-sub` or `codex-sub`;
-`model` is the route id, `model_served` is `null` until the CLI supplies
+`model` and `requested_model` are the requested route id; `model_served` is
+`null` until the CLI supplies
 independent served-model evidence, and
 `cost_usd` remains null. A successful subscription attestation is reflected in
 `billing_type: "subscription"`. Quota waits stay pending on the same account;

@@ -117,6 +117,15 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids (see [subscription-models.md](subscription-models.md)) |
 
+For a subscription job, `requested_model` is the exact route pin from the
+request. `model_served` remains `null` without independent CLI evidence; this
+does not prevent a functional result. `tokens_in`, `tokens_out`,
+`total_tokens`, `cache_read_tokens`, and `reasoning_tokens` contain only counts
+reported by the CLI, with `null` for unavailable counts. An unknown
+`cost_usd` remains `null`. An App Server reroute appears as a `model.rerouted`
+entry in that run's `/v1/agent/runs/{id}/events` stream and fails the tool
+turn; absence of that entry does not attest model identity.
+
 ### Agent run billing attestation (`GET /v1/agent/runs/{id}`)
 
 The response (also the cancel response) carries five per-run billing fields, read from the run's

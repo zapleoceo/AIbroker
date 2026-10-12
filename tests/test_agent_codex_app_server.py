@@ -54,6 +54,10 @@ class _Writer:
                     "threadId": "thread-1", "turnId": "turn-1", "namespace": None,
                     "callId": "call-1", "tool": "lookup", "arguments": {"id": 7}}})
         elif message.get("id") == 99 and "result" in message:
+            self.reader.put({"method": "thread/tokenUsage/updated", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "tokenUsage": {
+                    "total": {"inputTokens": 11, "outputTokens": 5, "totalTokens": 16,
+                             "cachedInputTokens": 2, "reasoningOutputTokens": 3}}}})
             self.reader.put({"method": "item/completed", "params": {
                 "threadId": "thread-1", "turnId": "turn-1",
                 "item": {"type": "agentMessage", "text": "Found 7"}}})
@@ -126,7 +130,9 @@ async def test_dynamic_tool_callback_waits_for_caller_then_completes(monkeypatch
     monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
     events = [item async for item in run_tool_turn(_Adapter(home), run)]
     assert [item.type for item in events] == ["session.assigned", "tool.call",
-                                               "tool.result", "run.completed"]
+                                               "tool.result", "usage", "run.completed"]
+    assert events[-2].total_tokens == 16
+    assert events[-2].reasoning_tokens == 3
     assert events[-1].final_text == "Found 7"
     assert process.stdin.sent[0]["params"]["capabilities"]["experimentalApi"] is True
     assert process.stdin.sent[2]["params"]["permissions"] == "broker"

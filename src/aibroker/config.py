@@ -156,6 +156,8 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
+    AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS: str = "[]"
+    AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS: str = ""
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

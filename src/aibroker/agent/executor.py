@@ -36,7 +36,10 @@ from aibroker.agent.workspace import cleanup_workspace, collect_files, create_wo
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
-from aibroker.providers.subscriptions import subscription_tool_model_verified
+from aibroker.providers.subscriptions import (
+    subscription_tool_model_canary,
+    subscription_tool_model_verified,
+)
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +117,9 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
     client_tools = (req.get("client_job") or {}).get("tools") or []
     if client_tools and (not get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
                          or not run.model
-                         or not subscription_tool_model_verified(f"codex-sub/{run.model}")):
+                         or not (subscription_tool_model_verified(f"codex-sub/{run.model}")
+                                 or subscription_tool_model_canary(f"codex-sub/{run.model}",
+                                                                   run.project_id))):
         return await _finish(run_id, ev.RunFailed(
             error_class="route_disabled", message="codex client tools are not verified"), {})
     totals: dict[str, int | None] = {}
@@ -366,13 +371,21 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                 terminal = item
                 break
             if isinstance(item, ev.Usage):
-                for key in ("input_tokens", "output_tokens", "cache_read_tokens", "turns"):
+                for key in ("input_tokens", "output_tokens", "total_tokens",
+                            "cache_read_tokens", "reasoning_tokens", "turns"):
                     val = getattr(item, key)
                     if val is not None:
                         totals[key] = (totals.get(key) or 0) + val
             elif isinstance(item, ev.FileChanged) and item.action != "deleted":
                 changed.append(item.path)
             await append_event(run_id, item, lease)
+            if isinstance(item, ev.Usage):
+                log.info(
+                    "agent_usage job_id=%d run_id=%d source=%s input_tokens=%s output_tokens=%s "
+                    "total_tokens=%s cache_read_tokens=%s reasoning_tokens=%s cost_usd=unknown",
+                    run_id, run_id, item.source, item.input_tokens, item.output_tokens,
+                    item.total_tokens, item.cache_read_tokens, item.reasoning_tokens,
+                )
     finally:
         if terminal is None or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
             await _stop_adapter(adapter, cfg.cancel_grace_s)

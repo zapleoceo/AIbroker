@@ -56,22 +56,36 @@ should use the Broker call ID as its own idempotency key. One outstanding call,
 16 calls per run, 64 KiB arguments/results, and exact-result idempotent retries
 while the job runs are enforced. A result sent after terminal state is rejected.
 The current `deep_jobs` pending/done/error status values remain
-intact for clients that do not use tools. A completed subscription result has
-`model_served: null`: the CLI model pin is not independent evidence of the
-model actually served. The raw client tool result is removed from pending
+intact for clients that do not use tools. In a subscription result,
+`requested_model` keeps the exact route pin and `model_served: null` means the
+CLI has not independently attested which model served it. This does not block
+the functional callback canary. The raw client tool result is removed from pending
 metadata when consumed and withheld from the persistent tool event.
 
 This is a new authenticated write endpoint and a new path for client-provided
 tool output into the worker. Independent review and CI precede enabling one
 exact model ID for a controlled canary under the existing owner-only project
-policy; that first enablement is the live callback canary window. Leave the
-feature disabled if the canary fails, and do not add other model IDs without
-their own canary. No new
+policy. For project 12, the narrow canary settings are
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED=true`,
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS=12`, and
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS=["codex-sub/gpt-6.1-sol"]`.
+The canary list works only alongside the existing `llm:agent` scope, project
+allowlist, and exact model/account policy; it does not advertise
+`supports_tools: true` in the catalog. The API and worker both check the same
+project/model gate. After one successful callback through Orchestra, clear the
+canary settings and put only that exact route in
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` to advertise it. A failed
+canary leaves the verified list empty. No new
 scope, external port, credential, API-paid fallback, or wider Linux sandbox is
 part of this design. Claude subscription tools require a separate adapter:
 the current Claude headless CLI does not expose this client-response pause;
 the Claude Agent SDK has in-process MCP tool handlers, which would need the
 same durable Broker callback contract and separate review.
+
+`subscription_tool_model_canary` evaluates the temporary exact project/model
+gate. `ModelRerouted` records an explicit App Server reroute notification in
+the run event stream before the tool turn fails; no notification is not proof
+of the serving model.
 
 ## Input image canary
 
@@ -82,6 +96,27 @@ unavailable for input vision until its exact ID is in
 `AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS`. That allowlist is empty by default.
 The production project 12 already has `llm:vision` and `llm:agent`; no new
 scope grant is needed for its canary.
+
+Run the diagnostic image probe even when `model_served` is unknown. A correct
+answer to a visually discriminating question proves functional image handling
+for the requested route in that run; it does not certify underlying model
+identity. Keep `requested_model`, `model_served`, any `model.rerouted` event,
+subscription billing attestation, and provider-reported token counts separate
+in the result. The diagnostic route does not require the universal vision
+allowlist, so the first probe needs no new scope or credential.
+
+For a functional callback canary, Orchestra submits one ordinary
+`POST /v1/jobs?capability=chat:fast` using the existing project-12 key,
+`model: codex-sub/gpt-6.1-sol`, and one harmless declared function such as
+`lookup_probe({id: 7})`. Return a fresh unpredictable marker in the tool
+result, and require that exact marker in the final answer. A pass requires a `pending` poll with exactly one
+schema-valid `tool_calls` entry, one same-project result accepted at
+`POST /v1/jobs/{id}/tool-results`, and a final `done` answer that uses the
+supplied result. A cross-project or mismatched call ID must be refused. Record
+`requested_model`, `model_served: null` when unknown, reroute evidence if
+observed, subscription billing attestation, and reported token usage. This
+proves callback function for the requested route; it does not prove the
+underlying model's identity. Do not send a paid API fallback.
 
 Using the existing Orchestra project key inside Orchestra, first submit one
 diagnostic `POST /v1/agent/runs` for `agent:codex`, `model: gpt-6.1-sol`,

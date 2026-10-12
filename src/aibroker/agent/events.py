@@ -45,6 +45,13 @@ class SessionAssigned(_Event):
     session_id: str = Field(min_length=1, max_length=128)
 
 
+class ModelRerouted(_Event):
+    type: Literal["model.rerouted"] = "model.rerouted"
+    from_model: str
+    to_model: str
+    source: Literal["codex_app_server"] = "codex_app_server"
+
+
 class MessageDelta(_Event):
     type: Literal["message.delta"] = "message.delta"
     text: str
@@ -74,6 +81,7 @@ class Usage(_Event):
     type: Literal["usage"] = "usage"
     input_tokens: int | None = None
     output_tokens: int | None = None
+    total_tokens: int | None = None
     cache_read_tokens: int | None = None
     turns: int | None = None
     reasoning_tokens: int | None = None
@@ -123,7 +131,7 @@ class RunTimedOut(_Event):
     limit: Literal["wall", "idle", "deadline"] = "wall"
 
 
-AnyEvent = (RunStarted | SessionAssigned | MessageDelta | ToolCall | ToolResult | FileChanged
+AnyEvent = (RunStarted | SessionAssigned | ModelRerouted | MessageDelta | ToolCall | ToolResult | FileChanged
             | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota
             | BillingAttested)
 AgentEvent = Annotated[AnyEvent, Field(discriminator="type")]
