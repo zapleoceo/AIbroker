@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from aibroker.providers.registry import Quota, spec_or_default
 
-# Static provider defaults live on ProviderSpec.quota (providers/specs.py).
+# Static provider defaults live on ProviderSpec.quota (providers/provider_specs/).
 
 
 def quota_for(provider: str) -> Quota:

@@ -138,7 +138,7 @@ services/attempt.py        ONE key attempt: reserve → decrypt → call → rel
   │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
   │    └─ decisions.py             OpenRouter decisions endpoint
   ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
-  │    └─ providers/specs.py       the DATA: one build_provider(...) per provider
+  │    └─ providers/provider_specs/       one provider definition per module
   ├─ providers/catalog.py          pin-able models, resolve_pin, /v1/models rows
   ├─ providers/cost.py             litellm pricing + registry overrides, per-minute audio
   ├─ providers/prompt_cache.py     anthropic marks, cache-token parsing, stable cache key

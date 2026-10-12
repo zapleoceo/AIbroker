@@ -27,8 +27,9 @@ src/aibroker/
     deep_jobs.py       submit/poll + payload-hash dedup
     response_cache.py  exact-match LRU+TTL for translate/prefilter
   providers/
-    registry.py        ProviderSpec/ModelSpec + views (leaf; data in specs.py)
-    specs.py           ONE build_provider(...) entry per provider
+    registry.py        ProviderSpec/ModelSpec + views (leaf)
+    specs.py           ordered registration of provider definitions
+    provider_specs/    one build_provider(...) definition per provider
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
     transport.py       Chat/Embed/Transcribe/Decide Protocols + dispatch facades
     litellm_client.py  litellm chat/embed/whisper transport

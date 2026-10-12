@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Response
+from fastapi.testclient import TestClient
 from PIL import Image
 
 from aibroker.agent.events import FileRef, RunCompleted
@@ -17,9 +18,11 @@ from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
+from aibroker.main import app
 from aibroker.providers.catalog import UnknownModel, listing, resolve_pin
 from aibroker.providers.subscriptions import subscription_models
 from aibroker.routes import proxy
+from tests.test_routes_proxy import _make_project
 
 
 def _ctx(scopes: tuple[str, ...] = ("llm:chat", "llm:agent")) -> SimpleNamespace:
@@ -43,6 +46,41 @@ def test_catalog_keeps_route_identity_and_subscription_variable_price():
         resolve_pin(claude["id"], "chat:fast", ["groq"])
     with pytest.raises(UnknownModel):
         resolve_pin("claude-sonnet-5-5", "chat:fast", ["groq", "claude-sub"])
+
+
+async def test_http_catalog_contract_matches_subscription_job_validation(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    create = AsyncMock(return_value=(42, True))
+    monkeypatch.setattr(proxy, "create_run", create)
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    plain, _ = await _make_project(["llm:chat", "llm:agent"])
+    headers = {"X-Project-Key": plain}
+    client = TestClient(app)
+    catalog = client.get("/v1/models", headers=headers)
+    assert catalog.status_code == 200
+    rows = {row["id"]: row for row in catalog.json()["data"]}
+    for model in ("claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"):
+        request = rows[model]["job_request"]
+        assert request["max_tokens"] == {
+            "default": 1024, "accepted": {"const": 1024}, "forwarded": False}
+        assert request["temperature"] == {
+            "default": 0.7, "accepted": {"const": 0.7}, "forwarded": False}
+        body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+        omitted = client.post("/v1/jobs?capability=chat:fast", headers=headers, json=body)
+        explicit = client.post("/v1/jobs?capability=chat:fast", headers=headers,
+                               json={**body, "max_tokens": 1024, "temperature": 0.7})
+        rejected = client.post("/v1/jobs?capability=chat:fast", headers=headers,
+                               json={**body, "max_tokens": 16})
+        assert omitted.status_code == explicit.status_code == 202
+        assert rejected.status_code == 400
+        assert rejected.json()["detail"] == (
+            "unsupported_for_subscription_model: temperature or max_tokens")
+    assert create.await_count == 4
 
 
 def test_compose_default_catalog_sentinel_keeps_defaults_and_malformed_fails_closed(monkeypatch):

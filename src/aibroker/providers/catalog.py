@@ -14,6 +14,7 @@ import difflib
 from dataclasses import dataclass
 
 from aibroker.config import get_settings
+from aibroker.providers.job_contract import job_request_contract
 from aibroker.providers.registry import (
     ModelSpec,
     all_models,
@@ -169,6 +170,7 @@ def listing() -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
     for m in pinnable_models():
+        tool_support = supports_tools(m)
         also = [o.id for o in pinnable_models()
                 if o.id != m.id and canonical_name(o.id) == canonical_name(m.id)]
         rows.append({
@@ -180,7 +182,8 @@ def listing() -> list[dict[str, object]]:
                              "local" if m.pricing == "local" else "api"),
             "name": canonical_name(m.id),
             "capabilities": sorted(m.capabilities),
-            "supports_tools": supports_tools(m),
+            "supports_tools": tool_support,
+            "job_request": job_request_contract(m, tool_support),
             "modalities": input_modalities(m),
             "also_served_by": also,
             "price": price_info(m),

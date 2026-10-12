@@ -5,7 +5,7 @@ health probe, quotas, cooldown base, JSON reliability, cache behaviour, error
 signs, size limits, models and their prices, rotation). Policy — which provider
 serves which capability in which order — stays in `routing/chains.py`.
 
-Adding a provider or a model is one entry in `providers/specs.py`; see
+Adding a provider or a model is one entry in `providers/provider_specs/`; see
 docs/how-to-add-provider.md. Consumers use the accessor functions below (views
 over the registry) instead of per-concern tables.
 
