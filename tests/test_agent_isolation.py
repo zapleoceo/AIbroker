@@ -115,7 +115,7 @@ def test_codex_container_claims_only_codex_and_never_mounts_a_claude_volume():
     assert "agent_claude_auth" not in svc and "claude-state" not in svc.replace(
         "never the Claude state dir", "")
     vols = re.findall(r"^\s+- (agent_\w+):", svc, re.M)
-    assert vols == ["agent_codex_auth"]                          # the ONLY named volume
+    assert vols == ["agent_codex_auth", "agent_codex_rpc"]       # auth and private RPC only
     home = re.search(r"^\s+HOME: (\S+)", svc, re.M).group(1)
     assert "claude" not in home and "codex-state" not in home    # HOME is neither auth dir
     assert re.search(r'^\s+CLAUDE_CONFIG_DIR: ""', svc, re.M)    # the image default is blanked

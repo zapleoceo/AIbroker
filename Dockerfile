@@ -37,8 +37,9 @@ RUN pip install --no-cache-dir -e .
 # owned by `app` because non-root can't mkdir under /var/lib at runtime — the
 # monitor hit PermissionError there once we dropped root (2026-07-10).
 RUN useradd --create-home --uid 10001 app \
-    && mkdir -p /var/lib/aibroker \
-    && chown -R app:app /app /var/lib/aibroker
+    && mkdir -p /var/lib/aibroker /run/aibroker-agent-rpc/claude /run/aibroker-agent-rpc/codex \
+    && chown -R app:app /app /var/lib/aibroker /run/aibroker-agent-rpc \
+    && chmod 0700 /run/aibroker-agent-rpc/claude /run/aibroker-agent-rpc/codex
 USER app
 
 EXPOSE 8000

@@ -113,6 +113,16 @@ def test_model_is_required_exact_and_never_implicit(monkeypatch):
     assert policy_violation(11, MODEL, "Owner") == "account_not_allowed"
 
 
+def test_wildcard_is_only_known_candidate_for_matching_agent_capability(monkeypatch):
+    _policy(monkeypatch, {"11": GOOD["11"],
+                          "12": {"models": ["*"], "accounts": ["owner"]}})
+    assert policy_violation(12, "gpt-6-luna", "owner", "agent:codex") is None
+    assert policy_violation(12, "gpt-6-luna", "owner", "agent:claude") == "model_not_allowed"
+    assert policy_violation(12, "unlisted-model", "owner", "agent:codex") == "model_not_allowed"
+    assert policy_violation(12, "gpt-6-luna", "other", "agent:codex") == "account_not_allowed"
+    assert policy_violation(11, "gpt-6-luna", "owner", "agent:codex") == "model_not_allowed"
+
+
 # --- the API --------------------------------------------------------------------------------------------------
 
 

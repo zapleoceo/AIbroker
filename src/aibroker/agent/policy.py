@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from aibroker.config import get_settings
+from aibroker.providers.subscriptions import PROVIDERS, subscription_models
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +33,17 @@ class ProjectPolicy:
     accounts: frozenset[str]
 
     def allows_model(self, model: str | None) -> bool:
-        """The EXACT model id must be listed; a missing model is never allowed (no implicit default)."""
+        """An exact model id allowed by this project."""
         return model is not None and model in self.models
+
+    def allows_candidate(self, model: str | None, capability: str | None) -> bool:
+        """A known candidate of the requested provider under an explicit wildcard."""
+        if model is None:
+            return False
+        if "*" not in self.models or capability not in PROVIDERS.values():
+            return False
+        return any(PROVIDERS[spec.provider] == capability
+                   and spec.id.split("/", 1)[1] == model for spec in subscription_models())
 
     def allows_account(self, account_id: str) -> bool:
         return account_id in self.accounts
@@ -72,12 +82,16 @@ def policy_for(project_id: int) -> ProjectPolicy | None:
     return policy if policy is not None and policy.models and policy.accounts else None
 
 
-def policy_violation(project_id: int, model: str | None, account_id: str) -> str | None:
+def policy_violation(project_id: int, model: str | None, account_id: str,
+                     capability: str | None = None) -> str | None:
     """The `error` code of the first rule broken, or None when the request fits the policy."""
     policy = policy_for(project_id)
     if policy is None:
         return "agent_policy_missing"
-    if not policy.allows_model(model):
+    allowed = policy.allows_model(model)
+    if not allowed and isinstance(policy, ProjectPolicy):
+        allowed = policy.allows_candidate(model, capability)
+    if not allowed:
         return "model_not_allowed"
     if not policy.allows_account(account_id):
         return "account_not_allowed"
