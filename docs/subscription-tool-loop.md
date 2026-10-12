@@ -1,0 +1,81 @@
+# Subscription client tools: implementation boundary
+
+Status: design for review. Subscription catalog rows still report
+`supports_tools: false`; `POST /v1/jobs` rejects `tools` for `claude-sub` and
+`codex-sub`. Native API-provider tools retain their existing contract.
+
+## Verified transport capability
+
+The production Codex worker has `codex-cli 0.162.1`. Its generated experimental
+App Server schema includes `ThreadStartParams.dynamicTools`,
+`DynamicToolCallParams` (`threadId`, `turnId`, `callId`, `tool`, `arguments`), and
+`DynamicToolCallResponse` (`contentItems`, `success`). The official App Server
+protocol sends `item/tool/call` to its client and waits for that client's
+response. The current Broker adapter uses `codex exec --json`, whose tool events
+describe operations already performed inside the CLI. Mapping those events to
+public `tool_calls` would falsely imply that Orchestra authorized execution.
+The pinned schema proves protocol availability, not live model conformance.
+
+## Proposed universal jobs exchange
+
+1. An authorized client submits the existing `POST /v1/jobs?capability=...`
+   request with a subscription model, declared function schemas, and
+   `tool_choice`. The server validates the same tool definitions as native
+   providers. The job remains pinned to its exact subscription account/model.
+2. The worker starts App Server over stdio inside its existing isolated Codex
+   container, with the existing workspace and permission profile. It advertises
+   *only* the functions declared by this job as dynamic tools. It does not
+   expose a host port, store a new credential, or call Orchestra directly.
+3. On `item/tool/call`, the worker persists the call ID, name, arguments,
+   thread/turn IDs, and a bounded deadline before exposing it. `GET
+   /v1/jobs/{id}` reports `status: pending`, `tool_calls`, and a distinct
+   `finish_reason: tool_calls` while the call waits. The model process remains
+   paused. The client authorizes and executes the function under its own
+   policy; Broker never executes that client function.
+4. An authenticated, same-project `POST /v1/jobs/{id}/tool-results` would
+   accept exactly one result per pending call ID. It must reject an unknown,
+   expired, duplicate-with-different-content, or already-terminal call.
+   The worker sends the bounded result as `DynamicToolCallResponse` and
+   continues the same turn. Repeating the identical result is idempotent.
+   After the final model answer, the existing `GET /v1/jobs/{id}` returns
+   `status: done` and `finish_reason: stop`.
+
+The pending call and result need durable, fenced database state. On worker
+loss or deployment, Broker must fail the run without replaying a possibly
+executed client operation. Cancellation and deadlines must resolve the waiting
+App Server request and terminate its process. A client should use the Broker
+call ID as its own idempotency key. `tools`, tool history, and `supports_tools`
+must stay rejected until this exchange has passed protocol, restart, auth,
+timeout, and live Orchestra checks. The current `deep_jobs` pending/done/error
+status values remain intact for clients that do not use tools.
+
+This is a new authenticated write endpoint and a new path for client-provided
+tool output into the worker. Review its exact route, database migration,
+authorization, size caps, and timeout behavior before enabling it. No new
+scope, external port, credential, API-paid fallback, or wider Linux sandbox is
+part of this design. Claude subscription tools require a separate adapter:
+the current Claude headless CLI does not expose this client-response pause;
+the Claude Agent SDK has in-process MCP tool handlers, which would need the
+same durable Broker callback contract and separate review.
+
+## Input image canary
+
+Input vision is separate from PNG generation. The deployed universal jobs
+route accepts bounded `image_url` `data:` blocks, writes actual image files,
+and passes them through Codex CLI `--image`, but every Codex model remains
+unavailable for input vision until its exact ID is in
+`AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS`. That allowlist is empty by default.
+The production project 12 already has `llm:vision` and `llm:agent`; no new
+scope grant is needed for its canary.
+
+Using the existing Orchestra project key inside Orchestra, first submit one
+diagnostic `POST /v1/agent/runs` for `agent:codex`, `model: gpt-6.1-sol`,
+`account_id: owner`, `allowed_tools: []`, and one small, valid PNG attachment
+(`name`, `media_type: image/png`, `data_b64`). Ask a visually discriminating
+question and check the final answer and subscription billing attestation.
+This diagnostic route uses the same real `--image` transport without changing
+the public catalog. After a successful canary and owner review, add only
+`gpt-6.1-sol` to the input-vision verified setting, then submit the matching
+`POST /v1/jobs?capability=vision` request with a `data:image/png;base64,...`
+`image_url` block and poll `GET /v1/jobs/{id}` through Orchestra. Do not infer
+input vision from the successful output-PNG job.

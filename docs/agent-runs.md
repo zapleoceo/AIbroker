@@ -2,9 +2,10 @@
 
 Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the broker queue.
 Status: the universal jobs API, Claude and Codex CLI adapters, and subscription
-catalog routes are implemented. The Codex route remains disabled pending owner
-login, billing checks, and real text/PNG verification. Multi-account config
-directories remain later work.
+catalog routes are implemented. The owner-enabled Codex route has completed
+live text and generated-PNG requests through the production Broker and
+Orchestra. Input vision and client-controlled subscription tools remain
+separate rollout gates; see `docs/subscription-tool-loop.md`.
 
 ## Legal / scope note
 
