@@ -44,15 +44,17 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:vision` | `capability=vision` access |
 | `llm:edit` | `capability=chat:edit` — reserved edit/coach lane |
 | `llm:deep` | `/v1/deep` — deep-reasoning models |
+| `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs` |
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
 
-The `llm:*` set must stay in sync across three places: `chains.CAPABILITY_SCOPE`
-(the scope each capability demands), `dashboard_scopes._KNOWN_SCOPES` (UI
-checkbox + edit validation), and this table. A capability whose scope is missing
-from `_KNOWN_SCOPES` can never be granted in the dashboard — the edit form
-silently rejects it — which 403'd Stepan2's voice until `llm:audio` was added
-(2026-07-11). `tests/test_scopes.py::test_every_capability_scope_is_known`
-guards the invariant.
+Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
+`dashboard_scopes._KNOWN_SCOPES` (provider key forms), and this table.
+`tests/test_scopes.py::test_every_capability_scope_is_known` guards the
+invariant. Project forms additionally offer `llm:agent` through
+`dashboard_scopes._PROJECT_SCOPES`; provider key forms do not. The owner may
+grant it with the project checkbox, but subscription jobs also require the
+server project allowlist and exact model/account policy. Self-signup never
+grants this scope.
 
 ## Scopes a provider can actually serve
 

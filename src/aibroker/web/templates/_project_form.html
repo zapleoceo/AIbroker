@@ -30,7 +30,8 @@
              {{ ph("blank = unlimited", "пусто = без лимита") }}>
       <small>{% if editing and project.total_request_cap is not none %}{{ t("Used " ~ project.total_requests_used ~ " of " ~ project.total_request_cap ~ ". ", "Использовано " ~ project.total_requests_used ~ " из " ~ project.total_request_cap ~ ". ") }}{% endif %}{{ t("Client requests, not provider attempts. Blank = unlimited.", "Клиентские запросы, не попытки провайдеров. Пусто = без лимита.") }}</small></div>
     <div class="field span-2"><span class="lbl" id="pf-scopes">{{ t("Allowed scopes", "Разрешённые права") }}</span>
-      <div class="scope-grid" role="group" aria-labelledby="pf-scopes">{{ scope_boxes|safe }}</div></div>
+      <div class="scope-grid" role="group" aria-labelledby="pf-scopes">{{ scope_boxes|safe }}</div>
+      <small id="pf-agent-scope-help">{{ t("llm:agent permits subscription agent backends (Claude/Codex). The server project allowlist and exact model/account policy are also required.", "llm:agent разрешает подписочные агентные модели Claude/Codex. Дополнительно нужны разрешение проекта на сервере и политика для конкретной модели и аккаунта.") }}</small></div>
   </div>
   <div class="{{ 'drawer-foot' if not inline else 'row' }}" style="{{ 'margin:0 -20px -28px' if not inline }}">
     {% if not inline %}<button type="button" class="btn" data-close>{{ t("Cancel", "Отмена") }}</button>{% endif %}

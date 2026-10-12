@@ -547,6 +547,59 @@ def test_dashboard_edit_project_rejects_unknown_scope():
     assert "Bad+or+empty+scope" in r.headers["location"]
 
 
+def test_project_agent_scope_checkbox_round_trip():
+    import asyncio
+
+    from aibroker.db import get_session
+    from aibroker.db.models import ProjectRow
+
+    async def _seed():
+        async with get_session() as s:
+            s.add(ProjectRow(id=998, name="scope-form", project_key_hash="scope-form-hash",
+                             project_key_prefix="aib_prj_test", allowed_scopes=["llm:chat"],
+                             daily_cost_cap_usd=0.2))
+
+    async def _scopes():
+        async with get_session() as s:
+            row = await s.get(ProjectRow, 998)
+            return row.allowed_scopes, row.daily_cost_cap_usd
+
+    asyncio.get_event_loop().run_until_complete(_seed())
+    cookies = _logged_in_cookies()
+    new_form = client.get("/dashboard/projects/new", cookies=cookies)
+    assert new_form.status_code == 200
+    assert 'value="llm:agent" aria-describedby="pf-agent-scope-help"' in new_form.text
+    page = client.get("/dashboard/projects/998?tab=settings", cookies=cookies)
+    assert page.status_code == 200
+    assert 'value="llm:agent" aria-describedby="pf-agent-scope-help"' in page.text
+
+    saved = client.post("/dashboard/projects/998/edit", cookies=cookies,
+                        data={"name": "scope-form", "daily_cost_cap_usd": "0.20",
+                              "allowed_scopes": ["llm:chat", "llm:agent"]},
+                        follow_redirects=False)
+    assert saved.status_code == 303
+    assert asyncio.get_event_loop().run_until_complete(_scopes()) == (["llm:chat", "llm:agent"], 0.2)
+
+    page = client.get("/dashboard/projects/998?tab=settings", cookies=cookies)
+    assert page.status_code == 200
+    assert 'value="llm:agent" checked' in page.text
+
+    saved = client.post("/dashboard/projects/998/edit", cookies=cookies,
+                        data={"name": "scope-form", "daily_cost_cap_usd": "0.20",
+                              "allowed_scopes": ["llm:chat"]}, follow_redirects=False)
+    assert saved.status_code == 303
+    assert asyncio.get_event_loop().run_until_complete(_scopes()) == (["llm:chat"], 0.2)
+
+
+def test_agent_scope_is_not_a_provider_key_scope():
+    from aibroker.routes.dashboard_scopes import _scope_checkboxes, _validate_scope_list
+
+    assert 'value="llm:agent"' not in _scope_checkboxes(["llm:chat"], provider="anthropic")
+    assert _validate_scope_list(["llm:chat", "llm:agent"]) is None
+    assert _validate_scope_list(["llm:chat", "llm:agent"], project=True) == [
+        "llm:chat", "llm:agent"]
+
+
 def test_project_detail_requires_auth():
     r = client.get("/dashboard/projects/42", follow_redirects=False)
     assert r.status_code == 303
