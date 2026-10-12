@@ -6,6 +6,8 @@ every provider *fact* lives in ONE `ProviderSpec` definition in
 `providers/registry.py`). `providers/specs.py` registers those definitions in
 the historical order. Routing policy - which provider serves which capability
 and in what sequence - stays in `routing/chains.py`.
+The shared `provider_specs.common.chat_probe` helper constructs a one-token
+chat probe when a provider needs one.
 
 ## Add a new model to an existing provider
 

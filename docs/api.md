@@ -604,6 +604,10 @@ means the backend does not apply the field. A `null` feature means Broker makes
 no model-specific support claim; it does not mean the feature works. The range
 for ordinary API jobs is Broker's input range, not a guarantee that every
 upstream model accepts its extremes.
+The catalog builds this field through `job_request_contract`. Subscription
+submission uses `subscription_request_problem` and
+`subscription_prompt_problem` to enforce the stated acceptance rules before
+enqueue.
 
 ### Cache affinity (2026-10-03)
 
