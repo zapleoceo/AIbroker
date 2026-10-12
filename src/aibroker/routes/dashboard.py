@@ -395,7 +395,7 @@ async def dash_edit_project(
     # therefore never silently lift a self-signup cap.
     if len(name) > _MAX_NAME_LEN:
         return _back(next, "!Name too long (max 100)")
-    scopes = _validate_scope_list(allowed_scopes or [])
+    scopes = _validate_scope_list(allowed_scopes or [], project=True)
     if scopes is None:
         return _back(next, "!Bad or empty scope")
     try:
@@ -460,7 +460,7 @@ async def dash_create_project(
 ) -> HTMLResponse:
     if len(name) > _MAX_NAME_LEN:
         return _back(next, "!Name too long (max 100)")
-    scopes = _validate_scope_list(allowed_scopes or ["llm:chat", "llm:embed"])
+    scopes = _validate_scope_list(allowed_scopes or ["llm:chat", "llm:embed"], project=True)
     if scopes is None:
         return _back(next, "!Bad or empty scope")
     if not daily_cost_cap_usd.strip():

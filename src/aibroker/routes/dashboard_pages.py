@@ -360,7 +360,7 @@ async def render_projects(request: Request, *, new_key: str | None = None,
         "projects.html", **_ctx(request, "projects", ("Projects", "Проекты"), rng=rng),
         cards=cards, new_key=new_key, new_key_project=new_key_project,
         only_signup=only_signup, n_signup=n_signup,
-        scope_boxes=_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes"),
+        scope_boxes=_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes", project=True),
     )
 
 
@@ -379,7 +379,7 @@ async def project_new_form(request: Request) -> Response:
     if (r := _guard(request)):
         return r
     return render("_project_form.html", project=None,
-                  scope_boxes=_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes"))
+                  scope_boxes=_scope_checkboxes(["llm:chat", "llm:embed"], "allowed_scopes", project=True))
 
 
 async def render_project_detail(request: Request, project_id: int, *,
@@ -409,7 +409,7 @@ async def render_project_detail(request: Request, project_id: int, *,
         req=views.request_cap_view(project),
         today_spend=spent_today, cap=cap,
         cap_pct=min(100, int(spent_today / cap * 100)) if cap else None,
-        scope_boxes=_scope_checkboxes(project.allowed_scopes, "allowed_scopes"),
+        scope_boxes=_scope_checkboxes(project.allowed_scopes, "allowed_scopes", project=True),
     )
 
 
