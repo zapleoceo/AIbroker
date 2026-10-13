@@ -43,7 +43,7 @@ OTHER_THREAD = "123e4567-e89b-12d3-a456-426614174001"
 
 
 def _service(name: str) -> str:
-    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z-]*:\n|^networks:|^volumes:)", COMPOSE,
+    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|^networks:|^volumes:)", COMPOSE,
                   re.S | re.M)
     assert m, name
     return m.group(1)

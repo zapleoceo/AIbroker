@@ -267,6 +267,7 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             auth_method=auth.auth_method, api_provider=auth.api_provider,
             paid_continuation_verified_off=verified_off,
             fallback="none",       # this path never falls back to API billing; recorded per run
+            account_id=run.account_id,
             project_daily_cap_usd=(None if project is None or project.daily_cost_cap_usd is None
                                    else float(project.daily_cost_cap_usd))), lease)
         bad_model = await _check_model(adapter, run.model)

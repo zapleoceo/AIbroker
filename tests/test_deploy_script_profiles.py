@@ -76,7 +76,7 @@ def test_worker_up_and_dry_run_use_active_agent_only():
 DEPLOY_SH = ROOT / "infra" / "aibroker-deploy.sh"
 needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 AGENT_UP = "docker compose --profile agent up -d --no-deps"
-AGENT_BUILD = "docker compose --profile agent build --quiet agent-worker agent-worker-codex"
+AGENT_BUILD = "docker compose --profile agent build --quiet agent-worker agent-worker-claude2 agent-worker-codex"
 
 STUB_DOCKER = r"""#!/bin/bash
 echo "docker $*" >> "$STUB_LOG"
@@ -130,8 +130,8 @@ def _run_deploy(tmp_path: Path, running: str, ps_fail: bool = False):
 @needs_bash
 @pytest.mark.parametrize(
     "running",
-    ["agent-worker agent-worker-codex", "agent-worker", ""],
-    ids=["both", "one", "none"],
+    ["agent-worker agent-worker-claude2 agent-worker-codex", "agent-worker", ""],
+    ids=["all", "one", "none"],
 )
 def test_deploy_recreates_only_running_workers(tmp_path, running):
     proc, log = _run_deploy(tmp_path, running)

@@ -43,10 +43,15 @@ def worker_capabilities() -> tuple[str, ...]:
 
 
 def worker_image_problem(env: Mapping[str, str] | None = None, marker: str = WORKER_MARKER,
-                         capabilities: Iterable[str] = ("agent:claude",)) -> str | None:
+                         capabilities: Iterable[str] = ("agent:claude",),
+                         account_id: str | None = None) -> str | None:
     """The agent lane may only run inside the worker image (CLI + auth volume + minimal
-    privileges); anywhere else it refuses to start."""
+    privileges); anywhere else it refuses to start. `account_id` (the worker's
+    AGENT_ACCOUNT_ID) is checked only when given: a Claude worker must name its account, or it
+    would claim runs of every login."""
     e = os.environ if env is None else env
+    if account_id is not None and "agent:claude" in capabilities and not account_id.strip():
+        return "AGENT_ACCOUNT_ID is not set (a Claude worker must name its account)"
     for cap in capabilities:
         home = _REQUIRED_HOME.get(cap)
         if home and not e.get(home):
@@ -67,12 +72,18 @@ async def claim_agent_runs(capability: str, limit: int) -> list[int]:
     if limit <= 0:
         return []
     now = _now()
+    stmt = select(DeepJobRow).where(
+        DeepJobRow.capability == capability, DeepJobRow.status == "pending",
+        (DeepJobRow.run_after.is_(None)) | (DeepJobRow.run_after < now))
+    if account := get_settings().AGENT_ACCOUNT_ID.strip():
+        # One worker = one subscription login: claim only that account's runs. An IN-subquery on
+        # the agent_runs primary key (no join, so FOR UPDATE still locks only deep_jobs rows and
+        # the ix_deep_jobs_claimable scan narrows first).
+        stmt = stmt.where(DeepJobRow.id.in_(
+            select(AgentRunRow.run_id).where(AgentRunRow.account_id == account)))
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow).where(
-                DeepJobRow.capability == capability, DeepJobRow.status == "pending",
-                (DeepJobRow.run_after.is_(None)) | (DeepJobRow.run_after < now),
-            ).order_by(DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
+            stmt.order_by(DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
         )).scalars().all()
         for r in rows:
             r.status = "running"
@@ -126,7 +137,9 @@ async def expire_overdue_waiting() -> int:
             await append_event(run_id, ev.RunFailed(
                 error_class="quota_exhausted",
                 message=f"{reason.get('reason') or 'usage limit reached'} "
-                        "(quota wait is past the job deadline)"))
+                        "(quota wait is past the job deadline)",
+                # the stored reset keeps the account paused for new-run selection (accounts.py)
+                reset_at=reason.get("not_before") if reason.get("reset_reported") else None))
             done += 1
     return done
 
@@ -149,11 +162,50 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
         log.exception("agent run %d crashed", run_id)
 
 
+async def fail_unclaimed_runs() -> int:
+    """A run nobody claimed within AGENT_PENDING_MAX_S because NO worker is alive for its account
+    ends `run.failed` account_unavailable instead of waiting forever. Only never-started runs
+    (no events, no quota wait) are candidates, and only when the account has no `running` run and
+    no run that started within the window (a run queued behind a long run on a live worker is
+    never reaped). The failure is written atomically with a still-`pending` check."""
+    limit = get_settings().AGENT_PENDING_MAX_S
+    if limit <= 0:
+        return 0
+    cutoff = _now() - timedelta(seconds=limit)
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(DeepJobRow.id, AgentRunRow.account_id, DeepJobRow.capability)
+            .join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
+                DeepJobRow.status == "pending", DeepJobRow.capability.like("agent:%"),
+                DeepJobRow.created_at < cutoff, AgentRunRow.last_seq == 0,
+                AgentRunRow.quota_waits == 0, AgentRunRow.outcome.is_(None))
+        )).all()
+        live = set((await s.execute(
+            select(AgentRunRow.account_id, DeepJobRow.capability)
+            .join(DeepJobRow, DeepJobRow.id == AgentRunRow.run_id).where(
+                DeepJobRow.capability.like("agent:%"),
+                (DeepJobRow.status == "running") | (DeepJobRow.started_at >= cutoff)
+                | (DeepJobRow.completed_at >= cutoff) | (AgentRunRow.last_event_at >= cutoff))
+            .distinct())).all())
+    done = 0
+    for run_id, account, capability in rows:
+        if (account, capability) in live:
+            continue
+        with contextlib.suppress(RunConflict):
+            await append_event(run_id, ev.RunFailed(
+                error_class="account_unavailable",
+                message=f"no worker claimed this run for account {account} "
+                        f"within {int(limit)}s"), only_if_pending=True)
+            done += 1
+    return done
+
+
 async def agent_worker_loop(stop: asyncio.Event,
                             wake: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
     caps = worker_capabilities()
-    problem = worker_image_problem(capabilities=caps) if caps else "AGENT_WORKER_CAPABILITIES is empty"
+    problem = worker_image_problem(
+        capabilities=caps, account_id=get_settings().AGENT_ACCOUNT_ID) if caps else "AGENT_WORKER_CAPABILITIES is empty"
     if problem:
         raise RuntimeError(f"agent lane refused to start: {problem}")
     register_real_adapters(caps)
@@ -172,6 +224,7 @@ async def agent_worker_loop(stop: asyncio.Event,
                     t = asyncio.create_task(_guarded(run_id, cfg))
                     inflight[cap].add(t)
                     t.add_done_callback(inflight[cap].discard)
+            await fail_unclaimed_runs()     # after the claim: a free slot takes queued work first
         except Exception:  # noqa: BLE001 - a bad tick must not kill the lane
             log.exception("agent worker tick failed")
         if wake is None:

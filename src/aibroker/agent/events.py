@@ -108,6 +108,7 @@ class BillingAttested(_Event):
     paid_continuation_verified_off: bool
     fallback: Literal["none"]            # set by the code path that refuses API fallback
     project_daily_cap_usd: float | None = None
+    account_id: str | None = None        # which subscription login the run used
 
 
 class RunCompleted(_Event):

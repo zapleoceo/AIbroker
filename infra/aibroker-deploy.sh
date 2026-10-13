@@ -20,7 +20,7 @@ set -euo pipefail
 # them and both gates were blind (prod ran PR #56 code at master #62). They are
 # handled explicitly below. Keep this list equal to the compose services that
 # have `profiles:` (tests/test_deploy_script_profiles.py enforces it).
-AGENT_SERVICES="agent-worker agent-worker-codex"
+AGENT_SERVICES="agent-worker agent-worker-claude2 agent-worker-codex"
 
 # AIBROKER_DEPLOY_DIR exists only so tests can run this script; the forced-command
 # ssh cannot pass env, so prod always uses the default.

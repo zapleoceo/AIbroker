@@ -163,13 +163,22 @@ def _clip(value: Any) -> Any:
     return value
 
 
-async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None) -> int:
+async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
+                       *, only_if_pending: bool = False) -> int:
     """Store the next event of a run (single writer per run) -> its seq. Terminal
     events also close the run: outcome set, queue row moved to done/error. With a `lease`
-    the write is FENCED: StaleLease if the session was taken over by a newer holder."""
+    the write is FENCED: StaleLease if the session was taken over by a newer holder.
+    `only_if_pending` makes the write atomic with "nobody claimed it": the queue row is locked
+    (FOR UPDATE SKIP LOCKED, like the claim) and must still be `pending`, else RunConflict."""
     now = _now()
     async with get_session() as s:
         await check_fence(s, lease)
+        if only_if_pending:
+            locked = (await s.execute(
+                select(DeepJobRow).where(DeepJobRow.id == run_id)
+                .with_for_update(skip_locked=True))).scalar_one_or_none()
+            if locked is None or locked.status != "pending":
+                raise RunConflict(f"agent run {run_id} was claimed or is locked")
         run = await s.get(AgentRunRow, run_id)
         if run is None:
             raise LookupError(f"agent run {run_id} not found")
@@ -220,6 +229,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                                        "usage_observed": usage_observed}
                     if client_job:
                         job.result_meta.update({
+                            "account_id": run.account_id,
                             "provider": client_job["provider"],
                             "model": client_job["model"],
                             "model_served": None,
@@ -235,6 +245,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                 elif event.type == "run.failed":
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
+                    if client_job:
+                        job.result_meta["account_id"] = run.account_id
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.result_meta = {"client_tool_history": history,

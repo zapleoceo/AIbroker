@@ -128,7 +128,7 @@ async def test_backoff_doubles_and_is_capped(cfg):
 
 async def test_waiting_run_is_not_claimed_early_then_resumes_own_session(cfg, monkeypatch):
     monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(
-        AGENT_CONCURRENCY_CODEX=1, AGENT_CONCURRENCY_CLAUDE=1))
+        AGENT_CONCURRENCY_CODEX=1, AGENT_CONCURRENCY_CLAUDE=1, AGENT_ACCOUNT_ID=""))
     rid = await _run(deadline_s=3600)
     register_adapter("agent:claude", lambda: FakeAgentCLI([
         ev.SessionAssigned(session_id="S1"), ev.Usage(input_tokens=4, turns=1), _quota()]))

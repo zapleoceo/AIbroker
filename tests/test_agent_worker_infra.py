@@ -26,7 +26,7 @@ DOCKERFILE = (ROOT / "infra" / "agent-worker" / "Dockerfile").read_text(encoding
 
 
 def _service(name: str) -> str:
-    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z-]*:\n|^volumes:)", COMPOSE, re.S | re.M)
+    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|^volumes:)", COMPOSE, re.S | re.M)
     assert m, name
     return m.group(1)
 

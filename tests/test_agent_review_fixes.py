@@ -30,7 +30,7 @@ DOCS = (ROOT / "docs" / "agent-runs.md").read_text(encoding="utf-8")
 
 
 def _service(name: str) -> str:
-    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z-]*:\n|^networks:|^volumes:)", COMPOSE,
+    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|^networks:|^volumes:)", COMPOSE,
                   re.S | re.M)
     assert m, name
     return "\n".join(ln for ln in m.group(1).splitlines() if not ln.strip().startswith("#"))

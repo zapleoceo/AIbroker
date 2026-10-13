@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from aibroker.config import get_settings
@@ -31,6 +31,11 @@ class AgentPolicyViolation(Exception):
 class ProjectPolicy:
     models: frozenset[str]
     accounts: frozenset[str]
+    # The accounts in the order the setting lists them (the preference order for selection).
+    account_order: tuple[str, ...] = field(default=(), compare=False)
+
+    def ordered_accounts(self) -> tuple[str, ...]:
+        return self.account_order or tuple(sorted(self.accounts))
 
     def allows_model(self, model: str | None) -> bool:
         """An exact model id allowed by this project."""
@@ -67,8 +72,9 @@ def _parse(raw: str) -> dict[int, ProjectPolicy] | None:
                 values = entry.get(field, [])
                 if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
                     raise ValueError(f"{key}.{field} must be a list of strings")
-                lists.append(frozenset(v.strip() for v in values if v.strip()))
-            out[int(key)] = ProjectPolicy(models=lists[0], accounts=lists[1])
+                lists.append(tuple(dict.fromkeys(v.strip() for v in values if v.strip())))
+            out[int(key)] = ProjectPolicy(models=frozenset(lists[0]), accounts=frozenset(lists[1]),
+                                          account_order=lists[1])
         return out
     except ValueError as exc:     # json.JSONDecodeError is a ValueError
         log.error("AGENT_PROJECT_POLICY is malformed (%s): refusing EVERY agent run", exc)

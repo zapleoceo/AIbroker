@@ -127,6 +127,10 @@ reported by the CLI, with `null` for unavailable counts. An unknown
 entry in that run's `/v1/agent/runs/{id}/events` stream and fails the tool
 turn; absence of that entry does not attest model identity.
 
+`account_id` (additive) names the login that serves a subscription job: `owner` for `codex-sub`, and for
+`claude-sub` the account chosen at submit (for example `claude-2`). It is `null` on other jobs. It does
+not change during the run.
+
 ### Agent run billing attestation (`GET /v1/agent/runs/{id}`)
 
 The response (also the cancel response) carries five per-run billing fields, read from the run's
@@ -141,7 +145,8 @@ billing guard passes and before the CLI starts; see [agent-runs.md](agent-runs.m
 | `fallback` | `string \| null` | always `none` when present (API fallback is refused); `null` if the guard did not pass |
 | `project_daily_cap_usd` | `number \| null` | project's `daily_cost_cap_usd` at run start; `null` = no cap, or the guard did not pass |
 
-All five are `null` for a run that never reached the attestation (for example a refused run:
+The `billing.attested` event also records `account_id` (the login the run used); the five fields above are
+unchanged. All five are `null` for a run that never reached the attestation (for example a refused run:
 `run.failed billing_mode_refused`, with no `billing.attested` event). The event carries no
 email or token.
 

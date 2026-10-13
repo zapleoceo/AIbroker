@@ -124,7 +124,7 @@ async def test_event_payload_holds_only_the_non_secret_fields(tmp_path):
     register_adapter("agent:claude", lambda: FakeAgentCLI([ev.RunCompleted()]))
     await execute_run(rid, _cfg(tmp_path))
     (att,) = (e for e in await list_events(rid) if e.type == "billing.attested")
-    assert set(att.payload) == {"schema_version", "type", *FIELDS}
+    assert set(att.payload) == {"schema_version", "type", "account_id", *FIELDS}
 
 
 async def test_cancel_response_carries_the_fields_too(tmp_path):

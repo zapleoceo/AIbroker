@@ -61,6 +61,8 @@ allowlist checks, a request is refused with 403 `{"error": ...}` (`AgentPolicyVi
 the project has no entry or an empty `models` / `accounts` list - `agent_policy_missing`; the request's
 `model` is absent or not EXACTLY one of the project's models (no prefix match, no implicit default,
 `latest` only if listed) - `model_not_allowed`; the `account_id` is not listed - `account_not_allowed`.
+For Claude, the `accounts` order is also the preference order of `/v1/jobs` account selection
+(see [Multiple Claude subscription accounts](#multiple-claude-subscription-accounts)).
 For a project explicitly configured with `"models": ["*"]`, the wildcard admits only
 model ids listed as candidates for the requested Claude or Codex subscription
 provider. Exact model entries retain their previous policy behavior. The
@@ -96,7 +98,8 @@ path in `aibroker.agent.rpc`.
   Codex run. Each additional model or modality still needs its own verification.
 - On **quota exhaustion** the run WAITS (see below), visible as `waiting_quota`.
   **No fallback to API billing/OpenRouter, no "extra usage", no rotation to another account.**
-  An account is chosen by the caller (`account_id`) and never swapped by the broker.
+  On `/v1/agent/runs` the caller chooses the account (`account_id`). On `/v1/jobs` (`claude-sub`) the
+  broker chooses it once at submit; it is never swapped afterwards (see below).
 
 ## Architecture
 
@@ -437,6 +440,57 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 `billing_mode`, `usage_source` and `cost_usd` are unchanged. No migration. A quota-wait retry runs the probe and writes a fresh `billing.attested` event on every attempt
 (tested in `test_a_quota_retry_attests_again_and_resumes_the_session`); the GET shows the latest.
 
+### Multiple Claude subscription accounts
+
+- **Setting `AGENT_ACCOUNT_ID`** (`config.py`): a worker claims only the runs whose `agent_runs.account_id`
+  equals it (`claim_agent_runs`, an IN-subquery; `SKIP LOCKED` unchanged). Empty = claims the runs of
+  every account (dev / tests only): a worker that claims `agent:claude` **refuses to start** with it
+  empty (`worker_image_problem`: "AGENT_ACCOUNT_ID is not set"), so no Claude login serves another
+  account's runs. Both compose workers set it.
+- **Unclaimed runs:** a never-started run (no events, no quota wait) still `pending` after
+  `AGENT_PENDING_MAX_S` (default 1800 s, 0 = off) is failed by the worker loop (`fail_unclaimed_runs`) with
+  `run.failed` `error_class: account_unavailable`, "no worker claimed this run for account X", but only
+  when no worker is alive for that account and capability: it has no `running` run and no run that started, finished or logged an event
+  within the window, so a run queued behind a long run is never reaped. The failure is atomic with a
+  still-`pending` check (the queue row is locked `FOR UPDATE SKIP LOCKED`, as in the claim). Quota-parked
+  runs and runs waiting for a client tool are never touched.
+- **Separate billing confirmation:** `agent-worker-claude2` reads `AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF`
+  from the compose `.env` (default false); the container still sees the standard name
+  `AGENT_PAID_CONTINUATION_VERIFIED_OFF`. The owner's confirmation for the first account never covers
+  the second one.
+- **Containers:** `agent-worker` = `owner`, `agent-worker-claude2` = `claude-2` (a neutral technical id).
+  Each has its own named auth volume: `agent_claude_auth` and `agent_claude2_auth`. **One login per
+  worker.** Two containers on one login would refresh the OAuth token concurrently, which is a real
+  failure (prod job 547951).
+- `agent-worker-claude2` has no RPC socket volume and no RPC wake: it finds new runs by its 1 s database poll.
+- **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
+  `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
+  listed order, and picks the first one without an active quota pause. A pause is the latest
+  `run.waiting_quota` / `run.failed quota_exhausted` signal whose stored reset time is still in the future
+  (every such signal counts; lookback 8 days, so a weekly limit that resets days ahead still pauses the
+  account; a deadline-expired wait keeps its reset in `reset_at`). If every
+  candidate is paused, the one whose reset comes first is picked, and the job waits honestly there.
+- A started run never changes account; a quota wait stays on the same account; there is no fallback to
+  paid API. `codex-sub` stays on `owner`.
+- **Catalog:** `claude-sub/claude-opus-5-5` and `claude-sub/claude-haiku-5-5` are listed but
+  `available: false` until a live check. Fable is not listed.
+
+**Operator login for the second account** (the owner does it himself; agents never log in):
+
+1. `ssh hetzner-root`, then `cd /var/www/aibroker`.
+2. `docker compose --profile agent run --rm agent-worker-claude2 claude`, then `/login`. Choose the
+   claude.ai subscription login, open the shown link in the browser while signed in to your second
+   ITSTEP Claude account (Team seat), paste the code back, then `/exit`.
+3. Verify: `docker compose --profile agent run --rm agent-worker-claude2 claude auth status` must show
+   `loggedIn: true` and `authMethod: claude.ai`, and the organization shown must be the ITSTEP Team
+   organization (check the organization shown; the docs do not name the field).
+4. Extra usage on a Team seat is controlled by the org admin: ask the Team admin to confirm extra usage is
+   OFF (or capped at 0) for this seat. Only then set `AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF=true`
+   in the compose `.env`. Until then `autonomous` / `exam` runs on `claude-2` are refused.
+5. `docker compose --profile agent up -d agent-worker-claude2` (first start is manual; deploy does not start it).
+6. Add `"claude-2"` to the project's `accounts` in `AGENT_PROJECT_POLICY`, for example
+   `"accounts": ["owner", "claude-2"]`.
+
 ### Rollback
 
 Routine rollback is: stop the worker (`docker compose --profile agent stop agent-worker`)
@@ -736,5 +790,6 @@ HTTP route and Orchestra remains to be checked by its client.
 ## Not done yet
 
 Orchestra's authenticated end-to-end image request and the Claude critic's
-receipt of decodable PNG bytes remain. Multi-account config directories and
-account-aware CLI catalog discovery remain later work.
+receipt of decodable PNG bytes remain. Account-aware CLI catalog discovery
+remains later work. Multi-account is done as one worker container per login (see
+[Multiple Claude subscription accounts](#multiple-claude-subscription-accounts)).
