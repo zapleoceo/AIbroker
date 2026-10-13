@@ -159,3 +159,17 @@ def test_checked_schema_is_cached(monkeypatch):
     sj.output_problem("{}", bad)
     sj.output_problem("{}", bad)
     assert n["c"] == 2  # the unusable verdict is cached too
+
+
+def test_oversized_schema_is_parse_only_and_not_cached(monkeypatch):
+    from jsonschema import Draft202012Validator
+
+    from aibroker.agent import subscription_job as sj
+    sj._checked_validator.cache_clear()
+    monkeypatch.setattr(Draft202012Validator, "check_schema",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("checked")))
+    big = {"type": "object", "required": ["x"], "properties": {
+        f"p{i}": {"type": "integer"} for i in range(sj.MAX_SCHEMA_BYTES // 10)}}
+    assert sj.output_problem('{"y": 1}', _rf(big)) is None  # would fail "required" if checked
+    assert sj.output_problem("nope", _rf(big)).startswith("InvalidJSON")
+    assert sj._checked_validator.cache_info().currsize == 0

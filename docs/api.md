@@ -240,7 +240,7 @@ the request schema (JSON Schema draft 2020-12). A non-conforming answer is an
 `InvalidJSON` rejection: the API path bills it and walks to the next provider, and
 if every attempt fails the job ends with a content failure. Markdown-fenced JSON is
 not accepted. Remote `$ref`s are never fetched; a schema the broker cannot evaluate (invalid,
-or containing a remote `$ref`) is evaluated parse-only. `strict: false` is still
+containing a remote `$ref`, or over 64 KiB as JSON) is evaluated parse-only. `strict: false` is still
 validated. Off-schema, array or scalar JSON used to come back as
 success, so expect more `InvalidJSON` rejections, especially on providers
 downgraded from `json_schema` to `json_object` (deepseek, cerebras).

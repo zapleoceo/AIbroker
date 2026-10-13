@@ -51,6 +51,12 @@ def response_format_problem(response_format: dict[str, Any] | None) -> str | Non
     return "unsupported_for_subscription_model: response_format type"
 
 
+# A caller schema over this size is validated parse-only: check_schema on a 1.5 MB /
+# 50k-property schema blocked the event loop for ~8.7 s on every cache miss, and each
+# cache entry would pin the whole schema text in memory. 64 KiB covers real schemas.
+MAX_SCHEMA_BYTES = 64 * 1024
+
+
 @lru_cache(maxsize=128)
 def _checked_validator(schema_json: str) -> Draft202012Validator | None:
     """Checked validator for a schema (keyed on its canonical JSON), or None when the
@@ -86,7 +92,10 @@ def output_problem(text: str, response_format: dict[str, Any] | None) -> str | N
         if not isinstance(schema, dict):
             return None
         try:
-            validator = _checked_validator(json.dumps(schema, sort_keys=True))
+            canonical = json.dumps(schema, sort_keys=True)
+            if len(canonical) > MAX_SCHEMA_BYTES:
+                return None  # oversized: parse-only, never checked, never cached
+            validator = _checked_validator(canonical)
         except (TypeError, ValueError):
             return None
         if validator is None:
