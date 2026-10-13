@@ -17,6 +17,7 @@ MAX_CALLS = 16
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 64 * 1024
 TOOL_WAIT_S = 300
+TOOL_CAPABILITIES = ("agent:codex", "agent:claude")
 
 
 class ClientToolConflict(Exception):
@@ -54,7 +55,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
             await check_fence(s, lease)
         job = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == run_id)
                                .with_for_update())).scalar_one_or_none()
-        if job is None or job.status != "running" or not job.capability == "agent:codex":
+        if job is None or job.status != "running" or job.capability not in TOOL_CAPABILITIES:
             raise ClientToolConflict("job is not running")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:
@@ -90,7 +91,7 @@ async def submit_result(run_id: int, project_id: int, call_id: str,
         ).with_for_update())).scalar_one_or_none()
         if job is None:
             raise LookupError("job not found")
-        if job.status != "running" or job.capability != "agent:codex":
+        if job.status != "running" or job.capability not in TOOL_CAPABILITIES:
             raise ClientToolConflict("job is not waiting for a client tool")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:

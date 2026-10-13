@@ -64,21 +64,24 @@ def subscription_model_verified(model: str) -> bool:
     return model in _catalog()[1]
 
 
-def _tool_model_ids(field: str) -> list[str]:
+def _tool_model_ids(field: str, prefix: str = "codex-sub/") -> list[str]:
     try:
         value = json.loads(getattr(get_settings(), field))
     except ValueError:
         return []
     if (not isinstance(value, list) or not all(isinstance(mid, str) for mid in value)
             or len(value) != len(set(value))
-            or not all(mid.startswith("codex-sub/") and subscription_model_verified(mid)
+            or not all(mid.startswith(prefix) and subscription_model_verified(mid)
                        for mid in value)):
         return []
     return value
 
 
 def subscription_tool_model_verified(model: str) -> bool:
-    """Advertise client tools only after a live callback for this exact Codex id."""
+    """Advertise client tools only after a live callback for this exact model id."""
+    if model.startswith("claude-sub/"):
+        return model in _tool_model_ids("AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS",
+                                        "claude-sub/")
     return model in _tool_model_ids("AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS")
 
 
@@ -87,6 +90,17 @@ def subscription_tool_model_canary(model: str, project_id: int) -> bool:
     return (project_id == 12
             and get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS == "12"
             and model in _tool_model_ids("AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS"))
+
+
+def subscription_tools_available(model: str, project_id: int) -> bool:
+    """Gate for client tools on one exact subscription model id (submit and run time)."""
+    settings = get_settings()
+    if model.startswith("claude-sub/"):
+        return (settings.AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED
+                and subscription_tool_model_verified(model))
+    return (settings.AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
+            and (subscription_tool_model_verified(model)
+                 or subscription_tool_model_canary(model, project_id)))
 
 
 def subscription_model(model: str | None) -> ModelSpec | None:
