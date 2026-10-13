@@ -36,7 +36,7 @@ poll response reports it as `account_id`. A started run never changes account; s
 Codex subscription requests are no longer serialized across the broker. They run concurrently up to
 the worker's concurrency (`AGENT_CONCURRENCY_CODEX`) and share the subscription's usage limits, so a
 `quota_exhausted` result waits on the same account rather than falling back. Because the processes
-share one `auth.json`, start-ups are briefly serialized (a short `__codex_auth__` lease) whenever the
+share one `auth.json`, start-ups are serialized (an `__codex_auth__` lease held until the first completed model call) whenever the
 file's `last_refresh` is older than 4 days or unreadable, so a rotating refresh token is never
 refreshed twice at once; see `agent-runs.md`.
 

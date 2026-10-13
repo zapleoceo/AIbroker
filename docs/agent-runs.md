@@ -196,13 +196,18 @@ writes files into the workspace.
   oversized (> 1 MiB), malformed or unparseable value counts as "due" and fails safe; never a
   token). If it is missing, unreadable or older than
   `CODEX_REFRESH_DUE_AFTER_S` (4 days; UNVERIFIED conservative value - Codex's own interval is
-  believed to be ~8 days but could not be checked offline), the run takes the short fixed lease
+  believed to be ~8 days but could not be checked offline), the run takes the start-up lease
   `("__codex_auth__", "refresh")` BEFORE `run.started` / `billing.attested` are written (so a
   requeue repeats no event) and holds it until the first event proving a model call completed
   (`message.delta`, `tool.call` or `usage`; NOT `session.assigned`, which precedes the first model
   request - the ordering is UNVERIFIED), or until the run ends and its CLI is fully stopped. There is
   no time-based early release: a silent start-up is not proof that the refresh finished, so it stays
-  under the lease and is bounded only by the run's wall/idle timeouts.
+  under the lease and is bounded only by the run's idle timeout (300 s by default) or, for a
+  client-tool run where idle equals wall, the wall timeout (1800 s). A CLI that ends its own
+  start-up (an error before any model event) is stopped before the lease is released. While one
+  run holds the lease, each waiting refresh-due run occupies one of the worker's
+  `AGENT_CONCURRENCY_CODEX` slots, so with 2 slots one silent holder plus one waiter blocks the
+  Codex worker until the holder ends.
   Other refresh-due runs retry every `codex_auth_poll_s` for up to `codex_auth_wait_s` (90 s), then
   are requeued; after `session_busy_max` requeues the run fails with `error_class=codex_auth_busy`.
   A run cancelled while it waits ends `cancelled` at once (no requeue, never `codex_auth_busy`).

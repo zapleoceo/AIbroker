@@ -193,8 +193,9 @@ class _AuthGate:
 async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig, run_id: int) -> _AuthGate | None:
     """Codex refreshes the shared CODEX_HOME/auth.json token while starting up, and refresh tokens
     rotate - two simultaneous refreshes can invalidate the login. When the file's `last_refresh`
-    says one may be due (or cannot be read), hold ONE short fixed lease until the CLI's first
-    event; otherwise take nothing and runs stay fully parallel."""
+    says one may be due (or cannot be read), hold ONE lease until the first event proving a completed
+    model call, or until the run ended and its CLI was stopped; otherwise take nothing and runs stay
+    fully parallel."""
     if not isinstance(adapter, CodexCLI) or not adapter.refresh_maybe_due(cfg.codex_refresh_due_after_s):
         return None
     deadline = time.monotonic() + cfg.codex_auth_wait_s
@@ -227,10 +228,12 @@ async def _held_drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg:
     except _AuthRefreshBusy:
         # Nothing was written for this attempt (the lease is taken before run.started), so a
         # requeue repeats no event. Capped like session_busy_max.
+        if await _cancel_flag(run.run_id):    # a cancel that raced the last poll still wins
+            return await _finish(run.run_id, ev.RunCancelled(), {}, lease=lease)
         if await requeue_run(run.run_id, cfg.session_busy_delay_s) > cfg.session_busy_max:
             return await _finish(run.run_id, ev.RunFailed(
                 error_class="codex_auth_busy",
-                message="the Codex auth-refresh start-up lease stayed taken"), {})
+                message="the Codex auth-refresh start-up lease stayed taken"), {}, lease=lease)
         return None
 
 
@@ -292,7 +295,7 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
     gate = await _codex_auth_gate(adapter, cfg, run_id)
     try:
         if gate is not None and await _cancel_flag(run_id):   # cancelled while it waited for the gate
-            return await _finish(run_id, ev.RunCancelled(), totals)
+            return await _finish(run_id, ev.RunCancelled(), totals, lease=lease)
         return await _drive_held_gate(run, job, adapter, cfg, lease, req, totals, gate)
     finally:
         if gate is not None:
@@ -471,12 +474,17 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                     item.total_tokens, item.cache_read_tokens, item.reasoning_tokens,
                 )
     finally:
-        if terminal is None or stop_cli or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
+        # Still holding the gate: the CLI ended its start-up by itself (an error before any model
+        # event), so make sure it is gone too - cancel() is idempotent - before the gate opens.
+        if (terminal is None or stop_cli or gate is not None
+                or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut)):
             await _stop_adapter(adapter, cfg.cancel_grace_s)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
         # Released only now: a waiting run must not start while this CLI is still in its TERM->KILL window.
+        # (A second cancellation of the whole task during _stop_adapter - worker shutdown only - can
+        # still leave here early; _drive's finally then releases the gate. Accepted: rare, logged.)
         if gate is not None:
             await gate.close()
         if lease_lost:

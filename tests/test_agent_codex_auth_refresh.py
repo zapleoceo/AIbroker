@@ -506,3 +506,45 @@ async def test_a_lost_startup_lease_during_startup_stops_the_cli(tmp_path, monke
     failed = [e for e in await list_events(rid) if e.type == "run.failed"]
     assert len(failed) == 1 and failed[0].payload["error_class"] == "codex_auth_busy"
     assert rig.released == [rid]
+
+
+async def test_a_cli_error_before_any_model_event_is_stopped_before_the_gate_opens(tmp_path, monkeypatch):
+    """The CLI ends its own start-up with an error (e.g. a failed refresh) while the gate is held:
+    the executor still stops it and releases the gate only after that stop finished."""
+    home = tmp_path / "home"
+    _auth(home)                                      # refresh due
+    (rid,) = await _runs(1, base=9520)
+    rig = _Rig(monkeypatch, [rid])
+    rig.stop_gate.clear()                            # the CLI's stop is blocked (TERM->KILL window)
+
+    async def failing_start(sub_self, run):
+        rig.entered.append(run.run_id)
+        yield ev.SessionAssigned(session_id=THREADS[0])
+        yield ev.RunFailed(error_class="cli_error", message="synthetic start-up error")
+
+    monkeypatch.setattr(SubprocessCLI, "start", failing_start)
+    _register(home)
+    t = asyncio.create_task(execute_run(rid, _cfg(tmp_path, cancel_grace_s=30)))
+    await _until(rig.stop_started.is_set)            # stopped although the CLI ended by itself
+    assert rig.released == [] and rig.holder == rid  # the gate is still held during the stop
+    rig.stop_gate.set()
+    assert await asyncio.wait_for(t, 10) == "failed"
+    assert rig.released == [rid] and rig.stops == [rid]
+
+
+async def test_a_cancel_that_races_the_last_poll_at_the_cap_still_ends_cancelled(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)
+    (rid,) = await _runs(1, base=9530)
+    _Rig(monkeypatch, [rid]).holder = 4242           # another run holds the refresh lease
+    calls = {"n": 0}
+
+    async def late_cancel(run_id):                   # not cancelled while waiting, cancelled right after
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    monkeypatch.setattr(executor, "_cancel_flag", late_cancel)
+    _register(home)
+    cfg = _cfg(tmp_path, codex_auth_wait_s=0.0, session_busy_max=0)
+    assert await execute_run(rid, cfg) == "cancelled"
+    assert [e.type for e in await list_events(rid)] == ["run.cancelled"]
