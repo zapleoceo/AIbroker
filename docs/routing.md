@@ -1417,6 +1417,8 @@ Three independent daily caps: per-key (atomic, see below), per-project (live
 SUM from `usage_log`), global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
 Free-tier keys with `cost <= 0` skip the check entirely.
 
+**Cap 0 refuses paid keys (2026-10-13).** `daily_cost_cap_usd = 0` on the project or on a key refuses a `tier="paid"` key before any reservation unless the model is registry-known free (`pricing == "free"`, passed to `reserve_cost` as `known_free_model`). An unpriced model estimates $0 too, so before this `used + estimate > cap` admitted it and its real cost landed uncapped. Free-tier and `trial` keys behave as before (master never refused `trial` at a $0 estimate).
+
 **Real reservation pattern (2026-07-03).** `run_chat` estimates the
 worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —
 assumes the full `max_tokens` budget is generated) and calls `reserve_cost`
@@ -1993,6 +1995,8 @@ past the finish-by moment:
 cloud calls that is the previous behaviour minus one minute; `chat:deep` keeps
 its exact old semantics through `_DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S +
 _DEEP_CALL_TIMEOUT_S` (5 + 19 = 24min &lt; 25).
+
+**Transcription uses the same gate (2026-10-13).** `run_transcribe` checks `_now() + _transcribe_call_timeout() > finish_by` before each attempt. `finish_by` is 18 min (`_TRANSCRIBE_WALL_DEADLINE_S = _CHAT_WALL_DEADLINE_S`) and the per-attempt timeout is `max(TRANSCRIBE_TIMEOUT_S, GEMINI_ASR_TIMEOUT_S)`. Past the gate the walk raises `TranscribeFailed` (`502`) instead of starting another attempt. Before this, a storm walk could outlast the 25-minute stale reclaim and a second worker re-ran the paid whisper call.
 
 ## Embedding: retry same-provider keys, never cross providers (2026-07-02)
 

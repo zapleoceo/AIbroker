@@ -2124,7 +2124,7 @@ async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch
         return SimpleNamespace(id=16 if tier == "paid" else 21, label="k",
                                tier=tier, provider=provider, token_encrypted="x")
 
-    async def fake_reserve(*, api_key, project, estimated_cost):
+    async def fake_reserve(*, api_key, project, estimated_cost, known_free_model=False):
         if api_key.tier == "paid":
             raise svc.CostGuardError("project", 0.6, 0.5993, 0.01)
 
@@ -2391,3 +2391,37 @@ async def test_record_error_stores_the_real_status_not_the_classification(monkey
     # auth class -> auth_fail, true status.
     got = await _booked(monkeypatch, _with_status(RuntimeError("bad key"), 403))
     assert (got["http_status"], got["status"]) == (403, "auth_fail")
+
+
+async def test_run_transcribe_respects_wall_deadline_below_stale_window(monkeypatch):
+    """13 attempts x 120s outlasted job_queue's stale-reclaim, so a second worker
+    re-ran the paid whisper call. The walk must stop starting attempts in time."""
+    from types import SimpleNamespace
+
+    import aibroker.services.llm_service as svc
+    from aibroker.services import job_queue
+    from aibroker.services.attempt import AttemptResult
+    from aibroker.services.llm_service import TranscribeFailed, run_transcribe
+
+    clock = [0.0]
+    timeout = 120.0
+    monkeypatch.setattr(svc, "_now", lambda: clock[0])
+    monkeypatch.setattr(svc, "_transcribe_call_timeout", lambda: timeout)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["groq"])
+    monkeypatch.setattr(svc, "_max_keys", lambda p: 13)
+    monkeypatch.setattr(svc, "model_for", lambda p, c: "groq/whisper-large-v3")
+    monkeypatch.setattr(svc, "estimate_transcription_cost", lambda *a, **k: 0.0)
+
+    async def pick(provider, scope, **kw):
+        return SimpleNamespace(id=1, label="k", tier="free", provider=provider)
+
+    async def attempt(a):
+        clock[0] += timeout
+        return AttemptResult(Flow.NEXT_KEY, error=RuntimeError("timeout"))
+
+    monkeypatch.setattr(svc, "pick_and_reserve", pick)
+    monkeypatch.setattr(svc, "run_attempt", attempt)
+    with pytest.raises(TranscribeFailed):
+        await run_transcribe(project=SimpleNamespace(id=1), audio=b"x",
+                             filename="a.ogg", workflow="w")
+    assert clock[0] < job_queue._STALE_RUNNING_S

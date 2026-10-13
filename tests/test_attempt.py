@@ -4,6 +4,7 @@ single error path. These tests pin the verdict (Flow) and the bookkeeping of eac
 branch, independently of any capability runner."""
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -233,3 +234,52 @@ def test_scrub_secrets_masks_credentials():
 def test_billed_cost_free_tier_is_always_zero():
     assert att._billed_cost(_key("free"), {"cost_usd": 3.0}) == 0.0
     assert att._billed_cost(_key("paid"), {"cost_usd": 3.0}) == 3.0
+
+
+
+async def test_cancel_after_successful_call_still_books_usage(rig):
+    """The provider already answered and billed; a client disconnect landing in the
+    ledger write must not drop the row."""
+    gate = asyncio.Event()
+    booked: list[int] = []
+
+    async def slow_record(**kw):
+        await gate.wait()
+        booked.append(1)
+        return 99
+
+    rig.record.side_effect = slow_record
+    task = asyncio.create_task(run_attempt(rig.attempt(key=_key("paid"))))
+    while not att._usage_writes:   # the write is in flight
+        await asyncio.sleep(0)
+    pending = list(att._usage_writes)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not booked              # cancellation did not wait for the write
+    gate.set()
+    await asyncio.gather(*pending)
+    assert booked == [1]
+    assert not att._usage_writes   # reference dropped once done
+
+
+async def test_background_usage_write_failure_is_logged(rig, caplog):
+    async def boom(**kw):
+        raise RuntimeError("db down")
+
+    rig.record.side_effect = boom
+    with caplog.at_level("ERROR", logger=att.log.name):
+        with pytest.raises(RuntimeError):
+            await run_attempt(rig.attempt(key=_key("paid")))
+        await asyncio.sleep(0)   # let the done-callback run
+    assert "record_usage failed for key 4" in caplog.text
+    assert not att._usage_writes
+
+
+async def test_registry_free_model_is_flagged_known_free_to_the_cap_guard(rig):
+    await run_attempt(rig.attempt(key=_key("paid"), model="openrouter/google/gemma-4-31b-it:free",
+                                  estimated_cost=0.0))
+    assert rig.reserve.await_args.kwargs["known_free_model"] is True
+    await run_attempt(rig.attempt(key=_key("paid"), model="openrouter/unpriced/model",
+                                  estimated_cost=0.0))
+    assert rig.reserve.await_args.kwargs["known_free_model"] is False

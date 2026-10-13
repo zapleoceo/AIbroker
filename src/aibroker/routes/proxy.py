@@ -427,6 +427,7 @@ class DeepJobResponse(BaseModel):
     tokens_out: int | None = None
     total_tokens: int | None = None
     cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
     cost_usd: float | None = None
     billing_type: str | None = None
@@ -536,6 +537,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
+        cache_write_tokens=meta.get("cache_write_tokens"),
         reasoning_tokens=meta.get("reasoning_tokens"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
         billing_type=meta.get("billing_type"),

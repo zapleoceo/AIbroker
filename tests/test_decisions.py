@@ -17,6 +17,7 @@ import aibroker.providers.decisions as dec
 import aibroker.services.attempt as att
 import aibroker.services.llm_service as svc
 from aibroker.main import app
+from aibroker.providers.cost import estimate_llm_cost
 from aibroker.providers.provider_errors import classify_provider_error
 from aibroker.routing.chains import CAPABILITY_CHAINS, scope_for
 from aibroker.routing.cost_guard import CostGuardError
@@ -84,7 +85,8 @@ async def test_decide_returns_answers_and_real_cost(monkeypatch):
     assert answers["u"]["noul"] == 0.95
     assert meta["tokens_in"] == 307 and meta["tokens_out"] == 23
     assert meta["cost_usd"] == pytest.approx(1.29e-05)
-    assert meta["model_served"] == "typesafe/jev-1.13-20260917"
+    # same normalisation as the chat path: directory stripped
+    assert meta["model_served"] == "jev-1.13-20260917"
 
 
 async def test_decide_strips_the_litellm_prefix(monkeypatch):
@@ -390,3 +392,39 @@ async def test_route_happy_path():
     data = r.json()
     assert data["answers"]["u"]["noul"] == 0.95
     assert data["request_id"] == 77 and data["tokens_out"] == 23
+
+
+
+def _mock_decisions(monkeypatch, body: dict) -> None:
+    real = httpx.AsyncClient
+    monkeypatch.setattr(
+        dec.httpx, "AsyncClient",
+        lambda **kw: real(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=body))))
+
+
+async def test_decision_without_reported_cost_books_estimate_not_zero(monkeypatch):
+    """OpenRouter omitting usage.cost must not book $0 — that blinds the caps."""
+    _mock_decisions(monkeypatch, {"answers": {"a": 1}, "model": "typesafe/jev-1.13",
+                                  "usage": {"input_tokens": 200000, "output_tokens": 10}})
+    _, meta = await dec.decide(model="openrouter/typesafe/jev-1.13", state="s",
+                               questions={}, api_key="k")
+    assert meta["cost_usd"] == pytest.approx(
+        estimate_llm_cost("openrouter/typesafe/jev-1.13", 200000, 10))
+    assert meta["cost_usd"] > 0
+
+
+async def test_decision_reported_cost_wins_even_when_zero(monkeypatch):
+    _mock_decisions(monkeypatch, {"answers": {}, "model": "typesafe/jev-1.13",
+                                  "usage": {"input_tokens": 200000, "output_tokens": 10,
+                                            "cost": 0}})
+    _, meta = await dec.decide(model="openrouter/typesafe/jev-1.13", state="s",
+                               questions={}, api_key="k")
+    assert meta["cost_usd"] == 0.0
+
+
+async def test_decision_model_served_echo_is_none(monkeypatch):
+    """An echo of the requested model adds nothing — same rule as the chat path."""
+    _mock_decisions(monkeypatch, {"answers": {}, "model": "typesafe/jev-1.13", "usage": {}})
+    _, meta = await dec.decide(model="openrouter/typesafe/jev-1.13", state="s",
+                               questions={}, api_key="k")
+    assert meta["model_served"] is None

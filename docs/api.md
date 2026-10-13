@@ -34,7 +34,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 - `name` (required) is normalised to a lowercase slug (`My Bot!` -> `my-bot`, 2-60 chars). It must
   be unique: on a clash a `-<4 hex>` suffix is appended, so always read the returned `name`.
   `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
-- **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid call is refused; `0` is
+- **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
   not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
   one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/transcribe` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
@@ -175,6 +175,8 @@ so voice notes never accumulate in the database or the nightly backup. The 25 MB
 Whisper ceiling is enforced before queueing; transport limits are under
 "Request body limits" below.
 
+A transcription job runs under a finish-by budget: it stops starting new attempts once 18 minutes of its wall budget is spent (the same gate as chat, below the 25-minute stale-job window) and fails with `502 TranscribeFailed`. A stale reclaim therefore cannot re-run the paid call and book it twice.
+
 ### Capabilities (for `/v1/jobs`)
 
 `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
@@ -237,11 +239,12 @@ below). Pass
 images as base64 data URLs — anthropic was removed from the vision chain because
 it 400s on fetch-gated image URLs.
 
-A completed chat `JobResponse` carries `cache_read_tokens` from the saved job result
+A completed chat `JobResponse` carries `cache_read_tokens` and `cache_write_tokens` from the saved job result
 (`null` for older jobs without the field; 0 when the provider reported no cache read — see
 [providers.md](providers.md#prompt-caching-2026-07-01-wired-end-to-end-2026-07-02))
 and `request_id` (the `usage_log` row id — match your own logs against the
 broker's).
+`/v1/deep` poll responses carry the same two fields; `cache_write_tokens` is additive and may be `null`.
 
 ### Async jobs — `/v1/jobs` (submit + poll)
 
@@ -269,7 +272,7 @@ POST /v1/jobs?capability=chat:smart
 GET /v1/jobs/123
   → 200 {"job_id":123,"status":"pending","poll_after_s":5}      # keep polling
   → 200 {"job_id":123,"status":"done","text":"…","provider":…,  # done
-         "tokens_in":…,"tokens_out":…,"cache_read_tokens":…,
+         "tokens_in":…,"tokens_out":…,"cache_read_tokens":…,"cache_write_tokens":…,
          "cost_usd":…,"request_id":…}
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
 ```
@@ -381,6 +384,7 @@ decision about one `state` in a single call, it is billed once for the input.
 - **Price.** $0.042 per million input tokens, $0 output. Measured on 120 real
   Vera triage events: median 0.36 s, p90 0.46 s, ~$0.000055 per event with
   four questions.
+- **Cost booked.** `cost_usd` is the `usage.cost` OpenRouter reports, even `0`. When OpenRouter omits it, the registry/LiteLLM estimate is booked instead, never a silent $0. `model_served` follows the chat-path rule: `null` when the provider just echoes the requested model.
 - **Free fallback (2026-10-03).** Jev is always the primary. If the caller did
   not pin `model` and Jev fails on a key (provider error, or the project/global/key
   cap blocks the reservation), `run_decision` immediately retries on the SAME

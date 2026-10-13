@@ -127,7 +127,7 @@ async def test_run_chat_falls_back_on_cap_block():
     from aibroker.routing import CostGuardError
     call_count = {"n": 0}
 
-    async def fake_check(api_key, project, estimated_cost):
+    async def fake_check(api_key, project, estimated_cost, known_free_model=False):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise CostGuardError(kind="key", limit=5.0, used=4.9, attempted=0.2)
@@ -1015,3 +1015,16 @@ async def test_jobs_chat_capability_image_in_non_user_message_requires_vision_sc
     r = client.post("/v1/jobs?capability=chat:fast", headers={"X-Project-Key": plain},
                     json={"messages": history})
     assert r.status_code == 403, r.text
+
+
+def test_job_poll_returns_cache_write_tokens():
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from aibroker.routes.proxy import _job_response
+    meta = {"provider": "anthropic", "model": "m", "tokens_in": 5000, "tokens_out": 10,
+            "cache_read_tokens": 100, "cache_write_tokens": 4800, "cost_usd": 0.02}
+    row = SimpleNamespace(id=1, status="done", request={"model": None}, result_text="x",
+                          result_meta=meta, error_message=None, created_at=datetime.now())
+    out = _job_response(row)
+    assert (out.cache_read_tokens, out.cache_write_tokens) == (100, 4800)

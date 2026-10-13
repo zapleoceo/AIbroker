@@ -64,6 +64,7 @@ async def reserve_cost(
     api_key: ApiKeyRow,
     project: ProjectRow,
     estimated_cost: float,
+    known_free_model: bool = False,
 ) -> None:
     """Admit-or-reject an attempted call against api_key/project/global caps,
     call BEFORE the provider call. Raise CostGuardError if any cap would be
@@ -98,6 +99,19 @@ async def reserve_cost(
     """
     if api_key.tier == "free" and estimated_cost <= 0:
         return
+
+    # A cap of 0 means "free providers only": a paid key is refused unless the
+    # model is registry-known free. `used + estimate > cap` alone admits it when
+    # the estimate is $0, which is also what an UNPRICED model estimates — that
+    # was the hole: its real cost then lands uncapped. Only tier=="paid": a
+    # trial key was never refused here on master, and still is not. Checked
+    # before any reservation, so nothing needs refunding.
+    if api_key.tier == "paid" and not known_free_model:
+        if api_key.daily_cost_cap_usd == 0:
+            raise CostGuardError("api_key", 0.0, api_key.daily_cost_used_usd or 0.0,
+                                 estimated_cost)
+        if project.daily_cost_cap_usd == 0:
+            raise CostGuardError("project", 0.0, 0.0, estimated_cost)
 
     # 1. per-key — atomic reserve-and-admit in one statement.
     if api_key.daily_cost_cap_usd is not None:
