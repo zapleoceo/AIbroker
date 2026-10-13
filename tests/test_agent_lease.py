@@ -482,13 +482,15 @@ async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
     fake = FakeAgentCLI([ev.MessageDelta(text="working"), ("hang",)])
     register_adapter("agent:claude", lambda: fake)
     cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
-                     cancel_poll_s=0.05, lease_ttl_s=0.9, lease_heartbeat_s=0.1)
+                     cancel_poll_s=0.05, lease_ttl_s=5.0, lease_heartbeat_s=0.1)
     task = asyncio.create_task(execute_run(rid, cfg))
     assert await _wait_until(lambda: fake.started is not None)
     t0 = time.monotonic()
     await _steal()                                              # a newer holder: renewal -> False
-    assert await asyncio.wait_for(task, 3) is None
-    assert time.monotonic() - t0 < 1.0 and fake.cancel_calls == 1
+    assert await asyncio.wait_for(task, 8) is None
+    # Stopped by the refused heartbeat renewal, well before the 5 s TTL could lapse; the
+    # half-TTL bound proves that without depending on a fast CI runner (was < 1.0 s, flaky).
+    assert time.monotonic() - t0 < 2.5 and fake.cancel_calls == 1
     assert not set(await _events(rid)) & ev.TERMINAL_TYPES      # no terminal write by the zombie
     async with get_session() as s:
         assert (await s.get(DeepJobRow, rid)).status == "running"
