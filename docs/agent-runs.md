@@ -84,7 +84,11 @@ configured candidate ids and the text-only jobs contract;
 when the job is unknown or belongs elsewhere. The worker checks the database
 and project policy when claiming it. No prompt or credential crosses RPC.
 The ordinary `/v1/jobs` and `/v1/agent/runs` clients are unchanged. If RPC is
-unavailable, the worker still polls the database. The RPC volumes contain no
+unavailable, the worker still polls the database: a worker whose RPC directory is not
+writable (no RPC volume mounted, e.g. `agent-worker-claude2` on the read-only image) skips the
+socket with one info line, and any other `OSError` while binding is one WARNING line without a
+traceback; a writable directory with wrong owner/mode still fails closed (`RuntimeError`, logged
+with traceback, polling continues). The RPC volumes contain no
 CLI auth files, have no host port, and do not change worker networks or the
 Codex seccomp/AppArmor profile.
 `wake_worker`, `start_worker_rpc`, and `stop_worker_rpc` implement this optional
@@ -245,6 +249,16 @@ writes files into the workspace.
 
 ## Models, usage, billing separation
 
+- **`model_unavailable` from the CLI.** When a subscription CLI says the requested model is not
+  usable on the account, `classify_failure` returns `model_unavailable` (checked after quota, so a
+  limit message always wins). Wordings, from the Claude Code errors page
+  (https://code.claude.com/docs/en/errors.md, VERIFIED): "There's an issue with the selected
+  model", "Model ... not found", "Model ... is not a recognized model id", "Claude Opus is not
+  available with the Claude Pro plan". Codex: "The 'X' model is not supported when using Codex with
+  a ChatGPT account" (UNVERIFIED, no fixture). The executor rewrites the terminal message so
+  `/v1/jobs` shows `model_unavailable: <model> is not available on this subscription account
+  (<CLI text>)`. It is terminal: not retried, not parked as a quota wait, and
+  `agent/accounts.py` ignores it (only `quota_exhausted` pauses an account).
 - **Model catalog comes from the CLI**, never from this repo: `AgentCLI.list_models()` returns
   `ModelInfo` entries (Codex: app-server `model/list` + `provider/capabilities`; Claude: its
   own list) or `None` when unavailable. Phase 1 defines the interface and the fake only.
@@ -286,7 +300,7 @@ the worker's own subscription login; the broker never reads or moves credentials
 When the adapter reports `run.failed quota_exhausted` (`classify_failure` on the CLI's limit
 wording: `hit your (weekly|session|5-hour|daily|opus|fable|sonnet) limit`, `weekly|5-hour limit
 reached`, plus the older usage/quota/rate-limit words; `context limit`, "session limit of 10 MB" etc.
-stay `cli_error`; only the first 2000 chars are scanned), `_wait_for_quota` does not fail the run: `park_for_quota` stores the non-terminal
+stay `cli_error`; only the first 2000 chars are scanned; quota wording is checked first), `_wait_for_quota` does not fail the run: `park_for_quota` stores the non-terminal
 `run.waiting_quota` event (`RunWaitingQuota`: `not_before`, `attempt`, `reset_reported`, `reason` =
 the CLI's wording, max 300 chars), puts
 the job back to `pending` with `run_after = not_before`, and the API shows status

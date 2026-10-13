@@ -97,6 +97,9 @@ async def start_worker_rpc(capability: str, wake: asyncio.Event) -> asyncio.Abst
     path = RPC_SOCKETS.get(capability)
     if path is None or not path.parent.is_dir():
         return None
+    if not os.access(path.parent, os.W_OK):     # read-only image, no RPC volume: nothing to bind
+        log.info("worker RPC: %s is not writable, no RPC volume mounted", path.parent)
+        return None
     directory = path.parent.stat()
     if directory.st_uid != os.getuid() or stat.S_IMODE(directory.st_mode) != 0o700:
         raise RuntimeError("worker RPC directory must be owned by worker uid and mode 0700")

@@ -356,3 +356,49 @@ def test_register_real_adapters_registers_both_without_spawning():
     real_cli.register_real_adapters()
     assert isinstance(make_adapter("agent:claude"), real_cli.ClaudeCLI)
     assert isinstance(make_adapter("agent:codex"), CodexCLI)
+
+
+_MODEL_WORDINGS = [   # VERIFIED: code.claude.com/docs/en/errors.md
+    "There's an issue with the selected model (claude-opus-x). It may not exist or you may not "
+    "have access to it.",
+    "Model claude-foo not found", "Model claude-foo is not a recognized model id",
+    "Claude Opus is not available with the Claude Pro plan"]
+
+
+@pytest.mark.parametrize("msg", _MODEL_WORDINGS)
+def test_classify_claude_model_unavailable_wordings(msg):
+    assert classify_failure(msg) == "model_unavailable"
+
+
+def test_classify_codex_model_unavailable_wording_unverified():
+    msg = "The 'gpt-x' model is not supported when using Codex with a ChatGPT account."
+    assert classify_failure(msg) == "model_unavailable"
+
+
+@pytest.mark.parametrize("msg", [
+    _WEEKLY, "You've hit your Opus limit · resets 3:45pm", "You've hit your Sonnet limit",
+    "Context limit reached · /compact or /clear to continue", "context limit exceeded",
+    "Credit balance is too low", "rate limit exceeded", "Request rejected (429)",
+    "The service is not available right now", "model overloaded", "Opus is experiencing high load",
+    "file not found: a.txt", "command not found", "segfault"])
+def test_model_unavailable_does_not_swallow_quota_or_unrelated(msg):
+    assert classify_failure(msg) != "model_unavailable"
+
+
+def test_quota_wins_when_both_wordings_appear():
+    assert classify_failure("Model x not found; you've hit your weekly limit") == "quota_exhausted"
+
+
+def test_claude_parser_result_and_stderr_paths_classify_model_unavailable():
+    from aibroker.agent.parsers import ClaudeParser
+    p = ClaudeParser()
+    out = p.feed(json.dumps({"type": "result", "is_error": True,
+                             "result": "There's an issue with the selected model (x)"}))
+    assert out[-1].error_class == "model_unavailable" and out[-1].reset_at is None
+    assert ClaudeParser().finish(1, "Model x not found").error_class == "model_unavailable"
+
+
+def test_model_unavailable_is_not_a_quota_pause():
+    from aibroker.agent.accounts import _reset_of
+    assert _reset_of("run.failed", {"error_class": "model_unavailable",
+                                    "reset_at": "2099-01-01T00:00:00"}) is None

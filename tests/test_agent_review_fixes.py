@@ -475,3 +475,26 @@ def test_mcp_servers_in_claude_json_refuse_the_run(tmp_path, state):
     assert "mcpServers" in settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws"))
     (tmp_path / "cfg" / ".claude.json").write_text("{broken")
     assert settings_problem(str(tmp_path / "cfg"), str(tmp_path / "ws")) is not None
+
+
+async def test_run_worker_logs_rpc_oserror_as_one_warning_without_traceback(monkeypatch, caplog):
+    import asyncio
+    import logging
+
+    from aibroker.agent import run_worker
+
+    async def boom(*_a):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(run_worker, "start_worker_rpc", boom)
+    with caplog.at_level(logging.DEBUG, logger=run_worker.log.name):
+        assert await run_worker.try_start_rpc("agent:claude", asyncio.Event()) is None
+    recs = [r for r in caplog.records if r.name == run_worker.log.name]
+    assert len(recs) == 1 and recs[0].levelno == logging.WARNING and recs[0].exc_info is None
+    assert "Read-only file system" in recs[0].getMessage()
+
+    async def refuse(*_a):
+        raise RuntimeError("worker RPC directory must be owned by worker uid and mode 0700")
+    monkeypatch.setattr(run_worker, "start_worker_rpc", refuse)
+    caplog.clear()
+    assert await run_worker.try_start_rpc("agent:claude", asyncio.Event()) is None
+    assert caplog.records[-1].exc_info is not None      # ownership failure keeps its traceback
