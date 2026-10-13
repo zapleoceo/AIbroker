@@ -369,3 +369,39 @@ def test_oversized_or_pathological_auth_json_is_unreadable_and_counts_as_due(tmp
         assert read_last_refresh(str(home)) is None
     (home / "auth.json").write_bytes(b"\xff\xfe not utf-8")
     assert read_last_refresh(str(home)) is None
+
+
+async def test_a_cancel_while_waiting_for_the_gate_requeues_at_once(tmp_path, monkeypatch):
+    """No 90 s wait for a cancelled run: it is requeued and the next claim ends it `cancelled`."""
+    home = tmp_path / "home"
+    _auth(home)
+    (rid,) = await _runs(1, base=9470)
+    rig = _Rig(monkeypatch, [rid])
+    rig.holder = 4242                                # another run holds the refresh lease
+
+    async def cancelled(run_id):
+        return True
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancelled)
+    _register(home)
+    t0 = asyncio.get_running_loop().time()
+    assert await execute_run(rid, _cfg(tmp_path, codex_auth_wait_s=30)) is None
+    assert asyncio.get_running_loop().time() - t0 < 5
+    assert rig.attempts_by(rid) == 1 and rig.entered == []
+    assert await list_events(rid) == []
+
+
+async def test_a_run_cancelled_before_it_got_the_gate_never_starts_the_cli(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)                                      # refresh due -> the gate is taken
+    (rid,) = await _runs(1, base=9480)
+    rig = _Rig(monkeypatch, [rid])
+
+    async def cancelled(run_id):
+        return True
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancelled)
+    _register(home)
+    assert await execute_run(rid, _cfg(tmp_path)) == "cancelled"
+    assert rig.entered == [] and rig.released == [rid]          # gate taken, then let go
+    assert [e.type for e in await list_events(rid)] == ["run.cancelled"]

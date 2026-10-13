@@ -103,8 +103,8 @@ def read_auth_mode(codex_home: str | None) -> str | None:
 # Codex refreshes the ChatGPT token in $CODEX_HOME/auth.json when `last_refresh` is old (its
 # interval is ~8 days) or after a 401. Refresh tokens rotate, so two processes refreshing at once
 # can invalidate the login. UNVERIFIED: the 8-day interval is from memory of the Codex source and
-# could not be checked offline; the field name and its ISO-8601 format were checked on a real
-# auth.json. We use a conservative 4 days so a refresh is serialized well before it is due.
+# could not be checked offline; the field name and its ISO-8601 format are UNVERIFIED too (no real
+# file is kept in the repo), so anything unreadable counts as due. We use a conservative 4 days so a refresh is serialized well before it is due.
 # A 401-triggered refresh cannot be predicted from the file and is not covered.
 CODEX_REFRESH_DUE_AFTER_S = 4 * 24 * 3600.0
 AUTH_READ_MAX_BYTES = 1024 * 1024        # a real auth.json is a few KB; anything bigger is refused

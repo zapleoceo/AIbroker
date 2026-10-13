@@ -189,7 +189,8 @@ async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig,
         if lease is not None:
             return stack
         await stack.aclose()
-        if time.monotonic() >= deadline:
+        # A cancel while waiting requeues too: the next claim ends it `cancelled` before any start.
+        if time.monotonic() >= deadline or await _cancel_flag(run_id):
             raise _AuthRefreshBusy
         await asyncio.sleep(cfg.codex_auth_poll_s)
 
@@ -270,6 +271,8 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
     # Before ANY event or workspace: a requeue (_AuthRefreshBusy) then leaves nothing behind.
     gate = await _codex_auth_gate(adapter, cfg, run_id)
     try:
+        if gate is not None and await _cancel_flag(run_id):   # cancelled while it waited for the gate
+            return await _finish(run_id, ev.RunCancelled(), totals)
         return await _drive_held_gate(run, job, adapter, cfg, lease, req, totals, gate)
     finally:
         if gate is not None:
