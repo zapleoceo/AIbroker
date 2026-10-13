@@ -39,6 +39,7 @@ from sqlalchemy import text
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
@@ -53,6 +54,11 @@ from aibroker.telemetry.notifier import alert
 from aibroker.telemetry.request_context import job_request_id, request_scope
 
 log = logging.getLogger(__name__)
+
+# Explicit RETURNING column list (never a star projection): behind pgbouncer's server-side
+# prepared statements a star projection changes result type after ADD COLUMN and
+# Postgres cannot re-plan it (InvalidCachedStatementError, prod 2026-10-13).
+_JOB_COLS_SQL = ", ".join(c.name for c in DeepJobRow.__table__.columns)
 
 # Slots are almost entirely I/O waits (a provider call blocks ~1-60s), so the
 # ceiling gates throughput, not CPU. 8 floored storm throughput at 8×60s while
@@ -171,6 +177,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
         )
 
 
+@retry_stale_statement
 async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
     """Atomically claim up to `limit` eligible pending rows → running. FOR
     UPDATE SKIP LOCKED lets every worker's loop claim in parallel without ever
@@ -189,7 +196,7 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
                 "  ORDER BY created_at "
                 "  LIMIT :n "
                 "  FOR UPDATE SKIP LOCKED"
-                ") RETURNING *"
+                f") RETURNING {_JOB_COLS_SQL}"
             ),
             {"n": limit},
         )).mappings().all()

@@ -68,3 +68,49 @@ def retry_terminal_write(
         raise last
 
     return wrapper
+
+
+def is_stale_statement_error(exc: BaseException) -> bool:
+    """True only for asyncpg's InvalidCachedStatementError ("cached statement plan
+    is invalid due to a database schema or configuration change") as surfaced
+    through SQLAlchemy: a DBAPIError whose `orig` is the dialect-adapted
+    InvalidCachedStatementError (or whose `__cause__` is asyncpg's own). Matched by
+    class name along the MRO so the check does not depend on the adapter's private
+    class path. Any other DBAPIError is NOT matched."""
+    if not isinstance(exc, DBAPIError):
+        return False
+    orig = exc.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        if candidate is not None and any(
+            c.__name__ == "InvalidCachedStatementError" for c in type(candidate).__mro__
+        ):
+            return True
+    return False
+
+
+def retry_stale_statement(
+    fn: Callable[..., Awaitable[T]],
+) -> Callable[..., Awaitable[T]]:
+    """Retry ONCE when a statement hits InvalidCachedStatementError.
+
+    After DDL on a hot table (e.g. ALTER TABLE ... ADD COLUMN) a pooled server
+    backend can still hold a prepared statement whose result type changed; the
+    first execution fails, and a fresh attempt (new transaction, statement
+    re-prepared or the backend's cache invalidated by the driver) normally
+    succeeds. The wrapped coroutine MUST open its own session/transaction so the
+    retry runs in a fresh one. A second consecutive failure propagates."""
+
+    @wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> T:
+        try:
+            return await fn(*args, **kwargs)
+        except DBAPIError as exc:
+            if not is_stale_statement_error(exc):
+                raise
+            log.warning(
+                "%s: stale prepared statement after schema change, retrying once: %s",
+                fn.__name__, exc,
+            )
+        return await fn(*args, **kwargs)
+
+    return wrapper
