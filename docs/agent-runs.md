@@ -200,7 +200,9 @@ writes files into the workspace.
   `("__codex_auth__", "refresh")` BEFORE `run.started` / `billing.attested` are written (so a
   requeue repeats no event) and holds it until the first event proving a model call completed
   (`message.delta`, `tool.call` or `usage`; NOT `session.assigned`, which precedes the first model
-  request - the ordering is UNVERIFIED) or `codex_auth_startup_s` (60 s), whichever comes first.
+  request - the ordering is UNVERIFIED), or until the run ends and its CLI is fully stopped. There is
+  no time-based early release: a silent start-up is not proof that the refresh finished, so it stays
+  under the lease and is bounded only by the run's wall/idle timeouts.
   Other refresh-due runs retry every `codex_auth_poll_s` for up to `codex_auth_wait_s` (90 s), then
   are requeued; after `session_busy_max` requeues the run fails with `error_class=codex_auth_busy`.
   A fresh `last_refresh` takes no lease, so runs stay fully parallel. A 401-triggered

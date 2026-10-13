@@ -64,7 +64,6 @@ class ExecConfig:
     lease_heartbeat_s: float = 30.0
     paid_continuation_verified_off: bool = False
     codex_paid_continuation_verified_off: bool = False
-    codex_auth_startup_s: float = 60.0       # max time the auth-refresh start-up lease is held
     codex_auth_wait_s: float = 90.0          # max wait for it before the run is requeued
     codex_auth_poll_s: float = 1.0           # how often a waiting run retries the lease
     codex_refresh_due_after_s: float = CODEX_REFRESH_DUE_AFTER_S
@@ -413,9 +412,6 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
     try:
         while terminal is None:
             now = time.monotonic()
-            if gate is not None and now - t0 >= cfg.codex_auth_startup_s:
-                await gate.close()                  # bounded: never hold it past the start-up window
-                gate = None
             if lease is not None and lease.lost.is_set():
                 lease_lost = True       # stop the CLI at once, like a cancel, but write nothing
                 break

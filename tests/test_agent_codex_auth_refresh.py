@@ -252,19 +252,37 @@ async def test_fresh_login_takes_no_lease_and_runs_stay_parallel(tmp_path, monke
     assert await asyncio.wait_for(t2, 10) == "completed"
 
 
-async def test_startup_lease_is_bounded_when_the_cli_emits_nothing(tmp_path, monkeypatch):
+async def test_a_silent_startup_keeps_the_gate_until_the_run_ends_and_the_cli_is_stopped(
+        tmp_path, monkeypatch):
     home = tmp_path / "home"
     _auth(home)                                      # refresh due
     ids = await _runs(2, base=9420)
     rig = _Rig(monkeypatch, ids)
     _register(home)
-    cfg = _cfg(tmp_path, codex_auth_startup_s=0.05)  # injected cap instead of the real 60 s
+    cancel_first = False
+    polls: list[float] = []                          # run 1's stream loop keeps polling: time passes
+
+    async def cancelled(run_id):
+        if run_id == ids[0]:
+            polls.append(asyncio.get_running_loop().time())
+        return cancel_first and run_id == ids[0]
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancelled)
+    cfg = _cfg(tmp_path, cancel_poll_s=0.01)
     t1 = asyncio.create_task(execute_run(ids[0], cfg))
     await _until(lambda: rig.entered == [ids[0]])
     t2 = asyncio.create_task(execute_run(ids[1], cfg))
-    await _until(lambda: ids[1] in rig.entered)      # the cap freed the lease though run 1 is silent
+    await _until(lambda: rig.attempts_by(ids[1]) >= 40)      # a silent start-up is not a release
+    await _until(lambda: len(polls) >= 2 and polls[-1] - polls[0] >= 0.3)   # well past any short cap
+    assert rig.entered == [ids[0]] and rig.holder == ids[0] and rig.released == []
+    assert not t1.done()
+    # Run 1 is ended (cancelled), its CLI is stopped, and only then run 2 gets the gate.
+    cancel_first = True
+    assert await asyncio.wait_for(t1, 10) == "cancelled"
+    assert rig.stops and rig.released == [ids[0]]
+    await _until(lambda: ids[1] in rig.entered)
     rig.release_all()
-    assert await asyncio.wait_for(asyncio.gather(t1, t2), 10) == ["completed", "completed"]
+    assert await asyncio.wait_for(t2, 10) == "completed"
 
 
 async def test_a_run_that_cannot_get_the_lease_in_time_is_requeued_without_events(tmp_path, monkeypatch):
