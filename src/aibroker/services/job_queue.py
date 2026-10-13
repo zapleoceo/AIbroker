@@ -43,8 +43,9 @@ from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.llm_service import (
-    BUDGET_EXHAUSTED,
     CONTENT_FAILED,
+    _BudgetExhausted,
+    cap_message,
     run_chat,
     run_transcribe,
 )
@@ -302,17 +303,19 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
                                 expect_started_at=row.started_at)
         return
-    if outcome is BUDGET_EXHAUSTED:
-        # A project/global daily cap is spent — more retries can't create budget,
+    if isinstance(outcome, _BudgetExhausted):
+        # A project/global daily or monthly cap is spent — more retries can't create budget,
         # so give up immediately with an honest message (not "no provider
         # available"). Alert the owner once per day so a silently-capped project
         # is visible, not just invisibly stalled until 00:00 UTC.
         await _finish(row.id, status="error",
-                       error_message="daily budget cap reached — retry after 00:00 UTC",
+                       error_message=cap_message(outcome.window),
                        expect_started_at=row.started_at)
         await alert(f"budget:{row.project_id}",
-                    f"project <b>{project.name}</b> hit its daily budget cap — "
-                    "jobs paused until 00:00 UTC", throttle_min=24 * 60)
+                    f"project <b>{project.name}</b> hit its {outcome.window} budget cap — "
+                    + ("jobs paused until 00:00 UTC" if outcome.window == "daily"
+                       else "jobs paused until the 1st of next month, 00:00 UTC"),
+                    throttle_min=24 * 60)
         return
     if outcome is CONTENT_FAILED:
         await _requeue_or_fail(

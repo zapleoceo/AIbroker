@@ -37,9 +37,10 @@ The actual provider credentials.
 | `is_active` / `is_alive` | `is_active` = ops toggle; `is_alive` = monitor-set |
 | `daily_used` / `daily_limit` | Request counter; `daily_limit=0` = no limit |
 | `daily_cost_used_usd` / `daily_cost_cap_usd` | Cap is NULL for free keys |
-| `monthly_cost_used_usd` / `monthly_cost_cap_usd` | Monthly analogue of the daily pair; cap NULL = no monthly cap |
+| `monthly_cost_used_usd` / `monthly_cost_cap_usd` | Monthly analogue of the daily pair, enforced since 2026-10-13; cap NULL = no monthly cap. The counter resets lazily via `monthly_reset_at` (below) |
 | `total_cost_usd` | Lifetime spend counter, never reset |
 | `daily_reset_at` | Date the two `daily_*` counters above were last touched. Read/write always goes through `FRESH_DAILY_USED_SQL`/`FRESH_DAILY_COST_SQL` (`selector.py`), which treats a non-today value as 0 — self-healing, no cron reset job. See **Cost guard** in [routing.md](routing.md). |
+| `monthly_reset_at` | First day of the UTC month `monthly_cost_used_usd` belongs to (migration 019, nullable). Read through `FRESH_MONTHLY_COST_SQL` (`selector.py`): any other value, including NULL, reads as 0; every write stamps the current month. See **Cost guard** in [routing.md](routing.md). |
 | `is_reserve` | Reserved-lane flag: picked LAST within its (provider, scope) group. A key scoped only to `llm:edit` with `is_reserve=true` is the Coach safety net — used only when all shared edit keys are exhausted, invisible to bot `llm:chat` traffic |
 | `cooldown_until` | Set on 429 |
 | `error_count` | Cleared on success ping by monitor |

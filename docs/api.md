@@ -290,6 +290,8 @@ per audio-minute (`whisper_cost`; the pre-call reservation uses
 the provider-reported duration, or a bitrate estimate when it is absent. Free
 keys are unchanged: $0, no reservation.
 
+**Monthly caps (2026-10-13).** `monthly_cost_cap_usd`, on the project and on its keys, is enforced on every reserving endpoint (`/v1/jobs`, `/v1/embed`, `/v1/transcribe`, `/v1/decisions`) over the current UTC calendar month. It was stored but ignored before. `0` means the same as for the daily cap: free providers only at project level, and that key is excluded at key level. A spent monthly cap returns `monthly budget cap reached — retry after the 1st of next month, 00:00 UTC` (a spent daily cap still returns `daily budget cap reached — retry after 00:00 UTC`). On the monthly text, stop resubmitting until the first day of the next UTC month.
+
 **Budget-cap error is honest + terminal (2026-07-16).** When a job fails
 because the project's (or the global) daily cost cap is spent, the `error`
 field reads exactly `daily budget cap reached — retry after 00:00 UTC` — NOT

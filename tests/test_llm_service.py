@@ -765,6 +765,30 @@ async def test_paid_only_project_cap_returns_budget_exhausted(monkeypatch):
     assert picks == ["deepseek"]           # aborted — anthropic/openai untried
 
 
+async def test_paid_only_monthly_project_cap_returns_monthly_sentinel(monkeypatch):
+    """A monthly project block carries its window through run_chat, so the job
+    fails with the monthly retry hint (not the daily 00:00 UTC one)."""
+    from types import SimpleNamespace
+
+    from aibroker.routing import CostGuardError
+
+    svc, _picks, _rec = _cap_block_env(monkeypatch, "project", ["deepseek"])
+
+    async def monthly_reserve(**kw):
+        raise CostGuardError("project", 0.5, 0.5, 0.001, window="monthly")
+
+    monkeypatch.setattr("aibroker.services.attempt.reserve_cost", monthly_reserve)
+    out = await svc.run_chat(
+        project=SimpleNamespace(id=7, name="stepan"), capability="chat:fast",
+        messages=[{"role": "user", "content": "hi"}], model=None,
+        max_tokens=64, temperature=0.7, response_format=None, workflow="w",
+        paid_only=True,
+    )
+    assert out is svc.BUDGET_EXHAUSTED_MONTHLY
+    assert out is not svc.BUDGET_EXHAUSTED
+    assert out.window == "monthly"
+
+
 async def test_per_key_cap_advances_to_next_provider(monkeypatch):
     """A per-key cap is LOCAL — other providers may still have room, so the walk
     continues to the next provider (returns None only after all are tried)."""

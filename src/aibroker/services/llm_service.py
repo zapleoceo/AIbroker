@@ -62,7 +62,7 @@ from aibroker.services.attempt import Attempt, AttemptResult, Flow, Rejection, r
 from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
 
 __all__ = [
-    "BUDGET_EXHAUSTED", "CONTENT_FAILED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
+    "BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED_MONTHLY", "CONTENT_FAILED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
     "EmbedOutcome", "EmbedRequestInvalid", "TranscribeFailed", "TranscribeOutcome", "classify_provider_error",
     "run_chat", "run_decision", "run_embed", "run_transcribe",
 ]
@@ -110,7 +110,16 @@ _DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S
 # Transcription is one call per attempt too, so it shares the non-deep budget.
 _TRANSCRIBE_WALL_DEADLINE_S = _CHAT_WALL_DEADLINE_S
 
-_CAP_MESSAGE = "daily budget cap reached — retry after 00:00 UTC"
+_CAP_MESSAGES = {
+    "daily": "daily budget cap reached — retry after 00:00 UTC",
+    "monthly": "monthly budget cap reached — retry after the 1st of next month, 00:00 UTC",
+}
+_CAP_MESSAGE = _CAP_MESSAGES["daily"]
+
+
+def cap_message(window: str) -> str:
+    """Client-facing text for a spent budget window (daily | monthly)."""
+    return _CAP_MESSAGES.get(window, _CAP_MESSAGE)
 
 
 def _now() -> float:
@@ -192,13 +201,26 @@ class ChatOutcome:
 
 
 class _BudgetExhausted:
-    """Sentinel run_chat returns when a PROJECT/GLOBAL daily cap is spent — a
+    """Sentinel run_chat returns when a PROJECT/GLOBAL cap is spent — a
     distinct outcome from None (no provider had capacity), so the caller can fail
-    the job honestly and stop retrying (more retries can't create budget)."""
-    __slots__ = ()
+    the job honestly and stop retrying (more retries can't create budget).
+    `window` says which budget ran out ("daily" | "monthly") so the message can
+    carry the right retry hint."""
+    __slots__ = ("window",)
+
+    def __init__(self, window: str = "daily") -> None:
+        self.window = window
 
 
 BUDGET_EXHAUSTED = _BudgetExhausted()
+BUDGET_EXHAUSTED_MONTHLY = _BudgetExhausted("monthly")
+
+
+def _exhausted_for(err: BaseException | None) -> _BudgetExhausted:
+    """The sentinel matching the window of the cap-block behind `err`."""
+    if getattr(err, "window", "daily") == "monthly":
+        return BUDGET_EXHAUSTED_MONTHLY
+    return BUDGET_EXHAUSTED
 
 
 class _ContentFailed:
@@ -516,10 +538,10 @@ async def run_chat(
                 if paid_only:
                     log.warning("chat:%s — paid tail budget-capped, no free "
                                 "fallback (final retry)", capability)
-                    return BUDGET_EXHAUSTED
+                    return _exhausted_for(res.error)
                 if step.tier is not None:
                     # Pinned walk: the free pass already ran before the paid one.
-                    return BUDGET_EXHAUSTED
+                    return _exhausted_for(res.error)
                 # A project/global COST cap blocks only PAID keys — $0 free keys are
                 # exempt — so a cap-block must NOT abort the walk: downgrade to
                 # free-only for the rest of it and retry THIS provider free-only
@@ -668,7 +690,7 @@ async def run_embed(
             )
         last_error = _failure_text(res)
         if res.flow is Flow.BUDGET_EXHAUSTED:
-            raise EmbedFailed(_CAP_MESSAGE)
+            raise EmbedFailed(_failure_text(res))
         if res.flow is Flow.NEXT_PROVIDER:
             break  # model gone / too large: the other keys would fail identically
     if not any_key_seen:
@@ -686,7 +708,7 @@ def _failure_text(res: AttemptResult) -> str:
     """Message for a failed attempt: the cap message for any cap block, else the
     provider error text."""
     if isinstance(res.error, CostGuardError):
-        return _CAP_MESSAGE
+        return cap_message(res.error.window)
     return str(res.error) if res.error else "attempt failed"
 
 
@@ -775,7 +797,7 @@ async def run_decision(
                 last_error = _failure_text(fb)
         if res.flow is not Flow.SUCCESS:
             if res.flow is Flow.BUDGET_EXHAUSTED:
-                raise DecisionFailed(_CAP_MESSAGE)
+                raise DecisionFailed(cap_message(getattr(res.error, "window", "daily")))
             continue
         meta = res.meta
         return DecisionOutcome(
@@ -877,7 +899,7 @@ async def run_transcribe(
             if res.error is not None:
                 last_error = _failure_text(res)
             if res.flow is Flow.BUDGET_EXHAUSTED:
-                raise TranscribeFailed(_CAP_MESSAGE)
+                raise TranscribeFailed(cap_message(getattr(res.error, "window", "daily")))
             if res.flow is Flow.NEXT_PROVIDER:
                 break  # deterministic for this audio/model → next provider
 

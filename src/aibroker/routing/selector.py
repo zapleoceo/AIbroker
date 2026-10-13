@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -60,6 +60,36 @@ FRESH_DAILY_COST_SQL = (
     "(CASE WHEN k.daily_reset_at IS DISTINCT FROM CURRENT_DATE "
     "THEN 0 ELSE k.daily_cost_used_usd END)"
 )
+
+# Monthly counter (monthly_cost_used_usd): same lazy self-healing reset, keyed on
+# the UTC calendar month. `monthly_reset_at` stores the FIRST DAY of the month the
+# counter belongs to; any other value (incl. NULL — every pre-migration-019 row,
+# whose counter was a never-reset lifetime sum) reads 0 and the next write stamps
+# the current month. The month start is a BOUND PARAMETER (`:month_start`, from
+# `month_start_utc()`), not a SQL function — date_trunc is Postgres-only and this
+# fragment is also exercised on SQLite. Every statement embedding these fragments
+# must therefore pass `month_params()`.
+FRESH_MONTHLY_COST_SQL = (
+    "(CASE WHEN k.monthly_reset_at IS DISTINCT FROM :month_start "
+    "THEN 0 ELSE k.monthly_cost_used_usd END)"
+)
+# Key-level monthly admission for the pick: no cap, or still under the cap. Mirrors
+# the daily predicate exactly — a key-level cap is about that key, so cap 0 excludes
+# the key whatever its tier ("free providers only" is the project-level rule, handled
+# in cost_guard.reserve_cost).
+MONTHLY_CAP_OK_SQL = (
+    f"(k.monthly_cost_cap_usd IS NULL OR {FRESH_MONTHLY_COST_SQL} < k.monthly_cost_cap_usd)"
+)
+
+
+def month_start_utc() -> date:
+    """First day of the current UTC calendar month (the monthly-reset boundary)."""
+    return datetime.now(UTC).date().replace(day=1)
+
+
+def month_params() -> dict[str, object]:
+    return {"month_start": month_start_utc()}
+
 
 # Effective ∞ for an uncapped saturation axis (paid / unknown provider).
 _INF = "999999999999"
@@ -213,9 +243,10 @@ async def pick_and_reserve(
         "k.scopes ? :scope",
         "(k.cooldown_until IS NULL OR k.cooldown_until < now())",
         f"(k.daily_cost_cap_usd IS NULL OR {FRESH_DAILY_COST_SQL} < k.daily_cost_cap_usd)",
+        MONTHLY_CAP_OK_SQL,
         f"(k.daily_limit = 0 OR {FRESH_DAILY_USED_SQL} < k.daily_limit)",
     ]
-    params: dict[str, object] = {"provider": provider, "scope": scope}
+    params: dict[str, object] = {"provider": provider, "scope": scope, **month_params()}
     if require_tier:
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
@@ -325,6 +356,7 @@ def _hydrate_key_row(row) -> ApiKeyRow:  # pragma: no cover — Postgres row →
         monthly_cost_used_usd=row["monthly_cost_used_usd"],
         total_cost_usd=row["total_cost_usd"],
         daily_reset_at=row["daily_reset_at"],
+        monthly_reset_at=row["monthly_reset_at"],
         cooldown_until=row["cooldown_until"],
         error_count=row["error_count"],
         last_used_at=row["last_used_at"],
@@ -485,7 +517,8 @@ async def record_usage(
         f"SET daily_used = {FRESH_DAILY_USED_SQL} + 1, "
         f"    daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :co, "
         "    daily_reset_at = CURRENT_DATE, "
-        "    monthly_cost_used_usd = monthly_cost_used_usd + :co, "
+        f"    monthly_cost_used_usd = {FRESH_MONTHLY_COST_SQL} + :co, "
+        "    monthly_reset_at = :month_start, "
         f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
         "WHERE k.id = :k"
     )
@@ -493,6 +526,7 @@ async def record_usage(
         insert_sql = _insert_sql(missing=missing)
         dropped = {param for col, param in _OPTIONAL_USAGE_COLS if col in missing}
         p = {k: v for k, v in params.items() if k not in dropped}
+        upd_p = {**p, **month_params()}
         async with get_session() as s:
             if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
                 # One round-trip: data-modifying CTE folds the INSERT and the
@@ -503,14 +537,14 @@ async def record_usage(
                     text(f"WITH ins AS ({insert_sql}), "
                          f"upd AS ({update_sql} RETURNING 1) "
                          "SELECT id FROM ins"),
-                    p,
+                    upd_p,
                 )).scalar_one()
             else:
                 # SQLite (test gate) allows only SELECT in a WITH clause — a
                 # data-modifying CTE is a syntax error there. Same statements,
                 # same session/transaction, just two round-trips.
                 usage_id = (await s.execute(text(insert_sql), p)).scalar_one()
-                await s.execute(text(update_sql), p)
+                await s.execute(text(update_sql), upd_p)
         return int(usage_id)
 
     missing = frozenset(_missing_usage_cols)

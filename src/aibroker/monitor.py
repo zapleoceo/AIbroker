@@ -113,6 +113,11 @@ def _paid_key_usable(key, cap_providers: set[str], scope: str,
         return False
     if scope not in (key.scopes or []):
         return False
+    if key.monthly_cost_cap_usd is not None:
+        m_used = (key.monthly_cost_used_usd
+                  if key.monthly_reset_at == now.date().replace(day=1) else 0.0)
+        if m_used >= key.monthly_cost_cap_usd:
+            return False
     if key.daily_cost_cap_usd is None:
         return True
     used = key.daily_cost_used_usd if key.daily_reset_at == now.date() else 0.0
