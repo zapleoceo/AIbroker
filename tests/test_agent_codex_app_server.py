@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from aibroker.agent.adapter import AgentRunSpec
 from aibroker.agent.codex_app_server import run_tool_turn
 
@@ -156,3 +158,108 @@ async def test_app_server_refuses_user_config_in_auth_home(tmp_path):
     events = [item async for item in run_tool_turn(_Adapter(home), run)]
     assert events[0].type == "run.failed"
     assert events[0].error_class == "settings_refused"
+
+
+class _ScriptedWriter(_Writer):
+    """Server->client requests use their own id counter, unrelated to ours."""
+
+    def __init__(self, reader, server_ids, method="item/tool/call", pre_turn=None):
+        super().__init__(reader)
+        self.server_ids = list(server_ids)
+        self.method = method
+        self.pre_turn = pre_turn
+        self.answered = 0
+
+    def _server_request(self, index):
+        self.reader.put({"id": self.server_ids[index], "method": self.method, "params": {
+            "threadId": "thread-1", "turnId": "turn-1", "namespace": None,
+            "callId": f"call-{index}", "tool": "lookup", "arguments": {"id": index}}})
+
+    def write(self, data):
+        message = json.loads(data)
+        method = message.get("method")
+        if method == "turn/start":
+            self.sent.append(message)
+            if self.pre_turn:
+                self.reader.put(self.pre_turn)
+            self.reader.put({"id": 3, "result": {"turn": {"id": "turn-1"}}})
+            self._server_request(0)
+        elif "method" not in message and "result" in message and message["id"] in self.server_ids:
+            self.sent.append(message)
+            self.answered += 1
+            if self.answered < len(self.server_ids):
+                self._server_request(self.answered)
+            else:
+                self.reader.put({"method": "item/completed", "params": {
+                    "threadId": "thread-1", "turnId": "turn-1",
+                    "item": {"type": "agentMessage", "text": "done"}}})
+                self.reader.put({"method": "turn/completed", "params": {
+                    "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}})
+        else:
+            super().write(data)
+
+
+async def _drive(monkeypatch, tmp_path, server_ids, **kwargs):
+    run, home = _run(tmp_path)
+    process = _Process()
+    process.stdin = _ScriptedWriter(process.stdout, server_ids, **kwargs)
+    async def spawn(*_args, **_kw):
+        return process
+    async def publish(*args):
+        return None
+    async def take(*args):
+        return True, "{}"
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides",
+                        lambda _home: ["a=b"])
+    monkeypatch.setattr("aibroker.agent.codex_app_server.publish_call", publish)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
+    events = [item async for item in run_tool_turn(_Adapter(home), run)]
+    return events, process
+
+
+@pytest.mark.parametrize("server_id", [1, 2, 3])
+async def test_server_tool_call_with_our_own_ids_is_not_our_response(
+        monkeypatch, tmp_path, server_id):
+    events, process = await _drive(monkeypatch, tmp_path, [server_id])
+    assert events[-1].type == "run.completed", events[-1]
+    assert [e.type for e in events].count("tool.call") == 1
+    assert process.stdin.sent[-1]["id"] == server_id
+
+
+async def test_five_sequential_tool_calls_with_server_ids_0_to_4_complete(monkeypatch, tmp_path):
+    events, _ = await _drive(monkeypatch, tmp_path, [0, 1, 2, 3, 4])
+    assert events[-1].type == "run.completed", events[-1]
+    assert [e.type for e in events].count("tool.call") == 5
+
+
+async def test_turn_response_after_notification_and_same_id_request(monkeypatch, tmp_path):
+    pre = {"method": "thread/status/changed", "params": {"threadId": "thread-1"}}
+    events, _ = await _drive(monkeypatch, tmp_path, [3], pre_turn=pre)
+    assert events[-1].type == "run.completed", events[-1]
+
+
+async def test_unapproved_server_request_with_id_3_still_fails_closed(monkeypatch, tmp_path):
+    events, _ = await _drive(monkeypatch, tmp_path, [3], method="tool/requestUserInput")
+    assert events[-1].type == "run.failed"
+    assert "unapproved operation" in events[-1].message
+
+
+async def test_server_request_before_thread_response_fails_closed(monkeypatch, tmp_path):
+    run, home = _run(tmp_path)
+    process = _Process()
+    class W(_Writer):
+        def write(self, data):
+            if json.loads(data).get("method") == "thread/start":
+                self.reader.put({"id": 2, "method": "item/tool/call", "params": {}})
+                return
+            super().write(data)
+    process.stdin = W(process.stdout)
+    async def spawn(*_args, **_kw):
+        return process
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides",
+                        lambda _home: ["a=b"])
+    events = [item async for item in run_tool_turn(_Adapter(home), run)]
+    assert events[-1].type == "run.failed"
+    assert "unexpected operation" in events[-1].message
