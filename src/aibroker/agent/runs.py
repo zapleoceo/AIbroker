@@ -25,7 +25,7 @@ from aibroker.agent.redact import redact, redact_obj
 from aibroker.agent.subscription_job import output_problem
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
-from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash
+from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash, replayed_job_id
 
 IN_FLIGHT = ("pending", "running")
 
@@ -90,9 +90,15 @@ async def create_run(
     deadline_s: int = 21600, attachments: list[dict[str, Any]] | None = None,
     run_mode: str = "autonomous", accept_paid_continuation_risk: bool = False,
     client_job: dict[str, Any] | None = None,
+    job_idempotency_key: str | None = None, job_payload_hash: str | None = None,
+    trace_id: str | None = None, labels: dict[str, str] | None = None,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
-    (same idempotency_key, or identical payload still in flight)."""
+    (same idempotency_key, or identical payload still in flight).
+
+    `job_*`/`trace_id`/`labels` are the /v1/jobs contract (deep_jobs columns): a job-level
+    Idempotency-Key is checked against `job_payload_hash` (the CLIENT payload hash, free of the
+    broker-picked account) and turns the in-flight payload dedup off for this request."""
     request: dict[str, Any] = {
         "prompt": prompt, "task_id": task_id, "account_id": account_id,
         "session_id": session_id, "wall_timeout_s": wall_timeout_s,
@@ -101,22 +107,28 @@ async def create_run(
         "run_mode": run_mode, "accept_paid_continuation_risk": accept_paid_continuation_risk,
         "client_job": client_job,
     }
-    phash = payload_hash(project.id, capability, request)
+    phash = job_payload_hash or payload_hash(project.id, capability, request)
     if idempotency_key:
         hit = await _find_by_idempotency(project.id, idempotency_key)
         if hit is not None:
             if hit[1].payload_hash != phash:
                 raise RunConflict("idempotency_key already used with a different payload")
             return hit[0].run_id, False
-    existing = await _find_inflight(project.id, capability, phash)
-    if existing is not None:
-        return existing, False
+    if job_idempotency_key:
+        existing = await replayed_job_id(project.id, job_idempotency_key, phash)
+        if existing is not None:
+            return existing, False
+    else:
+        existing = await _find_inflight(project.id, capability, phash)
+        if existing is not None:
+            return existing, False
     if session_id:
         await _check_resume(project.id, capability, account_id, session_id)
     try:
         async with get_session() as s:
             job = DeepJobRow(project_id=project.id, capability=capability, status="pending",
-                             request=request, payload_hash=phash)
+                             request=request, payload_hash=phash, trace_id=trace_id,
+                             labels=labels, idempotency_key=job_idempotency_key)
             s.add(job)
             await s.flush()
             s.add(AgentRunRow(
@@ -126,6 +138,11 @@ async def create_run(
             ))
             run_id = job.id
     except IntegrityError:   # lost the idempotency_key race: the winner's run is the answer
+        if job_idempotency_key:
+            winner = await replayed_job_id(project.id, job_idempotency_key, phash)
+            if winner is None:
+                raise
+            return winner, False
         hit = await _find_by_idempotency(project.id, idempotency_key) if idempotency_key else None
         if hit is None:
             raise

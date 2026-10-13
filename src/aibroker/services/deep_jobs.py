@@ -24,14 +24,15 @@ import hashlib
 import json
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select, text
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_stale_statement, retry_terminal_write
+from aibroker.services.job_meta import log_tag
 
 # Where async transcription parks its base64 audio inside `request`. The queue
 # stores payloads as JSONB, which can't hold raw bytes — and putting the blob in
@@ -65,6 +66,55 @@ def payload_hash(project_id: int, capability: str, request: dict[str, Any]) -> s
     """md5 over project + capability + canonical (sorted, compact) request JSON."""
     canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
     return hashlib.md5(f"{project_id}:{capability}:{canonical}".encode()).hexdigest()
+
+
+class IdempotencyConflict(Exception):
+    """The Idempotency-Key was already used by this project with a different payload."""
+
+    def __init__(self, existing_job_id: int) -> None:
+        self.existing_job_id = existing_job_id
+        super().__init__(f"idempotency key already used by job {existing_job_id} with a different payload")
+
+
+class SubmitOutcome(NamedTuple):
+    job_id: int
+    replayed: bool   # True only for an Idempotency-Key replay (legacy in-flight dedup stays False)
+
+
+def build_request(
+    *, messages: list[dict[str, Any]], model: str | None, max_tokens: int, temperature: float,
+    response_format: dict[str, Any] | None, workflow: str | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The stored request == the payload_hash input: every result-affecting field, and nothing
+    transport-level (trace_id, labels, idempotency key and timestamps never enter it)."""
+    return {
+        "messages": messages, "model": model,
+        "max_tokens": max_tokens, "temperature": temperature,
+        "response_format": response_format, "workflow": workflow,
+        **(extra or {}),
+    }
+
+
+async def find_by_idempotency_key(project_id: int, key: str) -> tuple[int, str | None] | None:
+    """(job id, payload_hash) of this project's job that used `key`, or None."""
+    async with get_session() as s:
+        row = (await s.execute(
+            select(DeepJobRow.id, DeepJobRow.payload_hash)
+            .where(DeepJobRow.project_id == project_id, DeepJobRow.idempotency_key == key)
+        )).first()
+    return (row[0], row[1]) if row else None
+
+
+async def replayed_job_id(project_id: int, key: str, phash: str) -> int | None:
+    """The job an Idempotency-Key already created for the same payload, None when the key is
+    new; IdempotencyConflict when the key was used with a different payload."""
+    hit = await find_by_idempotency_key(project_id, key)
+    if hit is None:
+        return None
+    if hit[1] != phash:
+        raise IdempotencyConflict(hit[0])
+    return hit[0]
 
 
 async def _find_inflight_duplicate(
@@ -112,14 +162,11 @@ async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Pos
         await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
 
 
-# BIGSERIAL id needs a real autoincrementing PK — SQLite doesn't do that for
-# BigInteger, so submit_job's insert-then-flush (and everything it schedules
-# downstream) is exercised only by the Postgres-only tests: the submit/dedup
-# tests in tests/test_deep_jobs.py (test_submit_same_payload_twice_returns_
-# same_id_single_row and friends) plus the end-to-end
-# test_deep_submit_enqueues_and_dispatcher_drains_to_done in
-# tests/test_routes_proxy.py — not the SQLite coverage run, hence
-# `# pragma: no cover` on this and the next two defs.
+# The legacy dedup/insert paths are exercised by the Postgres-only tests in
+# tests/test_deep_jobs.py (test_submit_same_payload_twice_returns_same_id_single_row
+# and friends) plus the end-to-end
+# test_deep_submit_enqueues_and_dispatcher_drains_to_done in tests/test_routes_proxy.py;
+# the idempotency/trace/labels paths also run on SQLite (tests/test_job_idempotency.py).
 async def submit_job(  # pragma: no cover
     *,
     project: ProjectRow,
@@ -132,7 +179,34 @@ async def submit_job(  # pragma: no cover
     workflow: str | None,
     extra: dict[str, Any] | None = None,
 ) -> int:
+    """`submit_job_ex` for callers that only need the id (no Idempotency-Key)."""
+    return (await submit_job_ex(
+        project=project, capability=capability, messages=messages, model=model,
+        max_tokens=max_tokens, temperature=temperature, response_format=response_format,
+        workflow=workflow, extra=extra,
+    )).job_id
+
+
+async def submit_job_ex(
+    *,
+    project: ProjectRow,
+    capability: str,
+    messages: list[dict[str, Any]],
+    model: str | None,
+    max_tokens: int,
+    temperature: float,
+    response_format: dict[str, Any] | None,
+    workflow: str | None,
+    extra: dict[str, Any] | None = None,
+    trace_id: str | None = None,
+    labels: dict[str, str] | None = None,
+    idempotency_key: str | None = None,
+) -> SubmitOutcome:
     """ENQUEUE a job for any chat `capability` and return its id immediately.
+
+    `idempotency_key` (unique per project): the same key + payload returns the existing job
+    (replayed=True), a different payload raises IdempotencyConflict, and the legacy in-flight
+    payload dedup is OFF for that request. `trace_id`/`labels` are stored on the row only.
 
     `extra` merges non-chat payload into the stored request — async
     transcription uses it for the base64 audio + filename (see AUDIO_FIELD),
@@ -144,29 +218,40 @@ async def submit_job(  # pragma: no cover
     bounded concurrency. This is what makes the queue survive a worker restart
     (a deploy) and apply backpressure: the request is durably enqueued the
     moment submit returns, whatever the broker/provider pool is doing."""
-    request = {
-        "messages": messages, "model": model,
-        "max_tokens": max_tokens, "temperature": temperature,
-        "response_format": response_format, "workflow": workflow,
-        **(extra or {}),
-    }
+    request = build_request(messages=messages, model=model, max_tokens=max_tokens,
+                            temperature=temperature, response_format=response_format,
+                            workflow=workflow, extra=extra)
     phash = payload_hash(project.id, capability, request)
-    existing = await _find_inflight_duplicate(project.id, capability, phash)
-    if existing is not None:
-        # Identical request already in flight — hand back its id (the client's
-        # own resubmit storm now polls ONE job) and don't wake the dispatcher.
-        log.info("dedup: project=%s %s resubmitted in-flight job %s — returning it",
-                 project.id, capability, existing)
-        return existing
-    if _dedup_available:
-        async with get_session() as s:
-            row = DeepJobRow(project_id=project.id, capability=capability,
-                              status="pending", request=request,
-                              payload_hash=phash)
-            s.add(row)
-            await s.flush()
-            job_id = row.id
+    if idempotency_key:
+        existing = await replayed_job_id(project.id, idempotency_key, phash)
+        if existing is not None:
+            return SubmitOutcome(existing, True)
     else:
+        existing = await _find_inflight_duplicate(project.id, capability, phash)
+        if existing is not None:
+            # Identical request already in flight — hand back its id (the client's
+            # own resubmit storm now polls ONE job) and don't wake the dispatcher.
+            log.info("dedup: project=%s %s resubmitted in-flight job %s — returning it",
+                     project.id, capability, existing)
+            return SubmitOutcome(existing, False)
+    if _dedup_available or idempotency_key:
+        try:
+            async with get_session() as s:
+                row = DeepJobRow(project_id=project.id, capability=capability,
+                                  status="pending", request=request,
+                                  payload_hash=phash, trace_id=trace_id, labels=labels,
+                                  idempotency_key=idempotency_key)
+                s.add(row)
+                await s.flush()
+                job_id = row.id
+        except IntegrityError:
+            # Lost the (project_id, idempotency_key) race: the winner's job is the answer.
+            winner = (await replayed_job_id(project.id, idempotency_key, phash)
+                      if idempotency_key else None)
+            if winner is None:
+                raise
+            return SubmitOutcome(winner, True)
+    else:  # pragma: no cover — only before migration 010
         # Degraded (migration 010 not applied yet): raw INSERT naming ONLY the
         # pre-010 columns. An ORM insert is unsafe here — SQLAlchemy's compiled
         # cache may reuse a statement that references payload_hash from before
@@ -190,7 +275,9 @@ async def submit_job(  # pragma: no cover
     except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
         log.debug("pg_notify(%s) failed: %s — poll fallback covers it",
                   JOBS_CHANNEL, e)
-    return job_id
+    log.info("job %d enqueued: project=%s %s%s", job_id, project.id, capability,
+             log_tag(trace_id, labels))
+    return SubmitOutcome(job_id, False)
 
 
 async def submit_deep_job(  # pragma: no cover

@@ -52,6 +52,8 @@
   <span class="chip warn">{{ t("pending", "ожидает") }}</span>
 {%- elif r.state == "running" -%}
   <span class="chip info">{{ t("running", "в работе") }}</span>
+{%- elif r.state == "cancelled" -%}
+  <span class="chip warn">{{ t("cancelled", "отменён") }}</span>
 {%- elif r.err -%}
   <span class="chip {{ r.err[2] }}" title="{{ r.http_status or '' }} {{ r.error_kind or '' }}">{{ t(r.err[0], r.err[1]) }}</span>
 {%- else -%}

@@ -43,7 +43,10 @@ from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
+from aibroker.services.job_control import cancel_flag
+from aibroker.services.job_meta import log_tag
 from aibroker.services.llm_service import (
+    CANCELLED,
     CONTENT_FAILED,
     _BudgetExhausted,
     cap_message,
@@ -102,7 +105,7 @@ _SHUTDOWN_GRACE_S = min(float(os.environ.get("JOB_SHUTDOWN_GRACE_S", "5")), 8.0)
 # task was cancelled (shutdown), which is exactly the set to hand back.
 _CLAIMED: dict[int, datetime | None] = {}
 
-# How long a FINISHED job (done/error) is kept before it is deleted. Nothing
+# How long a FINISHED job (done/error/cancelled) is kept before it is deleted. Nothing
 # reads them: the dashboard and monitor never touch deep_jobs, and a caller
 # polls its result within seconds — a week is already far past any real poll.
 # Left unbounded until 2026-07-26 the table had grown to 1.6 GB / 103k rows,
@@ -233,7 +236,12 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
     worker whose job was already stale-reclaimed and re-claimed by another
     worker can't clobber the live claim — reset its started_at, or fail a job
     that's legitimately running elsewhere (2026-07-19 review: only the success
-    path was guarded, so the error/no-provider paths could double-execute)."""
+    path was guarded, so the error/no-provider paths could double-execute).
+
+    A job whose client asked to cancel ends `cancelled` here instead of being retried."""
+    if await cancel_flag(job_id):
+        await _finish(job_id, status="cancelled", expect_started_at=expect_started_at)
+        return
     if retry_count + 1 > (_MAX_RETRIES if max_retries is None else max_retries):
         await _finish(job_id, status="error",
                        error_message=f"{reason} (gave up after {retry_count} retries)",
@@ -313,12 +321,19 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     (skipif ON_SQLITE); the paid-only escalation branch is also driven directly
     on SQLite (test_execute_final_attempt_escalates_to_paid_only)."""
     req = row.request
+    tag = log_tag(row.trace_id, row.labels)
     async with get_session() as s:
         project = await s.get(ProjectRow, row.project_id)
     if project is None:
         await _finish(row.id, status="error", error_message="project no longer exists",
                        expect_started_at=row.started_at)
         return
+    if row.cancel_requested:   # asked to cancel while queued/requeued: no provider call at all
+        log.info("job %d (%s) cancelled before running%s", row.id, row.capability, tag)
+        await _finish(row.id, status="cancelled", expect_started_at=row.started_at)
+        return
+    log.info("job %d running: project=%s %s attempt=%d%s", row.id, row.project_id, row.capability,
+             row.retry_count + 1, tag)
     # Final attempt before give-up walks the paid tail only: free-pool storms
     # outlast the 8-retry window, so the last shot must not waste itself on a
     # cooling free pool (2026-07-16: 148 jobs/h died "no provider available"
@@ -328,7 +343,7 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # no-op, so the final retry stays a normal walk instead.
     paid_only = row.retry_count >= _MAX_RETRIES - 1 and has_paid_tail(row.capability)
     if paid_only:
-        log.info("final retry — paid tail only, job %d", row.id)
+        log.info("final retry — paid tail only, job %d%s", row.id, tag)
     try:
         # One request id for every dispatcher retry of this job (job-<id>), so the
         # whole fallback + retry trail groups under the id the client was given.
@@ -344,16 +359,17 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                     workflow=req.get("workflow"),
                     paid_only=paid_only,
                     tools=req.get("tools"), tool_choice=req.get("tool_choice"),
+                    should_stop=lambda: cancel_flag(row.id),
                 )
     except UnknownModel as e:
         # The pin is not in the catalog (queued before a registry change): no retry
         # can fix it — fail the job with the suggestions instead of burning 8 runs.
-        log.warning("job %d (%s) pinned an unknown model: %s", row.id, row.capability, e)
+        log.warning("job %d (%s) pinned an unknown model: %s%s", row.id, row.capability, e, tag)
         await _finish(row.id, status="error", error_message=str(e),
                       expect_started_at=row.started_at)
         return
     except Exception as e:  # noqa: BLE001 — a job must always reach a terminal/requeued state
-        log.warning("job %d (%s) errored: %s", row.id, row.capability, e)
+        log.warning("job %d (%s) errored: %s%s", row.id, row.capability, e, tag)
         if isinstance(e, _DETERMINISTIC_ERRORS):
             await _finish(row.id, status="error",
                            error_message=f"invalid job ({type(e).__name__}): {e}",
@@ -361,6 +377,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             return
         await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
                                 expect_started_at=row.started_at)
+        return
+    if outcome is CANCELLED:
+        await _finish(row.id, status="cancelled", expect_started_at=row.started_at)
         return
     if isinstance(outcome, _BudgetExhausted):
         # A project/global daily or monthly cap is spent — more retries can't create budget,
@@ -442,7 +461,7 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
     went. Batched (see _JOB_RETENTION_BATCH) so a large first sweep can't hold
     a long lock; the next tick continues where this one stopped.
 
-    Only `done`/`error` rows are eligible — never `pending`/`running`, so an
+    Only `done`/`error`/`cancelled` rows are eligible — never `pending`/`running`, so an
     in-flight job (or one waiting on backoff) is untouchable regardless of age.
     Idempotent and safe to run on every tick."""
     async with get_session() as s:
@@ -450,7 +469,7 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
             text(
                 "DELETE FROM deep_jobs WHERE id IN ("
                 "  SELECT id FROM deep_jobs "
-                "  WHERE status IN ('done', 'error') "
+                "  WHERE status IN ('done', 'error', 'cancelled') "
                 "    AND completed_at IS NOT NULL "
                 "    AND completed_at < now() - make_interval(days => :days) "
                 "  LIMIT :batch"

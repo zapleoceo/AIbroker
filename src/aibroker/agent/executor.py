@@ -41,6 +41,7 @@ from aibroker.providers.subscriptions import (
     subscription_tool_model_canary,
     subscription_tool_model_verified,
 )
+from aibroker.services.job_meta import log_tag
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,8 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunTimedOut(limit="deadline"), totals)
     if run.cancel_requested:
         return await _finish(run_id, ev.RunCancelled(), totals)
+    log.info("agent run %d starting: project=%s %s%s", run_id, run.project_id, run.capability,
+             log_tag(job.trace_id, job.labels))
     adapter = make_adapter(run.capability)
     if adapter is None:
         return await _finish(run_id, ev.RunFailed(

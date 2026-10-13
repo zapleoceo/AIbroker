@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
   id BIGSERIAL PRIMARY KEY,
   project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   capability VARCHAR(30) NOT NULL DEFAULT 'chat:deep',
-  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|running|done|error
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',   -- pending|running|done|error|cancelled
   request JSONB NOT NULL,
   payload_hash VARCHAR(32),     -- md5(project:capability:canonical request) — in-flight dedup (010)
   result_text TEXT,
@@ -134,13 +134,20 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
   run_after TIMESTAMP,          -- earliest eligible time (backoff); NULL = now
   started_at TIMESTAMP,         -- when a dispatcher claimed it (→ running)
   created_at TIMESTAMP NOT NULL DEFAULT now(),
-  completed_at TIMESTAMP
+  completed_at TIMESTAMP,
+  trace_id VARCHAR(128),          -- client correlation id (020)
+  labels JSONB,                   -- client labels, <= 8 keys (020)
+  idempotency_key VARCHAR(128),   -- unique per project while the row lives (020)
+  cancel_requested BOOLEAN NOT NULL DEFAULT false   -- cooperative cancel of a running plain job (020)
 );
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);
 -- Dispatcher claim scan (services/job_queue.py): eligible pending rows.
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after, created_at);
 -- In-flight dedup lookup in submit_job (migration 010).
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_dedup ON deep_jobs(project_id, capability, payload_hash, created_at DESC);
+-- Idempotency-Key uniqueness + trace lookup (migration 020).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_deep_jobs_idempotency ON deep_jobs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_trace ON deep_jobs(project_id, trace_id) WHERE trace_id IS NOT NULL;
 
 -- Agent runs (017): side record + typed event log for `agent:*` deep_jobs rows.
 CREATE TABLE IF NOT EXISTS agent_runs (
