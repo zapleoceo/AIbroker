@@ -186,6 +186,31 @@ async def test_same_key_with_a_different_payload_is_409_with_existing_job_id():
     assert await _count(pid) == 1
 
 
+async def test_explicit_defaults_and_null_message_fields_hash_like_omitted_ones():
+    key, pid = await _make_project(["llm:chat"])
+    client = TestClient(app)
+    first = await _submit(client, key, {"messages": [{"role": "user", "content": "hi"}]},
+                          **{"Idempotency-Key": "k-norm"})
+    explicit = {"messages": [{"role": "user", "content": "hi", "tool_calls": None,
+                              "tool_call_id": None}],
+                "max_tokens": proxy.ChatRequest.model_fields["max_tokens"].default,
+                "temperature": proxy.ChatRequest.model_fields["temperature"].default,
+                "model": None, "response_format": None, "workflow": None}
+    again = await _submit(client, key, explicit, **{"Idempotency-Key": "k-norm"})
+    assert first.status_code == 202 and again.status_code == 200
+    assert again.json()["job_id"] == first.json()["job_id"]
+    assert await _count(pid) == 1
+
+
+async def test_replay_comes_before_pin_validation_and_availability_checks():
+    key, _ = await _make_project(["llm:chat"])
+    client = TestClient(app)
+    first = await _submit(client, key, **{"Idempotency-Key": "k-cfg"})
+    with patch.object(proxy, "_validate_pin", side_effect=AssertionError("must not run")):
+        again = await _submit(client, key, **{"Idempotency-Key": "k-cfg"})
+    assert again.status_code == 200 and again.json()["job_id"] == first.json()["job_id"]
+
+
 async def test_a_changed_model_or_max_tokens_is_a_different_payload():
     key, _ = await _make_project(["llm:chat"])
     client = TestClient(app)
@@ -321,6 +346,10 @@ async def test_subscription_early_replay_skips_create_run_and_conflicts_on_other
                     json=body)
     assert r.status_code == 200 and r.json()["job_id"] == job_id
     admit.assert_not_awaited()                         # a replay spends no request-cap unit
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS", "{}")   # config drifted
+    again = client.post("/v1/jobs?capability=chat:fast", headers=_h(key, **{"Idempotency-Key": "early"}),
+                        json=body)
+    assert again.status_code == 200 and again.json()["job_id"] == job_id
     other = {**body, "messages": [{"role": "user", "content": "different"}]}
     r = client.post("/v1/jobs?capability=chat:fast", headers=_h(key, **{"Idempotency-Key": "early"}),
                     json=other)
@@ -514,9 +543,11 @@ async def test_cancel_agent_job_pending_cancels_and_running_requests_cancel_via_
     client = TestClient(app)
     queued = await _insert_agent_job(pid)
     r = client.post(f"/v1/jobs/{queued}/cancel", headers=_h(key)).json()
-    assert r["state"] == "cancelled" and r["status"] == "error"   # agent runs end `error: run.cancelled`
+    assert r["state"] == "cancelled" and r["status"] == "cancelled"
     run, job = await get_run(queued, pid)
-    assert run.outcome == "cancelled" and job.error_message == "run.cancelled"
+    assert run.outcome == "cancelled" and job.status == "cancelled"
+    polled = proxy._job_response(job)
+    assert polled.status == "cancelled" and polled.error is None
     running = await _insert_agent_job(pid, "agent:codex")
     await _set(running, status="running")
     r = client.post(f"/v1/jobs/{running}/cancel", headers=_h(key)).json()

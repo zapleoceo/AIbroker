@@ -237,7 +237,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             if job is not None:
                 history = (job.result_meta or {}).get("client_tool_history") or []
                 usage_observed = (job.result_meta or {}).get("usage_observed") or {}
-                job.status = "done" if event.type == "run.completed" else "error"
+                job.status = ("done" if event.type == "run.completed"
+                              else "cancelled" if event.type == "run.cancelled" else "error")
                 job.completed_at = now
                 if event.type == "run.completed":
                     job.result_text = redact(event.final_text)

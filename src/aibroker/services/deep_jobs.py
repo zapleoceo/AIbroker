@@ -62,9 +62,22 @@ _DEDUP_WINDOW_S = 30 * 60
 _dedup_available = True
 
 
+def _without_null_message_fields(request: dict[str, Any]) -> dict[str, Any]:
+    """`{"role":"user","content":"x","tool_calls":null}` and the same message without the key
+    are one request: drop null-valued keys of each message before hashing."""
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return request
+    return {**request, "messages": [
+        {k: v for k, v in m.items() if v is not None} if isinstance(m, dict) else m
+        for m in messages]}
+
+
 def payload_hash(project_id: int, capability: str, request: dict[str, Any]) -> str:
-    """md5 over project + capability + canonical (sorted, compact) request JSON."""
-    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    """md5 over project + capability + canonical (sorted, compact) request JSON; explicit nulls in
+    messages and omitted fields hash alike."""
+    canonical = json.dumps(_without_null_message_fields(request), sort_keys=True,
+                           separators=(",", ":"))
     return hashlib.md5(f"{project_id}:{capability}:{canonical}".encode()).hexdigest()
 
 

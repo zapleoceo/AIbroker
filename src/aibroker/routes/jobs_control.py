@@ -11,10 +11,28 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.auth import ProjectCtx, require_project
+from aibroker.services.deep_jobs import IdempotencyConflict, replayed_job_id
 from aibroker.services.job_control import AgentCancelForbidden, cancel_job, cancel_matching
 from aibroker.services.job_meta import check_labels, check_token
 
 router = APIRouter(tags=["jobs"])
+
+
+def idempotency_conflict(exc: IdempotencyConflict) -> HTTPException:
+    return HTTPException(409, detail={
+        "error": "idempotency_key_conflict", "existing_job_id": exc.existing_job_id,
+        "message": "Idempotency-Key was already used with a different payload"})
+
+
+async def known_job_id(project_id: int, key: str | None, phash: str | None) -> int | None:
+    """The job an Idempotency-Key already created for this payload (None: new key or no key);
+    HTTP 409 when the key was used with a different payload."""
+    if not key or phash is None:
+        return None
+    try:
+        return await replayed_job_id(project_id, key, phash)
+    except IdempotencyConflict as exc:
+        raise idempotency_conflict(exc) from exc
 
 
 class CancelResponse(BaseModel):
@@ -31,12 +49,12 @@ class BulkCancelRequest(BaseModel):
 
     @field_validator("trace_id")
     @classmethod
-    def _trace(cls, value: str | None) -> str | None:
+    def _trace(_cls, value: str | None) -> str | None:
         return None if value is None else check_token(value, "trace_id")
 
     @field_validator("labels")
     @classmethod
-    def _labels(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+    def _labels(_cls, value: dict[str, str] | None) -> dict[str, str] | None:
         return check_labels(value)
 
     @model_validator(mode="after")

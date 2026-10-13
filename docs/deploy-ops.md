@@ -180,37 +180,57 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+**Rollout order for migration 020 (important).** On `master` the dispatcher claims with
+`UPDATE … RETURNING *` and builds `DeepJobRow(**row)` after the commit, so once the new columns exist
+that code raises `TypeError` on the unknown keys: claimed jobs sit in `running`, are dropped, and only the
+25-minute stale reclaim recovers them (burning a retry). Therefore:
+
+1. Deploy PR #76 first (it contains #71: explicit column lists for the claim and the key pick, plus the
+   shutdown requeue). It works with and without the new columns.
+2. Apply migration 020 (below) and run the post-check.
+3. Deploy the branch with the 020 code (`feat/jobs-trace-idempotency-cancel`). It keeps an explicit
+   `_JOB_COLUMNS` claim (the same idea as #71; expect a trivial conflict in `services/job_queue.py` when
+   rebasing on #76 — keep one explicit list that includes `trace_id, labels, idempotency_key,
+   cancel_requested`).
+
+Never apply 020 while plain `master` code is still serving, and never deploy this branch before 020: the
+ORM selects every `deep_jobs` column on each poll and claim.
+
 Migration 020 (2026-10-13, job trace / idempotency / cancel) adds four columns to `deep_jobs` —
 `trace_id varchar(128)`, `labels jsonb`, `idempotency_key varchar(128)` (all nullable) and
 `cancel_requested boolean NOT NULL DEFAULT false` — plus two partial indexes: the UNIQUE
 `ux_deep_jobs_idempotency (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL` and
 `ix_deep_jobs_trace (project_id, trace_id) WHERE trace_id IS NOT NULL`. Purely additive; the new status
 value `cancelled` needs no DDL (`deep_jobs.status` is a plain `varchar(20)`, no CHECK or enum).
-**Apply it BEFORE deploying this code**: the ORM selects every `deep_jobs` column on each poll and claim,
-so code that lands first fails on the missing columns.
+Apply it after #76 is live and before the 020 code (order above).
 
 ```
-docker exec -i aibroker-postgres psql -U aibroker aibroker \
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
   < /var/www/aibroker/infra/sql/migrations/020_deep_jobs_trace_idempotency.sql
 ```
 
-- Run it exactly like that (stdin / `-f`, autocommit), **not** with `psql -1` or inside a transaction: the
-  two `CREATE INDEX CONCURRENTLY` statements cannot run in one. `deep_jobs` is moderately large and written
+Post-check (both rows must show `indisvalid = t`):
+
+```
+docker exec -i aibroker-postgres psql -U aibroker aibroker -c \
+  "SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE indexrelid IN ('ux_deep_jobs_idempotency'::regclass, 'ix_deep_jobs_trace'::regclass);"
+```
+
+- Run it exactly like that (stdin / `-f`, autocommit, `-v ON_ERROR_STOP=1`), **not** with `psql -1` or inside a
+  transaction: the two `CREATE INDEX CONCURRENTLY` statements cannot run in one. The file does `RESET lock_timeout`
+  before the builds, because the 5 s `lock_timeout` would otherwise abort a `CONCURRENTLY` build and leave an
+  INVALID index that `IF NOT EXISTS` skips. `deep_jobs` is moderately large and written
   on every submit/claim/finish, so a plain index build would block those writes; both indexes are partial
   over all-NULL history, so the builds are tiny. If a concurrent build is interrupted it leaves an INVALID
   index that `IF NOT EXISTS` would skip — `DROP INDEX CONCURRENTLY IF EXISTS <name>` and re-run.
 - `ADD COLUMN … NOT NULL DEFAULT false` is metadata-only on PostgreSQL 11+ (the stack runs `pgvector/pgvector:pg16`):
   no table rewrite, no long lock; `SET lock_timeout = '5s'` makes the `ALTER`s fail fast instead of queueing
   behind a long transaction. `infra/sql/init.sql` mirrors the columns and indexes.
-- **pgbouncer / old code.** The previous dispatcher claimed with `UPDATE … RETURNING *` and built `DeepJobRow`
-  from every returned column. After the `ALTER`, that statement returns four more columns: through the
-  transaction-pooling pgbouncer (asyncpg prepared statements, `MAX_PREPARED_STATEMENTS`) already-cached
-  plans fail with "cached statement plan is invalid" until the connection is recycled, and the old
-  `DeepJobRow(**row)` rejects the unknown keys. Effect while the OLD code is still running: dispatcher claim
-  ticks fail and back off (logged, jobs stay `pending`, nothing is lost) until the new code is live. So: apply
-  020, deploy immediately, then restart `api` (the deploy recreates it) so no worker keeps a stale prepared
-  statement; the new code names the claimed columns explicitly (`_JOB_COLUMNS`) and no longer breaks on the
-  next `ALTER`.
+- **Why the order matters.** With plain `master` code still running, the claim `UPDATE … RETURNING *` returns the
+  four new columns (through the transaction-pooling pgbouncer cached prepared statements also fail with
+  "cached statement plan is invalid" until the connection is recycled) and `DeepJobRow(**row)` raises on the
+  unknown keys after the commit. #76/#71 and this branch name the claimed columns explicitly, so they survive any
+  later `ALTER`. After step 3 recreate `api` (the deploy does) so no worker keeps a stale prepared statement.
 - **Retention.** `cancelled` rows are pruned with `done`/`error` after `JOB_RETENTION_DAYS`; an
   `Idempotency-Key` therefore lives exactly as long as its job row (see
   [api.md](api.md#idempotency-key-migration-020)).

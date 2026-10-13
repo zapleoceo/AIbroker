@@ -372,6 +372,10 @@ headers and timestamps are excluded, so re-sending with another trace id is stil
 keeps its original trace). Two simultaneous submits with one key race on the unique index; the loser gets
 the winner's job (`200` replay) or the `409`. For subscription pins (`claude-sub/…`, `codex-sub/…`) the
 payload compared is the client's request, so the account the broker picks never causes a `409`.
+Equivalent requests hash equally: omitted fields and their explicit defaults (`max_tokens`, `temperature`, `model: null`)
+and `null`-valued message keys (`tool_calls: null`) are the same payload. A known key is answered right after the
+scope and project checks, **before** pin validation and the subscription availability/verification checks, so a
+config change since the first submit cannot turn a retry into a `503`/`4xx`.
 
 **Retention and key stability.** The key lives exactly as long as the job row: `done`/`error`/`cancelled`
 rows are deleted after `JOB_RETENTION_DAYS` (default 7), after which the same key starts a fresh job. The
@@ -396,8 +400,8 @@ field tells what actually happened:
 attempt (and before a requeued job runs), never in the middle of a provider call. A call already sent to a
 provider keeps running and **may still be billed**; cancel only prevents the next attempts. `agent:*` and
 subscription jobs reuse the agent run's own cancel (`POST /v1/agent/runs/{id}/cancel` semantics) and need the
-`llm:agent` scope (`403` otherwise); a cancelled agent run keeps reporting `status: "error"` with
-`error: "run.cancelled"` on poll, as before.
+`llm:agent` scope (`403` otherwise); a cancelled agent run polls as `status: "cancelled"` like any other job
+(it used to report `error: "run.cancelled"`; the run's own `GET /v1/agent/runs/{id}` status was already `cancelled`).
 
 `POST /v1/jobs/cancel` cancels **all non-terminal jobs of your project** matching exactly one selector —
 `{"trace_id": "X"}` or `{"labels": {"exam_run_id": "X"}}` (a labels selector matches jobs whose labels contain

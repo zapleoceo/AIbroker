@@ -62,6 +62,7 @@ from aibroker.providers.subscriptions import (
     subscription_model_verified,
     subscription_tool_model_canary,
 )
+from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
     DecisionFailed,
@@ -81,7 +82,6 @@ from aibroker.services.deep_jobs import (
     IdempotencyConflict,
     build_request,
     payload_hash,
-    replayed_job_id,
     submit_job_ex,
 )
 from aibroker.services.job_meta import check_labels, check_token, resolve_trace_id
@@ -151,12 +151,12 @@ class ChatRequest(BaseModel):
 
     @field_validator("trace_id")
     @classmethod
-    def valid_trace_id(cls, value: str | None) -> str | None:
+    def valid_trace_id(_cls, value: str | None) -> str | None:
         return None if value is None else check_token(value, "trace_id")
 
     @field_validator("labels")
     @classmethod
-    def valid_labels(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+    def valid_labels(_cls, value: dict[str, str] | None) -> dict[str, str] | None:
         return check_labels(value)
 
     @model_validator(mode="after")
@@ -659,12 +659,6 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
                 "tool_choice": body.tool_choice} if body.tools else None))
 
 
-def _idempotency_conflict(exc: IdempotencyConflict) -> HTTPException:
-    return HTTPException(409, detail={
-        "error": "idempotency_key_conflict", "existing_job_id": exc.existing_job_id,
-        "message": "Idempotency-Key was already used with a different payload"})
-
-
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
     """200 + the job's CURRENT poll body for an Idempotency-Key replay (never a new job)."""
     row = await get_job(job_id, ctx.project.id)
@@ -713,11 +707,14 @@ async def jobs_submit(
     _require_image_access(ctx, [m.model_dump(exclude_unset=True) for m in body.messages],
                           check_decode=subscription is None)
     if subscription is not None:
-        _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
         if not ctx.has_scope(AGENT_SCOPE):
             raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
         if not project_allowed(ctx.project.id):
             raise AgentProjectNotAllowed(ctx.project.id)
+        # A retry of a known key must not meet config checks that changed since the first submit.
+        if (known := await known_job_id(ctx.project.id, idempotency_key, client_hash)) is not None:
+            return await _replay(ctx, known)
+        _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
         if subscription.provider == "codex-sub" and not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
             raise HTTPException(503, "codex subscription route is not enabled")
         if not subscription_model_verified(subscription.id):
@@ -749,13 +746,6 @@ async def jobs_submit(
         prompt = prompt_for_messages(messages, body.response_format)
         if problem := subscription_prompt_problem(prompt):
             raise HTTPException(400, problem)
-        if idempotency_key:
-            try:
-                replayed = await replayed_job_id(ctx.project.id, idempotency_key, client_hash)  # type: ignore[arg-type]
-            except IdempotencyConflict as exc:
-                raise _idempotency_conflict(exc) from exc
-            if replayed is not None:
-                return await _replay(ctx, replayed)
         await admit_request(ctx.project)
         try:
             job_id, created = await create_run(
@@ -774,21 +764,16 @@ async def jobs_submit(
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
         except IdempotencyConflict as exc:   # lost the key race to a different payload
-            raise _idempotency_conflict(exc) from exc
+            raise idempotency_conflict(exc) from exc
         if idempotency_key and not created:
             return await _replay(ctx, job_id)
         response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
         await wake_worker(PROVIDERS[subscription.provider], job_id)
         return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
                                  trace_id=trace_id, labels=body.labels)
+    if (known := await known_job_id(ctx.project.id, idempotency_key, client_hash)) is not None:
+        return await _replay(ctx, known)
     _validate_pin(body.model, capability)
-    if idempotency_key:
-        try:
-            replayed = await replayed_job_id(ctx.project.id, idempotency_key, client_hash)  # type: ignore[arg-type]
-        except IdempotencyConflict as exc:
-            raise _idempotency_conflict(exc) from exc
-        if replayed is not None:
-            return await _replay(ctx, replayed)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
     await admit_request(ctx.project)
     try:
@@ -802,7 +787,7 @@ async def jobs_submit(
             trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
         )
     except IdempotencyConflict as exc:   # lost the key race to a different payload
-        raise _idempotency_conflict(exc) from exc
+        raise idempotency_conflict(exc) from exc
     if outcome.replayed:
         return await _replay(ctx, outcome.job_id)
     job_id = outcome.job_id
