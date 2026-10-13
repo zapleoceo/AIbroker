@@ -34,11 +34,12 @@ from datetime import datetime
 from typing import Any
 
 import asyncpg
-from sqlalchemy import text
+from sqlalchemy import func, text, update
 
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
@@ -53,6 +54,11 @@ from aibroker.telemetry.notifier import alert
 from aibroker.telemetry.request_context import job_request_id, request_scope
 
 log = logging.getLogger(__name__)
+
+# Explicit RETURNING column list (never a star projection): behind pgbouncer's server-side
+# prepared statements a star projection changes result type after ADD COLUMN and
+# Postgres cannot re-plan it (InvalidCachedStatementError, prod 2026-10-13).
+_JOB_COLS_SQL = ", ".join(c.name for c in DeepJobRow.__table__.columns)
 
 # Slots are almost entirely I/O waits (a provider call blocks ~1-60s), so the
 # ceiling gates throughput, not CPU. 8 floored storm throughput at 8×60s while
@@ -78,6 +84,23 @@ _MAX_CONTENT_RETRIES = int(os.environ.get("JOB_MAX_CONTENT_RETRIES", "1"))
 # (At 20 min the margin was ~1 min: a legit 19-min deep call could be re-queued
 # and double-executed. See fix 2026-07-10.)
 _STALE_RUNNING_S = 25 * 60
+
+# Graceful shutdown (SIGTERM → lifespan exit): in-flight calls get this long to
+# finish naturally, then are cancelled and the jobs THIS process still holds are
+# put straight back to `pending`. Without it every deploy left them `running`
+# with no executor until the 25-min stale reclaim above (2026-10-13: vision jobs
+# 552804/552805 sat 22 min after a restart). Clamped below main.py's 15 s wait
+# on the dispatcher so the requeue itself is never cut off.
+# Whole-stop budget vs Docker's `stop_grace_period: 30s` (SIGKILL timer starts at
+# SIGTERM): uvicorn drains open HTTP requests first (`--timeout-graceful-shutdown
+# 10`), then main.py gives the dispatcher 15 s = this grace (<= 8) + cancel +
+# release. 10 + 15 = 25 s, leaving ~5 s for the engine close.
+_SHUTDOWN_GRACE_S = min(float(os.environ.get("JOB_SHUTDOWN_GRACE_S", "5")), 8.0)
+
+# Jobs this process claimed and has not finished: job id -> the started_at it
+# claimed with. Only _execute_guarded writes it; an entry survives only when the
+# task was cancelled (shutdown), which is exactly the set to hand back.
+_CLAIMED: dict[int, datetime | None] = {}
 
 # How long a FINISHED job (done/error) is kept before it is deleted. Nothing
 # reads them: the dashboard and monitor never touch deep_jobs, and a caller
@@ -171,6 +194,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
         )
 
 
+@retry_stale_statement
 async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
     """Atomically claim up to `limit` eligible pending rows → running. FOR
     UPDATE SKIP LOCKED lets every worker's loop claim in parallel without ever
@@ -189,7 +213,7 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
                 "  ORDER BY created_at "
                 "  LIMIT :n "
                 "  FOR UPDATE SKIP LOCKED"
-                ") RETURNING *"
+                f") RETURNING {_JOB_COLS_SQL}"
             ),
             {"n": limit},
         )).mappings().all()
@@ -226,6 +250,41 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
             {"id": job_id, "rc": retry_count + 1, "backoff": _backoff_s(retry_count + 1),
              "expected": expect_started_at},
         )
+
+
+async def _release_claim(job_id: int, started_at: datetime | None) -> bool:
+    """Hand a job this process claimed back to the queue, eligible immediately.
+    Guarded on status='running' AND the exact started_at we claimed with (the
+    same claim guard as _requeue_or_fail/_finish): a job that finished, or was
+    stale-reclaimed and re-claimed by another process, is left alone. retry_count
+    is deliberately NOT bumped — an operator restart is not a failed attempt and
+    must not eat the retry budget. Returns True when the row was released."""
+    if started_at is None:
+        return False
+    async with get_session() as s:
+        res = await s.execute(
+            update(DeepJobRow)
+            .where(DeepJobRow.id == job_id, DeepJobRow.status == "running",
+                   DeepJobRow.started_at == started_at)
+            .values(status="pending", started_at=None,
+                    run_after=func.now())   # DB clock, like the claim's now()
+        )
+        return bool(res.rowcount)
+
+
+async def release_claimed_jobs() -> int:
+    """Shutdown: return every job this process still holds to `pending`. One INFO
+    line per released job; a failing row never blocks the rest."""
+    released = 0
+    for job_id, started_at in list(_CLAIMED.items()):
+        _CLAIMED.pop(job_id, None)
+        try:
+            if await _release_claim(job_id, started_at):
+                released += 1
+                log.info("shutdown: job %d returned to pending", job_id)
+        except Exception:  # noqa: BLE001 — stale reclaim still covers it
+            log.exception("shutdown: could not release job %d", job_id)
+    return released
 
 
 async def _run_transcription_job(project: ProjectRow, req: dict[str, Any]):  # pragma: no cover — exercised via the Postgres drain_once tests
@@ -364,13 +423,18 @@ async def _execute_guarded(row: DeepJobRow) -> None:  # pragma: no cover
     DB blip) is logged here instead of escaping as an unretrieved task
     exception. The row stays `running` and _requeue_stale_running reclaims it -
     the same recovery as a dead worker, so nothing is lost."""
+    _CLAIMED[row.id] = row.started_at
     try:
         await _execute(row)
     except asyncio.CancelledError:
+        # Keep the _CLAIMED entry: shutdown returns this job to the queue.
+        # Residual risk: a paid call that already succeeded but whose _finish did
+        # not commit is re-run (the outcome lives only in this cancelled task).
         raise
     except Exception:  # noqa: BLE001
         log.exception("job %d: could not record its outcome - left for stale-running "
                       "reclaim", row.id)
+    _CLAIMED.pop(row.id, None)
 
 
 async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DELETE, covered by test_job_queue.py's Postgres test
@@ -512,6 +576,40 @@ async def _listen_for_jobs(wake: asyncio.Event, stop: asyncio.Event) -> None:  #
 
 
 async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — loop harness
+    """Run the dispatch loop; on the way out (stop, or cancellation) give the
+    in-flight jobs a short grace, cancel the rest and requeue what is unfinished."""
+    inflight: set[asyncio.Task[Any]] = set()
+    try:
+        await _dispatch(stop, inflight)
+    finally:
+        # main.py bounds this with wait_for, which CANCELS us on timeout. The
+        # release runs as its own shielded task and is awaited to the end even
+        # then, so a timeout can never abort it half-way.
+        work = asyncio.ensure_future(_shutdown_inflight(inflight))
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            await work
+            raise
+        log.info("job dispatcher stopped")
+
+
+async def _shutdown_inflight(inflight: set[asyncio.Task[Any]],
+                             grace_s: float | None = None) -> None:
+    """Wait up to the grace for in-flight jobs, cancel stragglers, then return
+    every job this process still holds to `pending`."""
+    if inflight:
+        _, pending = await asyncio.wait(
+            inflight, timeout=_SHUTDOWN_GRACE_S if grace_s is None else grace_s)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    await release_claimed_jobs()
+
+
+async def _dispatch(stop: asyncio.Event,
+                    inflight: set[asyncio.Task[Any]]) -> None:  # pragma: no cover — loop harness
     """Forever: keep up to `_MAX_CONCURRENCY` jobs in flight, filling free slots
     each tick. Runs one instance per web worker (lifespan). Never lets one slow
     job (nemotron minutes) block claiming others — each runs as its own task.
@@ -521,7 +619,6 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
     floor; the timed wait stays as a fallback (`_IDLE_POLL_INTERVAL_S`) so a
     missed NOTIFY can never stall jobs. On SQLite (tests) no listener starts
     and the loop degrades to the plain `_POLL_INTERVAL_S` poll, as before."""
-    inflight: set[asyncio.Task[Any]] = set()
     wake = asyncio.Event()
     listener: asyncio.Task[None] | None = None
     # Retention runs on a slow counter rather than every tick: it is pure
@@ -571,6 +668,3 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
         listener.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listener
-    if inflight:
-        await asyncio.gather(*inflight, return_exceptions=True)
-    log.info("job dispatcher stopped")

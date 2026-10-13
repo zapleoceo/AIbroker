@@ -477,23 +477,37 @@ async def test_heartbeat_sets_lost_when_the_renewal_is_refused():
         assert await _wait_until(lease.lost.is_set, 1.0)
 
 
+# The in-memory SQLite test DB has ONE shared connection: the lease heartbeat (every 0.1 s)
+# and the executor's event writes interleave their transactions on it and collide on the
+# event seq (CI: IntegrityError UNIQUE run_id, seq). Postgres gives each session its own
+# connection; the CI integration job runs this there.
 async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
     rid = await _resume_run()
     fake = FakeAgentCLI([ev.MessageDelta(text="working"), ("hang",)])
     register_adapter("agent:claude", lambda: fake)
     cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
-                     cancel_poll_s=0.05, lease_ttl_s=0.9, lease_heartbeat_s=0.1)
+                     cancel_poll_s=0.05, lease_ttl_s=5.0, lease_heartbeat_s=0.1)
     task = asyncio.create_task(execute_run(rid, cfg))
-    assert await _wait_until(lambda: fake.started is not None)
+    if not await _wait_until(lambda: fake.started is not None):
+        async with get_session() as s:
+            job = await s.get(DeepJobRow, rid)
+        detail = (task.done() and not task.cancelled() and repr(task.exception()), job.status,
+                  job.run_after, job.error_message, await _events(rid))
+        task.cancel()
+        pytest.fail(f"run never started the CLI: {detail}")
     t0 = time.monotonic()
     await _steal()                                              # a newer holder: renewal -> False
-    assert await asyncio.wait_for(task, 3) is None
-    assert time.monotonic() - t0 < 1.0 and fake.cancel_calls == 1
+    assert await asyncio.wait_for(task, 8) is None
+    # Stopped by the refused heartbeat renewal, well before the 5 s TTL could lapse; the
+    # half-TTL bound proves that without depending on a fast CI runner (was < 1.0 s, flaky).
+    assert time.monotonic() - t0 < 2.5 and fake.cancel_calls == 1
     assert not set(await _events(rid)) & ev.TERMINAL_TYPES      # no terminal write by the zombie
     async with get_session() as s:
         assert (await s.get(DeepJobRow, rid)).status == "running"
 
 
+# Same single-shared-connection effect as above: a wall-clock window around the TTL on SQLite
+# depends on heartbeat/event write interleaving; the integration job runs it on Postgres.
 @pytest.mark.parametrize("failure", ["raises", "hangs"])
 async def test_db_errors_past_the_ttl_stop_the_cli(tmp_path, monkeypatch, failure):
     from aibroker.agent import lock as lock_mod

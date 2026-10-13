@@ -123,6 +123,41 @@ callers poll their result within seconds.
 Tune per environment with `JOB_RETENTION_DAYS` / `JOB_RETENTION_BATCH` /
 `JOB_RETENTION_EVERY_TICKS`.
 
+## Graceful shutdown returns in-flight jobs (2026-10-13)
+
+A deploy recreates `aibroker-api`. Before this, a job it was executing stayed
+`running` after the SIGTERM with no executor until the 25-minute stale reclaim
+(2026-10-13: vision jobs 552804/552805 sat 22 min after a restart).
+
+On a graceful SIGTERM the dispatcher waits up to `JOB_SHUTDOWN_GRACE_S` (default
+**5 s**, clamped to a **max of 8 s**, see the budget below) for the jobs it
+has in flight. Jobs still running after that are cancelled, and every job this
+process claimed and has not finished is returned to the queue by
+`release_claimed_jobs()`: `running` → `pending`, `started_at` cleared,
+`run_after = now`, `retry_count` unchanged (an operator restart is not a failed
+attempt). The release is guarded by the claimed `started_at`, so a job that
+finished, or was re-claimed elsewhere, is left alone. Released jobs are picked up
+within seconds; each one logs an INFO line `shutdown: job N returned to pending`.
+
+Shutdown budget (SIGKILL arrives `stop_grace_period` after SIGTERM, so the whole
+sequence must fit in it): uvicorn first drains open HTTP requests, capped by
+`--timeout-graceful-shutdown 10` (Dockerfile) = **10 s**; then the lifespan gives
+the dispatcher **15 s** (`wait_for` in `main.py`: in-flight grace <= 8 s + cancel +
+release); 10 + 15 = **25 s** < `stop_grace_period: 30s` (`aibroker-api` in
+docker-compose.yml). Without those two settings a long HTTP request would eat the
+default 10 s and the container would be killed before the release ran. The release
+runs shielded, so the `wait_for` timeout cannot abort it. `aibroker-monitor` runs no
+dispatcher and keeps the default.
+The 8 s clamp on `JOB_SHUTDOWN_GRACE_S` exists so the grace always ends inside that
+15 s dispatcher wait, leaving time for cancel and release.
+
+The 25-minute stale reclaim now covers only hard crashes (SIGKILL, OOM, host loss).
+
+Residual risk: a paid provider call that completed but whose finish had not
+committed within the grace is re-run, so double billing is possible in that
+narrow window. Agent jobs are untouched; they are executed by agent workers, not
+by this dispatcher.
+
 ## Schema migrations
 
 Applied via `psql` directly against the running container — there is no
@@ -174,6 +209,45 @@ warns once) if the code lands first, but apply it before deploying so the trail 
 recorded from the first request. The index line should be run separately with
 `CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
 `AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
+
+### Migrations vs pgbouncer prepared statements (2026-10-13)
+
+Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)
+made the API fail repeatedly with `InvalidCachedStatementError`. Jobs were requeued (none
+lost) until the idle pgbouncer server backends were terminated.
+
+- **Why.** pgbouncer runs in transaction pooling mode (`max_prepared_statements=500`) and keeps
+  server-side prepared statements keyed by query text. After `ADD COLUMN`, a `RETURNING *` or
+  `SELECT *` statement changes its result type; Postgres cannot re-plan it, and re-preparing
+  from the client reaches the same stale server statement.
+- **Rule.** No star projections (`RETURNING *`, `SELECT *`) in raw SQL on application tables.
+  Column lists are built from the ORM model (`Model.__table__.columns`); see
+  [conventions.md](conventions.md#sqlalchemy). Guarded by `tests/test_stale_statement.py`
+  (allowlist: CTE reads in `routes/dashboard_requests.py`).
+- **Consequence.** A column present in the model but not yet migrated makes those queries
+  fail, so migrations ALWAYS run before the code deploy.
+- **Safety net.** `retry_stale_statement` (`db/resilience.py`, matcher `is_stale_statement_error`)
+  retries once in a fresh transaction on `InvalidCachedStatementError` (key pick, job claim,
+  job finish) and logs one WARNING. It is a safety net for direct connections only: behind
+  pgbouncer the server statement is reused by query text, so the retry probably does not help.
+  Under pgbouncer the explicit column lists are the fix, plus the operator step below after
+  DDL. It does not replace the migration order.
+- **`ALTER COLUMN ... TYPE`.** On a column that is in a listed query, the query text stays the
+  same but the result type changes, so explicit column lists do not protect it. It needs the
+  operator step below (terminate idle pgbouncer backends) right after the migration.
+  `DROP COLUMN` follows expand/contract: first deploy code that no longer lists the column,
+  then drop it.
+- **Operator step after DDL on a hot table.** From the postgres container, terminate only idle
+  pgbouncer server backends:
+
+  ```sql
+  SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+  WHERE datname='aibroker' AND usename='aibroker'
+    AND client_addr='<pgbouncer container IP>' AND state='idle';
+  ```
+
+  No API restart is needed; a restart does not help, because the stale statements live in
+  pgbouncer's server connections. Do not read the postgres admin password for pgbouncer's console.
 
 ## Agent runs: operator step before deploying the allowlist
 

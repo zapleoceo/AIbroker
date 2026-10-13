@@ -116,6 +116,19 @@ against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
 quietly break cooldown/failover; upgrades must re-run the integration suite
 deliberately.
 
+## Stale prepared statements (2026-10-13)
+
+Raw-SQL statements on application tables use explicit column lists, not star projections:
+`selector._KEY_COLS` (key pick) and `job_queue._JOB_COLS_SQL` (job claim), built from the ORM
+`__table__.columns`. Behind pgbouncer, a `RETURNING *` changes result type after `ADD COLUMN`
+and fails with `InvalidCachedStatementError`. Under pgbouncer the explicit column lists are the
+fix, plus the operator step (terminate idle pgbouncer backends) after DDL.
+`db/resilience.retry_stale_statement` (key pick, job claim, job finish `deep_jobs._finish`;
+one retry in a fresh transaction; `is_stale_statement_error` is the matcher) is only a safety
+net for direct connections: pgbouncer reuses the server statement by query text, so there the
+retry probably does not help. See
+[deploy-ops.md](deploy-ops.md#migrations-vs-pgbouncer-prepared-statements-2026-10-13).
+
 ## Module map (core refactor 2026-10-03)
 
 One provider = one registry entry; one attempt = one template. Design note:
@@ -263,7 +276,10 @@ broker finishes its fallback chain). See `docs/api.md`.
   next `GET /v1/jobs/{id}` poll reads the result row from Postgres (works on
   whichever worker answers).
 - **Resilience (why a queue, not fire-and-forget).**
-  - *Survives a deploy.* A `running` row whose worker died mid-call is detected
+  - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
+    (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to
+    `pending` via `release_claimed_jobs()` (`running` → `pending`; see deploy-ops.md). A
+    `running` row whose worker was hard-killed (SIGKILL, crash) is detected
     (`started_at` past `_STALE_RUNNING_S`) and re-queued by the next tick —
     a few minutes of broker downtime delays answers, never drops them.
   - *Backpressure.* A flood of submits no longer means a flood of concurrent

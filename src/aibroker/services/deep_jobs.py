@@ -31,7 +31,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
-from aibroker.db.resilience import retry_terminal_write
+from aibroker.db.resilience import retry_stale_statement, retry_terminal_write
 
 # Where async transcription parks its base64 audio inside `request`. The queue
 # stores payloads as JSONB, which can't hold raw bytes — and putting the blob in
@@ -211,6 +211,7 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
+@retry_stale_statement
 @retry_terminal_write
 async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
     job_id: int, *, status: str,

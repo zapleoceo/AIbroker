@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow
-from aibroker.db.resilience import retry_terminal_write
+from aibroker.db.resilience import retry_stale_statement, retry_terminal_write
 from aibroker.providers.registry import cache_sticky_providers
 from aibroker.routing import circuit, shared_state
 from aibroker.routing.affinity import _affinity_for_shared
@@ -32,6 +32,12 @@ _TIMEOUT_STORM_MIN_KEYS = 2
 
 # Cache-sticky providers (per-key prompt cache + paid high-throughput API) are a
 # ProviderSpec flag — see registry.cache_sticky_providers().
+
+
+# Explicit RETURNING column list (never a star projection): behind pgbouncer's server-side
+# prepared statements a star projection changes result type after ADD COLUMN and
+# Postgres cannot re-plan it (InvalidCachedStatementError, prod 2026-10-13).
+_KEY_COLS = ", ".join(c.name for c in ApiKeyRow.__table__.columns)
 
 
 class SelectionError(Exception):
@@ -191,6 +197,14 @@ async def _saturated_key_ids() -> frozenset[int]:  # pragma: no cover — Postgr
     return ids
 
 
+@retry_stale_statement
+async def _exec_key_stmt(stmt, params: dict[str, object]):  # pragma: no cover — Postgres-only pick path
+    """Run one pick UPDATE in its own session/transaction (so a stale-statement
+    retry starts fresh) and return the first row mapping, or None."""
+    async with get_session() as s:
+        return (await s.execute(stmt, params)).mappings().first()
+
+
 async def pick_and_reserve(
     provider: str,
     scope: str,
@@ -271,9 +285,8 @@ async def pick_and_reserve(
 
     if only_key_id is not None:  # pragma: no cover — Postgres-only, exercised by test_selector.py
         exact = text("UPDATE api_keys AS k SET last_used_at = now() "
-                     f"WHERE k.id = :only AND ({where}) RETURNING *")
-        async with get_session() as s:
-            erow = (await s.execute(exact, {**params, "only": only_key_id})).mappings().first()
+                     f"WHERE k.id = :only AND ({where}) RETURNING {_KEY_COLS}")
+        erow = await _exec_key_stmt(exact, {**params, "only": only_key_id})
         return _hydrate_key_row(erow) if erow is not None else None
 
     # Cache-sticky fast path (2026-07-20): for deepseek/anthropic, pin ALL of the
@@ -288,9 +301,8 @@ async def pick_and_reserve(
     # are paid-tier keys.
     if provider in cache_sticky_providers() and affinity_id is not None and require_tier != "free":  # pragma: no cover — Postgres-only, exercised by test_selector.py
         sticky = text(f"UPDATE api_keys AS k SET last_used_at = now() "  # pragma: no cover
-                      f"WHERE k.id = :aff AND ({where}) RETURNING *")  # pragma: no cover
-        async with get_session() as s:  # pragma: no cover
-            srow = (await s.execute(sticky, {**params, "aff": affinity_id})).mappings().first()  # pragma: no cover
+                      f"WHERE k.id = :aff AND ({where}) RETURNING {_KEY_COLS}")  # pragma: no cover
+        srow = await _exec_key_stmt(sticky, {**params, "aff": affinity_id})  # pragma: no cover
         if srow is not None:  # pragma: no cover
             return _hydrate_key_row(srow)  # pragma: no cover
 
@@ -325,12 +337,11 @@ async def pick_and_reserve(
             LIMIT 1
             FOR UPDATE OF k SKIP LOCKED
         )
-        RETURNING *
+        RETURNING {_KEY_COLS}
         """
     )
 
-    async with get_session() as s:
-        row = (await s.execute(stmt, params)).mappings().first()
+    row = await _exec_key_stmt(stmt, params)
     if row is None:
         return None
     return _hydrate_key_row(row)  # pragma: no cover — Postgres-only pick path
