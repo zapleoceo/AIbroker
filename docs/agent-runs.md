@@ -188,7 +188,7 @@ writes files into the workspace.
   (`FOR UPDATE SKIP LOCKED`); `concurrency_for` gives the slots
   (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Compose passes
   `AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}` to `agent-worker-codex`; the operator
-  sets `AGENT_CONCURRENCY_CODEX=3` in `.env` for the production plan. **Auth-refresh guard:**
+  sets `AGENT_CONCURRENCY_CODEX=2` in `.env` for the production plan. **Auth-refresh guard:**
   concurrent Codex processes share `CODEX_HOME/auth.json`, and ChatGPT refresh tokens rotate, so two
   simultaneous refreshes could invalidate the login. Before starting the CLI the executor reads ONLY
   the non-secret `last_refresh` timestamp (assumed ISO-8601, possibly with nanoseconds and `Z`;
