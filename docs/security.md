@@ -11,7 +11,7 @@
 | `X-Project-Key` | DB compromise → revealing keys | Stored as `sha256(plain).hexdigest()` only. Plaintext prefix (12 chars) for ops display. |
 | Dashboard sessions | Cookie theft | HMAC-SHA256 signed (`<uid>.<exp>.<sig>`), `httponly`, `secure`, `samesite=lax`, 30d TTL. Single owner. |
 | Deploy SSH key | Server takeover | Restricted in `authorized_keys`: `command="..." + no-pty + no-*-forwarding`. Worst case attacker re-runs our deploy. |
-| Agent job results after revocation | Owner removes `llm:agent` or the project from `AGENT_ALLOWED_PROJECT_IDS`, but earlier results stay readable | Every read of an `agent:*` job (`GET /v1/jobs/{id}`, `GET /v1/deep/{id}`) re-authorizes scope, allowlist and policy |
+| Agent results after revocation | Owner removes `llm:agent`, the project from `AGENT_ALLOWED_PROJECT_IDS`, or its `AGENT_PROJECT_POLICY` entry, but earlier results stay readable | Every read of an `agent:*` job (`GET /v1/jobs/{id}`, `GET /v1/deep/{id}`) re-authorizes scope, allowlist and policy; agent run reads (`/v1/agent/runs/{id}`, `/events`) re-check policy |
 | Telegram login | Spoofed user_id | Verify HMAC-SHA256 over sorted params with secret = `sha256(bot_token)`. Reject if user_id ≠ `OWNER_TELEGRAM_ID`. Reject if `auth_date > 24h old`. |
 | Cost cap (`daily_cost_cap_usd`) | Concurrent requests race past the per-key cap (TOCTOU) | `reserve_cost`/`release_cost` use a single atomic `UPDATE ... WHERE ... RETURNING` — Postgres row-locking serializes concurrent writers so the cap can never be overshot. See **Cost guard** in [`routing.md`](routing.md). |
 

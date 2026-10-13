@@ -38,7 +38,8 @@ the same constants and validator used by `POST /v1/jobs`.
 Access requires the capability's existing scope plus `llm:agent`, the server
 project allowlist, and the exact CLI model and `owner` account in
 `AGENT_PROJECT_POLICY`. The worker rechecks these, and `GET /v1/jobs/{id}` and
-`GET /v1/deep/{id}` recheck them on every read. The configured list of
+`GET /v1/deep/{id}` recheck them on every read, as do the agent run reads
+(`/v1/agent/runs/{id}` and `/events`). The configured list of
 subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
 `claude-sub`/`codex-sub`). `AGENT_SUBSCRIPTION_VERIFIED_MODELS` uses the same
 shape and must be a subset. Malformed or inconsistent input exposes no

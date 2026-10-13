@@ -108,10 +108,10 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
 | `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; see [subscription tool loop](subscription-tool-loop.md) |
-| `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat) |
+| `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
-| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | Owner-only agent runs require `llm:agent` and the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty denies all). Submission also requires `AGENT_PROJECT_POLICY` to allow the model and `account_id` (exact model, or an explicitly approved candidate-only `"models":["*"]`). See [agent-runs.md](agent-runs.md). |
+| `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | Owner-only agent runs require `llm:agent` and the project id in `AGENT_ALLOWED_PROJECT_IDS` (empty denies all). Submission also requires `AGENT_PROJECT_POLICY` to allow the model and `account_id` (exact model, or an explicitly approved candidate-only `"models":["*"]`). `GET` reads re-check `AGENT_PROJECT_POLICY` against the run's stored model, account and capability (403 `agent_policy_missing`, `model_not_allowed`, `account_not_allowed`). See [agent-runs.md](agent-runs.md). |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
@@ -502,10 +502,10 @@ instead of grepping timestamps against provider/model/workflow.
 | Endpoint | Required scope |
 |---|---|
 | `/v1/jobs?capability=chat:*` | `llm:chat` |
-| `/v1/jobs` with any `image_url` block, any capability | `llm:vision` in addition to the capability scope (403 otherwise) |
+| `/v1/jobs` or `/v1/deep` with any `image_url` block, any capability | `llm:vision` in addition to the capability scope (403 otherwise) |
 | `/v1/jobs?capability=vision` | `llm:vision` |
 | `/v1/jobs?capability=<cap>` | scope per capability (`chat:*`→`llm:chat`, `vision`→`llm:vision`, `chat:deep`→`llm:deep`) |
-| `/v1/deep` | `llm:deep` |
+| `/v1/deep` | `llm:deep` (+ `llm:vision` when a message has `image_url` blocks) |
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |
 | `/v1/decisions` | `llm:decision` |
@@ -607,8 +607,8 @@ when the enabled model's support is unknown. Subscription routes report
 `supports_tools: false`; no client tool-call handoff is verified. Only exact
 Codex IDs separately verified for input vision list image input on the
 `vision` lane, limited to embedded data URLs. The input-vision verified list
-defaults to empty. Any `image_url` block requires `llm:vision` on any capability, not only
-`vision`; `llm:agent` and the capability's usual scope are also required for subscription pins.
+defaults to empty. Any `image_url` block on `/v1/jobs` or `/v1/deep` requires `llm:vision`, not only
+for `vision`; `llm:agent` and the capability's usual scope are also required for subscription pins.
 These fields summarize the model across its configured lanes; tools still require
 a chat capability and cannot be combined with `response_format`.
 The catalog builds the fields with `input_modalities()` and `supports_tools()`.
@@ -648,7 +648,7 @@ request.
 
 ## Vision jobs: what is rejected at submit (2026-09-12)
 
-`POST /v1/jobs` validates every inline `data:` image before queueing, for any
+`POST /v1/jobs` and `POST /v1/deep` validate every inline `data:` image before queueing, for any
 capability and non-subscription models (`services/vision_payload.py:inline_image_problem`):
 if the bytes cannot be decoded as an image the submit is refused with **400** and a reason
 such as `inline image #1 is an MP4/MOV video container — the declared
