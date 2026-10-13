@@ -50,6 +50,11 @@ def response_format_problem(response_format: dict[str, Any] | None) -> str | Non
 
 
 def output_problem(text: str, response_format: dict[str, Any] | None) -> str | None:
+    """The ONE structured-output check, shared by the subscription path and the API
+    chat gate (services/llm_service.py): json_object must be a JSON object,
+    json_schema must validate. A schema the broker cannot evaluate (invalid, or
+    unresolvable $ref) degrades to parse-only rather than failing every answer -
+    the caller's schema bug must not make a healthy provider look broken."""
     if not response_format:
         return None
     try:
@@ -60,9 +65,13 @@ def output_problem(text: str, response_format: dict[str, Any] | None) -> str | N
         return "InvalidJSON: expected a JSON object"
     if response_format["type"] == "json_schema":
         try:
-            Draft202012Validator(response_format["json_schema"]["schema"]).validate(value)
+            schema = response_format["json_schema"]["schema"]
+            Draft202012Validator.check_schema(schema)
+            Draft202012Validator(schema).validate(value)
         except ValidationError:
             return "InvalidJSON: response does not match json_schema"
+        except Exception:  # noqa: BLE001 - unusable schema/ref: parse-only, never a crash
+            return None
     return None
 
 
