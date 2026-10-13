@@ -23,6 +23,20 @@ _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many reque
                     # "context limit" / "session limit of 10 MB" is NOT quota.
                     r"hit your (?:weekly|session|5-hour|daily|opus|fable|sonnet) limit|"
                     r"\b(?:weekly|5-hour) limit reached", re.I)
+# Model not usable on the subscription account. VERIFIED wordings (Claude Code errors page,
+# https://code.claude.com/docs/en/errors.md): "There's an issue with the selected model",
+# "Model ... not found", "Model ... is not a recognized model id", "Claude Opus is not available
+# with the Claude Pro plan". UNVERIFIED (Codex, no fixture in this repo; recalled wording, keep it
+# anchored): "The 'X' model is not supported when using Codex with a ChatGPT account".
+# Deliberately NOT matched: bare "not available" / "unavailable" / "limit" text.
+_MODEL_UNAVAILABLE = re.compile(
+    r"issue with the selected model|"
+    r"\bmodel\b[^\n]{0,80}\bis not a recognized model id|"
+    # an id-like token must follow "Model": "Model Context Protocol server ... not found" and
+    # "model output file not found" are NOT this error.
+    r"\bmodel\s+['\"]?[\w.:/\[\]-]+['\"]?\s+not found\b|"
+    r"\bnot available with the claude \w+ plan|"
+    r"\bmodel is not supported when using codex with a chatgpt account", re.I)
 _MAX_SCAN = 2000     # classify/parse only the head of a message: bounded work on hostile text
 _MONTHS = {m: i for i, m in enumerate(
     ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
@@ -48,8 +62,12 @@ def sandbox_failure(text: str) -> bool:
 
 
 def classify_failure(message: str) -> str:
-    """quota_exhausted for limit/quota wording, else cli_error. Never triggers a fallback."""
-    return "quota_exhausted" if _QUOTA.search((message or "")[:_MAX_SCAN]) else "cli_error"
+    """quota_exhausted for limit/quota wording (checked first), model_unavailable for a model the
+    account cannot use, else cli_error. Never triggers a fallback; only quota is ever waited."""
+    head = (message or "")[:_MAX_SCAN]
+    if _QUOTA.search(head):
+        return "quota_exhausted"
+    return "model_unavailable" if _MODEL_UNAVAILABLE.search(head) else "cli_error"
 
 
 def parse_reset_at(message: str, now: datetime | None = None) -> str | None:

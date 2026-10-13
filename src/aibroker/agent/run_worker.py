@@ -27,6 +27,19 @@ def set_non_dumpable(libc: object | None = None) -> bool:
         return False
 
 
+async def try_start_rpc(capability: str, wake: asyncio.Event) -> asyncio.AbstractServer | None:
+    """The worker RPC is optional: failure to start it never stops database polling. An OSError
+    (e.g. EROFS, no socket directory) is one WARNING line; a failed ownership/mode check
+    (RuntimeError) keeps its traceback."""
+    try:
+        return await start_worker_rpc(capability, wake)
+    except OSError as exc:
+        log.warning("worker RPC unavailable (%s); database polling remains active", exc)
+    except RuntimeError:
+        log.exception("worker RPC unavailable; database polling remains active")
+    return None
+
+
 async def run_worker() -> None:  # pragma: no cover - process harness
     if not set_non_dumpable():
         raise RuntimeError("could not make the worker non-dumpable (PR_SET_DUMPABLE)")
@@ -40,10 +53,7 @@ async def run_worker() -> None:  # pragma: no cover - process harness
     wake = asyncio.Event()
     rpc = None
     if len(caps) == 1:
-        try:
-            rpc = await start_worker_rpc(caps[0], wake)
-        except (OSError, RuntimeError):
-            log.exception("worker RPC unavailable; database polling remains active")
+        rpc = await try_start_rpc(caps[0], wake)
     try:
         await agent_worker_loop(stop, wake)
     finally:

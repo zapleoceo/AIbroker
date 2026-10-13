@@ -304,3 +304,22 @@ async def test_run_reads_are_closed_when_the_policy_is_removed_after_queueing(mo
             r = await c.get(path, headers={"X-Project-Key": key})
             assert r.status_code == 403, path
             assert r.json() == {"error": "model_not_allowed"}, path
+
+
+async def test_cli_model_unavailable_fails_once_with_a_clear_client_message(monkeypatch, tmp_path):
+    rid = await _queued()
+    _policy(monkeypatch, GOOD)
+    cli_text = "There's an issue with the selected model"
+    fake = FakeAgentCLI([ev.RunFailed(error_class="model_unavailable", message=cli_text)])
+    register_adapter("agent:claude", lambda: fake)
+    assert await execute_run(rid, _cfg(tmp_path)) == "failed"      # not parked for quota, not retried
+    events = await list_events(rid)
+    assert events[-1].type == "run.failed"
+    assert [e.type for e in events].count("run.waiting_quota") == 0
+    assert events[-1].payload["message"] == (
+        f"{MODEL} is not available on this subscription account ({cli_text})")
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, rid)
+        assert job.error_message.startswith(
+            f"model_unavailable: {MODEL} is not available on this subscription account (")
+        assert job.retry_count == 0

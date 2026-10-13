@@ -52,3 +52,19 @@ async def test_missing_worker_rpc_is_optional(monkeypatch, tmp_path: Path):
     monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", tmp_path / "missing" / "worker.sock")
     assert await rpc.start_worker_rpc("agent:codex", asyncio.Event()) is None
     await rpc.wake_worker("agent:codex", 1)
+
+
+async def test_unwritable_rpc_directory_means_no_rpc_volume(monkeypatch, tmp_path: Path):
+    tmp_path.chmod(0o700)
+    monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", tmp_path / "worker.sock")
+    monkeypatch.setattr(rpc.os, "access", lambda *_a, **_k: False)
+    assert await rpc.start_worker_rpc("agent:codex", asyncio.Event()) is None
+    assert not (tmp_path / "worker.sock").exists()
+
+
+async def test_writable_directory_keeps_the_ownership_check_fail_closed(
+        monkeypatch, tmp_path: Path):
+    tmp_path.chmod(0o770)
+    monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", tmp_path / "worker.sock")
+    with pytest.raises(RuntimeError, match="mode 0700"):
+        await rpc.start_worker_rpc("agent:codex", asyncio.Event())
