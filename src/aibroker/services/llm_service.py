@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from aibroker.agent.subscription_job import output_problem
 from aibroker.config import get_settings
 from aibroker.db.models import ProjectRow
 from aibroker.providers.adapters import extra_for_provider, is_deepseek_big_json_prompt
@@ -163,14 +164,6 @@ def _wants_json(response_format: dict[str, Any] | None) -> bool:
     )
 
 
-def _is_valid_json(text: str) -> bool:
-    try:
-        json.loads(text)
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
 # ─── Outcomes ───────────────────────────────────────────────────────────────
 
 
@@ -253,7 +246,8 @@ def _chat_gate(
             # the next PROVIDER — re-asking a one-key local provider is deterministic.
             return Rejection("EmptyBody", Flow.NEXT_PROVIDER, http_status=502, bill=False,
                              log_message=f"{provider} returned an empty body — escalating")
-        if _wants_json(response_format) and not _is_valid_json(text):
+        problem = output_problem(text, response_format) if _wants_json(response_format) else None
+        if problem:
             # Empty and malformed are both a (model, prompt) property: the next
             # provider, never a sibling key of this model.
             if not (text or "").strip():
@@ -263,7 +257,7 @@ def _chat_gate(
                     log_message=f"provider {provider} returned an empty JSON body, next provider")
             return Rejection(
                 "InvalidJSON", Flow.NEXT_PROVIDER,
-                log_message=f"provider {provider} returned unparseable JSON, next provider")
+                log_message=f"provider {provider} returned invalid JSON ({problem}), next provider")
         return None
 
     return check

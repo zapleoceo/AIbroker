@@ -227,9 +227,23 @@ idle.
 grammar-constrain generation, so with them the model **should not** return
 invalid JSON — this is the root-cause fix for the `InvalidJSON` failures, far
 better than the broker's post-hoc JSON validation. The broker forwards the
-schema unchanged; providers that don't enforce it (groq, cerebras, cohere,
-openrouter — `JSON_UNRELIABLE_PROVIDERS`) are deprioritized for JSON requests
-(still tried, but after the reliable ones).
+schema unchanged; providers that don't enforce it are deprioritized for JSON
+requests (still tried, but after the reliable ones). Which providers those are is
+set by `ProviderSpec.json_reliability` in `providers/provider_specs/*.py`:
+`unreliable` (groq, cerebras, cohere, openrouter) sinks behind the reliable ones,
+`incapable` (zai) is excluded from JSON requests.
+
+**Structured output is validated on every path.** The broker checks every JSON
+answer, on the API path and on subscription jobs alike, with one validator:
+`json_object` must parse to a JSON object, and `json_schema` must validate against
+the request schema (JSON Schema draft 2020-12). A non-conforming answer is an
+`InvalidJSON` rejection: the API path bills it and walks to the next provider, and
+if every attempt fails the job ends with a content failure. Markdown-fenced JSON is
+not accepted. Remote `$ref`s are never fetched; a schema the broker cannot evaluate (invalid,
+containing a remote `$ref`, or over 64 KiB as JSON) is evaluated parse-only. `strict: false` is still
+validated. Off-schema, array or scalar JSON used to come back as
+success, so expect more `InvalidJSON` rejections, especially on providers
+downgraded from `json_schema` to `json_object` (deepseek, cerebras).
 
 `vision` accepts OpenAI-style multimodal `content`: a `ChatMessage.content`
 may be a plain string **or** a list of blocks, e.g.
