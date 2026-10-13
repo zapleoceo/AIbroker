@@ -15,9 +15,10 @@ from sqlalchemy import select
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow
 
-# A quota wait ends before the run's overall deadline (default 6 h), so a signal older than
-# this can no longer be in the future; it bounds the scan of the event log.
-QUOTA_LOOKBACK = timedelta(hours=24)
+# Bounds the scan of the event log. A session limit resets within hours, but a WEEKLY limit
+# (run.failed quota_exhausted / run.waiting_quota with its reset days ahead) must still pause
+# the account days later, so the window is longer than the longest reset (7 days) plus slack.
+QUOTA_LOOKBACK = timedelta(days=8)
 
 
 def _now() -> datetime:
@@ -49,7 +50,8 @@ async def quota_resets(accounts: list[str], capability: str,
                        now: datetime | None = None) -> dict[str, datetime]:
     """{account: when its CURRENT quota pause ends}; accounts without an active pause are absent.
     One query: the quota events (run.waiting_quota / run.failed) of the last QUOTA_LOOKBACK for
-    these accounts, newest first; the latest quota signal of an account decides."""
+    these accounts. Every signal whose stored reset time is still in the future counts; the
+    account stays paused until the latest of those resets."""
     now = now or _now()
     async with get_session() as s:
         rows = (await s.execute(
@@ -58,18 +60,13 @@ async def quota_resets(accounts: list[str], capability: str,
             .where(AgentRunRow.account_id.in_(accounts), AgentRunRow.capability == capability,
                    AgentRunEventRow.ts >= now - QUOTA_LOOKBACK,
                    AgentRunEventRow.type.in_(("run.waiting_quota", "run.failed")))
-            .order_by(AgentRunEventRow.ts.desc(), AgentRunEventRow.seq.desc())
         )).all()
-    latest: dict[str, datetime] = {}
-    seen: set[str] = set()
+    paused: dict[str, datetime] = {}
     for account, event_type, payload in rows:
         reset = _reset_of(event_type, payload or {})
-        if reset is None or account in seen:
-            continue
-        seen.add(account)
-        if reset > now:
-            latest[account] = reset
-    return latest
+        if reset is not None and reset > now and (account not in paused or reset > paused[account]):
+            paused[account] = reset
+    return paused
 
 
 async def pick_account(candidates: tuple[str, ...], capability: str,

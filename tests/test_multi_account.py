@@ -2,6 +2,7 @@
 /v1/jobs (policy order, quota pauses), same-account quota waits, account in the poll."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -9,19 +10,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
 from aibroker.agent import events as ev
 from aibroker.agent import policy as pol
 from aibroker.agent import worker
-from aibroker.agent.accounts import pick_account, quota_resets
+from aibroker.agent.accounts import QUOTA_LOOKBACK, _reset_of, pick_account, quota_resets
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.policy import ProjectPolicy, policy_for
-from aibroker.agent.runs import append_event, create_run, get_attestation, get_run, park_for_quota
+from aibroker.agent.runs import (
+    append_event,
+    create_run,
+    get_attestation,
+    get_run,
+    list_events,
+    park_for_quota,
+)
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
+from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.main import app
 from aibroker.providers.catalog import listing
 from aibroker.providers.subscriptions import subscription_model_verified
@@ -98,6 +106,71 @@ async def test_empty_account_setting_claims_every_account(monkeypatch):
     assert sorted(await worker.claim_agent_runs(CAP, 5)) == sorted(ids)
 
 
+# --- unclaimed runs / fail-closed account ------------------------------------------------------
+
+
+async def _age(rid: int, seconds: float) -> None:
+    async with get_session() as s:
+        (await s.get(DeepJobRow, rid)).created_at = _now() - timedelta(seconds=seconds)
+
+
+def _pending_max(monkeypatch, value: float) -> None:
+    monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(AGENT_PENDING_MAX_S=value))
+
+
+async def test_unclaimed_run_for_an_unserved_account_fails_with_a_clear_error(monkeypatch):
+    pid, _ = await _project()
+    old, fresh = await _run(pid, "ghost", "a"), await _run(pid, "ghost", "b")
+    await _age(old, 3600)
+    _pending_max(monkeypatch, 1800)
+    assert await worker.fail_unclaimed_runs() == 1
+    row, job = await get_run(old, pid)
+    assert row.outcome == "failed" and job.status == "error"
+    assert job.error_message.startswith("account_unavailable: no worker claimed this run for account ghost")
+    assert (await get_run(fresh, pid))[1].status == "pending"
+
+
+async def test_reaper_skips_quota_parked_started_and_claimed_runs(monkeypatch):
+    pid, _ = await _project()
+    parked, started, claimed = [await _run(pid, "owner", t) for t in "abc"]
+    await park_for_quota(parked, _now() + timedelta(days=1))
+    await append_event(started, ev.SessionAssigned(session_id="S"))
+    async with get_session() as s:
+        (await s.get(DeepJobRow, claimed)).status = "running"
+    for rid in (parked, started, claimed):
+        await _age(rid, 7200)
+    _pending_max(monkeypatch, 1800)
+    assert await worker.fail_unclaimed_runs() == 0
+    for rid in (parked, started, claimed):
+        assert (await get_run(rid, pid))[0].outcome is None
+
+
+async def test_reaper_can_be_disabled(monkeypatch):
+    pid, _ = await _project()
+    rid = await _run(pid, "ghost")
+    await _age(rid, 99999)
+    _pending_max(monkeypatch, 0)
+    assert await worker.fail_unclaimed_runs() == 0
+
+
+def test_claude_worker_without_an_account_refuses_to_start(tmp_path):
+    marker = tmp_path / "marker"
+    marker.write_text("x")
+    env = {"CLAUDE_CONFIG_DIR": "/x", "CODEX_HOME": "/y"}
+    kw = {"env": env, "marker": str(marker)}
+    assert "AGENT_ACCOUNT_ID" in worker.worker_image_problem(
+        capabilities=("agent:claude",), account_id="  ", **kw)
+    assert worker.worker_image_problem(capabilities=("agent:claude",), account_id="owner", **kw) is None
+    assert worker.worker_image_problem(capabilities=("agent:codex",), account_id="", **kw) is None
+
+
+async def test_worker_loop_refuses_to_start_for_claude_without_an_account(monkeypatch):
+    monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(
+        AGENT_WORKER_CAPABILITIES="agent:claude", AGENT_ACCOUNT_ID=""))
+    with pytest.raises(RuntimeError, match="AGENT_ACCOUNT_ID"):
+        await worker.agent_worker_loop(asyncio.Event())
+
+
 # --- selection ----------------------------------------------------------------------------------
 
 
@@ -126,12 +199,61 @@ async def test_an_expired_pause_no_longer_counts():
     assert await pick_account(("owner", "claude-2"), CAP) == "owner"
 
 
-async def test_latest_quota_signal_of_an_account_decides():
+async def test_account_stays_paused_until_the_latest_future_reset():
     pid, _ = await _project()
     rid = await _run(pid, "owner")
-    await park_for_quota(rid, _now() + timedelta(hours=5))
-    await park_for_quota(rid, _now() - timedelta(minutes=1))     # a later wait that already ended
+    later = _now() + timedelta(hours=5)
+    await park_for_quota(rid, later)
+    await park_for_quota(rid, _now() - timedelta(minutes=1))     # a wait that already ended
+    paused = await quota_resets(["owner"], CAP)
+    assert abs((paused["owner"] - later).total_seconds()) < 1
+
+
+async def test_a_three_day_old_weekly_signal_with_its_reset_ahead_still_pauses():
+    pid, _ = await _project()
+    rid = await _run(pid, "owner")
+    reset = datetime.now(UTC) + timedelta(days=2)
+    await append_event(rid, ev.RunFailed(error_class="quota_exhausted",
+                                         reset_at=reset.isoformat()))
+    async with get_session() as s:
+        for row in (await s.execute(select(AgentRunEventRow))).scalars():
+            row.ts = _now() - timedelta(days=3)
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
+    assert "owner" in await quota_resets(["owner"], CAP)
+
+
+async def test_a_signal_older_than_the_lookback_is_ignored():
+    pid, _ = await _project()
+    rid = await _run(pid, "owner")
+    await park_for_quota(rid, _now() + timedelta(days=1))
+    async with get_session() as s:
+        for row in (await s.execute(select(AgentRunEventRow))).scalars():
+            row.ts = _now() - QUOTA_LOOKBACK - timedelta(hours=1)
     assert await quota_resets(["owner"], CAP) == {}
+
+
+def test_reset_parsing_tolerates_garbage_and_timezones():
+    assert _reset_of("run.waiting_quota", {}) is None                    # missing
+    assert _reset_of("run.waiting_quota", {"not_before": 5}) is None     # not a string
+    assert _reset_of("run.failed", {"error_class": "quota_exhausted", "reset_at": "soon"}) is None
+    assert _reset_of("run.failed", {"error_class": "cli_error", "reset_at": "2030-01-01T00:00:00"}) is None
+    assert _reset_of("run.failed", {"error_class": "quota_exhausted",
+                                    "reset_at": "2030-01-01T02:00:00+02:00"}) == datetime(2030, 1, 1)
+
+
+async def test_deadline_expiry_keeps_the_reset_so_the_account_stays_paused():
+    pid, _ = await _project()
+    rid = await _run(pid, "owner")
+    not_before = _now() + timedelta(days=2)
+    await park_for_quota(rid, not_before, reset_reported=True)
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, rid)
+        job.created_at = _now() - timedelta(days=1)
+        job.request = {**job.request, "deadline_s": 60}
+    assert await worker.expire_overdue_waiting() == 1
+    last = (await list_events(rid))[-1]
+    assert last.type == "run.failed" and last.payload["reset_at"]
+    assert "owner" in await quota_resets(["owner"], CAP)
 
 
 async def test_quota_exhausted_failure_with_future_reset_pauses_the_account():

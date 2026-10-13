@@ -120,6 +120,10 @@ def test_second_claude_container_has_its_own_login_and_account():
     assert re.findall(r"^\s+- (agent_\w+):", second, re.M) == ["agent_claude2_auth"]
     assert re.findall(r"^\s+- (agent_\w+):", first, re.M) == ["agent_claude_auth", "agent_claude_rpc"]
     assert "AGENT_ACCOUNT_ID" not in _service("agent-worker-codex")
+    # each Claude login has its own extra-usage confirmation; claude-2 never reads the owner's
+    own = "AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF:-false}"
+    assert own in second and "${AGENT_PAID_CONTINUATION_VERIFIED_OFF" not in second
+    assert "AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}" in first
 
 
 def test_codex_container_claims_only_codex_and_never_mounts_a_claude_volume():

@@ -145,8 +145,12 @@ class Settings(BaseSettings):
     AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
     # Which account's runs THIS worker claims (agent_runs.account_id). One container per
     # subscription login (agent-worker = "owner", agent-worker-claude2 = "claude-2"). EMPTY = claim
-    # runs of every account (dev / single container).
+    # runs of every account (dev / tests only): a worker that claims agent:claude refuses to start
+    # with it empty (worker_image_problem), so a Claude login never serves another account's runs.
     AGENT_ACCOUNT_ID: str = ""
+    # A never-started agent run still pending after this many seconds (no worker serves its
+    # account) is failed `account_unavailable`. 0 disables.
+    AGENT_PENDING_MAX_S: float = 1800.0
     # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
     # isolated worker profile is separately approved and deployed.
     AGENT_SUBSCRIPTION_MODELS: str = ('{"claude-sub":["claude-sonnet-5-5","claude-opus-5-5",'

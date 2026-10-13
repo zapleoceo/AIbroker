@@ -411,8 +411,9 @@ services:
       AGENT_WORKER_CAPABILITIES: "agent:claude"
       # Claims only runs of this subscription login (agent_runs.account_id); see docs/agent-runs.md.
       AGENT_ACCOUNT_ID: claude-2
-      # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
-      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+      # Its OWN confirmation: the owner's check of the first account never covers this Team seat.
+      # The container still sees the standard setting name; only the .env source differs.
+      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}

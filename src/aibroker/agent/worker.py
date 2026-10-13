@@ -43,10 +43,15 @@ def worker_capabilities() -> tuple[str, ...]:
 
 
 def worker_image_problem(env: Mapping[str, str] | None = None, marker: str = WORKER_MARKER,
-                         capabilities: Iterable[str] = ("agent:claude",)) -> str | None:
+                         capabilities: Iterable[str] = ("agent:claude",),
+                         account_id: str | None = None) -> str | None:
     """The agent lane may only run inside the worker image (CLI + auth volume + minimal
-    privileges); anywhere else it refuses to start."""
+    privileges); anywhere else it refuses to start. `account_id` (the worker's
+    AGENT_ACCOUNT_ID) is checked only when given: a Claude worker must name its account, or it
+    would claim runs of every login."""
     e = os.environ if env is None else env
+    if account_id is not None and "agent:claude" in capabilities and not account_id.strip():
+        return "AGENT_ACCOUNT_ID is not set (a Claude worker must name its account)"
     for cap in capabilities:
         home = _REQUIRED_HOME.get(cap)
         if home and not e.get(home):
@@ -132,7 +137,9 @@ async def expire_overdue_waiting() -> int:
             await append_event(run_id, ev.RunFailed(
                 error_class="quota_exhausted",
                 message=f"{reason.get('reason') or 'usage limit reached'} "
-                        "(quota wait is past the job deadline)"))
+                        "(quota wait is past the job deadline)",
+                # the stored reset keeps the account paused for new-run selection (accounts.py)
+                reset_at=reason.get("not_before") if reason.get("reset_reported") else None))
             done += 1
     return done
 
@@ -155,11 +162,43 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
         log.exception("agent run %d crashed", run_id)
 
 
+async def fail_unclaimed_runs() -> int:
+    """A run nobody claimed within AGENT_PENDING_MAX_S (typically: no worker serves its account)
+    ends `run.failed` account_unavailable instead of waiting forever. Only runs that never
+    started (no events, no quota wait) are touched; quota-parked and client-tool waits are not."""
+    limit = get_settings().AGENT_PENDING_MAX_S
+    if limit <= 0:
+        return 0
+    cutoff = _now() - timedelta(seconds=limit)
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(DeepJobRow.id, AgentRunRow.account_id)
+            .join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
+                DeepJobRow.status == "pending", DeepJobRow.capability.like("agent:%"),
+                DeepJobRow.created_at < cutoff, AgentRunRow.last_seq == 0,
+                AgentRunRow.quota_waits == 0, AgentRunRow.outcome.is_(None))
+        )).all()
+    done = 0
+    for run_id, account in rows:
+        with contextlib.suppress(RunConflict):
+            async with get_session() as s:      # claimed since the scan? then leave it alone
+                job = await s.get(DeepJobRow, run_id)
+                if job is None or job.status != "pending":
+                    continue
+            await append_event(run_id, ev.RunFailed(
+                error_class="account_unavailable",
+                message=f"no worker claimed this run for account {account} "
+                        f"within {int(limit)}s"))
+            done += 1
+    return done
+
+
 async def agent_worker_loop(stop: asyncio.Event,
                             wake: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
     caps = worker_capabilities()
-    problem = worker_image_problem(capabilities=caps) if caps else "AGENT_WORKER_CAPABILITIES is empty"
+    problem = worker_image_problem(
+        capabilities=caps, account_id=get_settings().AGENT_ACCOUNT_ID) if caps else "AGENT_WORKER_CAPABILITIES is empty"
     if problem:
         raise RuntimeError(f"agent lane refused to start: {problem}")
     register_real_adapters(caps)
@@ -172,6 +211,7 @@ async def agent_worker_loop(stop: asyncio.Event,
         try:
             await fail_stale_agent_runs()
             await expire_overdue_waiting()
+            await fail_unclaimed_runs()
             for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
                 for run_id in await claim_agent_runs(cap, free):

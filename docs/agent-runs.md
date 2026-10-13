@@ -444,7 +444,17 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 
 - **Setting `AGENT_ACCOUNT_ID`** (`config.py`): a worker claims only the runs whose `agent_runs.account_id`
   equals it (`claim_agent_runs`, an IN-subquery; `SKIP LOCKED` unchanged). Empty = claims the runs of
-  every account (dev / single container).
+  every account (dev / tests only): a worker that claims `agent:claude` **refuses to start** with it
+  empty (`worker_image_problem`: "AGENT_ACCOUNT_ID is not set"), so no Claude login serves another
+  account's runs. Both compose workers set it.
+- **Unclaimed runs:** a never-started run (no events, no quota wait) still `pending` after
+  `AGENT_PENDING_MAX_S` (default 1800 s, 0 = off) is failed by the worker loop (`fail_unclaimed_runs`) with
+  `run.failed` `error_class: account_unavailable`, "no worker claimed this run for account X". Quota-parked
+  runs and runs waiting for a client tool are never touched.
+- **Separate billing confirmation:** `agent-worker-claude2` reads `AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF`
+  from the compose `.env` (default false); the container still sees the standard name
+  `AGENT_PAID_CONTINUATION_VERIFIED_OFF`. The owner's confirmation for the first account never covers
+  the second one.
 - **Containers:** `agent-worker` = `owner`, `agent-worker-claude2` = `claude-2` (a neutral technical id).
   Each has its own named auth volume: `agent_claude_auth` and `agent_claude2_auth`. **One login per
   worker.** Two containers on one login would refresh the OAuth token concurrently, which is a real
@@ -453,7 +463,9 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 - **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
   `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
   listed order, and picks the first one without an active quota pause. A pause is the latest
-  `run.waiting_quota` / `quota_exhausted` signal with a reset in the future (24 h lookback). If every
+  `run.waiting_quota` / `run.failed quota_exhausted` signal whose stored reset time is still in the future
+  (every such signal counts; lookback 8 days, so a weekly limit that resets days ahead still pauses the
+  account; a deadline-expired wait keeps its reset in `reset_at`). If every
   candidate is paused, the one whose reset comes first is picked, and the job waits honestly there.
 - A started run never changes account; a quota wait stays on the same account; there is no fallback to
   paid API. `codex-sub` stays on `owner`.
@@ -464,11 +476,14 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 
 1. `ssh hetzner-root`, then `cd /var/www/aibroker`.
 2. `docker compose --profile agent run --rm agent-worker-claude2 claude`, then `/login`. Choose the
-   claude.ai subscription login, open the shown link in the browser while signed in to the second
-   ITSTEP Claude account, paste the code back, then `/exit`.
+   claude.ai subscription login, open the shown link in the browser while signed in to your second
+   ITSTEP Claude account (Team seat), paste the code back, then `/exit`.
 3. Verify: `docker compose --profile agent run --rm agent-worker-claude2 claude auth status` must show
-   `loggedIn: true` and `authMethod: claude.ai`.
-4. In that account's claude.ai settings, turn **extra usage OFF**.
+   `loggedIn: true` and `authMethod: claude.ai`, and the organization shown must be the ITSTEP Team
+   organization (check the organization shown; the docs do not name the field).
+4. Extra usage on a Team seat is controlled by the org admin: ask the Team admin to confirm extra usage is
+   OFF (or capped at 0) for this seat. Only then set `AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF=true`
+   in the compose `.env`. Until then `autonomous` / `exam` runs on `claude-2` are refused.
 5. `docker compose --profile agent up -d agent-worker-claude2` (first start is manual; deploy does not start it).
 6. Add `"claude-2"` to the project's `accounts` in `AGENT_PROJECT_POLICY`, for example
    `"accounts": ["owner", "claude-2"]`.
