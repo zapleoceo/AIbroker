@@ -148,6 +148,8 @@ docker-compose.yml). Without those two settings a long HTTP request would eat th
 default 10 s and the container would be killed before the release ran. The release
 runs shielded, so the `wait_for` timeout cannot abort it. `aibroker-monitor` runs no
 dispatcher and keeps the default.
+The 8 s clamp on `JOB_SHUTDOWN_GRACE_S` exists so the grace always ends inside that
+15 s dispatcher wait, leaving time for cancel and release.
 
 The 25-minute stale reclaim now covers only hard crashes (SIGKILL, OOM, host loss).
 
