@@ -15,6 +15,15 @@
 # says nothing about which config a container was started with.
 set -euo pipefail
 
+# Activate the `agent` compose profile for EVERY compose call below (build, up,
+# drift gate, health gate). agent-worker / agent-worker-codex sit under
+# `profiles: ["agent"]`, and without the profile compose ignores them entirely:
+# deploy never rebuilt or recreated them and both gates were blind to them. Prod
+# ran the agent worker on PR #56 code while master was at #62. With the profile
+# set, `--remove-orphans` also treats them as managed, not orphans. Neither
+# worker has a healthcheck, so the health gate below accepts "running" for them.
+export COMPOSE_PROFILES=agent
+
 REMOTE_DIR=/var/www/aibroker
 cd "$REMOTE_DIR"
 
