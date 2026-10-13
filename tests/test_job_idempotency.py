@@ -662,7 +662,7 @@ async def test_bulk_cancel_needs_exactly_one_valid_selector(payload):
 
 
 def test_claim_returning_list_is_every_deep_jobs_column():
-    wanted = {c.strip() for c in job_queue._JOB_COLUMNS.split(",")}
+    wanted = {c.strip() for c in job_queue._JOB_COLS_SQL.split(",")}
     assert wanted == {c.name for c in DeepJobRow.__table__.columns}
 
 
