@@ -22,6 +22,11 @@ from aibroker.agent.codex_cli import CONFIG_OVERRIDES, permission_overrides
 log = logging.getLogger(__name__)
 
 
+# One JSON-RPC notification (a long agent message, a tool argument) is one line; asyncio's default
+# 64 KiB and the former 1 MiB cut such runs with a readline error. Same bound as real_cli.py.
+_STDOUT_LINE_LIMIT = 1 << 24
+
+
 def _log_message(message: dict[str, Any]) -> None:
     """Diagnosis aid: method and id only, never params or results."""
     log.debug("app-server message method=%s id=%s", message.get("method"), message.get("id"))
@@ -80,7 +85,7 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, cwd=run.workspace,
-        env=adapter.process_env(run), limit=1 << 20, start_new_session=True)
+        env=adapter.process_env(run), limit=_STDOUT_LINE_LIMIT, start_new_session=True)
     adapter._proc = proc
     stderr_task = asyncio.create_task(adapter._drain_stderr(proc))
     assert proc.stdin is not None and proc.stdout is not None
