@@ -28,6 +28,11 @@ your weekly limit - resets Oct 15, 8pm (UTC)") is such a wait: the job stays pen
 stated reset, or ends `failed` with `error_message` `quota_exhausted: <limit wording> (reset ... is past the job
 deadline)` if the request deadline (`deadline_s`, default 6 h) falls first.
 
+For `claude-sub`, the account is chosen once at submit: the first account listed for the project in
+`AGENT_PROJECT_POLICY` without an active quota pause, otherwise the one whose pause ends first. The
+poll response reports it as `account_id`. A started run never changes account; see
+[agent-runs.md](agent-runs.md#multiple-claude-subscription-accounts).
+
 Every catalog row now has a `job_request` field. Subscription rows report
 `max_tokens.accepted.const: 1024` and `temperature.accepted.const: 0.7`, both
 with `forwarded: false`: omit these fields, or send exactly those defaults.
@@ -39,8 +44,8 @@ references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
 
 Access requires the capability's existing scope plus `llm:agent`, the server
-project allowlist, and the exact CLI model and `owner` account in
-`AGENT_PROJECT_POLICY`. The worker rechecks these, and `GET /v1/jobs/{id}` and
+project allowlist, and the exact CLI model and an account in
+`AGENT_PROJECT_POLICY` (`owner` for Codex; for Claude, any listed account, chosen at submit). The worker rechecks these, and `GET /v1/jobs/{id}` and
 `GET /v1/deep/{id}` recheck them on every read, as do the agent run reads
 (`/v1/agent/runs/{id}` and `/events`). The configured list of
 subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
@@ -52,7 +57,9 @@ in that list gain the `vision` capability and image input in the catalog.
 The direct diagnostic agent route can be used to verify an input image before
 enabling its exact model ID. Compose uses the `default` sentinel when no override is
 provided. The default verified list contains only the completed Claude Sonnet
-smoke model; other candidates remain unavailable until confirmed by a live run.
+smoke model; other candidates remain unavailable until confirmed by a live run. The default Claude
+candidates are `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-haiku-5-5`; the last two are listed
+with `available: false` until a live check. Fable is not listed.
 The default Codex candidate list contains the seven picker-visible exact IDs
 returned by the owner's Codex App Server `model/list` on 2026-10-12:
 `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
