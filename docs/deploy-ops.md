@@ -33,9 +33,9 @@ Push to `master` → `.github/workflows/deploy.yml` runs **five jobs** (`docs`,
    `aib.zapleo.com`; key on the server is wired to
    `command="/usr/local/bin/aibroker-deploy"` in `authorized_keys`.
    The wrapper (`infra/aibroker-deploy.sh`) does `git fetch` +
-   `reset --hard origin/master` → `docker compose build` → `up -d
-   --remove-orphans` → drift gate (exit 12) → health gate on every service,
-   up to 180s (exit 11). See "Deploy entrypoint" below.
+   `reset --hard origin/master` → `docker compose build` → `--profile agent build`
+   of the two workers → `up -d --remove-orphans` → recreate of the workers that
+   were running → drift gate (exit 12) → health gate, up to 180s (exit 11). See "Deploy entrypoint" below.
 
 ### What this guarantees
 
@@ -178,10 +178,9 @@ not mark a candidate verified for ordinary jobs, change scope or budget, or
 permit API-billed fallback. A live model still needs the usual billing guard.
 
 The approved internal RPC uses `agent_claude_rpc` and `agent_codex_rpc` named
-volumes. The ordinary deploy recreates the API with both mounts. Since the
-workers are behind the `agent` Compose profile, build and recreate those two
-containers separately after the API deploy; otherwise database polling remains
-active and no socket is used. The volumes contain only `worker.sock`, owned by
+volumes. The ordinary deploy recreates the API with both mounts, and the agent
+workers (`agent-worker`, `agent-worker-codex`) are rebuilt by the same deploy and
+recreated only if running (see "Agent workers in every deploy"). The volumes contain only `worker.sock`, owned by
 uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
 auth volumes into API. No new Docker network, host port, capability, or sandbox
 relaxation is required.
@@ -209,7 +208,38 @@ and unreviewed; it now lives in the repo and is installed with
 backup and refuses to install a script that fails `bash -n`).
 
 Installing is deliberately NOT part of the deploy: a deploy must not rewrite
-the entrypoint currently executing it.
+the entrypoint currently executing it. CI does not install it either. The server
+runs the INSTALLED copy, so a change to `infra/aibroker-deploy.sh` takes effect
+only after an operator runs `infra/install-deploy.sh` on the server.
+
+### Agent workers in every deploy (since 2026-10-13)
+
+Services under the compose profile `agent` are invisible to a plain
+`docker compose up -d`, so the script names `agent-worker` and `agent-worker-codex`
+explicitly. Before the fix, deploy never rebuilt them and the gates did not check
+them: on 2026-10-13 `aibroker-agent-worker` kept running PR #56 code while master
+was at #62.
+
+- **Build:** both workers are always built, after the base build, because they are
+  `FROM aibroker-api:latest`. A stopped worker is built too, so its image is ready.
+- **Recreate:** only the workers that were **running** before the deploy are
+  recreated (`--profile agent up -d --no-deps`). A worker stopped by the owner (the
+  rollback in [agent-runs.md](agent-runs.md#rollback)) stays stopped across deploys.
+- **Interruption:** recreating an active worker interrupts its in-flight run. Docker's
+  default 10s stop grace applies, and the interrupted run is later marked
+  `worker_lost` by the reaper. Deploy only when no agent runs are active.
+- **Gates:** the drift gate and the health gate cover the active workers. The workers
+  have no compose healthcheck, so an active worker must only be `running`.
+- **Fail closed:** the running-workers probe and the health-gate `ps` output are
+  captured before use. A failing docker/compose query aborts the deploy instead of
+  being read as "no workers".
+- **One-offs:** the health gate skips leftover `docker compose run` containers
+  (names containing `-run-`).
+- **`AIBROKER_DEPLOY_DIR`** (default `/var/www/aibroker`) exists only so tests can
+  run the script. The forced-command SSH cannot set it, so prod always uses the default.
+- `tests/test_deploy_script_profiles.py` guards that every profiled service is listed
+  in the script, that the default build runs before the agent build, and that the
+  health gate uses `ps -a`.
 
 ### What it checks, and why
 
@@ -231,12 +261,16 @@ would still have to do. On a fully-applied deploy every line ends in
 `Running` / `Healthy` / `Waiting`; any other verb (`Recreate`, `Create`,
 `Starting`, `Started`) means a container is not running the config we just
 deployed. Verified both ways: silent on a clean state, and it catches a
-container stopped out from under compose. Exit 12.
+container stopped out from under compose. The same check runs for the active
+agent workers (`--profile agent up -d --dry-run --no-deps`), because the base
+command does not see them. Exit 12.
 
-**Health gate, every service.** Waits up to 180s for all of them, not just
-`api`. Only `monitor` has its healthcheck disabled, so it only has to be
+**Health gate.** Waits up to 180s for every service listed by `docker compose ps -a`,
+not just `api`, so an exited container fails it. An owner-stopped agent worker is
+skipped. Only `monitor` has its healthcheck disabled, so it only has to be
 `running`; postgres, pgbouncer, redis, vision-local and api
-must be `healthy`. On failure it dumps `compose ps` plus
+must be `healthy`. An active agent worker has no healthcheck and must be
+`running`. On failure it dumps `compose ps` plus
 the last 30 log lines of each offending service. Exit 11.
 
 On success it prints the resolved `args` of `vision-local`, so

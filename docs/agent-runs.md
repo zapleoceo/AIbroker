@@ -425,6 +425,9 @@ and/or revoke the exact test grant (remove `llm:agent` from the test project). D
 volume or logging out is NOT a routine rollback: the account's authentication is handled
 separately by the owner. Stopping the worker leaves queued runs `pending` and in-flight runs
 `running`; `fail_stale_agent_runs` closes the latter as `worker_lost` once the worker is back.
+A stopped worker stays stopped across deploys: `infra/aibroker-deploy.sh` builds it but
+recreates only the workers that were running (see
+[deploy-ops.md](deploy-ops.md#agent-workers-in-every-deploy-since-2026-10-13)).
 
 ### Billing gate: paid continuation
 
