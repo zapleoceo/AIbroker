@@ -20,6 +20,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
+from aibroker.agent.client_tools import clear_pending_call
 from aibroker.agent.codex_cli import CodexCLI
 from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
@@ -367,7 +368,7 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             if item is None:
                 break
             last = time.monotonic()
-            if isinstance(item, ev.RunCompleted | ev.RunFailed):
+            if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):
                 terminal = item
                 break
             if isinstance(item, ev.Usage):
@@ -392,6 +393,13 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+        if lease_lost:
+            # Unfenced on purpose: it only withdraws this run's own unanswered tool call, and a
+            # lost lease means no terminal event will ever do it.
+            try:
+                await clear_pending_call(run_id)
+            except Exception:
+                log.exception("could not withdraw the pending client tool of run %d", run_id)
     if lease_lost:
         raise StaleLease(f"run {run_id} can no longer assume its session lease")
     return terminal or ev.RunFailed(error_class="no_terminal_event"), changed

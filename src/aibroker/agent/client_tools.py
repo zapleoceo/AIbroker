@@ -23,8 +23,18 @@ class ClientToolConflict(Exception):
     """A tool call or result is absent, expired, invalid, or no longer current."""
 
 
+class ClientToolCancelled(ClientToolConflict):
+    """The caller cancelled the run while it waited for a tool result: not a protocol fault."""
+
+
 def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def is_waiting(call: dict[str, Any]) -> bool:
+    """True while a call may still be answered; past its deadline submit_result refuses it,
+    so the poll response must stop advertising it too."""
+    return call.get("state") == "waiting" and _now() < datetime.fromisoformat(call["deadline"])
 
 
 def _digest(success: bool, content: str) -> str:
@@ -116,14 +126,16 @@ async def take_result(run_id: int, call_id: str,
             raise ClientToolConflict("job stopped while waiting for a tool")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:
-            raise ClientToolConflict("job was cancelled")
+            raise ClientToolCancelled("job was cancelled")
         meta = dict(job.result_meta or {})
         call = dict(meta.get("client_tool") or {})
         if call.get("call_id") != call_id:
             raise ClientToolConflict("pending tool changed")
-        if _now() >= datetime.fromisoformat(call["deadline"]):
-            raise ClientToolConflict("tool call expired")
         if call.get("state") != "ready":
+            # The deadline bounds the wait only: a result the client already got a 202 for is
+            # delivered even if the worker's ~1s poll lands just after the deadline.
+            if _now() >= datetime.fromisoformat(call["deadline"]):
+                raise ClientToolConflict("tool call expired")
             return None
         result = bool(call["success"]), str(call["content"])
         history = list(meta.get("client_tool_history") or [])
@@ -132,3 +144,19 @@ async def take_result(run_id: int, call_id: str,
         meta.pop("client_tool", None)
         job.result_meta = meta
         return result
+
+
+async def clear_pending_call(run_id: int) -> None:
+    """On lease loss, withdraw a still-waiting call so poll stops advertising it and
+    submit_result refuses a result nobody will read. A `ready` call is kept: its result was
+    already acknowledged with 202 and an identical retry must stay idempotent. A crash needs
+    no call here: the terminal write in runs.py replaces result_meta."""
+    async with get_session() as s:
+        job = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == run_id)
+                               .with_for_update())).scalar_one_or_none()
+        if job is None or job.status != "running":
+            return
+        meta = dict(job.result_meta or {})
+        if (meta.get("client_tool") or {}).get("state") == "waiting":
+            del meta["client_tool"]
+            job.result_meta = meta

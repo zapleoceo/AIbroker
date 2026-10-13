@@ -32,12 +32,17 @@ The pinned schema proves protocol availability, not live model conformance.
 3. On `item/tool/call`, the worker checks the thread and turn IDs, then persists
    the call ID, name, arguments, and a 300-second deadline before exposing it. `GET
    /v1/jobs/{id}` reports `status: pending`, `tool_calls`, and a distinct
-   `finish_reason: tool_calls` while the call waits. The model process remains
-   paused. The client authorizes and executes the function under its own
-   policy; Broker never executes that client function.
+   `finish_reason: tool_calls` while the call waits (`is_waiting`). The model
+   process remains paused. The deadline bounds only the wait for a result: once
+   it passes with no result, poll returns a plain `status: pending` with
+   `poll_after_s` and no `tool_calls` or `finish_reason`. The client authorizes
+   and executes the function under its own policy; Broker never executes that client function.
 4. An authenticated, same-project `POST /v1/jobs/{id}/tool-results`
    accept exactly one result per pending call ID. It must reject an unknown,
-   expired, duplicate-with-different-content, or already-terminal call.
+   expired (past its deadline without an accepted result), duplicate-with-different-content,
+   or already-terminal call with 409. An accepted (`202`) result is always delivered to
+   the worker, even when the worker's poll lands after the deadline: `take_result`
+   returns a ready result past the deadline.
    The worker sends the bounded result as `DynamicToolCallResponse` and
    continues the same turn. Repeating the identical result is idempotent.
    After the final model answer, the existing `GET /v1/jobs/{id}` returns
@@ -45,13 +50,22 @@ The pinned schema proves protocol availability, not live model conformance.
 
 The pending call and result use `deep_jobs.result_meta` under row locks. The
 worker checks its lease fence before publishing or consuming a callback and
-never replays a possibly executed client operation after lease loss.
+never replays a possibly executed client operation after lease loss. On lease
+loss, `clear_pending_call` withdraws the call only while it is still waiting:
+poll stops advertising it and later result submits get 409. A result already
+accepted with 202 is kept. On a crash, the run's terminal write replaces
+`result_meta`, which withdraws the call. A hard worker death is bounded by the
+300-second deadline; the reaper then marks the run `worker_lost`.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
-invalid state. `ClientToolResultIn` validates the HTTP payload and
-`jobs_tool_result` enforces project ownership. The catalog uses
+invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a
+cancel during the tool wait; `is_waiting` decides whether poll advertises the
+call; `clear_pending_call` withdraws it. `ClientToolResultIn` validates the
+HTTP payload and `jobs_tool_result` enforces project ownership. The catalog uses
 `subscription_tool_model_verified` to require an exact verified Codex ID.
-Cancellation and deadlines terminate the waiting App Server process. A client
+Cancellation terminates the waiting App Server process and ends the run as
+`run.cancelled` (outcome `cancelled`), not `failed` / `client_tool_protocol`.
+Deadlines also terminate the waiting App Server process. A client
 should use the Broker call ID as its own idempotency key. One outstanding call,
 16 calls per run, 64 KiB arguments/results, and exact-result idempotent retries
 while the job runs are enforced. A result sent after terminal state is rejected.

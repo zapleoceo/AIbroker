@@ -15,7 +15,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
-from aibroker.agent.client_tools import MAX_RESULT_BYTES, ClientToolConflict, submit_result
+from aibroker.agent.client_tools import (
+    MAX_RESULT_BYTES,
+    ClientToolConflict,
+    is_waiting,
+    submit_result,
+)
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.rpc import wake_worker
@@ -511,7 +516,7 @@ def _job_response(row: Any) -> DeepJobResponse:
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
-        if pending_tool.get("state") == "waiting":
+        if is_waiting(pending_tool):
             call = {"id": pending_tool["call_id"], "type": "function",
                     "function": {"name": pending_tool["name"],
                                  "arguments": pending_tool["arguments"]}}

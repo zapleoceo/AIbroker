@@ -209,7 +209,9 @@ writes files into the workspace.
    renewal request, so it is never later than the DB's `lease_until`; DB errors and hangs are both
    covered). The stream loop then stops the CLI at once (cancel, like a timeout) and the run
    ends with **no terminal write**; the stale-run sweep later closes it as `run.failed
-   worker_lost`. It is never re-run.
+   worker_lost`. It is never re-run. Before ending, `clear_pending_call` withdraws a still-waiting
+   client tool call, so poll stops advertising it and later result submits get 409; an already
+   accepted (202) result is kept.
    Busy -> the run goes back to `pending` with a delay (`requeue_run`), failing
    `session_busy` after `session_busy_max` tries. Two runs never use one session at once.
    Every acquisition returns a `Lease` with a FENCE token that grows by one on each takeover
@@ -227,7 +229,8 @@ writes files into the workspace.
    for `idle_timeout_s`) timeouts give `run.timed_out`; the cancel flag
    (`cancel_requested`, polled every `AGENT_CANCEL_POLL_S`) gives `run.cancelled`. Both call
    `adapter.cancel()` (the adapter contract owns SIGTERM then SIGKILL), bounded by
-   `AGENT_CANCEL_GRACE_S`.
+   `AGENT_CANCEL_GRACE_S`. A cancel during a client tool wait (`ClientToolCancelled`) ends
+   as `run.cancelled`, not `run.failed`.
 5. Adapter crash -> `adapter_error`; stream ending without a terminal event ->
    `no_terminal_event`. Failures are never retried or rerouted. The one exception is
    quota exhaustion, which waits (below).

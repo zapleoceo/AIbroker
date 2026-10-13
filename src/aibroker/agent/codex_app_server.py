@@ -10,7 +10,12 @@ from typing import Any
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentRunSpec, StreamEvent
-from aibroker.agent.client_tools import ClientToolConflict, publish_call, take_result
+from aibroker.agent.client_tools import (
+    ClientToolCancelled,
+    ClientToolConflict,
+    publish_call,
+    take_result,
+)
 from aibroker.agent.codex_cli import CONFIG_OVERRIDES, permission_overrides
 
 
@@ -185,6 +190,8 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 yield ev.RunCompleted(final_text=final_text)
                 return
         raise ClientToolConflict("App Server closed before turn completion")
+    except ClientToolCancelled:
+        yield ev.RunCancelled()
     except (ClientToolConflict, ValueError, OSError, json.JSONDecodeError) as exc:
         yield ev.RunFailed(error_class="client_tool_protocol", message=str(exc)[:500])
     finally:

@@ -107,7 +107,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
-| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; see [subscription tool loop](subscription-tool-loop.md) |
+| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its 300 s deadline without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
