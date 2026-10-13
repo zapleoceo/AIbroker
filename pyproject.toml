@@ -55,6 +55,11 @@ addopts = "-v --strict-markers"
 line-length = 100
 target-version = "py312"
 
+[tool.coverage.run]
+# SQLAlchemy's async engine runs on greenlets; without this, coverage drops every line executed
+# after the first database await, so tests that do run that code report it as never executed.
+concurrency = ["greenlet", "thread"]
+
 [tool.ruff.lint]
 # MUST match the explicit --select/--ignore in .github/workflows/deploy.yml's
 # quality job — that CLI override is what actually gates production. Until

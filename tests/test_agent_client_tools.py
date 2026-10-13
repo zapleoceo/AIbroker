@@ -206,3 +206,21 @@ async def test_lease_loss_keeps_accepted_ready_result():
         await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
     assert await submit_result(job_id, 91, "c1", True, "ok") is False   # idempotent retry
     assert await take_result(job_id, "c1") == (True, "ok")
+
+
+async def test_lease_loss_still_raises_when_withdrawing_the_call_fails(monkeypatch, caplog):
+    job_id = await _job()
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+
+    async def broken(run_id):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("aibroker.agent.executor.clear_pending_call", broken)
+    lease = Lease("owner", "s", job_id, 1)
+    lease.lost.set()
+    spec = AgentRunSpec(run_id=job_id, capability="agent:codex", prompt="p",
+                        workspace=".", account_id="owner")
+    with caplog.at_level("ERROR"), pytest.raises(StaleLease):
+        await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
+    assert any("could not withdraw the pending client tool" in r.message and r.exc_info
+               for r in caplog.records)
