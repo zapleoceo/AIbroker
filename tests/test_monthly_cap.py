@@ -7,7 +7,7 @@ Postgres-only SQL. Only the refund path (GREATEST) needs Postgres.
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import insert, text
@@ -42,7 +42,7 @@ async def _add_key(**kw) -> ApiKeyRow:
         "scopes": ["llm:chat"], "token_encrypted": "x", "is_active": True,
         "is_alive": True, "daily_limit": 999999, "daily_used": 0,
         "daily_cost_used_usd": 0.0, "daily_cost_cap_usd": None,
-        "daily_reset_at": date.today(), "monthly_cost_cap_usd": None,
+        "daily_reset_at": datetime.now(UTC).date(),  # the cost guard counts days in UTC "monthly_cost_cap_usd": None,
         "monthly_cost_used_usd": 0.0, "monthly_reset_at": month_start_utc(),
         "total_cost_usd": 0.0, "error_count": 0, "notes": "",
     }
