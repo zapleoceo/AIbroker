@@ -193,7 +193,15 @@ lost) until the idle pgbouncer server backends were terminated.
   fail, so migrations ALWAYS run before the code deploy.
 - **Safety net.** `retry_stale_statement` (`db/resilience.py`, matcher `is_stale_statement_error`)
   retries once in a fresh transaction on `InvalidCachedStatementError` (key pick, job claim,
-  job finish) and logs one WARNING. It does not replace the migration order.
+  job finish) and logs one WARNING. It is a safety net for direct connections only: behind
+  pgbouncer the server statement is reused by query text, so the retry probably does not help.
+  Under pgbouncer the explicit column lists are the fix, plus the operator step below after
+  DDL. It does not replace the migration order.
+- **`ALTER COLUMN ... TYPE`.** On a column that is in a listed query, the query text stays the
+  same but the result type changes, so explicit column lists do not protect it. It needs the
+  operator step below (terminate idle pgbouncer backends) right after the migration.
+  `DROP COLUMN` follows expand/contract: first deploy code that no longer lists the column,
+  then drop it.
 - **Operator step after DDL on a hot table.** From the postgres container, terminate only idle
   pgbouncer server backends:
 

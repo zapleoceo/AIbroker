@@ -14,10 +14,30 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from aibroker.db.resilience import is_stale_statement_error, retry_stale_statement
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "aibroker"
-# `SELECT * FROM r2` reads a CTE whose columns are listed explicitly in the same
-# statement (routes/dashboard_requests.py), so its result type cannot drift.
+# routes/dashboard_requests.py: `r.*`, `pg.*` and `SELECT * FROM r2` all read CTEs
+# (g -> r -> r2 -> pg, built around line 241) whose columns are listed explicitly in
+# the same statement, so their result type cannot drift after ADD COLUMN.
 ALLOWLIST = {"routes/dashboard_requests.py"}
-STAR = re.compile(r"RETURNING\s+\*|SELECT\s+\*", re.IGNORECASE)
+# Matched over the WHOLE file text, so RETURNING / SELECT and the `*` split across
+# lines or adjacent string literals are caught; `alias.*` is caught too.
+STAR = re.compile(
+    r"RETURNING[\s\"']*\*|SELECT[\s\"']*\*|[\"'\s(,]\w+\.\*",
+    re.IGNORECASE,
+)
+
+
+def test_star_regex_self_check():
+    for bad in (
+        "x RETURNING *",
+        '"RETURNING\n    *"',
+        '"UPDATE t SET a=1 RETURNING "\n"*"',
+        "select\n *\n from t",
+        '"SELECT k.* FROM api_keys k"',
+        '"SELECT j.id, j.* FROM deep_jobs j"',
+    ):
+        assert STAR.search(bad), bad
+    for ok in ('"RETURNING id, label"', "x = a * b  # 2 * 3", '"SELECT id FROM t"'):
+        assert not STAR.search(ok), ok
 
 
 def test_no_star_projection_in_raw_sql():
@@ -26,9 +46,10 @@ def test_no_star_projection_in_raw_sql():
         rel = path.relative_to(SRC).as_posix()
         if rel in ALLOWLIST:
             continue
-        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if STAR.search(line):
-                offenders.append(f"{rel}:{n}: {line.strip()}")
+        body = path.read_text(encoding="utf-8")
+        for m in STAR.finditer(body):
+            line_no = body.count("\n", 0, m.start()) + 1
+            offenders.append(f"{rel}:{line_no}: {m.group(0).strip()!r}")
     assert not offenders, "star projections break after ALTER TABLE ADD COLUMN:\n" + "\n".join(offenders)
 
 
