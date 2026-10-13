@@ -107,7 +107,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
-| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its 300 s deadline without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
+| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex or Claude subscription tool call; an accepted result is always delivered, while a call past its 300 s deadline without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
@@ -629,7 +629,9 @@ one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
 when the enabled model's support is unknown. Subscription routes report
-`supports_tools: false`; no client tool-call handoff is verified. Only exact
+`supports_tools: false` until the provider's tool gate is enabled and the exact ID verified
+(`AGENT_SUBSCRIPTION_CODEX_TOOLS_*`, `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_*`); `POST /v1/jobs` with `tools` on a
+`claude-sub/*` or `codex-sub/*` pin answers `503` while its gate is off. Only exact
 Codex IDs separately verified for input vision list image input on the
 `vision` lane, limited to embedded data URLs. The input-vision verified list
 defaults to empty. Any `image_url` block on `/v1/jobs` or `/v1/deep` requires `llm:vision`, not only

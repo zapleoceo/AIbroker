@@ -1,7 +1,7 @@
 """Stdio MCP server the Claude CLI spawns per run: it only relays tool calls to the worker.
 
 Stdlib only and credential-free: the tool list comes from a file in the run workspace and every
-call is forwarded over the run's Unix socket to the worker (agent.mcp_relay), which owns DB access,
+call is forwarded over the run's Unix socket to the worker (agent.claude_tools.ToolRelay), which owns DB access,
 fences and validation. Protocol subset: initialize, ping, tools/list, tools/call.
 """
 from __future__ import annotations

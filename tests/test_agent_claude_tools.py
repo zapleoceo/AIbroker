@@ -22,6 +22,7 @@ from aibroker.agent.client_tools import ClientToolConflict, publish_call, submit
 from aibroker.agent.constants import AGENT_CAPABILITIES
 from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
+from aibroker.agent.lock import StaleLease
 from aibroker.agent.registry import clear_adapters, register_adapter
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
@@ -38,6 +39,11 @@ TOOLS = [{"type": "function", "function": {
 MODEL = "claude-sonnet-5-5"
 needs_unix = pytest.mark.skipif(not hasattr(asyncio, "start_unix_server"),
                                 reason="Unix sockets (the worker runs on Linux)")
+
+
+@pytest.fixture(autouse=True)
+def _no_announce_wait(monkeypatch):
+    monkeypatch.setattr(claude_tools, "ANNOUNCE_WAIT_S", 0.0)
 
 
 async def _job(capability: str = "agent:claude", tools=TOOLS, choice="auto") -> int:
@@ -192,6 +198,92 @@ async def test_schema_invalid_arguments_are_an_error_and_never_published(monkeyp
     assert relay.failure is None and relay.calls == 0      # the model may retry
 
 
+async def test_invalid_calls_are_capped_then_the_run_fails(monkeypatch):
+    job_id = await _job()
+    killed = []
+    relay = ToolRelay(_spec(run_id=job_id), lambda: killed.append(True))
+    for _ in range(claude_tools.MAX_INVALID_CALLS - 1):
+        assert "schema" in (await relay.call("lookup", {"id": "x"}))[1]
+        assert relay.failure is None
+    is_error, text = await relay.call("lookup", {"id": "x"})
+    assert is_error and "too many" in text and killed == [True]
+    assert relay.failure.error_class == "client_tool_protocol"
+    assert relay.invalid == claude_tools.MAX_INVALID_CALLS
+
+
+async def test_invalid_calls_count_toward_the_total_call_cap():
+    job_id = await _job()
+    relay = ToolRelay(_spec(run_id=job_id), lambda: None)
+    relay.calls = client_tools.MAX_CALLS          # 16 valid calls already made
+    assert "too many" in (await relay.call("lookup", {"id": "x"}))[1]
+    assert relay.failure.error_class == "client_tool_protocol"
+
+
+@pytest.mark.parametrize("target", ["take_result", "publish_call"])
+async def test_stale_lease_or_db_error_fails_the_run_and_withdraws_the_call(monkeypatch, target):
+    job_id = await _job()
+    real_publish = claude_tools.publish_call
+
+    async def boom(*args, **kwargs):
+        raise StaleLease("taken over") if target == "take_result" else RuntimeError("db down")
+
+    if target == "take_result":
+        monkeypatch.setattr(claude_tools, "take_result", boom)
+    else:
+        async def publish_then_boom(*args, **kwargs):
+            await real_publish(*args, **kwargs)
+            raise RuntimeError("db down")
+        monkeypatch.setattr(claude_tools, "publish_call", publish_then_boom)
+    killed = []
+    relay = ToolRelay(_spec(run_id=job_id), lambda: killed.append(True))
+    is_error, _ = await relay.call("lookup", {"id": 1})
+    assert is_error and killed == [True]
+    assert relay.failure.error_class == "adapter_error"
+    async with get_session() as s:
+        assert proxy._job_response(await s.get(DeepJobRow, job_id)).tool_calls is None
+
+
+async def test_withdraw_failure_is_logged_not_raised(monkeypatch, caplog):
+    job_id = await _job()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(claude_tools, "take_result", boom)
+    monkeypatch.setattr(claude_tools, "clear_pending_call", boom)
+    relay = ToolRelay(_spec(run_id=job_id), lambda: None)
+    with caplog.at_level("ERROR"):
+        assert (await relay.call("lookup", {"id": 1}))[0] is True
+    assert relay.failure.error_class == "adapter_error"
+    assert any("could not withdraw" in r.message for r in caplog.records)
+
+
+async def test_call_adopts_the_cli_tool_use_id_announced_for_the_same_arguments():
+    job_id = await _job()
+    relay = ToolRelay(_spec(run_id=job_id), lambda: None)
+    relay.announce("toolu_other", "lookup", {"id": 99})
+    relay.announce("toolu_mine", "lookup", {"id": 3})
+    relay.announce("x" * 200, "lookup", {"id": 3})        # over-long ids are ignored
+    task = asyncio.create_task(relay.call("lookup", {"id": 3}))
+    call = await _pending(job_id)
+    assert call["call_id"] == "toolu_mine"                # the id the event stream carries
+    await submit_result(job_id, 93, "toolu_mine", True, "ok")
+    assert await task == (False, "ok")
+    assert [a[0] for a in relay._announced] == ["toolu_other"]
+
+
+async def test_call_waits_briefly_for_a_late_announcement(monkeypatch):
+    job_id = await _job()
+    monkeypatch.setattr(claude_tools, "ANNOUNCE_WAIT_S", 5.0)
+    relay = ToolRelay(_spec(run_id=job_id), lambda: None)
+    task = asyncio.create_task(relay.call("lookup", {"id": 3}))
+    await asyncio.sleep(0.05)
+    relay.announce("toolu_late", "lookup", {"id": 3})
+    assert (await _pending(job_id))["call_id"] == "toolu_late"
+    relay.stop()
+    await task
+
+
 async def test_expired_call_fails_the_run_like_codex(monkeypatch):
     job_id = await _job()
     monkeypatch.setattr(client_tools, "TOOL_WAIT_S", 0)
@@ -326,6 +418,8 @@ async def test_turn_runs_with_mcp_only_withholds_results_and_completes(tmp_path,
     assert [e.type for e in events] == ["session.assigned", "tool.call", "tool.result",
                                         "run.completed"]
     assert events[2].output == claude_tools.WITHHELD
+    assert (events[1].name, events[1].call_id) == ("lookup", "t1")   # bare name, CLI id
+    assert relays[0]._announced == [("t1", "lookup", '{"id":7}')]    # the call will adopt "t1"
     assert "SENSITIVE" not in json.dumps([e.__dict__ for e in events], default=str)
     argv = adapter.argv
     assert argv[argv.index("--mcp-config") + 1].endswith("mcp.json")
@@ -393,7 +487,9 @@ def test_argv_allows_only_the_broker_mcp_tools():
     allowed = [a for a in argv if a.startswith("--allowedTools")]
     assert allowed == ["--allowedTools=mcp__broker__*"]
     denied = next(a for a in argv if a.startswith("--disallowedTools=")).split("=", 1)[1].split(",")
-    assert {"Bash", "Read", "Write", "Edit", "WebFetch", "Agent"} <= set(denied)
+    assert {"Bash", "Read", "Write", "Edit", "WebFetch", "Agent", "Task", "Skill", "TodoWrite",
+            "LS", "NotebookRead"} <= set(denied)
+    assert "ToolSearch" not in denied
     assert not any(t in allowed[0] for t in ("Bash", "Read", "Write", "Edit"))
     with pytest.raises(ValueError, match="exclude"):
         real_cli.build_claude_argv(_spec(allowed_tools=["Read(src/**)"]), mcp_config="/w/m.json")
@@ -410,7 +506,7 @@ def test_mcp_config_holds_command_and_args_only_no_secrets(tmp_path, monkeypatch
     data = json.loads(text)
     server = data["mcpServers"]["broker"]
     assert set(data) == {"mcpServers"} and set(server) == {"type", "command", "args"}
-    assert server["args"][:2] == ["-m", "aibroker.agent.mcp_bridge"]
+    assert server["args"][:3] == ["-I", "-m", "aibroker.agent.mcp_bridge"]
     assert "hunter2" not in text and "postgresql" not in text
     assert sock.parent == config.parent and sock.name == "b.sock"
     assert f"mcp__{claude_tools.SERVER_NAME}__*" == real_cli.MCP_ALLOW

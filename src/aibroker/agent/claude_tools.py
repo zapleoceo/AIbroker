@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -19,15 +20,21 @@ from typing import Any
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentRunSpec, StreamEvent
 from aibroker.agent.client_tools import (
+    MAX_CALLS,
     ClientToolCancelled,
     ClientToolConflict,
+    clear_pending_call,
     publish_call,
     take_result,
 )
 from aibroker.agent.real_cli import build_claude_argv
 from aibroker.services.tool_contract import validate_result
 
+log = logging.getLogger(__name__)
 BRIDGE_DIR = ".aibroker-mcp"
+MAX_INVALID_CALLS = 3     # schema-invalid calls tolerated before the run fails
+ANNOUNCE_WAIT_S = 5.0     # how long a call waits for the CLI's own tool_use event (id matching)
+BRIDGE_PREFIX = "mcp__broker__"
 SERVER_NAME = "broker"
 MAX_SOCKET_PATH = 100     # sun_path is 108 bytes on Linux
 WITHHELD = "[client tool result withheld]"
@@ -48,7 +55,7 @@ def write_bridge_files(workspace: str, tools: list[dict[str, Any]]) -> tuple[Pat
     config = root / "mcp.json"
     config.write_text(json.dumps({"mcpServers": {SERVER_NAME: {
         "type": "stdio", "command": sys.executable,
-        "args": ["-m", "aibroker.agent.mcp_bridge", "--socket", str(sock),
+        "args": ["-I", "-m", "aibroker.agent.mcp_bridge", "--socket", str(sock),
                  "--tools", str(tools_file)]}}}), encoding="utf-8")
     for path in (tools_file, config):
         os.chmod(path, 0o600)
@@ -61,9 +68,12 @@ class ToolRelay:
     def __init__(self, run: AgentRunSpec, on_failure: Callable[[], None]) -> None:
         self.run = run
         self.calls = 0
+        self.invalid = 0
         self.failure: ev.RunFailed | ev.RunCancelled | None = None
         self._on_failure = on_failure
         self._seq = 0
+        self._announced: list[tuple[str, str, str]] = []
+        self._announce_event = asyncio.Event()
         self._stop = asyncio.Event()
         self._lock = asyncio.Lock()
 
@@ -76,6 +86,41 @@ class ToolRelay:
             self._stop.set()
             self._on_failure()
 
+    @staticmethod
+    def _key(arguments: Any) -> str:
+        return json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    def announce(self, call_id: str, name: str, arguments: Any) -> None:
+        """Remember the CLI's own tool_use id so the published call carries the same id."""
+        if 1 <= len(call_id) <= 128:
+            self._announced.append((call_id, name, self._key(arguments)))
+            self._announce_event.set()
+
+    async def _claim_id(self, name: str, arguments: Any) -> str:
+        """The announced tool_use id with this name and arguments (oldest first), else call_N.
+        The MCP request carries no tool_use id we can rely on, so the match is by content."""
+        key = self._key(arguments)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + ANNOUNCE_WAIT_S
+        while True:
+            for index, (call_id, tool, announced) in enumerate(self._announced):
+                if tool == name and announced == key:
+                    del self._announced[index]
+                    return call_id
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                self._seq += 1
+                return f"call_{self._seq}"
+            self._announce_event.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._announce_event.wait(), timeout=remaining)
+
+    async def _withdraw(self) -> None:
+        try:
+            await clear_pending_call(self.run.run_id)
+        except Exception:
+            log.exception("could not withdraw the pending client tool of run %d", self.run.run_id)
+
     def _argument_problem(self, call_id: str, name: str, raw: str) -> str | None:
         call = {"id": call_id, "type": "function", "function": {"name": name, "arguments": raw}}
         return validate_result("", {"finish_reason": "tool_calls", "tool_calls": [call]},
@@ -86,13 +131,17 @@ class ToolRelay:
         if self._stop.is_set():
             return True, "the run is stopping"
         async with self._lock:
-            call_id = f"call_{self._seq + 1}"
+            call_id = await self._claim_id(name, arguments)
             raw = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
             if problem := self._argument_problem(call_id, name, raw):
+                self.invalid += 1
+                if self.invalid >= MAX_INVALID_CALLS or self.calls + self.invalid > MAX_CALLS:
+                    self._fail(ev.RunFailed(error_class="client_tool_protocol",
+                                            message="too many invalid client tool calls"))
+                    return True, "too many invalid tool calls; the run is ending"
                 return True, f"arguments for {name} do not match its schema ({problem})"
             try:
                 await publish_call(self.run.run_id, call_id, name, arguments, self.run.fence_leases)
-                self._seq += 1
                 self.calls += 1
                 while True:
                     result = await take_result(self.run.run_id, call_id, self.run.fence_leases)
@@ -106,6 +155,10 @@ class ToolRelay:
                 self._fail(ev.RunCancelled())
             except ClientToolConflict as exc:
                 self._fail(ev.RunFailed(error_class="client_tool_protocol", message=str(exc)[:500]))
+            except Exception as exc:    # StaleLease, DB errors: never leave the call pending
+                log.exception("client tool call failed for run %d", self.run.run_id)
+                await self._withdraw()
+                self._fail(ev.RunFailed(error_class="adapter_error", message=str(exc)[:500]))
             return True, "the tool call could not be completed"
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -158,6 +211,10 @@ async def run_claude_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator
         async for item in adapter.exec_argv(argv, run):
             if isinstance(item, ev.ToolResult):
                 item = ev.ToolResult(call_id=item.call_id, ok=item.ok, output=WITHHELD)
+            elif isinstance(item, ev.ToolCall) and item.name.startswith(BRIDGE_PREFIX):
+                bare = item.name[len(BRIDGE_PREFIX):]
+                relay.announce(item.call_id, bare, item.input)
+                item = ev.ToolCall(call_id=item.call_id, name=bare, input=item.input)
             if item.type in ev.TERMINAL_TYPES:
                 if relay.failure is not None:
                     yield relay.failure

@@ -1,9 +1,14 @@
 # Subscription client tools: implementation boundary
 
 Status: implemented behind `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED=false` and
-an empty `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` list. The default
-catalog reports `supports_tools: false`. Claude subscription jobs still reject
-tools. Native API-provider tools retain their existing contract.
+an empty `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` list, and, for Claude,
+behind `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED=false` and an empty
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` list. The default catalog
+reports `supports_tools: false` for every subscription model. With the Claude
+gate off, `POST /v1/jobs` with `tools` on a `claude-sub/*` pin answers `503`
+("Claude subscription client tools are not enabled for this project and model").
+Native API-provider tools retain their existing contract. Claude is described in
+[Claude client tools (MCP bridge)](#claude-client-tools-mcp-bridge).
 
 ## Verified transport capability
 
@@ -91,15 +96,82 @@ canary settings and put only that exact route in
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` to advertise it. A failed
 canary leaves the verified list empty. No new
 scope, external port, credential, API-paid fallback, or wider Linux sandbox is
-part of this design. Claude subscription tools require a separate adapter:
-the current Claude headless CLI does not expose this client-response pause;
-the Claude Agent SDK has in-process MCP tool handlers, which would need the
-same durable Broker callback contract and separate review.
+part of this design. Claude subscription tools use the MCP bridge below, not
+the App Server.
 
 `subscription_tool_model_canary` evaluates the temporary exact project/model
 gate. `ModelRerouted` records an explicit App Server reroute notification in
 the run event stream before the tool turn fails; no notification is not proof
 of the serving model.
+
+## Claude client tools (MCP bridge)
+
+A `claude-sub/*` job with `tools` follows the same contract as Codex: `pending`
+with `tool_calls` and `finish_reason: "tool_calls"`, the caller posts
+`/v1/jobs/{id}/tool-results`, the same run continues, then `done`. The Claude
+headless CLI cannot pause for a client response by itself, so the worker gives
+the CLI one MCP server named `broker`:
+
+- `claude_tools.write_bridge_files` writes `<workspace>/.aibroker-mcp/tools.json`
+  (name, description and `inputSchema` of exactly the job's tools), `mcp.json`
+  (command and args only, no `env`, no secrets) and reserves `b.sock`. The CLI
+  gets `--mcp-config <mcp.json>` next to the existing `--strict-mcp-config`.
+- The command is `python -I -m aibroker.agent.mcp_bridge --socket ... --tools ...`
+  (`-I`: the run workspace, the CLI's cwd, is not put on `sys.path`). The shim is
+  stdlib only and speaks newline-delimited JSON-RPC over stdio: `handle_message`
+  answers `initialize`, `ping`, `tools/list`, `tools/call`; `serve` is the loop;
+  `socket_forward` relays one call per connection to the worker; `load_tools`
+  reads the tools file; `main` is the entry point.
+- In the worker, `claude_tools.ToolRelay` listens on the socket (`serve`) and
+  handles each call (`call`): it checks the arguments against the declared schema
+  (`validate_result`, the Codex check), then `publish_call` (same fences, 16-call and
+  64 KiB limits, 300 s deadline), then polls `take_result`. The result becomes
+  the MCP result: text content, `isError: true` when `success` is false.
+- `run_claude_tool_turn` drives the CLI (`exec_argv`) and rewrites its events.
+  `tool_choice: "none"` runs a plain text turn without the bridge.
+- Built-in tools are off: `--tools ""`, `--allowedTools=mcp__broker__*` as the
+  only allow rule, and `--disallowedTools` names every built-in tool of the
+  official tools reference (`BUILTIN_DENY`) besides the scoped credential and
+  `/proc` denies. `allowed_tools` and attachments are refused for these runs.
+
+Differences from Codex that clients can observe:
+
+- **Call ids.** The MCP request carries no tool-use id we rely on, so the relay
+  matches each call to the CLI's own `tool_use` event by tool name and
+  canonical arguments (oldest first) and publishes the call under that
+  `toolu_*` id; the `tool.call` event (name rewritten to the bare tool name,
+  without `mcp__broker__`) and the poll `tool_calls[].id` are then the same id.
+  If no event matches within `ANNOUNCE_WAIT_S` (5 s) the id is `call_N`. Unverified against
+  the real CLI.
+- **Schema-invalid arguments** do not fail the run at once (Codex does): the model
+  gets an MCP error result and nothing is published, so it may correct itself.
+  Each rejected call counts: the third one (`MAX_INVALID_CALLS`), or any call that
+  makes valid plus rejected calls exceed 16, ends the run as
+  `client_tool_protocol`.
+- **Faults.** Expired deadline, cancel and publish refusal end the run like
+  Codex (`client_tool_protocol` / cancelled). Any other exception in the relay
+  (`StaleLease`, database errors) is logged, withdraws the still-waiting call
+  and fails the run as `adapter_error`.
+- **Required tool.** `tool_choice` `required` or a named function fails the
+  run with `client_tool_protocol` when the CLI completes without calling one.
+
+Gate: `subscription_tools_available(model, project_id)` is the one check used by
+the API (`503`), the executor at run time (`route_disabled`), and, together with
+`subscription_tool_model_verified`, the catalog (`supports_tools`). For
+`claude-sub/*` it needs `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` and the exact id
+in `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` (a JSON list such as
+`["claude-sub/claude-sonnet-5-5"]`; ids must also be verified catalog models);
+there is no canary list for Claude.
+
+Canary: enable the gate for one exact model, submit one `lookup_probe` job as
+for Codex, and check that the poll shows one `tool_calls` entry, that its id equals the
+`tool.call` event id, that the result is accepted with `202`, that the final
+answer contains the marker, and that the init message lists no built-in tool.
+CLI flags used: `--mcp-config`, `--strict-mcp-config`, `--tools`,
+`--allowedTools`, `--disallowedTools` are documented at
+code.claude.com/docs/en/cli-reference and `/permissions`; the `--mcp-config <path>` form
+(space, not `=`) follows the documented example. The MCP wire details (protocol version
+echo, stripped shim environment) are unverified on the real CLI.
 
 ## Input image canary
 

@@ -47,8 +47,17 @@ Probe = Callable[[list[str], Mapping[str, str]], Awaitable[str]]
 ATTACHMENT_READ = "Read(inputs/**)"
 MCP_ALLOW = "mcp__broker__*"     # server name "broker" is fixed in claude_tools.SERVER_NAME
 # Bare names remove a tool from the model's context; belt and braces next to `--tools ""`.
-BUILTIN_DENY = ("Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep",
-                "WebFetch", "WebSearch", "Agent")
+# Names from code.claude.com/docs/en/tools-reference plus legacy ones (LS, NotebookRead, Task).
+# ToolSearch stays allowed: it may be the way the CLI loads the deferred mcp__broker__ tools.
+BUILTIN_DENY = (
+    "Bash", "PowerShell", "Monitor", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "NotebookRead", "Glob", "Grep", "LS", "LSP", "WebFetch", "WebSearch", "Agent", "Task",
+    "Skill", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskOutput",
+    "TaskStop", "Workflow", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+    "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "SendMessage",
+    "ListAgents", "RemoteTrigger", "ScheduleWakeup", "PushNotification", "SendUserFile",
+    "SendFeedback", "Artifact", "ReadMcpResourceTool", "ListMcpResourcesTool",
+)
 CLI_ENV_KEYS = ("PATH", "HOME", "CLAUDE_CONFIG_DIR", "DISABLE_AUTOUPDATER", "LANG", "TMPDIR")
 
 
