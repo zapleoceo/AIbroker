@@ -241,6 +241,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                             "cost_usd": None,
                             "billing_type": run.billing_mode,
                             "finish_reason": "stop",
+                            "ignored_params": client_job.get("ignored_params") or [],
                         })
                 elif event.type == "run.failed":
                     job.result_meta = {"client_tool_history": history,

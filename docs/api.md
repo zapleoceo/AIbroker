@@ -221,6 +221,14 @@ values return `422`:
 - deep (`DeepRequest`, the `/v1/deep` alias): `max_tokens` 1..32768
   (default 4096) — the deep lane legitimately generates long answers.
 
+Subscription models (`claude-sub/*`, `codex-sub/*`) share these ranges but only **ignore** both
+params, because the CLI has no such control: a value in range is accepted (`202`), an out-of-range value
+is `422` like everywhere else. The poll response carries `ignored_params`, the list of those params
+the caller set (`[]` for none; `null` on non-subscription jobs). A subscription prompt over
+`AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS` (default 1,000,000 characters) is `400`. Returned `files` of
+such a job can carry entries with `skipped` (`too_large`, `cap_reached`, `invalid_image`) and no
+content for a file or generated image that exceeded a cap (2 MiB each, 8 MiB total).
+
 Rationale: an oversized `max_tokens` inflates the cost-guard's worst-case
 reservation estimate and silently knocks every capped paid key out of the
 chain — the paid tail vanishes and the request 503s with keys sitting

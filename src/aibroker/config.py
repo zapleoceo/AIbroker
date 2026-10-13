@@ -173,12 +173,27 @@ class Settings(BaseSettings):
     AGENT_SESSION_LEASE_HEARTBEAT_S: float = 30.0
     AGENT_CANCEL_POLL_S: float = 1.0
     AGENT_CANCEL_GRACE_S: float = 15.0     # how long adapter.cancel() may take
-    AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
-    AGENT_FILES_TOTAL_BYTES: int = 1024 * 1024
+    AGENT_FILE_MAX_BYTES: int = 2 * 1024 * 1024     # per returned file
+    AGENT_FILES_TOTAL_BYTES: int = 8 * 1024 * 1024
     AGENT_FILES_MAX_COUNT: int = 20
     AGENT_IMAGE_MAX_BYTES: int = 2 * 1024 * 1024   # per exported generated image
     AGENT_IMAGES_MAX_COUNT: int = 4
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
+    # Subscription jobs (POST /v1/jobs -> agent:*). MAX_WALL_S is the absolute safety bound of one
+    # attempt, client-tool waits included. IDLE_S is the stall watchdog: it is reset only by a
+    # parsed CLI event (the parsers expose no partial/thinking events, so one silent step longer
+    # than IDLE_S is killed) and is suspended while a client tool call waits for its result.
+    AGENT_SUBSCRIPTION_MAX_WALL_S: int = Field(1800, ge=10)
+    AGENT_SUBSCRIPTION_IDLE_S: int = Field(300, ge=5)
+    # The prompt is held as body, parsed string, dedup-hash JSON and the stored request (~30 B/char
+    # at the non-ASCII peak in the API, ~10 in the worker): 1M chars is ~30 MB, far below the 1g
+    # worker limit. Above it the CLI context (~250k tokens) refuses the prompt anyway.
+    AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS: int = Field(1_000_000, ge=1000)
+    # Client-tool handoff (Codex tools). WAIT_S bounds ONE call; the whole run stays under MAX_WALL_S
+    # (CALLS x WAIT_S is deliberately not a wall: it would be 16 h).
+    AGENT_CLIENT_TOOL_MAX_CALLS: int = Field(64, ge=1)
+    AGENT_CLIENT_TOOL_MAX_BYTES: int = Field(1024 * 1024, ge=1024)   # arguments and result each
+    AGENT_CLIENT_TOOL_WAIT_S: int = Field(900, ge=1)
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"

@@ -1,10 +1,11 @@
 """Broker jobs request rules exposed in the model catalog and used at submit."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, Protocol
 
 from aibroker.agent.subscription_job import response_format_problem
+from aibroker.config import get_settings
 from aibroker.providers.registry import ModelSpec
 
 DEFAULT_MAX_TOKENS = 1024
@@ -13,7 +14,7 @@ JOB_MAX_TOKENS_MIN = 1
 JOB_MAX_TOKENS_MAX = 16384
 JOB_TEMPERATURE_MIN = 0.0
 JOB_TEMPERATURE_MAX = 2.0
-SUBSCRIPTION_PROMPT_MAX_CHARS = 200_000
+IGNORED_SUBSCRIPTION_PARAMS = ("max_tokens", "temperature")
 SUBSCRIPTION_ROLES = ("system", "user", "assistant")
 SUBSCRIPTION_RESPONSE_FORMATS = ("json_object", "json_schema")
 JOB_CAPABILITIES = frozenset({
@@ -31,8 +32,6 @@ class _Message(Protocol):
 
 class _JobBody(Protocol):
     messages: Sequence[_Message]
-    max_tokens: int
-    temperature: float
     response_format: dict[str, Any] | None
     tools: list[Any] | None
     tool_choice: Any
@@ -46,9 +45,11 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
     if spec.pricing == "subscription":
         return {
             "max_tokens": {"default": DEFAULT_MAX_TOKENS,
-                           "accepted": {"const": DEFAULT_MAX_TOKENS}, "forwarded": False},
+                           "accepted": {"minimum": JOB_MAX_TOKENS_MIN,
+                                        "maximum": JOB_MAX_TOKENS_MAX}, "forwarded": False},
             "temperature": {"default": DEFAULT_TEMPERATURE,
-                            "accepted": {"const": DEFAULT_TEMPERATURE}, "forwarded": False},
+                            "accepted": {"minimum": JOB_TEMPERATURE_MIN,
+                                         "maximum": JOB_TEMPERATURE_MAX}, "forwarded": False},
             "message_roles": [*SUBSCRIPTION_ROLES, "tool"] if tools_supported else list(SUBSCRIPTION_ROLES),
             "message_content": (["text", "image_data_url"] if "vision" in spec.capabilities
                                 else ["text"]),
@@ -57,7 +58,7 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
             "stream": False,
             "response_format_types": list(SUBSCRIPTION_RESPONSE_FORMATS),
             "json_schema_refs": False,
-            "max_prompt_chars": SUBSCRIPTION_PROMPT_MAX_CHARS,
+            "max_prompt_chars": subscription_prompt_max_chars(),
         }
     return {
         "max_tokens": {"default": DEFAULT_MAX_TOKENS,
@@ -78,7 +79,7 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
 
 
 def subscription_request_problem(body: _JobBody, capability: str, provider: str) -> str | None:
-    """Reject controls that the Claude/Codex CLI route cannot apply."""
+    """Reject controls that the Claude/Codex CLI route cannot apply (sampling params are only ignored)."""
     if body.tools and capability == "vision":
         return "unsupported_for_subscription_model: tools on vision"
     if body.tools and provider != "codex-sub":
@@ -97,11 +98,19 @@ def subscription_request_problem(body: _JobBody, capability: str, provider: str)
         return "unsupported_for_subscription_model: vision"
     if problem := response_format_problem(body.response_format):
         return problem
-    if body.temperature != DEFAULT_TEMPERATURE or body.max_tokens != DEFAULT_MAX_TOKENS:
-        return "unsupported_for_subscription_model: temperature or max_tokens"
     return None
 
 
+def ignored_subscription_params(fields_set: Collection[str]) -> list[str]:
+    """Sampling params the caller set that the CLI route cannot apply: they are accepted so one
+    request body works on every model, and named in the result so no caller assumes they took effect."""
+    return [name for name in IGNORED_SUBSCRIPTION_PARAMS if name in fields_set]
+
+
+def subscription_prompt_max_chars() -> int:
+    return get_settings().AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS
+
+
 def subscription_prompt_problem(prompt: str) -> str | None:
-    return (f"subscription prompt exceeds {SUBSCRIPTION_PROMPT_MAX_CHARS} characters"
-            if len(prompt) > SUBSCRIPTION_PROMPT_MAX_CHARS else None)
+    limit = subscription_prompt_max_chars()
+    return f"subscription prompt exceeds {limit} characters" if len(prompt) > limit else None
