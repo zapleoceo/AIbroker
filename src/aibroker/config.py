@@ -162,6 +162,9 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'
     # Input image capability is confirmed separately from a model's text availability.
     AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS: str = '{"codex-sub":[]}'
+    # Live-test evidence per catalog id ({id: {capability: job_id_or_note}}); informational only,
+    # never gates selection (that is VERIFIED_MODELS).
+    AGENT_SUBSCRIPTION_TESTED_MODELS: str = "{}"
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
