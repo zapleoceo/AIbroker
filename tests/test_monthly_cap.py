@@ -87,7 +87,7 @@ async def test_key_monthly_cap_blocks_reservation_and_counts_up():
 
 async def test_key_monthly_cap_excludes_key_from_pick():
     """The pick's WHERE fragment (shared constant) drops a key at its monthly cap;
-    a free-tier key and a key under cap stay eligible; a stale month reads 0."""
+    cap 0 excludes any tier (like daily); a stale month reads 0."""
     over = await _add_key(monthly_cost_cap_usd=1.0, monthly_cost_used_usd=1.0)
     under = await _add_key(monthly_cost_cap_usd=1.0, monthly_cost_used_usd=0.5)
     uncapped = await _add_key()
@@ -100,7 +100,8 @@ async def test_key_monthly_cap_excludes_key_from_pick():
         ids = {r[0] for r in await s.execute(
             text(f"SELECT k.id FROM api_keys k WHERE {MONTHLY_CAP_OK_SQL}"), month_params())}
     assert over.id not in ids
-    assert {under.id, uncapped.id, free0.id, stale.id, never.id} <= ids
+    assert free0.id not in ids
+    assert {under.id, uncapped.id, stale.id, never.id} <= ids
 
 
 async def test_monthly_cap_zero_admits_free_tier_and_registry_free():

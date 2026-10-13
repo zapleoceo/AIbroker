@@ -73,12 +73,12 @@ FRESH_MONTHLY_COST_SQL = (
     "(CASE WHEN k.monthly_reset_at IS DISTINCT FROM :month_start "
     "THEN 0 ELSE k.monthly_cost_used_usd END)"
 )
-# Key-level monthly admission for the pick: no cap, or a free-tier key (its real cost
-# is forced to $0, so a cap — notably 0 = "free providers only" — never excludes it),
-# or still under the cap.
+# Key-level monthly admission for the pick: no cap, or still under the cap. Mirrors
+# the daily predicate exactly — a key-level cap is about that key, so cap 0 excludes
+# the key whatever its tier ("free providers only" is the project-level rule, handled
+# in cost_guard.reserve_cost).
 MONTHLY_CAP_OK_SQL = (
-    f"(k.monthly_cost_cap_usd IS NULL OR k.tier = 'free' "
-    f"OR {FRESH_MONTHLY_COST_SQL} < k.monthly_cost_cap_usd)"
+    f"(k.monthly_cost_cap_usd IS NULL OR {FRESH_MONTHLY_COST_SQL} < k.monthly_cost_cap_usd)"
 )
 
 
