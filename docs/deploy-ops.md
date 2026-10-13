@@ -187,7 +187,8 @@ that code raises `TypeError` on the unknown keys: claimed jobs sit in `running`,
 
 1. Deploy PR #76 first (it contains #71: explicit column lists for the claim and the key pick, plus the
    shutdown requeue). It works with and without the new columns.
-2. Apply migration 020 (below) and run the post-check.
+2. Apply migration 020 (below) and run the post-check. The migration file's own header repeats this
+   order and the `psql -v ON_ERROR_STOP=1` invocation.
 3. Deploy the branch with the 020 code (`feat/jobs-trace-idempotency-cancel`). It keeps an explicit
    `_JOB_COLUMNS` claim (the same idea as #71; expect a trivial conflict in `services/job_queue.py` when
    rebasing on #76 — keep one explicit list that includes `trace_id, labels, idempotency_key,
