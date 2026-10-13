@@ -32,7 +32,9 @@ _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many reque
 _MODEL_UNAVAILABLE = re.compile(
     r"issue with the selected model|"
     r"\bmodel\b[^\n]{0,80}\bis not a recognized model id|"
-    r"\bmodel\b[^\n.]{0,80}\bnot found\b|"
+    # an id-like token must follow "Model": "Model Context Protocol server ... not found" and
+    # "model output file not found" are NOT this error.
+    r"\bmodel\s+['\"]?[\w.:/\[\]-]+['\"]?\s+not found\b|"
     r"\bnot available with the claude \w+ plan|"
     r"\bmodel is not supported when using codex with a chatgpt account", re.I)
 _MAX_SCAN = 2000     # classify/parse only the head of a message: bounded work on hostile text

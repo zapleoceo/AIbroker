@@ -380,7 +380,9 @@ def test_classify_codex_model_unavailable_wording_unverified():
     "Context limit reached · /compact or /clear to continue", "context limit exceeded",
     "Credit balance is too low", "rate limit exceeded", "Request rejected (429)",
     "The service is not available right now", "model overloaded", "Opus is experiencing high load",
-    "file not found: a.txt", "command not found", "segfault"])
+    "file not found: a.txt", "command not found", "segfault",
+    'MCP server failed: Model Context Protocol server "github" not found',
+    "Error: model output file not found"])
 def test_model_unavailable_does_not_swallow_quota_or_unrelated(msg):
     assert classify_failure(msg) != "model_unavailable"
 

@@ -296,7 +296,8 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                   req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
             return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
-        if isinstance(terminal, ev.RunFailed) and terminal.error_class == "model_unavailable"                 and run.model:
+        if (isinstance(terminal, ev.RunFailed) and terminal.error_class == "model_unavailable"
+                and run.model):
             terminal = ev.RunFailed(
                 error_class="model_unavailable",
                 message=f"{run.model} is not available on this subscription account "
