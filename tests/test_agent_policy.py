@@ -273,7 +273,7 @@ def test_compose_passes_the_policy_to_api_and_worker():
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8").replace("\r\n", "\n")
     line = "AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}"
     for service in ("api", "agent-worker"):
-        block = re.search(rf"^  {service}:\n(.*?)(?=^  [a-z][a-z-]*:\n|^networks:|^volumes:)",
+        block = re.search(rf"^  {service}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|^networks:|^volumes:)",
                           compose, re.S | re.M).group(1)
         assert line in block, service
 

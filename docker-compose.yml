@@ -351,6 +351,8 @@ services:
       AGENT_WORKER_ENABLED: "true"
       # This container claims ONLY Claude runs and mounts ONLY the Claude auth volume.
       AGENT_WORKER_CAPABILITIES: "agent:claude"
+      # Claims only runs of this subscription login (agent_runs.account_id); see docs/agent-runs.md.
+      AGENT_ACCOUNT_ID: owner
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
@@ -361,6 +363,63 @@ services:
     volumes:
       - agent_claude_auth:/home/app/claude-state
       - agent_claude_rpc:/run/aibroker-agent-rpc/claude
+    tmpfs:
+      - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
+      - /tmp:size=64m,uid=10001,gid=10001,mode=1777
+    read_only: true
+    init: true   # reaps tool children; with the CLI's own process group, no orphans survive a run
+    # Reaches only postgres/pgbouncer (not api/redis/vision). Internet egress stays open: the CLI
+    # must reach Anthropic. ACCEPTED RISK (see docs/agent-runs.md).
+    networks: [agent_db]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 256
+    restart: "no"
+    logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
+
+  # Second Claude subscription login: same image and hardening as agent-worker, its OWN auth volume.
+  # Claims only account "claude-2". No RPC volume: the API wakes only the first worker's socket, this
+  # one finds new runs by its 1 s database poll (the socket is an optional hint, docs/agent-runs.md).
+  #   log in (owner, once): docker compose --profile agent run --rm agent-worker-claude2 claude   -> /login
+  #   run:                  docker compose --profile agent up -d agent-worker-claude2
+  agent-worker-claude2:
+    profiles: ["agent"]
+    build:
+      context: .
+      dockerfile: infra/agent-worker/Dockerfile
+      args:
+        BASE_IMAGE: ${AGENT_BASE_IMAGE:-aibroker-api:latest}
+    image: aibroker-agent-worker
+    container_name: aibroker-agent-worker-claude2
+    # Only pgbouncer (transaction pooling): no direct postgres connection, no LISTEN, no session lock.
+    depends_on:
+      pgbouncer:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # The settings model requires these three, but the agent lane uses none of them: inert
+      # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
+      TOKEN_SECRET: agent-worker-placeholder-token-secret
+      ADMIN_KEY: agent-worker-placeholder-admin-key
+      INTERNAL_SECRET: agent-worker-placeholder-internal-secret
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AGENT_WORKER_ENABLED: "true"
+      # This container claims ONLY Claude runs and mounts ONLY the Claude auth volume.
+      AGENT_WORKER_CAPABILITIES: "agent:claude"
+      # Claims only runs of this subscription login (agent_runs.account_id); see docs/agent-runs.md.
+      AGENT_ACCOUNT_ID: claude-2
+      # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
+      AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
+      AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
+      AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
+      AGENT_SUBSCRIPTION_VERIFIED_MODELS: ${AGENT_SUBSCRIPTION_VERIFIED_MODELS:-default}
+      AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS: ${AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS:-default}
+    volumes:
+      - agent_claude2_auth:/home/app/claude-state
     tmpfs:
       - /var/lib/aibroker/agent-workspaces:size=512m,uid=10001,gid=10001,mode=0700
       - /tmp:size=64m,uid=10001,gid=10001,mode=1777
@@ -457,6 +516,9 @@ volumes:
     driver: local
   # CLI subscription login of the agent worker (named volume; never an image layer or a host mount).
   agent_claude_auth:
+    driver: local
+  # Second Claude subscription login (account "claude-2"); owner logs in once, see agent-worker-claude2.
+  agent_claude2_auth:
     driver: local
   # Codex CLI ChatGPT login (CODEX_HOME; Codex refreshes auth.json, so it must stay writable).
   agent_codex_auth:

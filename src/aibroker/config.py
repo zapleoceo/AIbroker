@@ -143,9 +143,14 @@ class Settings(BaseSettings):
     # container per CLI (agent-worker: agent:claude, agent-worker-codex: agent:codex) so each CLI
     # sees only its own auth volume; the default claims both (dev / single container).
     AGENT_WORKER_CAPABILITIES: str = "agent:claude,agent:codex"
+    # Which account's runs THIS worker claims (agent_runs.account_id). One container per
+    # subscription login (agent-worker = "owner", agent-worker-claude2 = "claude-2"). EMPTY = claim
+    # runs of every account (dev / single container).
+    AGENT_ACCOUNT_ID: str = ""
     # Explicit subscription pins visible in /v1/models. The Codex lane stays off until its
     # isolated worker profile is separately approved and deployed.
-    AGENT_SUBSCRIPTION_MODELS: str = ('{"claude-sub":["claude-sonnet-5-5"],"codex-sub":['
+    AGENT_SUBSCRIPTION_MODELS: str = ('{"claude-sub":["claude-sonnet-5-5","claude-opus-5-5",'
+                                      '"claude-haiku-5-5"],"codex-sub":['
                                       '"gpt-6.1-sol","gpt-6-astra","gpt-6-sol","gpt-6-luna",'
                                       '"gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"]}')
     # Exact account-confirmed route ids. Candidate models remain visible but unavailable until

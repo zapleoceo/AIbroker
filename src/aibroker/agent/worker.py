@@ -67,12 +67,18 @@ async def claim_agent_runs(capability: str, limit: int) -> list[int]:
     if limit <= 0:
         return []
     now = _now()
+    stmt = select(DeepJobRow).where(
+        DeepJobRow.capability == capability, DeepJobRow.status == "pending",
+        (DeepJobRow.run_after.is_(None)) | (DeepJobRow.run_after < now))
+    if account := get_settings().AGENT_ACCOUNT_ID.strip():
+        # One worker = one subscription login: claim only that account's runs. An IN-subquery on
+        # the agent_runs primary key (no join, so FOR UPDATE still locks only deep_jobs rows and
+        # the ix_deep_jobs_claimable scan narrows first).
+        stmt = stmt.where(DeepJobRow.id.in_(
+            select(AgentRunRow.run_id).where(AgentRunRow.account_id == account)))
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow).where(
-                DeepJobRow.capability == capability, DeepJobRow.status == "pending",
-                (DeepJobRow.run_after.is_(None)) | (DeepJobRow.run_after < now),
-            ).order_by(DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
+            stmt.order_by(DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
         )).scalars().all()
         for r in rows:
             r.status = "running"

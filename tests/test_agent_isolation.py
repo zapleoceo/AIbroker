@@ -50,7 +50,7 @@ SESS = "sess-0123456789abcdefXYZ"
 
 
 def _service(name: str) -> str:
-    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z-]*:\n|^networks:|^volumes:)", COMPOSE,
+    m = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|^networks:|^volumes:)", COMPOSE,
                   re.S | re.M)
     assert m, name
     return "\n".join(ln for ln in m.group(1).splitlines() if not ln.strip().startswith("#"))
@@ -89,8 +89,8 @@ HARDENING = ("read_only: true", "init: true", "cap_drop: [ALL]", "no-new-privile
              'profiles: ["agent"]', 'restart: "no"')
 
 
-@pytest.mark.parametrize("name", ["agent-worker", "agent-worker-codex"])
-def test_both_workers_share_the_same_hardening(name):
+@pytest.mark.parametrize("name", ["agent-worker", "agent-worker-claude2", "agent-worker-codex"])
+def test_all_workers_share_the_same_hardening(name):
     svc = _service(name)
     for line in HARDENING:
         assert line in svc, (name, line)
@@ -108,6 +108,20 @@ def test_claude_container_claims_only_claude_and_never_mounts_the_codex_volume()
     assert "agent_codex_auth" not in svc and "codex-state" not in svc
 
 
+def test_second_claude_container_has_its_own_login_and_account():
+    first, second = _service("agent-worker"), _service("agent-worker-claude2")
+    assert 'AGENT_WORKER_CAPABILITIES: "agent:claude"' in second
+    assert "AGENT_ACCOUNT_ID: owner" in first and "AGENT_ACCOUNT_ID: claude-2" in second
+    assert "container_name: aibroker-agent-worker-claude2" in second
+    assert "agent_claude2_auth:/home/app/claude-state" in second
+    assert "agent_claude_auth" not in second and "agent_codex" not in second
+    assert "agent_claude2" not in first
+    # no shared RPC socket volume: the second worker falls back to database polling
+    assert re.findall(r"^\s+- (agent_\w+):", second, re.M) == ["agent_claude2_auth"]
+    assert re.findall(r"^\s+- (agent_\w+):", first, re.M) == ["agent_claude_auth", "agent_claude_rpc"]
+    assert "AGENT_ACCOUNT_ID" not in _service("agent-worker-codex")
+
+
 def test_codex_container_claims_only_codex_and_never_mounts_a_claude_volume():
     svc = _service("agent-worker-codex")
     assert 'AGENT_WORKER_CAPABILITIES: "agent:codex"' in svc
@@ -123,7 +137,7 @@ def test_codex_container_claims_only_codex_and_never_mounts_a_claude_volume():
 
 
 def test_each_auth_volume_is_declared_once():
-    for vol in ("agent_claude_auth", "agent_codex_auth"):
+    for vol in ("agent_claude_auth", "agent_claude2_auth", "agent_codex_auth"):
         assert len(re.findall(rf"^  {vol}:\n", COMPOSE, re.M)) == 1
 
 
@@ -159,7 +173,7 @@ def test_register_real_adapters_registers_only_the_lanes_capabilities():
 async def test_a_lane_claims_only_its_own_capability(monkeypatch, tmp_path):
     monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(
         AGENT_WORKER_CAPABILITIES="agent:codex", AGENT_CONCURRENCY_CODEX=1,
-        AGENT_CONCURRENCY_CLAUDE=1))
+        AGENT_CONCURRENCY_CLAUDE=1, AGENT_ACCOUNT_ID=""))
     plain = generate_project_key()
     async with get_session() as s:
         await s.execute(insert(ProjectRow).values(

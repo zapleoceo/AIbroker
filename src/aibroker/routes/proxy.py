@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
+from aibroker.agent.accounts import pick_account
 from aibroker.agent.client_tools import (
     MAX_RESULT_BYTES,
     ClientToolConflict,
@@ -22,7 +23,7 @@ from aibroker.agent.client_tools import (
     submit_result,
 )
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
-from aibroker.agent.policy import AgentPolicyViolation, policy_violation
+from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run
 from aibroker.agent.subscription_input import subscription_messages
@@ -431,6 +432,8 @@ class DeepJobResponse(BaseModel):
     reasoning_tokens: int | None = None
     cost_usd: float | None = None
     billing_type: str | None = None
+    account_id: str | None = Field(
+        None, description="subscription jobs: which login (account) served the run")
     latency_ms: int | None = None
     key_label: str | None = None
     request_id: int | None = None
@@ -511,9 +514,11 @@ def _job_response(row: Any) -> DeepJobResponse:
     the same fail-safe reason."""
     request = getattr(row, "request", None) or {}
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
+    # Subscription runs only: the account is chosen at creation and never changes.
+    account_id = request.get("account_id") if request.get("client_job") else None
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
-                               requested_model=requested_model)
+                               requested_model=requested_model, account_id=account_id)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -523,7 +528,7 @@ def _job_response(row: Any) -> DeepJobResponse:
                                  "arguments": pending_tool["arguments"]}}
         return DeepJobResponse(
             job_id=row.id, status="pending",
-            requested_model=requested_model,
+            requested_model=requested_model, account_id=account_id,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
@@ -537,6 +542,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
+        account_id=meta.get("account_id") or account_id,
         cache_write_tokens=meta.get("cache_write_tokens"),
         reasoning_tokens=meta.get("reasoning_tokens"),
         cost_usd=meta.get("cost_usd"), latency_ms=meta.get("latency_ms"),
@@ -628,7 +634,12 @@ async def jobs_submit(
         if not subscription_model_verified(subscription.id):
             raise HTTPException(503, "subscription model availability is not verified")
         cli_model = subscription.id.split("/", 1)[1]
-        violation = policy_violation(ctx.project.id, cli_model, "owner",
+        account_id = "owner"      # Codex has a single login; only Claude rotates accounts
+        policy = policy_for(ctx.project.id)
+        if policy is not None and subscription.provider == "claude-sub":
+            account_id = await pick_account(
+                policy.ordered_accounts(), PROVIDERS[subscription.provider]) or account_id
+        violation = policy_violation(ctx.project.id, cli_model, account_id,
                                      PROVIDERS[subscription.provider])
         if violation:
             raise AgentPolicyViolation(violation)
@@ -653,7 +664,7 @@ async def jobs_submit(
         try:
             job_id, _ = await create_run(
                 project=ctx.project, capability=PROVIDERS[subscription.provider], prompt=prompt,
-                task_id="jobs", account_id="owner", session_id=None, idempotency_key=None,
+                task_id="jobs", account_id=account_id, session_id=None, idempotency_key=None,
                 wall_timeout_s=1800, idle_timeout_s=300, allowed_tools=[], model=cli_model,
                 attachments=attachments,
                 client_job={"capability": capability, "provider": subscription.provider,

@@ -345,7 +345,7 @@ async def test_the_worker_path_never_uses_the_direct_url_or_a_foreign_connection
 
     monkeypatch.setattr(asyncpg, "connect", spy)
     monkeypatch.setattr(worker, "get_settings", lambda: SimpleNamespace(
-        AGENT_CONCURRENCY_CODEX=1, AGENT_CONCURRENCY_CLAUDE=1))
+        AGENT_CONCURRENCY_CODEX=1, AGENT_CONCURRENCY_CLAUDE=1, AGENT_ACCOUNT_ID=""))
     async with session_lock("a", "s", 1) as lease:
         assert lease is not None
     assert await worker.claim_agent_runs("agent:claude", 1) == []

@@ -220,6 +220,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                                        "usage_observed": usage_observed}
                     if client_job:
                         job.result_meta.update({
+                            "account_id": run.account_id,
                             "provider": client_job["provider"],
                             "model": client_job["model"],
                             "model_served": None,
@@ -235,6 +236,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None)
                 elif event.type == "run.failed":
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
+                    if client_job:
+                        job.result_meta["account_id"] = run.account_id
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.result_meta = {"client_tool_history": history,
