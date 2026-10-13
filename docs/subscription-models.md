@@ -23,7 +23,9 @@ provider fallback chain. `provider` on success is `claude-sub` or `codex-sub`;
 independent served-model evidence, and
 `cost_usd` remains null. A successful subscription attestation is reflected in
 `billing_type: "subscription"`. Quota waits stay pending on the same account;
-there is no API-billed fallback.
+there is no API-billed fallback. A Claude Code weekly or session cap (for example "You've hit
+your weekly limit - resets Oct 15, 8pm (UTC)") is such a wait: the job stays pending until the
+stated reset, or ends `timed_out` if the request deadline (`deadline_s`, default 6 h) falls first.
 
 Every catalog row now has a `job_request` field. Subscription rows report
 `max_tokens.accepted.const: 1024` and `temperature.accepted.const: 0.7`, both

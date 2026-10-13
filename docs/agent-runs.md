@@ -281,19 +281,24 @@ the worker's own subscription login; the broker never reads or moves credentials
 ## Quota exhaustion = wait
 
 When the adapter reports `run.failed quota_exhausted` (`classify_failure` on the CLI's limit
-wording; `parse_reset_at` reads a stated reset time - `|<epoch>` or "in N minutes/hours", wording
-UNVERIFIED), `_wait_for_quota` does not fail the run: `park_for_quota` stores the non-terminal
+wording: `hit your <...> limit` and the named caps `weekly / session / 5-hour / daily / opus limit`;
+`context / token / output / line limit` stay `cli_error`), `_wait_for_quota` does not fail the run: `park_for_quota` stores the non-terminal
 `run.waiting_quota` event (`RunWaitingQuota`: `not_before`, `attempt`, `reset_reported`), puts
 the job back to `pending` with `run_after = not_before`, and the API shows status
 `waiting_quota` with `not_before` and `quota_waits`. `not_before` is the reported reset time
 (+5 s) or, without one, exponential backoff 60 s x 2^n capped at 30 min
-(`quota_backoff_cap_s`). The retry runs on the SAME account and subscription route (the
+(`quota_backoff_cap_s`). `parse_reset_at` reads `|<epoch>`, "in N minutes/hours" (wording
+UNVERIFIED) and `resets [Mon D,] H[:MM]am|pm (TZ)` (seen in prod 2026-10-12: "resets Oct 15, 8pm
+(UTC)"). The zone is UTC/GMT or an IANA name. With no date the reset is today if still ahead, else
+tomorrow; a past date means next year. An unknown zone or invalid date gives no reset time, so the
+exponential backoff applies. The retry runs on the SAME account and subscription route (the
 billing guard re-checks every attempt) and resumes this run's own session; usage adds up
 across attempts. Never an API/OpenRouter fallback, never another account.
 
 The wait is bounded by the request's overall `deadline_s` (default 6 h, counted from creation):
 a `not_before` past it, an `execute_run` after it, or `expire_overdue_waiting` (worker tick)
 for a run still parked ends with `run.timed_out limit=deadline`. Cancel works while waiting.
+So a reset later than the deadline (e.g. a weekly cap) ends the job timed out, not after days.
 
 ## Input attachments
 
