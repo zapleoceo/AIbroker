@@ -205,6 +205,7 @@ writes files into the workspace.
   under the lease and is bounded only by the run's wall/idle timeouts.
   Other refresh-due runs retry every `codex_auth_poll_s` for up to `codex_auth_wait_s` (90 s), then
   are requeued; after `session_busy_max` requeues the run fails with `error_class=codex_auth_busy`.
+  A run cancelled while it waits ends `cancelled` at once (no requeue, never `codex_auth_busy`).
   A fresh `last_refresh` takes no lease, so runs stay fully parallel. A 401-triggered
   refresh cannot be predicted from the file and is not covered; a two-run live canary remains a
   smoke test, not the safeguard. Slots are never shared

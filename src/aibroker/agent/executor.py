@@ -176,6 +176,10 @@ class _AuthRefreshBusy(Exception):
     """The Codex auth-refresh start-up lease stayed taken; the run is requeued."""
 
 
+class _AuthWaitCancelled(Exception):
+    """The run was cancelled while it waited for the auth-refresh start-up lease."""
+
+
 @dataclass
 class _AuthGate:
     """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours."""
@@ -201,8 +205,9 @@ async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig, run_id: int) -> _
         if lease is not None:
             return _AuthGate(stack, lease)
         await stack.aclose()
-        # A cancel while waiting requeues too: the next claim ends it `cancelled` before any start.
-        if time.monotonic() >= deadline or await _cancel_flag(run_id):
+        if await _cancel_flag(run_id):       # ends `cancelled` at once, never as codex_auth_busy
+            raise _AuthWaitCancelled
+        if time.monotonic() >= deadline:
             raise _AuthRefreshBusy
         await asyncio.sleep(cfg.codex_auth_poll_s)
 
@@ -216,6 +221,9 @@ async def _held_drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg:
     except StaleLease:
         log.error("run %d lost its session lease; stopping without further writes", run.run_id)
         return None
+    except _AuthWaitCancelled:
+        # Nothing was written yet (the gate is taken before run.started): the cancel is terminal.
+        return await _finish(run.run_id, ev.RunCancelled(), {}, lease=lease)
     except _AuthRefreshBusy:
         # Nothing was written for this attempt (the lease is taken before run.started), so a
         # requeue repeats no event. Capped like session_busy_max.
