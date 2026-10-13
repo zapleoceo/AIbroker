@@ -4,6 +4,7 @@ single error path. These tests pin the verdict (Flow) and the bookkeeping of eac
 branch, independently of any capability runner."""
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -233,3 +234,24 @@ def test_scrub_secrets_masks_credentials():
 def test_billed_cost_free_tier_is_always_zero():
     assert att._billed_cost(_key("free"), {"cost_usd": 3.0}) == 0.0
     assert att._billed_cost(_key("paid"), {"cost_usd": 3.0}) == 3.0
+
+
+
+async def test_cancel_after_successful_call_still_books_usage(rig):
+    """The provider already answered and billed; a client disconnect landing in the
+    ledger write must not drop the row."""
+    booked = asyncio.Event()
+
+    async def slow_record(**kw):
+        await asyncio.sleep(0.05)
+        booked.set()
+        return 99
+
+    rig.record.side_effect = slow_record
+    task = asyncio.create_task(run_attempt(rig.attempt(key=_key("paid"))))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.1)
+    assert booked.is_set()

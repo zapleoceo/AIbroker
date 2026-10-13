@@ -328,7 +328,10 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         await _record_rejection(a, rej, meta)
         return AttemptResult(rej.flow, payload=payload, meta=meta, rejection=rej.error_kind)
 
-    usage_id = await record_usage(
+    # The provider already answered and billed: a client disconnect cancelling the
+    # request here must not drop the ledger row, so the write is shielded (the
+    # cancel still propagates once it has landed).
+    usage_id = await asyncio.shield(record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,
         provider=a.provider, model=a.model, model_served=meta.get("model_served"),
         capability=a.capability, workflow=a.workflow,
@@ -338,7 +341,7 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         cache_write_tokens=meta.get("cache_write_tokens", 0),
         latency_ms=meta.get("latency_ms"), status="ok", error_kind=None,
         http_status=200, request_id=current_request_id(),
-    )
+    ))
     # A success re-pins the request family AND (project, provider) to what just
     # worked, so the NEXT request lands where the provider-side cache is warm.
     if a.note_affinity:
