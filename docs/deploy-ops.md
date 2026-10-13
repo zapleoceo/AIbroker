@@ -202,6 +202,27 @@ uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
 auth volumes into API. No new Docker network, host port, capability, or sandbox
 relaxation is required.
 
+## Subscription job limits
+
+Settings read by `api` and the agent workers (set them in the compose `environment` of each service
+that must see them; the compose file does not pass them through by default, so the defaults apply):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_SUBSCRIPTION_MAX_WALL_S` | 1800 | hard cap of one attempt, tool waits included |
+| `AGENT_SUBSCRIPTION_IDLE_S` | 300 | stall watchdog, reset only by a parsed CLI event |
+| `AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS` | 1000000 | prompt limit of `POST /v1/jobs` (explicit `400` above) |
+| `AGENT_CLIENT_TOOL_MAX_CALLS` | 64 | client tool calls per run |
+| `AGENT_CLIENT_TOOL_MAX_BYTES` | 1048576 | tool arguments and one tool result, each |
+| `AGENT_CLIENT_TOOL_WAIT_S` | 900 | time one tool call waits for the caller |
+| `AGENT_FILE_MAX_BYTES` / `AGENT_FILES_TOTAL_BYTES` | 2 MiB / 8 MiB | returned files |
+
+Body limits: nginx allows 28 MB on `location = /v1/jobs` (a 1M-character prompt is at most about 4 MB
+even as UTF-8) and 4 MB on every other location, including `/v1/jobs/{id}/tool-results`. A 1 MiB
+tool result is JSON-escaped by the client; text with many control characters or quotes can
+grow past 4 MB and be refused by nginx before it reaches the API. The agent worker memory limit is 1g;
+the prompt is held about 10 bytes per character there, so the default limit needs about 10 MB.
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —

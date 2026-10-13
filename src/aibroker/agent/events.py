@@ -25,7 +25,7 @@ class FileRef(BaseModel):
     path: str
     size: int = 0
     content_b64: str | None = None
-    skipped: str | None = None   # too_large | cap_reached | unsafe_path | missing
+    skipped: str | None = None   # too_large | cap_reached | unsafe_path_or_missing | invalid_image
     expires_at: str | None = None   # ISO UTC; past it the content is no longer served
     expired: bool = False
     sha256: str | None = None       # set for exported images
