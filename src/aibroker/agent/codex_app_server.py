@@ -121,11 +121,15 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         final_text = ""
         calls = 0
         turn_id: str | None = None
+        seen_requests: set[Any] = set()
+        seen_calls: set[str] = set()
         thread_usage: dict[str, Any] | None = None
         async for raw in proc.stdout:
             message = json.loads(raw)
             _log_message(message)
             if _is_response(message, 3):
+                if turn_id is not None:
+                    raise ClientToolConflict("duplicate turn response")
                 if message.get("error"):
                     raise ClientToolConflict("App Server refused the turn")
                 turn_id = ((message.get("result") or {}).get("turn") or {}).get("id")
@@ -141,6 +145,10 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 call_id, name = params.get("callId"), params.get("tool")
                 if not isinstance(name, str) or not isinstance(call_id, str):
                     raise ClientToolConflict("invalid dynamic tool call")
+                if message["id"] in seen_requests or call_id in seen_calls:
+                    raise ClientToolConflict("duplicate dynamic tool call")
+                seen_requests.add(message["id"])
+                seen_calls.add(call_id)
                 await publish_call(run.run_id, call_id, name, params.get("arguments"),
                                    run.fence_leases)
                 calls += 1

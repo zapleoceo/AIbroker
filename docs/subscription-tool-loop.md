@@ -24,6 +24,8 @@ AND the message has no `method`. Matching on id alone mistook the App Server's
 fourth tool call (its id 3) for our `turn/start` reply and failed the run with
 "App Server did not assign a turn" (prod, 2026-10-13, exam jobs with 4+ calls).
 Incoming messages are logged at DEBUG with method and id only.
+A second `turn/start` reply, or a repeated `item/tool/call` (same server request id
+or same `callId`), fails the run closed; a repeated `thread/start` reply is ignored.
 
 ## Universal jobs exchange
 
