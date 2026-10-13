@@ -99,6 +99,17 @@ async def reserve_cost(
     if api_key.tier == "free" and estimated_cost <= 0:
         return
 
+    # A cap of 0 means "free providers only": a paid key is refused whatever the
+    # estimate. `used + estimate > cap` alone admits it when the estimate is $0
+    # (":free" and unpriced models price at 0.0), and the real cost then lands
+    # uncapped. Checked before any reservation, so nothing needs refunding.
+    if api_key.tier != "free":
+        if api_key.daily_cost_cap_usd == 0:
+            raise CostGuardError("api_key", 0.0, api_key.daily_cost_used_usd or 0.0,
+                                 estimated_cost)
+        if project.daily_cost_cap_usd == 0:
+            raise CostGuardError("project", 0.0, 0.0, estimated_cost)
+
     # 1. per-key — atomic reserve-and-admit in one statement.
     if api_key.daily_cost_cap_usd is not None:
         async with get_session() as s:

@@ -261,3 +261,29 @@ async def test_global_cap_blocks_and_refunds_key_reservation(monkeypatch):
     # step-1 reservation (0.05 on the key) must be rolled back
     assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(0.0)
     invalidate_global_cache()
+
+
+
+# ─── cap 0 = free providers only, whatever the estimate ──────────────────────
+
+
+async def test_cap_zero_refuses_paid_key_with_zero_estimate():
+    """`used + estimate > cap` alone admitted a paid key when the estimate was $0
+    (":free" / unpriced models) under a cap of 0 — docs/api.md says refused."""
+    paid = ApiKeyRow(id=5, provider="openrouter", label="x", tier="paid",
+                     token_encrypted="x", scopes=["llm:chat"], daily_cost_cap_usd=None)
+    with pytest.raises(CostGuardError) as ei:
+        await reserve_cost(api_key=paid, project=_project(cap=0.0), estimated_cost=0.0)
+    assert ei.value.kind == "project"
+    capped_key = ApiKeyRow(id=6, provider="openrouter", label="x", tier="paid",
+                           token_encrypted="x", scopes=["llm:chat"],
+                           daily_cost_cap_usd=0.0, daily_cost_used_usd=0.0)
+    with pytest.raises(CostGuardError) as ei:
+        await reserve_cost(api_key=capped_key, project=_project(), estimated_cost=0.0)
+    assert ei.value.kind == "api_key"
+
+
+async def test_cap_zero_still_admits_free_key():
+    free = ApiKeyRow(id=7, provider="groq", label="x", tier="free", token_encrypted="x",
+                     scopes=["llm:chat"], daily_cost_cap_usd=None)
+    await reserve_cost(api_key=free, project=_project(cap=0.0), estimated_cost=0.0)
