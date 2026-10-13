@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from aibroker.config import get_settings
 from aibroker.db.models import ProjectRow
 from aibroker.providers.adapters import extra_for_provider, is_deepseek_big_json_prompt
 from aibroker.providers.catalog import PinTarget, UnknownModel, resolve_pin
@@ -106,6 +107,9 @@ _DEEP_WALL_DEADLINE_S = 5 * 60.0
 # local key can then never create a double-execution.
 _DEEP_FINISH_BY_S = _DEEP_WALL_DEADLINE_S + _DEEP_CALL_TIMEOUT_S
 
+# Transcription is one call per attempt too, so it shares the non-deep budget.
+_TRANSCRIBE_WALL_DEADLINE_S = _CHAT_WALL_DEADLINE_S
+
 _CAP_MESSAGE = "daily budget cap reached — retry after 00:00 UTC"
 
 
@@ -134,6 +138,14 @@ def _call_timeout(capability: str, provider: str | None = None) -> float:
     model = model_for(provider, capability) if provider else None
     own = transport_for(model).call_timeout(capability) if model else None
     return own if own is not None else _CALL_TIMEOUT_S
+
+
+def _transcribe_call_timeout() -> float:
+    """Longest a single transcription attempt can run: the litellm/chat-audio
+    transports bound it by TRANSCRIBE_TIMEOUT_S, the Gemini ASR transport by its
+    own setting."""
+    s = get_settings()
+    return max(s.TRANSCRIBE_TIMEOUT_S, s.GEMINI_ASR_TIMEOUT_S)
 
 
 def _wants_json(response_format: dict[str, Any] | None) -> bool:
@@ -713,8 +725,8 @@ async def run_decision(
     tried and failed (502). Paid-only so the spend lands on the account that holds
     the prepaid credit and its spend limit (a $0 free-tier key is NOT refused by
     this model, so routing billed traffic there would spread it where no limit is
-    set). The reservation is sized from our own per-token price — litellm has no
-    entry for this model and would reserve $0.
+    set). The reservation is sized from our own per-token price (input tokens are
+    estimated before the call).
 
     Fallback: when the caller did not pin `model` and the primary attempt on a key
     fails (provider error or cap block), the free DECISION_FALLBACK_MODEL is tried
@@ -822,6 +834,10 @@ async def run_transcribe(
     scope = scope_for("transcription")
     last_error: str | None = None
     any_key_seen = False
+    # Same finish-by gate as run_chat: without it a storm walk (13 attempts x
+    # 120s) outlasts job_queue's stale-reclaim and a second worker re-runs the
+    # paid whisper call.
+    finish_by = _now() + _TRANSCRIBE_WALL_DEADLINE_S
 
     for provider in chain_for("transcription"):
         # Rotate KEYS within the provider before moving on — one transient 429/
@@ -835,6 +851,12 @@ async def run_transcribe(
             any_key_seen = True
             if not use_model:
                 break
+            if _now() + _transcribe_call_timeout() > finish_by:
+                log.warning("transcription — a %s attempt would end past the "
+                            "finish-by deadline; stop starting attempts so the job "
+                            "finishes before stale-reclaim (no double-execution)",
+                            provider)
+                raise TranscribeFailed(last_error or "transcription deadline reached")
             res = await run_attempt(Attempt(
                 key=key, project=project, provider=provider, model=use_model,
                 capability="transcription", workflow=workflow,
