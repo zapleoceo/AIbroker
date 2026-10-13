@@ -17,6 +17,16 @@ describe operations already performed inside the CLI. Mapping those events to
 public `tool_calls` would falsely imply that Orchestra authorized execution.
 The pinned schema proves protocol availability, not live model conformance.
 
+The App Server numbers its own requests to the Broker (`item/tool/call`) with an
+id counter independent of ours, so the adapter treats a message as the reply to
+its `initialize` / `thread/start` / `turn/start` request only when the id matches
+AND the message has no `method`. Matching on id alone mistook the App Server's
+fourth tool call (its id 3) for our `turn/start` reply and failed the run with
+"App Server did not assign a turn" (prod, 2026-10-13, exam jobs with 4+ calls).
+Incoming messages are logged at DEBUG with method and id only.
+A second `turn/start` reply, or a repeated `item/tool/call` (same server request id
+or same `callId`), fails the run closed; a repeated `thread/start` reply is ignored.
+
 ## Universal jobs exchange
 
 1. An authorized client submits the existing `POST /v1/jobs?capability=...`

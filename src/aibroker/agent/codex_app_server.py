@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,22 @@ from aibroker.agent.client_tools import (
     take_result,
 )
 from aibroker.agent.codex_cli import CONFIG_OVERRIDES, permission_overrides
+
+log = logging.getLogger(__name__)
+
+
+def _log_message(message: dict[str, Any]) -> None:
+    """Diagnosis aid: method and id only, never params or results."""
+    log.debug("app-server message method=%s id=%s", message.get("method"), message.get("id"))
+
+
+def _is_response(message: dict[str, Any], expected: int) -> bool:
+    """A reply to OUR request: our id and no ``method``.
+
+    The App Server numbers its own server->client requests with an independent
+    counter, so a server request can carry the same numeric id as ours.
+    """
+    return message.get("id") == expected and "method" not in message
 
 
 def _tool_specs(run: AgentRunSpec) -> list[dict[str, Any]]:
@@ -75,7 +92,8 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
     async def read_response(expected: int) -> dict[str, Any]:
         while raw := await proc.stdout.readline():
             message = json.loads(raw)
-            if message.get("id") == expected:
+            _log_message(message)
+            if _is_response(message, expected):
                 if message.get("error") or not isinstance(message.get("result"), dict):
                     raise ClientToolConflict("App Server refused a required protocol request")
                 return message["result"]
@@ -103,10 +121,15 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         final_text = ""
         calls = 0
         turn_id: str | None = None
+        seen_requests: set[Any] = set()
+        seen_calls: set[str] = set()
         thread_usage: dict[str, Any] | None = None
         async for raw in proc.stdout:
             message = json.loads(raw)
-            if message.get("id") == 3:
+            _log_message(message)
+            if _is_response(message, 3):
+                if turn_id is not None:
+                    raise ClientToolConflict("duplicate turn response")
                 if message.get("error"):
                     raise ClientToolConflict("App Server refused the turn")
                 turn_id = ((message.get("result") or {}).get("turn") or {}).get("id")
@@ -122,6 +145,10 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 call_id, name = params.get("callId"), params.get("tool")
                 if not isinstance(name, str) or not isinstance(call_id, str):
                     raise ClientToolConflict("invalid dynamic tool call")
+                if message["id"] in seen_requests or call_id in seen_calls:
+                    raise ClientToolConflict("duplicate dynamic tool call")
+                seen_requests.add(message["id"])
+                seen_calls.add(call_id)
                 await publish_call(run.run_id, call_id, name, params.get("arguments"),
                                    run.fence_leases)
                 calls += 1
