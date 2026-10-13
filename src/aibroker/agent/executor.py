@@ -15,13 +15,14 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.client_tools import clear_pending_call
-from aibroker.agent.codex_cli import CodexCLI
+from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI
 from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.policy import policy_violation
@@ -63,6 +64,10 @@ class ExecConfig:
     lease_heartbeat_s: float = 30.0
     paid_continuation_verified_off: bool = False
     codex_paid_continuation_verified_off: bool = False
+    codex_auth_startup_s: float = 60.0       # max time the auth-refresh start-up lease is held
+    codex_auth_wait_s: float = 90.0          # max wait for it before the run is requeued
+    codex_auth_poll_s: float = 1.0           # how often a waiting run retries the lease
+    codex_refresh_due_after_s: float = CODEX_REFRESH_DUE_AFTER_S
     quota_backoff_base_s: float = 60.0
     quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
     env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
@@ -143,24 +148,17 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
     if adapter is None:
         return await _finish(run_id, ev.RunFailed(
             error_class="adapter_unavailable", message=f"no adapter for {run.capability}"), totals)
-    if run.capability == "agent:codex":
-        # CODEX_HOME/generated_images belongs to the account, not a run. One
-        # fenced lease across all workers sharing that home prevents overlap.
-        async with session_lock("__codex_home__", "generated_images", run_id,
-                                ttl_s=cfg.lease_ttl_s,
-                                heartbeat_s=cfg.lease_heartbeat_s) as image_lease:
-            if image_lease is None:
-                await requeue_run(run_id, cfg.session_busy_delay_s)
-                return None
-            return await _execute_with_session(run, job, adapter, cfg, image_lease)
-    return await _execute_with_session(run, job, adapter, cfg, None)
+    # No global lease: Codex runs execute in parallel. Generated images are exported from the
+    # run's own thread directory (generated_images/<thread UUID>) against a per-run baseline, so
+    # concurrent runs cannot take each other's PNGs. Only a resumed session is exclusive.
+    return await _execute_with_session(run, job, adapter, cfg)
 
 
 async def _execute_with_session(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
-                                cfg: ExecConfig, image_lease: Lease | None) -> str | None:
+                                cfg: ExecConfig) -> str | None:
     resume = run.resume_session_id
     if not resume:
-        return await _held_drive(run, job, adapter, cfg, image_lease)
+        return await _held_drive(run, job, adapter, cfg, None)
     async with session_lock(run.account_id, resume, run.run_id, ttl_s=cfg.lease_ttl_s,
                             heartbeat_s=cfg.lease_heartbeat_s) as lease:
         if lease is None:
@@ -168,17 +166,50 @@ async def _execute_with_session(run: AgentRunRow, job: DeepJobRow, adapter: Agen
                 return await _finish(run.run_id, ev.RunFailed(
                     error_class="session_busy", message="session stayed locked"), {})
             return None
-        return await _held_drive(run, job, adapter, cfg, lease, image_lease)
+        return await _held_drive(run, job, adapter, cfg, lease)
+
+
+class _AuthRefreshBusy(Exception):
+    """The Codex auth-refresh start-up lease stayed taken; the run is requeued."""
+
+
+async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig,
+                           run_id: int) -> contextlib.AsyncExitStack | None:
+    """Codex refreshes the shared CODEX_HOME/auth.json token while starting up, and refresh tokens
+    rotate - two simultaneous refreshes can invalidate the login. When the file's `last_refresh`
+    says one may be due (or cannot be read), hold ONE short fixed lease until the CLI's first
+    event; otherwise take nothing and runs stay fully parallel."""
+    if not isinstance(adapter, CodexCLI) or not adapter.refresh_maybe_due(cfg.codex_refresh_due_after_s):
+        return None
+    deadline = time.monotonic() + cfg.codex_auth_wait_s
+    while True:
+        stack = contextlib.AsyncExitStack()
+        lease = await stack.enter_async_context(session_lock(
+            "__codex_auth__", "refresh", run_id, ttl_s=cfg.lease_ttl_s, heartbeat_s=cfg.lease_heartbeat_s))
+        if lease is not None:
+            return stack
+        await stack.aclose()
+        if time.monotonic() >= deadline:
+            raise _AuthRefreshBusy
+        await asyncio.sleep(cfg.codex_auth_poll_s)
 
 
 async def _held_drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg: ExecConfig,
-                      lease: Lease | None, image_lease: Lease | None = None) -> str | None:
+                      lease: Lease | None) -> str | None:
     """_drive, but a run whose lease was taken over (StaleLease on a fenced write) simply
     stops: the newer holder owns the session and this zombie writes nothing more."""
     try:
-        return await _drive(run, job, adapter, cfg, lease, image_lease)
+        return await _drive(run, job, adapter, cfg, lease)
     except StaleLease:
         log.error("run %d lost its session lease; stopping without further writes", run.run_id)
+        return None
+    except _AuthRefreshBusy:
+        # Nothing was written for this attempt (the lease is taken before run.started), so a
+        # requeue repeats no event. Capped like session_busy_max.
+        if await requeue_run(run.run_id, cfg.session_busy_delay_s) > cfg.session_busy_max:
+            return await _finish(run.run_id, ev.RunFailed(
+                error_class="codex_auth_busy",
+                message="the Codex auth-refresh start-up lease stayed taken"), {})
         return None
 
 
@@ -232,11 +263,23 @@ async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFaile
 
 
 async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
-                 cfg: ExecConfig, lease: Lease | None = None,
-                 image_lease: Lease | None = None) -> str:
+                 cfg: ExecConfig, lease: Lease | None = None) -> str:
     run_id = run.run_id
     req = dict(job.request)
     totals: dict[str, int | None] = {}
+    # Before ANY event or workspace: a requeue (_AuthRefreshBusy) then leaves nothing behind.
+    gate = await _codex_auth_gate(adapter, cfg, run_id)
+    try:
+        return await _drive_held_gate(run, job, adapter, cfg, lease, req, totals, gate)
+    finally:
+        if gate is not None:
+            await gate.aclose()
+
+
+async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg: ExecConfig,
+                           lease: Lease | None, req: dict[str, Any], totals: dict[str, int | None],
+                           gate: contextlib.AsyncExitStack | None) -> str:
+    run_id = run.run_id
     workspace = create_workspace(cfg.workspace_root, run_id)
     try:
         async with get_session() as s:
@@ -288,7 +331,7 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             attachments=attached,
             client_tools=list((req.get("client_job") or {}).get("tools") or []),
             tool_choice=(req.get("client_job") or {}).get("tool_choice"),
-            fence_leases=tuple(held for held in (lease, image_lease) if held is not None))
+            fence_leases=(lease,) if lease is not None else ())
         if isinstance(adapter, CodexCLI):
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
@@ -296,22 +339,16 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
             float(req.get("wall_timeout_s", 1800) if spec.client_tools else
-                  req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
+                  req.get("idle_timeout_s", 300)), cfg, lease, gate)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
             return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
         if isinstance(terminal, ev.RunCompleted):
-            if image_lease is not None:
-                async with get_session() as s:
-                    await check_fence(s, image_lease)
             paths = changed + [f.path for f in terminal.files]
             files = await asyncio.to_thread(
                 collect_files, workspace, paths, max_bytes=cfg.file_max_bytes,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
             images = await asyncio.to_thread(_export_images, adapter, spec, started_at, cfg)
-            if image_lease is not None:
-                async with get_session() as s:
-                    await check_fence(s, image_lease)
             terminal = ev.RunCompleted(final_text=terminal.final_text, files=[*files, *images])
         return await _finish(run_id, terminal, totals, mode, lease)
     finally:
@@ -335,7 +372,7 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                   totals: dict[str, int | None], wall_s: float, idle_s: float,
                   cfg: ExecConfig, lease: Lease | None = None,
-                  image_lease: Lease | None = None) -> tuple[ev.AnyEvent, list[str]]:
+                  gate: contextlib.AsyncExitStack | None = None) -> tuple[ev.AnyEvent, list[str]]:
     q: asyncio.Queue[ev.AnyEvent | None] = asyncio.Queue()
     changed: list[str] = []
 
@@ -356,7 +393,10 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
     try:
         while terminal is None:
             now = time.monotonic()
-            if any(held is not None and held.lost.is_set() for held in (lease, image_lease)):
+            if gate is not None and now - t0 >= cfg.codex_auth_startup_s:
+                await gate.aclose()                 # bounded: never hold it past the start-up window
+                gate = None
+            if lease is not None and lease.lost.is_set():
                 lease_lost = True       # stop the CLI at once, like a cancel, but write nothing
                 break
             if now - t0 >= wall_s:
@@ -377,6 +417,12 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             if item is None:
                 break
             last = time.monotonic()
+            # Release on the first event that proves a model call completed (assistant text, a
+            # tool call, or turn usage) - NOT on session.assigned, which precedes the first model
+            # request. UNVERIFIED: that Codex refreshes its token at/before that first request.
+            if gate is not None and isinstance(item, ev.MessageDelta | ev.ToolCall | ev.Usage):
+                await gate.aclose()
+                gate = None
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):
                 terminal = item
                 break
@@ -397,6 +443,8 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                     item.total_tokens, item.cache_read_tokens, item.reasoning_tokens,
                 )
     finally:
+        if gate is not None:
+            await gate.aclose()
         if terminal is None or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
             await _stop_adapter(adapter, cfg.cancel_grace_s)
         task.cancel()

@@ -193,3 +193,36 @@ def _agent_allowlist(request, monkeypatch):
         monkeypatch.setattr("aibroker.agent.constants.allowed_project_ids", lambda: _EveryProject())
     if name.startswith("test_agent_") and name != "test_agent_policy":
         monkeypatch.setattr("aibroker.agent.policy.policy_for", lambda project_id: _AnyPolicy())
+
+
+@pytest.fixture
+def serialized_db(monkeypatch):
+    """Keep concurrent agent runs concurrent, but take turns on the database.
+
+    The in-memory SQLite test DB has ONE shared connection, so two runs' transactions interleave
+    on it (lost rollbacks, duplicate event `seq`). Production uses separate connections. Every
+    DB access of the executor goes through one lock here; adapters/CLIs still run concurrently."""
+    import asyncio
+    import contextlib
+    import functools
+
+    from aibroker.agent import executor
+
+    lock = asyncio.Lock()
+    real_get_session = executor.get_session
+
+    @contextlib.asynccontextmanager
+    async def locked_session():
+        async with lock, real_get_session() as s:
+            yield s
+
+    def locked(fn):
+        @functools.wraps(fn)
+        async def wrapper(*a, **kw):
+            async with lock:
+                return await fn(*a, **kw)
+        return wrapper
+
+    monkeypatch.setattr(executor, "get_session", locked_session)
+    for name in ("append_event", "record_usage", "requeue_run", "park_for_quota"):
+        monkeypatch.setattr(executor, name, locked(getattr(executor, name)))

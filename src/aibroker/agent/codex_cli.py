@@ -16,7 +16,7 @@ Safety, by construction (mirrors ClaudeCLI):
 - `-m` / `--model=<id>` exactly as given; resume ONLY with the exact thread id (a UUID): the CLI
   would also resolve a "thread name", so anything else is refused, and never `--last`;
 - the prompt goes on stdin (`-`); CLI and probe get a minimal environment (CODEX_HOME, no keys);
-- auth is read for ONE field only: `auth_mode` of $CODEX_HOME/auth.json - never a token.
+- auth is read for TWO non-secret fields only: `auth_mode` and `last_refresh` of $CODEX_HOME/auth.json - never a token.
 """
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aibroker.agent.adapter import AgentRunSpec, AuthAttestation, BillingMode, StreamEvent
@@ -99,6 +100,48 @@ def read_auth_mode(codex_home: str | None) -> str | None:
     return mode if isinstance(mode, str) else None
 
 
+# Codex refreshes the ChatGPT token in $CODEX_HOME/auth.json when `last_refresh` is old (its
+# interval is ~8 days) or after a 401. Refresh tokens rotate, so two processes refreshing at once
+# can invalidate the login. UNVERIFIED: the 8-day interval is from memory of the Codex source and
+# could not be checked offline; the field name and its ISO-8601 format were checked on a real
+# auth.json. We use a conservative 4 days so a refresh is serialized well before it is due.
+# A 401-triggered refresh cannot be predicted from the file and is not covered.
+CODEX_REFRESH_DUE_AFTER_S = 4 * 24 * 3600.0
+AUTH_READ_MAX_BYTES = 1024 * 1024        # a real auth.json is a few KB; anything bigger is refused
+
+
+def read_last_refresh(codex_home: str | None) -> datetime | None:
+    """The `last_refresh` timestamp of $CODEX_HOME/auth.json - and nothing else (the file also
+    holds tokens: never read, kept or logged). None when absent / unreadable / unparseable."""
+    if not codex_home:
+        return None
+    try:
+        with (Path(codex_home) / "auth.json").open("rb") as fh:
+            blob = fh.read(AUTH_READ_MAX_BYTES + 1)
+        if len(blob) > AUTH_READ_MAX_BYTES:
+            return None                      # not a plausible auth.json: treat as unreadable
+        data = json.loads(blob.decode("utf-8"))
+        raw = data.get("last_refresh") if isinstance(data, dict) else None
+        if not isinstance(raw, str):
+            return None
+        # Codex is documented to write nanoseconds ("...05.123456789Z"); fromisoformat takes at most 6 digits.
+        raw = re.sub(r"(\.\d{6})\d+", r"\1", raw.strip())
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def refresh_maybe_due(codex_home: str | None, now: datetime | None = None,
+                      after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+    """True when a token refresh may happen soon. A missing or unreadable timestamp counts as due
+    (serialize conservatively); a timestamp in the future (clock skew) does not."""
+    last = read_last_refresh(codex_home)
+    if last is None:
+        return True
+    return ((now or datetime.now(UTC)) - last).total_seconds() >= after_s
+
+
 def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
                      codex_home: str | None = None) -> list[str]:
     """`codex exec [resume <thread id>] --json ... -` with constant overrides; ValueError when
@@ -141,8 +184,11 @@ class CodexCLI(SubprocessCLI):
         self._image_baseline: set[str] | None = None
         self._image_session_id: str | None = None
 
+    def refresh_maybe_due(self, after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+        return refresh_maybe_due(self._env.get("CODEX_HOME"), after_s=after_s)
+
     def snapshot_artifacts(self) -> None:
-        """Called under the shared-home lease just before this run starts."""
+        """Called just before this run starts; only the run's own thread dir is compared."""
         self._image_baseline = snapshot_generated_paths(self._env.get("CODEX_HOME"))
 
     def make_env(self, source: Mapping[str, str] | None) -> dict[str, str]:
