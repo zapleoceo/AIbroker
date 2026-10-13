@@ -268,8 +268,8 @@ async def test_global_cap_blocks_and_refunds_key_reservation(monkeypatch):
 
 
 async def test_cap_zero_refuses_paid_key_with_zero_estimate():
-    """`used + estimate > cap` alone admitted a paid key when the estimate was $0
-    (":free" / unpriced models) under a cap of 0 — docs/api.md says refused."""
+    """An UNPRICED model estimates $0, so `used + estimate > cap` admitted a paid
+    key under a cap of 0 and its real cost landed uncapped."""
     paid = ApiKeyRow(id=5, provider="openrouter", label="x", tier="paid",
                      token_encrypted="x", scopes=["llm:chat"], daily_cost_cap_usd=None)
     with pytest.raises(CostGuardError) as ei:
@@ -283,7 +283,24 @@ async def test_cap_zero_refuses_paid_key_with_zero_estimate():
     assert ei.value.kind == "api_key"
 
 
+async def test_cap_zero_admits_paid_key_on_registry_free_model():
+    paid = ApiKeyRow(id=5, provider="openrouter", label="x", tier="paid",
+                     token_encrypted="x", scopes=["llm:chat"], daily_cost_cap_usd=None)
+    await reserve_cost(api_key=paid, project=_project(cap=0.0), estimated_cost=0.0,
+                       known_free_model=True)
+
+
 async def test_cap_zero_still_admits_free_key():
     free = ApiKeyRow(id=7, provider="groq", label="x", tier="free", token_encrypted="x",
                      scopes=["llm:chat"], daily_cost_cap_usd=None)
     await reserve_cost(api_key=free, project=_project(cap=0.0), estimated_cost=0.0)
+
+
+async def test_cap_zero_trial_key_keeps_master_behaviour():
+    """Master never refused a trial key at estimate $0 under cap 0 (only tier=='paid'
+    is the new rule); a positive estimate was and stays refused."""
+    trial = ApiKeyRow(id=8, provider="nvidia", label="x", tier="trial", token_encrypted="x",
+                      scopes=["llm:chat"], daily_cost_cap_usd=None)
+    await reserve_cost(api_key=trial, project=_project(cap=0.0), estimated_cost=0.0)
+    with pytest.raises(CostGuardError):
+        await reserve_cost(api_key=trial, project=_project(cap=0.0), estimated_cost=0.001)

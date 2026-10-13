@@ -2124,7 +2124,7 @@ async def test_run_chat_retries_same_provider_free_after_a_cap_block(monkeypatch
         return SimpleNamespace(id=16 if tier == "paid" else 21, label="k",
                                tier=tier, provider=provider, token_encrypted="x")
 
-    async def fake_reserve(*, api_key, project, estimated_cost):
+    async def fake_reserve(*, api_key, project, estimated_cost, known_free_model=False):
         if api_key.tier == "paid":
             raise svc.CostGuardError("project", 0.6, 0.5993, 0.01)
 

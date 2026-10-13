@@ -34,7 +34,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 - `name` (required) is normalised to a lowercase slug (`My Bot!` -> `my-bot`, 2-60 chars). It must
   be unique: on a clash a `-<4 hex>` suffix is appended, so always read the returned `name`.
   `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
-- **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid call is refused, including a paid key on a `:free` or unpriced model priced at $0; free-tier keys are unaffected; `0` is
+- **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
   not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
   one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/transcribe` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling

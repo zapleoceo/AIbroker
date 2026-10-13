@@ -18,7 +18,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
 | `local/*` (Qwen3-VL) | Free, no external bill. |
 
-The usage write after a successful paid call is shielded from request cancellation (`asyncio.shield` in `services/attempt.py`). The provider has already billed, so the ledger row lands even if the client disconnects; the cancel still propagates once the write has landed.
+The usage write after a successful paid call runs as its own tracked task behind `asyncio.shield` (`services/attempt.py`). The provider has already billed, so the ledger row lands even if the client disconnects: the cancel is raised at once and does not wait for the write, which completes in the background. A failed background write is logged with `log.error` (key, project, model).
 
 ## Cached tokens
 

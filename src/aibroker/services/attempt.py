@@ -14,6 +14,7 @@ keys and providers; this module owns what happens to a single key.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -33,6 +34,7 @@ from aibroker.providers.provider_errors import (
     is_model_unavailable,
     is_timeout,
 )
+from aibroker.providers.registry import model_spec
 from aibroker.routing import (
     CostGuardError,
     affinity,
@@ -88,6 +90,25 @@ def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
     free account ever exhausts its free allocation, flip that key to tier='paid'.)
     """
     return 0.0 if key.tier == "free" else meta["cost_usd"]
+
+
+# Strong references to in-flight usage writes: the event loop keeps only weak
+# ones, and shield() leaves the inner task running when its awaiter is cancelled.
+_usage_writes: set[asyncio.Task[Any]] = set()
+
+
+def _usage_write_done(task: asyncio.Task[Any], *, key_id: int, project_id: int | None,
+                      model: str) -> None:
+    """Drop the reference and surface a failure: after a cancel nobody awaits the
+    task, so its exception would otherwise vanish and the billed call go unbooked
+    without a trace."""
+    _usage_writes.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("record_usage failed for key %s project %s model %s — a billed call "
+                  "is missing from usage_log", key_id, project_id, model, exc_info=exc)
 
 
 async def _release_reservation(key: ApiKeyRow, estimated_cost: float) -> None:
@@ -299,8 +320,10 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     reserved = a.estimated_cost if (a.reserve and a.estimated_cost > 0) else 0.0
     if a.reserve:
         try:
+            spec = model_spec(a.model)
             await reserve_cost(api_key=a.key, project=a.project,
-                               estimated_cost=a.estimated_cost)
+                               estimated_cost=a.estimated_cost,
+                               known_free_model=spec is not None and spec.pricing == "free")
         except CostGuardError as e:
             return AttemptResult(await _block_on_cap(a, e), error=e)
     try:
@@ -329,9 +352,10 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         return AttemptResult(rej.flow, payload=payload, meta=meta, rejection=rej.error_kind)
 
     # The provider already answered and billed: a client disconnect cancelling the
-    # request here must not drop the ledger row, so the write is shielded (the
-    # cancel still propagates once it has landed).
-    usage_id = await asyncio.shield(record_usage(
+    # request here must not drop the ledger row. The write runs as its own task, so
+    # a cancel raises here immediately but the write still completes in the
+    # background (cancellation does not wait for it).
+    usage_task = asyncio.ensure_future(record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,
         provider=a.provider, model=a.model, model_served=meta.get("model_served"),
         capability=a.capability, workflow=a.workflow,
@@ -342,6 +366,10 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         latency_ms=meta.get("latency_ms"), status="ok", error_kind=None,
         http_status=200, request_id=current_request_id(),
     ))
+    _usage_writes.add(usage_task)
+    usage_task.add_done_callback(functools.partial(
+        _usage_write_done, key_id=a.key.id, project_id=a.project.id, model=a.model))
+    usage_id = await asyncio.shield(usage_task)
     # A success re-pins the request family AND (project, provider) to what just
     # worked, so the NEXT request lands where the provider-side cache is warm.
     if a.note_affinity:

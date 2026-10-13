@@ -127,7 +127,7 @@ async def test_run_chat_falls_back_on_cap_block():
     from aibroker.routing import CostGuardError
     call_count = {"n": 0}
 
-    async def fake_check(api_key, project, estimated_cost):
+    async def fake_check(api_key, project, estimated_cost, known_free_model=False):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise CostGuardError(kind="key", limit=5.0, used=4.9, attempted=0.2)

@@ -1417,7 +1417,7 @@ Three independent daily caps: per-key (atomic, see below), per-project (live
 SUM from `usage_log`), global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
 Free-tier keys with `cost <= 0` skip the check entirely.
 
-**Cap 0 refuses paid keys (2026-10-13).** `daily_cost_cap_usd = 0` on the project or on a key refuses every paid-tier key before any reservation, even when its estimate is $0 (`:free` and unpriced models price at 0.0). Before this, `used + estimate > cap` admitted them and their real cost landed uncapped. Free-tier keys are unaffected.
+**Cap 0 refuses paid keys (2026-10-13).** `daily_cost_cap_usd = 0` on the project or on a key refuses a `tier="paid"` key before any reservation unless the model is registry-known free (`pricing == "free"`, passed to `reserve_cost` as `known_free_model`). An unpriced model estimates $0 too, so before this `used + estimate > cap` admitted it and its real cost landed uncapped. Free-tier and `trial` keys behave as before (master never refused `trial` at a $0 estimate).
 
 **Real reservation pattern (2026-07-03).** `run_chat` estimates the
 worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —

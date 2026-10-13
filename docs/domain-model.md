@@ -16,7 +16,7 @@ Client apps. Each has its own scopes and cost caps.
 | `project_key_hash` | `sha256(plain)` hex |
 | `project_key_prefix` | First 12 chars of plaintext, for ops display |
 | `allowed_scopes` | JSONB array; routes check membership |
-| `daily_cost_cap_usd` / `monthly_cost_cap_usd` | NULL = no cap; `0` = free providers only (every paid-tier key is refused, including ones priced at $0) |
+| `daily_cost_cap_usd` / `monthly_cost_cap_usd` | NULL = no cap; `0` = free providers only (a paid-tier key is refused unless the model is registry-known free; an unpriced model counts as paid) |
 | `total_request_cap` / `total_requests_used` | Lifetime client-request cap and its atomic counter (migration 016); NULL cap = unlimited |
 | `self_signup` / `signup_ip` | Created via `POST /v1/signup`; origin IP for the per-IP signup limit |
 | `is_active` | Soft-disable |
