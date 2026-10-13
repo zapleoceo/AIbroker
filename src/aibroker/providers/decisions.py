@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from aibroker.providers.cost import estimate_llm_cost
+from aibroker.providers.model_identity import served_model
 from aibroker.providers.pricing import reported_cost
 
 OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
@@ -29,10 +31,8 @@ OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 _TIMEOUT_S = 20.0
 
 # jev-1.13 on OpenRouter: $0.042/M input, $0 output (model page, 2026-09-18).
-# Only used to size the cost RESERVATION before the call — the booked cost is
-# the `usage.cost` OpenRouter returns. LiteLLM's pricing map has no entry for
-# this model, so estimate_llm_cost would reserve $0 and let the project cap be
-# bypassed; this keeps the reservation honest.
+# Sizes the cost RESERVATION before the call. The booked cost is the
+# `usage.cost` OpenRouter returns, or the registry-priced estimate when it omits it.
 JEV_INPUT_USD_PER_TOKEN = 0.042 / 1_000_000
 
 # FREE fallback, owner decision 2026-10-03 ("делай запасным"). Inception Mercury
@@ -124,12 +124,20 @@ async def decide(
             f"{tag}openrouter decisions HTTP {resp.status_code}: {resp.text[:400]}")
     body = resp.json()
     usage = body.get("usage") or {}
+    tokens_in = int(usage.get("input_tokens") or 0)
+    tokens_out = int(usage.get("output_tokens") or 0)
+    reported = reported_cost(usage)
+    # usage.cost is the real bill, but OpenRouter omits it on some responses;
+    # booking $0 there would blind the daily caps, so fall back to the price table
+    # exactly like the chat path (litellm_client._prefer_reported_cost).
+    cost = reported if reported is not None else estimate_llm_cost(
+        model, tokens_in, tokens_out)
     return body.get("answers") or {}, {
-        "tokens_in": int(usage.get("input_tokens") or 0),
-        "tokens_out": int(usage.get("output_tokens") or 0),
-        "cost_usd": reported_cost(usage) or 0.0,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost,
         "latency_ms": latency_ms,
-        "model_served": body.get("model"),
+        "model_served": served_model(model, body.get("model")),
     }
 
 
