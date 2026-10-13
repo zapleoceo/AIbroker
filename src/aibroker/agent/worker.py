@@ -19,7 +19,7 @@ from aibroker.agent.real_cli import register_real_adapters
 from aibroker.agent.runs import RunConflict, append_event
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import AgentRunRow, DeepJobRow
+from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +103,8 @@ async def fail_stale_agent_runs() -> int:
 
 
 async def expire_overdue_waiting() -> int:
-    """A run waiting for quota past its overall deadline ends `run.timed_out` (deadline)."""
+    """A run waiting for quota past its overall deadline ends `run.failed` (quota_exhausted) with
+    the limit wording the CLI gave (kept on its last `run.waiting_quota` event)."""
     now = _now()
     async with get_session() as s:
         rows = (await s.execute(
@@ -116,7 +117,16 @@ async def expire_overdue_waiting() -> int:
     done = 0
     for run_id in overdue:
         with contextlib.suppress(RunConflict):
-            await append_event(run_id, ev.RunTimedOut(limit="deadline"))
+            async with get_session() as s:
+                reason = (await s.execute(
+                    select(AgentRunEventRow.payload).where(
+                        AgentRunEventRow.run_id == run_id,
+                        AgentRunEventRow.type == "run.waiting_quota")
+                    .order_by(AgentRunEventRow.seq.desc()).limit(1))).scalar() or {}
+            await append_event(run_id, ev.RunFailed(
+                error_class="quota_exhausted",
+                message=f"{reason.get('reason') or 'usage limit reached'} "
+                        "(quota wait is past the job deadline)"))
             done += 1
     return done
 

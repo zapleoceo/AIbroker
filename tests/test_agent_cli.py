@@ -216,15 +216,18 @@ def test_claude_parser_weekly_limit_result_is_quota_with_reset():
 
 
 @pytest.mark.parametrize("msg", [
-    _WEEKLY, "You've hit your session limit", "You've hit your Opus limit", "5-hour limit reached",
-    "weekly limit", "daily limit exceeded"])
+    _WEEKLY, "You've hit your session limit · resets 3:45pm",
+    "You've hit your Opus limit · resets 3:45pm",
+    "You've hit your weekly limit · resets Mon 12:00am", "5-hour limit reached",
+    "weekly limit reached"])
 def test_classify_claude_code_limit_wordings(msg):
     assert classify_failure(msg) == "quota_exhausted"
 
 
 @pytest.mark.parametrize("msg", [
     "context limit exceeded by the prompt", "token limit for this file", "output limit of 4k",
-    "line limit", "segfault"])
+    "line limit", "segfault", "You've hit your context limit",
+    "The tool exceeded the session limit of 10 MB", "weekly limit", "daily limit exceeded"])
 def test_classify_unrelated_limits_stay_cli_error(msg):
     assert classify_failure(msg) == "cli_error"
 
@@ -238,11 +241,28 @@ def test_classify_unrelated_limits_stay_cli_error(msg):
     ("resets 12am (UTC)", "2026-10-12T10:00:00", "2026-10-13T00:00:00+00:00"),
     ("resets 3pm (Europe/Kyiv)", "2026-10-12T10:00:00", "2026-10-12T12:00:00+00:00"),
     ("resets 3pm (Mars/Base)", "2026-10-12T10:00:00", None),
+    ("resets 8pm (America)", "2026-10-12T10:00:00", None),            # a directory, not a zone
+    ("resets 8pm (" + "A" * 300 + ")", "2026-10-12T10:00:00", None),  # overlong zone
+    ("resets 8pm (a b)", "2026-10-12T10:00:00", None),
+    ("resets Mon 12:00am", "2026-10-12T10:00:00", "2026-10-19T00:00:00+00:00"),   # Mon 12 Oct
+    ("resets Wed 3:45pm (UTC)", "2026-10-12T10:00:00", "2026-10-14T15:45:00+00:00"),
+    ("resets Mon 11pm (UTC)", "2026-10-12T10:00:00", "2026-10-12T23:00:00+00:00"),
+    ("resets Foo 3pm (UTC)", "2026-10-12T10:00:00", None),
     ("resets Feb 30, 3pm (UTC)", "2026-10-12T10:00:00", None),
     ("no time here", "2026-10-12T10:00:00", None)])
 def test_parse_reset_at_clock_forms(msg, now, want):
     from datetime import UTC, datetime
     assert parse_reset_at(msg, datetime.fromisoformat(now).replace(tzinfo=UTC)) == want
+
+
+def test_classify_and_parse_are_fast_on_hostile_input():
+    import time
+    from datetime import UTC, datetime
+    big = ("hit your " * 12000) + "resets " * 5000 + "limit" * 20000
+    t0 = time.perf_counter()
+    classify_failure(big)
+    parse_reset_at(big, datetime(2026, 10, 12, tzinfo=UTC))
+    assert time.perf_counter() - t0 < 0.2
 
 
 def test_claude_parser_refuses_api_key_source_at_runtime():

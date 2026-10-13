@@ -297,7 +297,7 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
 
 
 async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool = False,
-                         lease: Lease | None = None) -> int:
+                         lease: Lease | None = None, reason: str = "") -> int:
     """The CLI hit its usage limit: record `run.waiting_quota`, put the run back to pending
     until `not_before`, and resume THIS run's own session on the retry. Same account, same
     billing route -> number of quota waits so far. Fenced like append_event."""
@@ -313,7 +313,7 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
         run.last_event_at = now
         s.add(AgentRunEventRow(
             run_id=run_id, seq=run.last_seq, ts=now, type="run.waiting_quota",
-            payload=_waiting_payload(not_before, run.quota_waits, reset_reported)))
+            payload=_waiting_payload(not_before, run.quota_waits, reset_reported, reason)))
         if run.session_id:
             run.resume_session_id = run.session_id
         job.status = "pending"
@@ -322,9 +322,11 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
         return run.quota_waits
 
 
-def _waiting_payload(not_before: datetime, attempt: int, reset_reported: bool) -> dict[str, Any]:
+def _waiting_payload(not_before: datetime, attempt: int, reset_reported: bool,
+                     reason: str = "") -> dict[str, Any]:
     return RunWaitingQuota(not_before=not_before.replace(tzinfo=UTC).isoformat(),
-                           attempt=attempt, reset_reported=reset_reported).model_dump(mode="json")
+                           attempt=attempt, reset_reported=reset_reported,
+                           reason=reason[:300]).model_dump(mode="json")
 
 
 async def get_attestation(run_id: int) -> dict[str, Any] | None:

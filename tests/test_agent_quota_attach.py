@@ -159,13 +159,20 @@ async def test_no_fallback_billing_guard_still_applies_on_retry(tmp_path):
         assert len((await s.execute(select(DeepJobRow))).scalars().all()) == 1
 
 
-async def test_wait_beyond_overall_deadline_times_out_instead(cfg):
+async def test_wait_beyond_overall_deadline_fails_with_the_limit_wording(cfg):
     rid = await _run(deadline_s=60)
-    register_adapter("agent:claude", lambda: FakeAgentCLI([_quota(
-        reset_at=(datetime.now(UTC) + timedelta(hours=2)).isoformat())]))
-    assert await execute_run(rid, cfg) == "timed_out"
+    reset = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+    register_adapter("agent:claude", lambda: FakeAgentCLI([ev.RunFailed(
+        error_class="quota_exhausted", reset_at=reset,
+        message="You've hit your weekly limit · resets Oct 15, 8pm (UTC)")]))
+    assert await execute_run(rid, cfg) == "failed"
     last = (await list_events(rid))[-1]
-    assert last.type == "run.timed_out" and last.payload["limit"] == "deadline"
+    assert last.type == "run.failed" and last.payload["error_class"] == "quota_exhausted"
+    _, job = await _row(rid)       # what a /v1/jobs poller reads
+    assert job.status == "error"
+    assert job.error_message.startswith("quota_exhausted: You've hit your weekly limit")
+    assert f"reset {reset} is past the job deadline" in job.error_message
+    assert "run.waiting_quota" not in [e.type for e in await list_events(rid)]   # no retry
 
 
 async def test_waiting_run_past_deadline_is_expired_by_the_worker(cfg):
@@ -177,7 +184,9 @@ async def test_waiting_run_past_deadline_is_expired_by_the_worker(cfg):
         (await s.get(DeepJobRow, rid)).created_at = _now() - timedelta(hours=2)
     assert await worker.expire_overdue_waiting() == 1
     run, job = await _row(rid)
-    assert run.outcome == "timed_out" and job.status == "error"
+    assert run.outcome == "failed" and job.status == "error"
+    assert job.error_message.startswith("quota_exhausted: usage limit reached")
+    assert "past the job deadline" in job.error_message
 
 
 async def test_execute_after_deadline_times_out_without_starting(cfg):
