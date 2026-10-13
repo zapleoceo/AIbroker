@@ -623,3 +623,112 @@ async def test_drain_once_content_failed_fails_after_one_retry():
         row = await s.get(DeepJobRow, jid)
         assert row.status == "error"
         assert "empty/invalid JSON" in row.error_message
+
+
+# ─── graceful shutdown: in-flight jobs go straight back to pending ──────────
+
+
+async def _running_job(job_id: int, pid: int, started: datetime, retry_count: int = 2) -> None:
+    async with get_session() as s:
+        s.add(DeepJobRow(
+            id=job_id, project_id=pid, capability="chat:fast", status="running",
+            retry_count=retry_count, started_at=started,
+            request={"messages": [], "max_tokens": 1, "temperature": 0}))
+
+
+async def _row(job_id: int) -> DeepJobRow:
+    async with get_session() as s:
+        return await s.get(DeepJobRow, job_id)
+
+
+async def _stuck_dispatch(rows) -> list[asyncio.Task]:
+    """Run each row through _execute_guarded with an _execute that never returns,
+    like a provider call still in flight when SIGTERM lands."""
+    async def hang(_row):
+        await asyncio.Event().wait()
+
+    job_queue._CLAIMED.clear()
+    with patch.object(job_queue, "_execute", hang):
+        tasks = [asyncio.create_task(job_queue._execute_guarded(r)) for r in rows]
+        await asyncio.sleep(0)
+    return tasks
+
+
+async def test_shutdown_requeues_inflight_job_without_burning_retries():
+    pid = await _make_project(["llm:chat"])
+    started = datetime(2026, 10, 13, 9, 25, 7)
+    await _running_job(970001, pid, started)
+    tasks = await _stuck_dispatch([DeepJobRow(id=970001, started_at=started)])
+    before = datetime.now(UTC).replace(tzinfo=None)
+
+    await job_queue._shutdown_inflight(set(tasks), grace_s=0.01)
+
+    row = await _row(970001)
+    assert row.status == "pending" and row.started_at is None
+    assert row.retry_count == 2                      # operator restart: no retry burnt
+    assert before <= row.run_after <= datetime.now(UTC).replace(tzinfo=None)
+    assert not job_queue._CLAIMED
+
+
+async def test_shutdown_leaves_job_that_finished_during_grace():
+    pid = await _make_project(["llm:chat"])
+    started = datetime(2026, 10, 13, 9, 25, 8)
+    await _running_job(970002, pid, started)
+    job_queue._CLAIMED.clear()
+    release = asyncio.Event()
+
+    async def finish_within_grace(row):
+        await release.wait()
+        async with get_session() as s:
+            (await s.get(DeepJobRow, row.id)).status = "done"
+
+    with patch.object(job_queue, "_execute", finish_within_grace):
+        task = asyncio.create_task(
+            job_queue._execute_guarded(DeepJobRow(id=970002, started_at=started)))
+        await asyncio.sleep(0)
+        release.set()
+        await job_queue._shutdown_inflight({task}, grace_s=1.0)
+
+    assert (await _row(970002)).status == "done"
+    assert not job_queue._CLAIMED
+
+
+async def test_shutdown_never_touches_another_process_claim():
+    """Same row re-claimed elsewhere (different started_at) or already pending:
+    the guarded UPDATE changes nothing."""
+    pid = await _make_project(["llm:chat"])
+    ours, theirs = datetime(2026, 10, 13, 9, 25, 9), datetime(2026, 10, 13, 9, 50, 8)
+    await _running_job(970003, pid, theirs, retry_count=3)
+    tasks = await _stuck_dispatch([DeepJobRow(id=970003, started_at=ours)])
+
+    await job_queue._shutdown_inflight(set(tasks), grace_s=0.01)
+
+    row = await _row(970003)
+    assert row.status == "running" and row.started_at == theirs and row.retry_count == 3
+
+
+async def test_release_claim_is_idempotent_and_ignores_missing_started_at():
+    pid = await _make_project(["llm:chat"])
+    started = datetime(2026, 10, 13, 9, 25, 10)
+    await _running_job(970004, pid, started)
+    assert await job_queue._release_claim(970004, started) is True
+    assert await job_queue._release_claim(970004, started) is False   # no double requeue
+    assert await job_queue._release_claim(970004, None) is False
+
+
+async def test_release_claimed_jobs_survives_a_failing_row():
+    pid = await _make_project(["llm:chat"])
+    started = datetime(2026, 10, 13, 9, 25, 11)
+    await _running_job(970005, pid, started)
+    job_queue._CLAIMED.clear()
+    job_queue._CLAIMED.update({970099: started, 970005: started})
+    real = job_queue._release_claim
+
+    async def flaky(job_id, st):
+        if job_id == 970099:
+            raise RuntimeError("db blip")
+        return await real(job_id, st)
+
+    with patch.object(job_queue, "_release_claim", flaky):
+        assert await job_queue.release_claimed_jobs() == 1
+    assert (await _row(970005)).status == "pending"
