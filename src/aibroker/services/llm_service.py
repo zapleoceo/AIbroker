@@ -844,6 +844,12 @@ async def run_transcribe(
         # timeout must not skip the provider while healthy sibling keys sit idle.
         for _ in range(_max_keys(provider)):
             use_model = model_for(provider, "transcription")
+            if _now() + _transcribe_call_timeout() > finish_by:
+                log.warning("transcription — a %s attempt would end past the "
+                            "finish-by deadline; stop starting attempts so the job "
+                            "finishes before stale-reclaim (no double-execution)",
+                            provider)
+                raise TranscribeFailed(last_error or "transcription deadline reached")
             key = await pick_and_reserve(provider, scope=scope, project_id=project.id,
                                           models=[use_model] if use_model else None)
             if key is None:
@@ -851,12 +857,6 @@ async def run_transcribe(
             any_key_seen = True
             if not use_model:
                 break
-            if _now() + _transcribe_call_timeout() > finish_by:
-                log.warning("transcription — a %s attempt would end past the "
-                            "finish-by deadline; stop starting attempts so the job "
-                            "finishes before stale-reclaim (no double-execution)",
-                            provider)
-                raise TranscribeFailed(last_error or "transcription deadline reached")
             res = await run_attempt(Attempt(
                 key=key, project=project, provider=provider, model=use_model,
                 capability="transcription", workflow=workflow,
