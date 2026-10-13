@@ -130,7 +130,7 @@ continuity). Submit only enqueues (`pending`); a per-worker dispatcher
 | `id` | BIGSERIAL PK — the `job_id` clients poll |
 | `project_id` | FK, CASCADE — a job belongs to exactly one project |
 | `capability` | Which async-job capability this runs (default `chat:deep`) |
-| `status` | `pending` / `running` / `done` / `error` |
+| `status` | `pending` / `running` / `done` / `error` / `cancelled` (client cancel, migration 020; terminal) |
 | `request` | Full request payload, JSONB |
 | `payload_hash` | md5 of `project:capability:canonical request JSON` (migration 010). Lets submit return an EXISTING in-flight job for an identical resubmit inside a 30-min window instead of enqueueing a duplicate — only `pending`/`running` jobs dedup; `done`/`error` never do (the client may legitimately retry after a failure). Nullable — rows predating the migration have none |
 | `result_text` / `result_meta` | Set on `done` |
@@ -139,11 +139,16 @@ continuity). Submit only enqueues (`pending`); a per-worker dispatcher
 | `run_after` | Earliest eligible time (exponential backoff); NULL = eligible now |
 | `started_at` | When a dispatcher claimed the row (→ `running`); a row stuck past the stale window is re-queued by the next tick |
 | `created_at` / `completed_at` | Lifecycle timestamps |
+| `trace_id` / `labels` | Client correlation (migration 020): `varchar(128)` and JSONB (<= 8 string pairs). Echoed on submit/poll, logged, never in `payload_hash` |
+| `idempotency_key` | Client `Idempotency-Key` (migration 020), unique per project while the row lives; NULL for jobs submitted without one |
+| `cancel_requested` | `boolean NOT NULL DEFAULT false` (migration 020): client asked to cancel a `running` job; the dispatcher ends it `cancelled` at the next attempt boundary |
 
 Indexes: `(project_id, created_at)` for polling,
-`(status, run_after, created_at)` for the dispatcher's claim scan, and
+`(status, run_after, created_at)` for the dispatcher's claim scan,
 `(project_id, capability, payload_hash, created_at DESC)` for the dedup
-lookup (migration 010).
+lookup (migration 010), a partial UNIQUE `(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL`
+(`ux_deep_jobs_idempotency`) and a partial `(project_id, trace_id) WHERE trace_id IS NOT NULL`
+(`ix_deep_jobs_trace`), both migration 020.
 
 ### `provider_observations`
 

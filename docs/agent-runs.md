@@ -144,7 +144,10 @@ Rules enforced at submit:
   project, capability and `account_id`; otherwise 400. A session still used by an unfinished
   run -> 409. There is no "last" / "continue" anywhere.
 - **Cancel**: a queued run is cancelled at once (`run.cancelled`); a running one gets
-  `cancel_requested` for the worker (C2); a finished one is returned unchanged.
+  `cancel_requested` for the worker (C2); a finished one is returned unchanged. Jobs submitted
+  through `POST /v1/jobs` (subscription pins) are cancelled with `POST /v1/jobs/{id}/cancel` /
+  `POST /v1/jobs/cancel` (by `trace_id` / `labels`), which call this same `cancel_run` and need
+  `llm:agent`; see [api.md](api.md#cancel-migration-020).
 
 ## Events (schema_version 1)
 

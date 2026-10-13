@@ -111,7 +111,7 @@ several passes. The dispatcher calls it every `JOB_RETENTION_EVERY_TICKS`
 (default 300 ≈ 25 min at the idle poll), Postgres only. Both workers running it
 is harmless: the DELETE is idempotent.
 
-Only `done`/`error` rows with a `completed_at` are eligible — a `pending` or
+Only `done`/`error`/`cancelled` rows with a `completed_at` are eligible — a `pending` or
 `running` job is untouchable regardless of age, so nothing can be deleted out
 from under the dispatcher or while a caller might still poll it. Verified
 against real Postgres before shipping (old done/error deleted; fresh done,
@@ -179,6 +179,41 @@ it now includes migration 011, `usage_log.model_served`). Migration 010 (2026-07
 plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
+
+Migration 020 (2026-10-13, job trace / idempotency / cancel) adds four columns to `deep_jobs` —
+`trace_id varchar(128)`, `labels jsonb`, `idempotency_key varchar(128)` (all nullable) and
+`cancel_requested boolean NOT NULL DEFAULT false` — plus two partial indexes: the UNIQUE
+`ux_deep_jobs_idempotency (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL` and
+`ix_deep_jobs_trace (project_id, trace_id) WHERE trace_id IS NOT NULL`. Purely additive; the new status
+value `cancelled` needs no DDL (`deep_jobs.status` is a plain `varchar(20)`, no CHECK or enum).
+**Apply it BEFORE deploying this code**: the ORM selects every `deep_jobs` column on each poll and claim,
+so code that lands first fails on the missing columns.
+
+```
+docker exec -i aibroker-postgres psql -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/020_deep_jobs_trace_idempotency.sql
+```
+
+- Run it exactly like that (stdin / `-f`, autocommit), **not** with `psql -1` or inside a transaction: the
+  two `CREATE INDEX CONCURRENTLY` statements cannot run in one. `deep_jobs` is moderately large and written
+  on every submit/claim/finish, so a plain index build would block those writes; both indexes are partial
+  over all-NULL history, so the builds are tiny. If a concurrent build is interrupted it leaves an INVALID
+  index that `IF NOT EXISTS` would skip — `DROP INDEX CONCURRENTLY IF EXISTS <name>` and re-run.
+- `ADD COLUMN … NOT NULL DEFAULT false` is metadata-only on PostgreSQL 11+ (the stack runs `pgvector/pgvector:pg16`):
+  no table rewrite, no long lock; `SET lock_timeout = '5s'` makes the `ALTER`s fail fast instead of queueing
+  behind a long transaction. `infra/sql/init.sql` mirrors the columns and indexes.
+- **pgbouncer / old code.** The previous dispatcher claimed with `UPDATE … RETURNING *` and built `DeepJobRow`
+  from every returned column. After the `ALTER`, that statement returns four more columns: through the
+  transaction-pooling pgbouncer (asyncpg prepared statements, `MAX_PREPARED_STATEMENTS`) already-cached
+  plans fail with "cached statement plan is invalid" until the connection is recycled, and the old
+  `DeepJobRow(**row)` rejects the unknown keys. Effect while the OLD code is still running: dispatcher claim
+  ticks fail and back off (logged, jobs stay `pending`, nothing is lost) until the new code is live. So: apply
+  020, deploy immediately, then restart `api` (the deploy recreates it) so no worker keeps a stale prepared
+  statement; the new code names the claimed columns explicitly (`_JOB_COLUMNS`) and no longer breaks on the
+  next `ALTER`.
+- **Retention.** `cancelled` rows are pruned with `done`/`error` after `JOB_RETENTION_DAYS`; an
+  `Idempotency-Key` therefore lives exactly as long as its job row (see
+  [api.md](api.md#idempotency-key-migration-020)).
 
 Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable) and
 backfills it once. **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
