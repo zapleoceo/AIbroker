@@ -61,6 +61,10 @@ async def test_project_monthly_cap_blocks_paid_reservation():
     now = datetime.now(UTC).replace(tzinfo=None)
     last_month = datetime.combine(month_start_utc(), datetime.min.time()) - timedelta(days=1)
     async with get_session() as s:
+        # usage_log.project_id is an FK: Postgres needs the project row to exist.
+        s.add(ProjectRow(id=1, name="cap-m", project_key_hash="h-cap-m",
+                         project_key_prefix="pk_m", allowed_scopes=["llm:chat"]))
+        await s.flush()
         s.add(UsageLogRow(project_id=1, provider="x", status="ok", cost_usd=0.9, created_at=now))
         # last month's spend must NOT count
         s.add(UsageLogRow(project_id=1, provider="x", status="ok", cost_usd=50.0,
