@@ -33,6 +33,13 @@ For `claude-sub`, the account is chosen once at submit: the first account listed
 poll response reports it as `account_id`. A started run never changes account; see
 [agent-runs.md](agent-runs.md#multiple-claude-subscription-accounts).
 
+Codex subscription requests are no longer serialized across the broker. They run concurrently up to
+the worker's concurrency (`AGENT_CONCURRENCY_CODEX`) and share the subscription's usage limits, so a
+`quota_exhausted` result waits on the same account rather than falling back. Because the processes
+share one `auth.json`, start-ups are briefly serialized (a short `__codex_auth__` lease) whenever the
+file's `last_refresh` is older than 4 days or unreadable, so a rotating refresh token is never
+refreshed twice at once; see `agent-runs.md`.
+
 Every catalog row now has a `job_request` field. Subscription rows report
 `max_tokens.accepted.const: 1024` and `temperature.accepted.const: 0.7`, both
 with `forwarded: false`: omit these fields, or send exactly those defaults.

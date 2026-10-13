@@ -41,7 +41,8 @@ those three fake-data checks, not proof of all reads or a real model run.
 
 ## Code fixes prepared for repeat review
 
-1. A fenced shared-home lease serializes normal Codex runs across workers. PNG
+1. Superseded 2026-10-13: the global shared-home lease was removed; normal Codex runs now
+   run in parallel, and only a resumed session is exclusive (see `agent-runs.md`). PNG
    export is restricted to the fresh thread UUID reported by this CLI process;
    resumed threads and pre-populated thread directories fail closed for PNGs.
    The [pinned 0.162.1 source](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/ext/image-generation/src/artifact.rs)

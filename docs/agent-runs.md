@@ -186,7 +186,26 @@ writes files into the workspace.
 
 - `claim_agent_runs(capability, limit)` claims `agent:*` rows of ONE capability
   (`FOR UPDATE SKIP LOCKED`); `concurrency_for` gives the slots
-  (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Slots are never shared
+  (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Compose passes
+  `AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}` to `agent-worker-codex`; the operator
+  sets `AGENT_CONCURRENCY_CODEX=3` in `.env` for the production plan. **Auth-refresh guard:**
+  concurrent Codex processes share `CODEX_HOME/auth.json`, and ChatGPT refresh tokens rotate, so two
+  simultaneous refreshes could invalidate the login. Before starting the CLI the executor reads ONLY
+  the non-secret `last_refresh` timestamp (assumed ISO-8601, possibly with nanoseconds and `Z`;
+  field name and format are UNVERIFIED here - no real file is kept in the repo - so an absent,
+  oversized (> 1 MiB), malformed or unparseable value counts as "due" and fails safe; never a
+  token). If it is missing, unreadable or older than
+  `CODEX_REFRESH_DUE_AFTER_S` (4 days; UNVERIFIED conservative value - Codex's own interval is
+  believed to be ~8 days but could not be checked offline), the run takes the short fixed lease
+  `("__codex_auth__", "refresh")` BEFORE `run.started` / `billing.attested` are written (so a
+  requeue repeats no event) and holds it until the first event proving a model call completed
+  (`message.delta`, `tool.call` or `usage`; NOT `session.assigned`, which precedes the first model
+  request - the ordering is UNVERIFIED) or `codex_auth_startup_s` (60 s), whichever comes first.
+  Other refresh-due runs retry every `codex_auth_poll_s` for up to `codex_auth_wait_s` (90 s), then
+  are requeued; after `session_busy_max` requeues the run fails with `error_class=codex_auth_busy`.
+  A fresh `last_refresh` takes no lease, so runs stay fully parallel. A 401-triggered
+  refresh cannot be predicted from the file and is not covered; a two-run live canary remains a
+  smoke test, not the safeguard. Slots are never shared
   with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
 - `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
   becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
@@ -778,8 +797,11 @@ The pinned Codex 0.162.1 image extension writes `generated_images/<thread UUID>/
 Resumed threads export no PNG because a stale CLI can still write into their shared thread directory
 after a lease takeover. An already populated directory for a claimed new thread also exports nothing.
 Accepted files: regular files only (no symlinked file, directory or source directory; depth <= 3;
-no traversal out of the directory), with a new path since this run's pre-start snapshot. A shared-home
-DB lease still serializes normal Codex runs across workers. Each image is at most
+no traversal out of the directory), with a new path since this run's pre-start snapshot.
+Codex runs execute in parallel up to `AGENT_CONCURRENCY_CODEX` per worker; only a resume of the same
+CLI session is exclusive (per-session lease on account_id + session id). Generated images stay
+isolated because export reads only the run's own thread UUID directory (`images.py`), against a
+per-thread baseline. Each image is at most
 `AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
 de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
 `width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
