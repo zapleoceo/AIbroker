@@ -102,8 +102,9 @@ def _rf(schema):
     return {"type": "json_schema", "json_schema": {"schema": schema}}
 
 
-def test_remote_ref_never_touches_network(monkeypatch):
+def test_remote_ref_never_touches_network():
     import socket
+    from unittest import mock
 
     from aibroker.agent import subscription_job as sj
     sj._checked_validator.cache_clear()
@@ -113,12 +114,13 @@ def test_remote_ref_never_touches_network(monkeypatch):
         calls.append(a)
         raise AssertionError("network touched")
 
-    monkeypatch.setattr(socket, "create_connection", boom)
-    monkeypatch.setattr(socket.socket, "connect", boom)
-    for ref in ("http://169.254.169.254/latest/meta-data/", "https://example.invalid/s.json"):
-        for schema in ({"$ref": ref}, {"type": "object", "properties": {"a": {"$ref": ref}}}):
-            assert sj.output_problem('{"a": 1}', _rf(schema)) is None  # parse-only
-            assert sj.output_problem("nope", _rf(schema)).startswith("InvalidJSON")
+    # Scoped to the validator calls only: the Postgres test fixture opens sockets at teardown.
+    with mock.patch.object(socket, "create_connection", boom), \
+            mock.patch.object(socket.socket, "connect", boom):
+        for ref in ("http://169.254.169.254/latest/meta-data/", "https://example.invalid/s.json"):
+            for schema in ({"$ref": ref}, {"type": "object", "properties": {"a": {"$ref": ref}}}):
+                assert sj.output_problem('{"a": 1}', _rf(schema)) is None  # parse-only
+                assert sj.output_problem("nope", _rf(schema)).startswith("InvalidJSON")
     assert calls == []
 
 
