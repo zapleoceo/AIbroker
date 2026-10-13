@@ -199,7 +199,9 @@ ORM selects every `deep_jobs` column on each poll and claim.
 
 Migration 020 (2026-10-13, job trace / idempotency / cancel) adds four columns to `deep_jobs` —
 `trace_id varchar(128)`, `labels jsonb`, `idempotency_key varchar(128)` (all nullable) and
-`cancel_requested boolean NOT NULL DEFAULT false` — plus two partial indexes: the UNIQUE
+`cancel_requested boolean NOT NULL DEFAULT false` (the ORM model carries the same server default, so
+`create_all` / init.sql and raw `INSERT`s that omit it agree with the migration) — plus two partial
+indexes: the UNIQUE
 `ux_deep_jobs_idempotency (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL` and
 `ix_deep_jobs_trace (project_id, trace_id) WHERE trace_id IS NOT NULL`. Purely additive; the new status
 value `cancelled` needs no DDL (`deep_jobs.status` is a plain `varchar(20)`, no CHECK or enum).
