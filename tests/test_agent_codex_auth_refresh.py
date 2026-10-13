@@ -115,6 +115,12 @@ class _Rig:
         # lease stays "held" until the test clears it after the releasing run has fully finished.
         self.keep_holder_after_release = False
         self.holder: int | None = None        # who holds the refresh lease (in memory, see below)
+        self.auth_leases: dict[int, SimpleNamespace] = {}     # each run's refresh lease (has .lost)
+        self.lose_on_acquire: set[int] = set()                # runs whose lease is lost at once
+        self.stops: list[int] = []            # the CLI was told to stop (adapter.cancel())
+        self.stop_started = asyncio.Event()
+        self.stop_gate = asyncio.Event()      # a stop waits on it; set = the stop finishes at once
+        self.stop_gate.set()
         real_lock = executor.session_lock
 
         @contextlib.asynccontextmanager
@@ -128,7 +134,10 @@ class _Rig:
                 return
             self.holder = run_id
             try:
-                yield SimpleNamespace(run_id=run_id)
+                lease = self.auth_leases[run_id] = SimpleNamespace(run_id=run_id, lost=asyncio.Event())
+                if run_id in self.lose_on_acquire:
+                    lease.lost.set()
+                yield lease
             finally:
                 self.released.append(run_id)
                 if not self.keep_holder_after_release:
@@ -153,6 +162,13 @@ class _Rig:
             yield ev.RunCompleted(final_text="ok")
 
         monkeypatch.setattr(SubprocessCLI, "start", fake_start)
+
+        async def fake_cancel(sub_self):
+            self.stops.append(self.holder if self.holder is not None else -1)
+            self.stop_started.set()
+            await self.stop_gate.wait()           # the CLI is in its TERM->KILL window
+
+        monkeypatch.setattr(SubprocessCLI, "cancel", fake_cancel)
 
     def attempts_by(self, rid):
         return self.attempts.count(rid)
@@ -405,3 +421,66 @@ async def test_a_run_cancelled_before_it_got_the_gate_never_starts_the_cli(tmp_p
     assert await execute_run(rid, _cfg(tmp_path)) == "cancelled"
     assert rig.entered == [] and rig.released == [rid]          # gate taken, then let go
     assert [e.type for e in await list_events(rid)] == ["run.cancelled"]
+
+
+async def test_the_gate_is_held_until_an_interrupted_cli_is_fully_stopped(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)
+    ids = await _runs(2, base=9490)
+    rig = _Rig(monkeypatch, ids)
+    rig.stop_gate.clear()                            # the first CLI's stop is blocked
+    cancel_first = False
+
+    async def cancelled(run_id):
+        return cancel_first and run_id == ids[0]
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancelled)
+    _register(home)
+    cfg = _cfg(tmp_path, cancel_poll_s=0.01, cancel_grace_s=30)
+    t1 = asyncio.create_task(execute_run(ids[0], cfg))
+    await _until(lambda: rig.entered == [ids[0]])
+    t2 = asyncio.create_task(execute_run(ids[1], cfg))
+    await _until(lambda: rig.attempts_by(ids[1]) >= 2)
+    cancel_first = True
+    await _until(rig.stop_started.is_set)            # run 1 is stopping its CLI
+    n = rig.attempts_by(ids[1])
+    await _until(lambda: rig.attempts_by(ids[1]) >= n + 3)    # run 2 keeps being refused meanwhile
+    assert rig.holder == ids[0] and rig.released == [] and rig.entered == [ids[0]]
+    rig.stop_gate.set()                              # the CLI is gone
+    assert await asyncio.wait_for(t1, 10) == "cancelled"
+    assert rig.released == [ids[0]]                  # released only after the stop finished
+    await _until(lambda: ids[1] in rig.entered)      # now run 2 may start
+    rig.release_all()
+    assert await asyncio.wait_for(t2, 10) == "completed"
+
+
+async def test_a_lost_startup_lease_before_the_cli_starts_fails_the_run(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)
+    (rid,) = await _runs(1, base=9500)
+    rig = _Rig(monkeypatch, [rid])
+    rig.lose_on_acquire = {rid}
+    _register(home)
+    assert await execute_run(rid, _cfg(tmp_path)) == "failed"
+    assert rig.entered == [] and rig.stops == []     # the CLI never started
+    events = await list_events(rid)
+    assert [e.type for e in events].count("run.started") == 1
+    failed = [e for e in events if e.type == "run.failed"]
+    assert len(failed) == 1 and failed[0].payload["error_class"] == "codex_auth_busy"
+    assert rig.released == [rid]
+
+
+async def test_a_lost_startup_lease_during_startup_stops_the_cli(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)
+    (rid,) = await _runs(1, base=9510)
+    rig = _Rig(monkeypatch, [rid])
+    _register(home)
+    t = asyncio.create_task(execute_run(rid, _cfg(tmp_path, cancel_poll_s=0.01)))
+    await _until(lambda: rig.entered == [rid])       # in start-up: no model event yet
+    rig.auth_leases[rid].lost.set()
+    assert await asyncio.wait_for(t, 10) == "failed"
+    assert rig.stops == [rid]                        # the CLI was stopped, and the gate still held then
+    failed = [e for e in await list_events(rid) if e.type == "run.failed"]
+    assert len(failed) == 1 and failed[0].payload["error_class"] == "codex_auth_busy"
+    assert rig.released == [rid]

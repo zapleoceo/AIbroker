@@ -169,12 +169,25 @@ async def _execute_with_session(run: AgentRunRow, job: DeepJobRow, adapter: Agen
         return await _held_drive(run, job, adapter, cfg, lease)
 
 
+_AUTH_LEASE_LOST = ev.RunFailed(error_class="codex_auth_busy",
+                                message="the Codex auth-refresh start-up lease was lost")
+
+
 class _AuthRefreshBusy(Exception):
     """The Codex auth-refresh start-up lease stayed taken; the run is requeued."""
 
 
-async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig,
-                           run_id: int) -> contextlib.AsyncExitStack | None:
+@dataclass
+class _AuthGate:
+    """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours."""
+    stack: contextlib.AsyncExitStack
+    lease: Lease
+
+    async def close(self) -> None:
+        await self.stack.aclose()
+
+
+async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig, run_id: int) -> _AuthGate | None:
     """Codex refreshes the shared CODEX_HOME/auth.json token while starting up, and refresh tokens
     rotate - two simultaneous refreshes can invalidate the login. When the file's `last_refresh`
     says one may be due (or cannot be read), hold ONE short fixed lease until the CLI's first
@@ -187,7 +200,7 @@ async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig,
         lease = await stack.enter_async_context(session_lock(
             "__codex_auth__", "refresh", run_id, ttl_s=cfg.lease_ttl_s, heartbeat_s=cfg.lease_heartbeat_s))
         if lease is not None:
-            return stack
+            return _AuthGate(stack, lease)
         await stack.aclose()
         # A cancel while waiting requeues too: the next claim ends it `cancelled` before any start.
         if time.monotonic() >= deadline or await _cancel_flag(run_id):
@@ -276,12 +289,12 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
         return await _drive_held_gate(run, job, adapter, cfg, lease, req, totals, gate)
     finally:
         if gate is not None:
-            await gate.aclose()
+            await gate.close()
 
 
 async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI, cfg: ExecConfig,
                            lease: Lease | None, req: dict[str, Any], totals: dict[str, int | None],
-                           gate: contextlib.AsyncExitStack | None) -> str:
+                           gate: _AuthGate | None) -> str:
     run_id = run.run_id
     workspace = create_workspace(cfg.workspace_root, run_id)
     try:
@@ -339,6 +352,9 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
         started_at = time.time() - 1.0
+        if gate is not None and gate.lease.lost.is_set():
+            # run.started is already written, so a requeue would repeat it: end the run instead.
+            return await _finish(run_id, _AUTH_LEASE_LOST, totals, mode, lease)
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
             float(req.get("wall_timeout_s", 1800) if spec.client_tools else
@@ -375,7 +391,7 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                   totals: dict[str, int | None], wall_s: float, idle_s: float,
                   cfg: ExecConfig, lease: Lease | None = None,
-                  gate: contextlib.AsyncExitStack | None = None) -> tuple[ev.AnyEvent, list[str]]:
+                  gate: _AuthGate | None = None) -> tuple[ev.AnyEvent, list[str]]:
     q: asyncio.Queue[ev.AnyEvent | None] = asyncio.Queue()
     changed: list[str] = []
 
@@ -393,14 +409,19 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
     t0 = last = last_poll = time.monotonic()
     terminal: ev.AnyEvent | None = None
     lease_lost = False
+    stop_cli = False
     try:
         while terminal is None:
             now = time.monotonic()
             if gate is not None and now - t0 >= cfg.codex_auth_startup_s:
-                await gate.aclose()                 # bounded: never hold it past the start-up window
+                await gate.close()                  # bounded: never hold it past the start-up window
                 gate = None
             if lease is not None and lease.lost.is_set():
                 lease_lost = True       # stop the CLI at once, like a cancel, but write nothing
+                break
+            if gate is not None and gate.lease.lost.is_set():
+                terminal = _AUTH_LEASE_LOST     # refresh must not go on unfenced: stop the CLI now
+                stop_cli = True
                 break
             if now - t0 >= wall_s:
                 terminal = ev.RunTimedOut(limit="wall")
@@ -424,7 +445,7 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             # tool call, or turn usage) - NOT on session.assigned, which precedes the first model
             # request. UNVERIFIED: that Codex refreshes its token at/before that first request.
             if gate is not None and isinstance(item, ev.MessageDelta | ev.ToolCall | ev.Usage):
-                await gate.aclose()
+                await gate.close()
                 gate = None
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):
                 terminal = item
@@ -446,13 +467,14 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                     item.total_tokens, item.cache_read_tokens, item.reasoning_tokens,
                 )
     finally:
-        if gate is not None:
-            await gate.aclose()
-        if terminal is None or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
+        if terminal is None or stop_cli or isinstance(terminal, ev.RunCancelled | ev.RunTimedOut):
             await _stop_adapter(adapter, cfg.cancel_grace_s)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+        # Released only now: a waiting run must not start while this CLI is still in its TERM->KILL window.
+        if gate is not None:
+            await gate.close()
         if lease_lost:
             # Unfenced on purpose: it only withdraws this run's own unanswered tool call, and a
             # lost lease means no terminal event will ever do it.
