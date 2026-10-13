@@ -93,12 +93,16 @@ def retry_stale_statement(
 ) -> Callable[..., Awaitable[T]]:
     """Retry ONCE when a statement hits InvalidCachedStatementError.
 
-    After DDL on a hot table (e.g. ALTER TABLE ... ADD COLUMN) a pooled server
-    backend can still hold a prepared statement whose result type changed; the
-    first execution fails, and a fresh attempt (new transaction, statement
-    re-prepared or the backend's cache invalidated by the driver) normally
-    succeeds. The wrapped coroutine MUST open its own session/transaction so the
-    retry runs in a fresh one. A second consecutive failure propagates."""
+    A safety net for DIRECT Postgres connections only: after DDL on a hot table
+    the driver invalidates its own statement cache, and the retry succeeds if it
+    lands on a fresh server connection. Behind pgbouncer (transaction pooling,
+    max_prepared_statements) it probably does NOT help: pgbouncer reuses the
+    server-side statement by query text, so the retry hits the same stale plan.
+    There the fix is explicit column lists (no star projections) plus the
+    operator step after DDL (terminate idle pgbouncer backends; see
+    docs/deploy-ops.md). The wrapped coroutine MUST open its own
+    session/transaction so the retry runs in a fresh one. A second consecutive
+    failure propagates."""
 
     @wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> T:

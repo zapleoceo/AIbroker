@@ -12,7 +12,7 @@ src/aibroker/
   db/
     engine.py          Async engine + sessionmaker + Base
     models.py          ORM models
-    resilience.py      retry_terminal_write — retry transient failures on money-already-spent writes; retry_stale_statement — retry once on InvalidCachedStatementError
+    resilience.py      retry_terminal_write — retry transient failures on money-already-spent writes; retry_stale_statement — one retry on InvalidCachedStatementError (safety net for direct connections only, not a pgbouncer fix)
   routing/
     chains.py          Capability → provider order
     selector.py        LRU + atomic pick_and_reserve
