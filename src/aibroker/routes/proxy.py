@@ -524,6 +524,22 @@ def _job_response(row: Any) -> DeepJobResponse:
     )
 
 
+def _require_agent_read_access(ctx: ProjectCtx, row: Any) -> None:
+    """Re-authorize reading an agent/subscription job. The gate runs at read time,
+    not only at submit, so revoking llm:agent or dropping the project from
+    AGENT_ALLOWED_PROJECT_IDS also closes already-created results on EVERY poll route."""
+    if not row.capability.startswith("agent:"):
+        return
+    if not ctx.has_scope(AGENT_SCOPE):
+        raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
+    if not project_allowed(ctx.project.id):
+        raise AgentProjectNotAllowed(ctx.project.id)
+    violation = policy_violation(ctx.project.id, row.request.get("model"),
+                                 row.request.get("account_id", ""), row.capability)
+    if violation:
+        raise AgentPolicyViolation(violation)
+
+
 @router.get("/deep/{job_id}", response_model=DeepJobResponse)
 async def deep_poll(
     job_id: int,
@@ -533,6 +549,7 @@ async def deep_poll(
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
+    _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return _job_response(row)  # pragma: no cover
 
@@ -570,6 +587,12 @@ async def jobs_submit(
             f"{sorted(_JOB_CAPABILITIES)}",
         )
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    # Images are gated by content, not by capability name: a chat:*/structured job
+    # carrying image_url blocks reaches a vision-capable model just the same.
+    if any(isinstance(message.content, list) and any(
+        isinstance(block, dict) and block.get("type") == "image_url"
+        for block in message.content) for message in body.messages):
+        _require_capability_scope(ctx, scope_for("vision"))
     subscription = subscription_model(body.model)
     if subscription is not None:
         _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
@@ -593,10 +616,6 @@ async def jobs_submit(
                                     or subscription_tool_model_canary(subscription.id,
                                                                       ctx.project.id))):
             raise HTTPException(503, "Codex subscription client tools are not enabled for this project and model")
-        if any(isinstance(message.content, list) and any(
-            isinstance(block, dict) and block.get("type") == "image_url"
-            for block in message.content) for message in body.messages):
-            _require_capability_scope(ctx, scope_for("vision"))
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
         try:
             messages, attachments = subscription_messages(messages)
@@ -627,7 +646,7 @@ async def jobs_submit(
         return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2)
     _validate_pin(body.model, capability)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
-    if capability == "vision" and (problem := inline_image_problem(messages)):
+    if problem := inline_image_problem(messages):
         # A file no provider can decode must fail HERE, permanently — not walk
         # the chain, retry eight times and be resubmitted by the client (see
         # services/vision_payload.py for the 8-passes-in-24h case behind this).
@@ -691,15 +710,7 @@ async def jobs_poll(
     row = await get_job(job_id, ctx.project.id)
     if row is None:
         raise HTTPException(404, "job not found")
-    if row.capability.startswith("agent:"):
-        if not ctx.has_scope(AGENT_SCOPE):
-            raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
-        if not project_allowed(ctx.project.id):
-            raise AgentProjectNotAllowed(ctx.project.id)
-        violation = policy_violation(ctx.project.id, row.request.get("model"),
-                                     row.request.get("account_id", ""), row.capability)
-        if violation:
-            raise AgentPolicyViolation(violation)
+    _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
     return _job_response(row)  # pragma: no cover
 
