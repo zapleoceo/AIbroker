@@ -1413,11 +1413,35 @@ a naive `TIMESTAMP` and asyncpg rejects offset-aware values.
 `src/aibroker/routing/cost_guard.py:reserve_cost(api_key, project, estimated_cost)`
 + `release_cost(api_key, estimated_cost)`.
 
-Three independent daily caps: per-key (atomic, see below), per-project (live
-SUM from `usage_log`), global (30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
+Three independent caps: per-key (daily and monthly, one atomic statement, see below),
+per-project (daily and monthly, live SUM from `usage_log`), global (daily only,
+30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
 Free-tier keys with `cost <= 0` skip the check entirely.
 
 **Cap 0 refuses paid keys (2026-10-13).** `daily_cost_cap_usd = 0` on the project or on a key refuses a `tier="paid"` key before any reservation unless the model is registry-known free (`pricing == "free"`, passed to `reserve_cost` as `known_free_model`). An unpriced model estimates $0 too, so before this `used + estimate > cap` admitted it and its real cost landed uncapped. Free-tier and `trial` keys behave as before (master never refused `trial` at a $0 estimate).
+
+**Monthly caps are enforced (2026-10-13).** `projects.monthly_cost_cap_usd` and
+`api_keys.monthly_cost_cap_usd` were stored but never checked; now both are. Key level:
+`monthly_cost_used_usd` is a second window beside the daily one, with the same lazy
+reset. `FRESH_MONTHLY_COST_SQL` reads the counter as 0 unless `monthly_reset_at` equals
+the first day of the current UTC month (`month_start_utc()`, bound as `:month_start`
+via `month_params()`; no DB-specific `date_trunc`). `reserve_cost` debits the daily and
+monthly windows in ONE atomic `UPDATE ... RETURNING` (both or neither); `release_cost`
+refunds exactly the windows that were reserved; `record_usage` stamps `monthly_reset_at`.
+The key pick (`pick_and_reserve`) excludes a key at its monthly cap through
+`MONTHLY_CAP_OK_SQL`, exactly like the daily cap: cap 0 on a key excludes that key
+whatever its tier. Project level: a live SUM over `usage_log` since the start of the UTC
+month (step 2b of `reserve_cost`); cap 0 = free providers only, the same rule as daily.
+There is no global monthly cap. The monitor's paid-key usability check
+(`monitor._paid_key_usable`) honours the monthly cap too. Existing `monthly_cost_used_usd`
+values were never reset, so they restart from 0 for the current month on first touch
+after deploy. Migration 019 (`api_keys.monthly_reset_at`) must be applied before deploy,
+see **Schema migrations** in [deploy-ops.md](deploy-ops.md).
+
+**Known gap: monthly blocks show the daily wording.** Any `CostGuardError` from either
+monthly window maps to `daily budget cap reached — retry after 00:00 UTC`
+(`llm_service._CAP_MESSAGE`). That retry hint is wrong for a monthly cap, whose window
+resets on the 1st of the next UTC month. Fixing the message is a separate change.
 
 **Real reservation pattern (2026-07-03).** `run_chat` estimates the
 worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —

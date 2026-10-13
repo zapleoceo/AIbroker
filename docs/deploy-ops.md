@@ -145,6 +145,19 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable, no
+backfill). **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
+references the column on every request, so code that lands first breaks key selection
+until the column exists. Operator command:
+
+```
+docker exec -i aibroker-postgres psql -U aibroker aibroker \n  < /var/www/aibroker/infra/sql/migrations/019_api_keys_monthly_reset.sql
+```
+
+Existing `monthly_cost_used_usd` values were never reset. They read as 0 for the current
+month on first touch after deploy, so no backfill is needed. `infra/sql/init.sql` already
+mirrors 019.
+
 Migration 018 (agent session leases) adds `agent_session_leases`. Apply it BEFORE deploying
 code that takes session leases (the agent worker lane); the agent worker itself connects only
 through pgbouncer, so it needs no direct Postgres access for this. The owner checklist is in
