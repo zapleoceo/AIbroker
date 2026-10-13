@@ -270,7 +270,8 @@ broker finishes its fallback chain). See `docs/api.md`.
   never stall jobs; on SQLite no listener starts and it degrades to plain
   `_POLL_INTERVAL_S` polling), it claims up to `JOB_MAX_CONCURRENCY` eligible
   `pending` rows — an atomic
-  `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING *`, so the
+  `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING <explicit
+  column list>` (`_JOB_COLUMNS`, guarded by a test against the model), so the
   workers never double-claim — flips them to `running`, and runs each through
   the SAME `run_chat` the sync path uses. On success → `done`; the client's
   next `GET /v1/jobs/{id}` poll reads the result row from Postgres (works on
@@ -292,6 +293,28 @@ broker finishes its fallback chain). See `docs/api.md`.
     InvalidJSON and nothing transient happened, `run_chat` returns
     `CONTENT_FAILED` and the job gets only `JOB_MAX_CONTENT_RETRIES` (default 1)
     retries before erroring - see docs/routing.md "Content failures".
+- **Trace, idempotency, cancel (migration 020).** `deep_jobs` carries `trace_id`,
+  `labels`, `idempotency_key` and `cancel_requested`. `submit_job_ex` stores them
+  (never in `payload_hash`), logs them in the job lines, and with an
+  `Idempotency-Key` skips the in-flight dedup: an existing job for the same
+  `(project, key)` is returned (`replayed`), a different payload raises
+  `IdempotencyConflict` (409), and a lost insert race on the partial unique index
+  returns the winner. Cancel lives in `services/job_control.py`
+  (`POST /v1/jobs/{id}/cancel`, `POST /v1/jobs/cancel`): a `pending` row becomes the new
+  terminal status `cancelled` under `SELECT … FOR UPDATE` (so it is either cancelled or
+  claimed, never both); a `running` row only gets `cancel_requested`. `run_chat` takes a
+  `should_stop` callback polled before every provider attempt (`CANCELLED` sentinel), and
+  `_execute` / `_requeue_or_fail` also honour the flag, so a flagged job ends `cancelled`
+  instead of retrying. A provider call already in flight is not interrupted and may be
+  billed. `agent:*` jobs go through `agent.runs.cancel_run`. `cancelled` is terminal like
+  `done`/`error`: never claimed, never stale-reclaimed, pruned by retention.
+  Code map: `services/job_meta.py` (`check_token`, `check_labels`, `resolve_trace_id`,
+  `log_tag` — one validator for body fields and headers); `services/deep_jobs.py`
+  (`build_request` = the hashed payload, `find_by_idempotency_key`, `replayed_job_id`,
+  `submit_job_ex` -> `SubmitOutcome`, `IdempotencyConflict`); `services/job_control.py`
+  (`cancel_job` -> `CancelResult`, `cancel_matching` -> `BulkCancel`, `cancel_flag`,
+  `AgentCancelForbidden`); `routes/jobs_control.py` (`jobs_cancel`, `jobs_cancel_bulk`,
+  request/response models `BulkCancelRequest`, `CancelResponse`, `BulkCancelResponse`).
 - `drain_once()` is one deterministic pass (claim + run to completion) — what
   the loop repeats, and what tests drive directly.
 - Queue state lives on `deep_jobs` (migrations 008 `capability`, 009

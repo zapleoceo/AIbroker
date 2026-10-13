@@ -101,6 +101,20 @@ def test_a_job_with_attempts_is_one_row_and_a_job_without_any_still_appears():
     assert sum(1 for r in _rows() if r["request_id"].startswith("job-")) == 4   # no duplicates
 
 
+def test_a_cancelled_job_is_its_own_state_even_when_an_attempt_succeeded():
+    _seed_mixed()
+    now = ds.now()
+    ds.seed(ds.job(14, "cancelled", minutes_ago=3, completed_at=now - timedelta(minutes=2)),
+            ds.job(15, "cancelled", minutes_ago=3, completed_at=now - timedelta(minutes=2)),
+            ds.usage(20, minutes_ago=2, status="ok", provider="groq", api_key_id=2,
+                     request_id="job-15", capability="chat:fast"))
+    assert {r["request_id"]: r["state"] for r in _rows(status="cancelled")} == {
+        "job-14": "cancelled", "job-15": "cancelled"}
+    assert "job-15" not in {r["request_id"] for r in _rows(status="ok")}
+    html = _get("/dashboard/requests?status=cancelled").text
+    assert "job-14" in html and "cancelled" in html
+
+
 def test_result_is_newest_first_and_counts_requests_not_attempts():
     _seed_mixed()
     rows = _rows()

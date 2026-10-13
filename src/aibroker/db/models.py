@@ -12,11 +12,13 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.sql import expression as sa_expr
@@ -231,7 +233,7 @@ class DeepJobRow(Base):
     # Which capability this async job runs. Built for chat:deep; now generic
     # (POST /v1/jobs?capability=X) — the table/model name stays for continuity.
     capability: Mapped[str] = mapped_column(String(30), default="chat:deep", nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending|running|done|error
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending|running|done|error|cancelled
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     # md5 of project+capability+canonical request (migration 010): lets submit
     # return an EXISTING in-flight job for an identical resubmit instead of
@@ -246,6 +248,21 @@ class DeepJobRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime)  # claimed → running
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Client correlation + idempotency + cancel (migration 020). NOT part of payload_hash.
+    trace_id: Mapped[str | None] = mapped_column(String(128))
+    labels: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_expr.false(),
+                                                   nullable=False)
+
+    __table_args__ = (
+        Index("ux_deep_jobs_idempotency", "project_id", "idempotency_key", unique=True,
+              postgresql_where=text("idempotency_key IS NOT NULL"),
+              sqlite_where=text("idempotency_key IS NOT NULL")),
+        Index("ix_deep_jobs_trace", "project_id", "trace_id",
+              postgresql_where=text("trace_id IS NOT NULL"),
+              sqlite_where=text("trace_id IS NOT NULL")),
+    )
 
 
 class AgentRunRow(Base):

@@ -106,7 +106,9 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 |---|---|---|---|
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
-| `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
+| `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`\|`cancelled`; also `trace_id`, `labels`) |
+| `POST` | `/v1/jobs/{job_id}/cancel` | — | `{job_id, state, status}` — `state` is `cancelled`, `cancel_requested` or `already_terminal`; `404` for another project's job. See "Cancel" below |
+| `POST` | `/v1/jobs/cancel` | `{"trace_id": …}` **or** `{"labels": {…}}` | `{cancelled: [ids], cancel_requested: [ids], already_terminal: n}` — bulk cancel of this project's in-flight jobs |
 | `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its 300 s deadline without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
@@ -270,7 +272,7 @@ broker's).
 Same request body as `/v1/chat` (incl. `response_format`), but the broker
 **never holds the connection**: it returns `202` with a `job_id` immediately,
 runs the call in the background, and you **poll** `GET /v1/jobs/{job_id}` until
-`status` is `done` or `error`. Available for every chat capability
+`status` is `done`, `error` or `cancelled`. Available for every chat capability
 (`chat:fast`/`smart`/`sales`/`code`/`edit`/`deep`, `structured`, `prefilter`,
 `translate`, `vision`) — `embedding` stays sync-only (fast, no held-connection
 problem to solve); transcription has its own `POST /v1/transcribe/jobs`.
@@ -294,7 +296,11 @@ GET /v1/jobs/123
          "tokens_in":…,"tokens_out":…,"cache_read_tokens":…,"cache_write_tokens":…,
          "cost_usd":…,"request_id":…}
   → 200 {"job_id":123,"status":"error","error":"…"}             # failed
+  → 200 {"job_id":123,"status":"cancelled"}                     # cancelled by the client
 ```
+
+Every poll body also carries `trace_id` and `labels` (see below), and `cancel_requested: true` while a
+cancel is pending on a running job.
 
 **Caps apply to `/v1/embed`, `/v1/transcribe` and `/v1/decisions` too (2026-09-07).** Until
 then the cost guard had exactly one caller — the chat path — so a project could
@@ -324,11 +330,85 @@ a silently-capped project is visible rather than invisibly stalled.
 `POST /v1/jobs` payload (same project, capability, and canonical request
 body) submitted within **30 minutes** while the prior job is still
 `pending` or `running` returns the SAME `job_id` — the client's resubmit
-storm collapses onto one job it just keeps polling. A `done`/`error` job
+storm collapses onto one job it just keeps polling. A `done`/`error`/`cancelled` job
 never dedups: after a failure a resubmit legitimately means "retry".
 Best-effort, not a uniqueness constraint (two truly simultaneous identical
 submits can still both insert). Client contract: resubmitting is harmless —
-you'll get back the in-flight `job_id`; just poll it.
+you'll get back the in-flight `job_id`; just poll it. A request that carries an
+`Idempotency-Key` (below) opts OUT of this dedup.
+
+#### Trace id and labels (migration 020)
+
+`POST /v1/jobs` accepts two optional correlation fields; both are stored on the job, written to the
+broker's job log lines (`job N enqueued/running`, `agent run N starting`, job errors), returned in the
+submit response and in **every** poll (`GET /v1/jobs/{id}` and `GET /v1/deep/{id}`) as `trace_id` and
+`labels` (`null` when absent), and are **never part of the payload hash**.
+
+| Field | Where | Rule |
+|---|---|---|
+| `trace_id` | body, or header `X-Trace-Id` (the body wins when both are sent) | string, 1-128 chars of `[A-Za-z0-9._:-]` |
+| `labels` | body | object, at most 8 keys; every key and value a string of 1-128 chars of `[A-Za-z0-9._:-]` (e.g. `{"exam_run_id": "r-7", "case_id": "c1", "sample": "2", "attempt": "1"}`) |
+
+A value outside these rules is `422` and nothing is queued. They are what `POST /v1/jobs/cancel`
+selects on.
+
+#### Idempotency-Key (migration 020)
+
+Send header `Idempotency-Key: <1-128 chars of [A-Za-z0-9._:-]>` on `POST /v1/jobs` to make a submit
+safe to retry. The key is unique **per project** (a partial unique index on
+`deep_jobs(project_id, idempotency_key)`).
+
+| Situation | Result |
+|---|---|
+| New key | normal submit, `202` |
+| Same key + same canonical payload | **`200`** with header `Idempotent-Replay: true` and the **same** job's current poll body (status, and the result once done) plus `poll_url`; no new job, no request-cap unit spent |
+| Same key + a different payload | **`409`** `{"detail": {"error": "idempotency_key_conflict", "existing_job_id": N, …}}` |
+| Different keys, identical payload | two independent jobs |
+| No key | the in-flight dedup above, unchanged |
+
+The canonical payload is the stored request: `model`, capability, `messages`, `max_tokens`, `temperature`,
+`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`,
+headers and timestamps are excluded, so re-sending with another trace id is still a replay (the stored job
+keeps its original trace). Two simultaneous submits with one key race on the unique index; the loser gets
+the winner's job (`200` replay) or the `409`. For subscription pins (`claude-sub/…`, `codex-sub/…`) the
+payload compared is the client's request, so the account the broker picks never causes a `409`.
+Equivalent requests hash equally: omitted fields and their explicit defaults (`max_tokens`, `temperature`, `model: null`)
+and `null`-valued message keys (`tool_calls: null`) are the same payload. A known key is answered right after the
+scope and project checks, **before** pin validation and the subscription availability/verification checks, so a
+config change since the first submit cannot turn a retry into a `503`/`4xx`.
+
+**Retention and key stability.** The key lives exactly as long as the job row: `done`/`error`/`cancelled`
+rows are deleted after `JOB_RETENTION_DAYS` (default 7), after which the same key starts a fresh job. The
+client must send a **stable key across retries of the same logical call** (derive it from your run/case/
+attempt, e.g. `run-7:case-3:attempt-1`) and a **new key for a deliberate re-run** — the broker never
+invents keys, so a per-attempt counter is the client's concern.
+
+#### Cancel (migration 020)
+
+`POST /v1/jobs/{job_id}/cancel` — your own project's jobs only (`404` otherwise), idempotent. The `state`
+field tells what actually happened:
+
+| `state` | Meaning |
+|---|---|
+| `cancelled` | the job is terminal **now**: a `pending` job (never started, or waiting out a retry backoff) became `cancelled` immediately; an `agent:*` run that had not started ended `run.cancelled` |
+| `cancel_requested` | the job is `running`: a flag is set and the job ends `cancelled` at the next attempt boundary (plain LLM jobs) or when the agent worker stops the CLI; poll for the terminal outcome. The poll shows `cancel_requested: true` meanwhile. A job may still finish `done` if it completes first |
+| `already_terminal` | nothing to cancel; `status` says how it ended (`done`/`error`/`cancelled`) |
+
+`status` in the response is the job's status right now, exactly as a poll reports it.
+
+**Billing caveat.** Plain LLM jobs are cancelled cooperatively: the flag is checked before every provider
+attempt (and before a requeued job runs), never in the middle of a provider call. A call already sent to a
+provider keeps running and **may still be billed**; cancel only prevents the next attempts. `agent:*` and
+subscription jobs reuse the agent run's own cancel (`POST /v1/agent/runs/{id}/cancel` semantics) and need the
+`llm:agent` scope (`403` otherwise); a cancelled agent run polls as `status: "cancelled"` like any other job
+(it used to report `error: "run.cancelled"`; the run's own `GET /v1/agent/runs/{id}` status was already `cancelled`).
+
+`POST /v1/jobs/cancel` cancels **all non-terminal jobs of your project** matching exactly one selector —
+`{"trace_id": "X"}` or `{"labels": {"exam_run_id": "X"}}` (a labels selector matches jobs whose labels contain
+all the given pairs); anything else is `422`. Response: `{"cancelled": [ids], "cancel_requested": [ids],
+"already_terminal": n}`, where `already_terminal` counts matched jobs that finished before their cancel landed.
+Other projects' jobs are never touched, whatever their trace or labels. Agent jobs are skipped when the key
+lacks `llm:agent`. No new scope or key is needed — the ordinary `X-Project-Key`.
 
 `poll_after_s` is the broker's suggested wait before the next poll: 2 only in
 the submit response, then 5 s for a job under 30 s old, 10 s under 2 min, 20 s

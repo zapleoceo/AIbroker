@@ -24,7 +24,9 @@ src/aibroker/
     llm_service.py     run_chat/run_embed/run_decision/run_transcribe — the WALKS
     attempt.py         the ONE key-attempt template (reserve→call→release→gate→record→affinity)
     job_queue.py       dispatcher_loop — claims + drains pending jobs
-    deep_jobs.py       submit/poll + payload-hash dedup
+    deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
+    job_control.py     cancel one job / bulk cancel by trace_id or labels
+    job_meta.py        trace_id / labels / Idempotency-Key validation
     response_cache.py  exact-match LRU+TTL for translate/prefilter
   providers/
     registry.py        ProviderSpec/ModelSpec + views (leaf)
@@ -41,6 +43,7 @@ src/aibroker/
   routes/
     health.py          / + /healthz + /v1/health
     proxy.py           /v1/jobs + /v1/embed
+    jobs_control.py    /v1/jobs/{id}/cancel + /v1/jobs/cancel
     admin.py           /admin/* (X-Admin-Key)
     dashboard*.py      /login + /dashboard + /dashboard/* (split: dashboard.py + dashboard_assets/data/render/scopes.py)
   telemetry/

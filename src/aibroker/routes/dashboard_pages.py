@@ -230,7 +230,8 @@ async def requests_csv(request: Request) -> Response:
 # (en, ru) vocabulary shared by the filter selects and the active-filter chips.
 _KIND_LABELS = {"job": ("Queue", "Очередь"), "direct": ("Direct", "Прямой")}
 _STATUS_LABELS = {"ok": ("ok", "ок"), "failed": ("failed", "ошибка"),
-                  "pending": ("pending", "ожидает"), "running": ("running", "в работе")}
+                  "pending": ("pending", "ожидает"), "running": ("running", "в работе"),
+                  "cancelled": ("cancelled", "отменён")}
 _FILTER_NAMES = {"q": ("ID", "ID"), "type": ("Type", "Тип"), "status": ("Status", "Статус"),
                  "project": ("Project", "Проект"), "workflow": ("Workflow", "Сценарий"),
                  "capability": ("Capability", "Способность"), "model": ("Model", "Модель"), "provider": ("Provider", "Провайдер")}

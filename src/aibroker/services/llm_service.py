@@ -12,6 +12,7 @@ import asyncio  # noqa: F401 — kept for callers patching svc.asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -227,6 +228,15 @@ class _ContentFailed:
 CONTENT_FAILED = _ContentFailed()
 
 
+class _Cancelled:
+    """Sentinel run_chat returns when `should_stop` said the client cancelled the job between
+    attempts. Nothing is in flight at that point; a call already sent earlier may still be billed."""
+    __slots__ = ()
+
+
+CANCELLED = _Cancelled()
+
+
 # ─── Chat ───────────────────────────────────────────────────────────────────
 
 
@@ -380,7 +390,8 @@ async def run_chat(
     at: datetime | None = None,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
-) -> ChatOutcome | _BudgetExhausted | _ContentFailed | None:
+    should_stop: Callable[[], Awaitable[bool]] | None = None,
+) -> ChatOutcome | _BudgetExhausted | _ContentFailed | _Cancelled | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
     `model` pins EXACTLY that model (a routing id or a bare canonical name — see
@@ -394,6 +405,7 @@ async def run_chat(
     project/global daily cap is spent, so the job fails honestly instead of
     burning retries that cannot create budget. Returns `CONTENT_FAILED` when every
     attempt was an EmptyBody / InvalidJSON and nothing transient happened.
+    `should_stop` is polled before every attempt (the job queue's cancel flag); True -> `CANCELLED`.
     """
     pinned_tool_provider = tool_model_provider(model) if tools else None
     scope = scope_for(capability)
@@ -455,6 +467,9 @@ async def run_chat(
         # attempts hit DIFFERENT models.
         rotation_base: int | None = None
         for attempt_in_provider in range(1 if step.key_id else _max_keys(provider)):
+            if should_stop is not None and await should_stop():
+                log.info("chat:%s cancelled by the client before attempt %d", capability, attempts + 1)
+                return CANCELLED
             if attempts >= attempt_cap:
                 log.warning("chat:%s hit per-request attempt cap (%d) — 503",
                             capability, attempt_cap)

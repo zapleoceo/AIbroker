@@ -47,7 +47,7 @@ CSV_EXPORT_LIMIT = 20_000
 _SLICES = (timedelta(days=1), timedelta(days=7), timedelta(days=30))
 _MARGIN = timedelta(days=1)
 
-STATUSES = ("ok", "failed", "pending", "running")
+STATUSES = ("ok", "failed", "pending", "running", "cancelled")
 KINDS = ("job", "direct")
 
 _GK = "COALESCE(u.request_id, 'u-' || CAST(u.id AS VARCHAR(20)))"
@@ -71,6 +71,7 @@ _ASC = {"time": "{a}sort_time ASC, {a}gk ASC", "cost": "{a}cost_usd ASC, {a}sort
 _STATE_SQL = (
     "CASE WHEN r.job_status IN ('pending', 'running') THEN r.job_status "
     "WHEN r.job_status = 'done' THEN 'ok' WHEN r.job_status = 'error' THEN 'failed' "
+    "WHEN r.job_status = 'cancelled' THEN 'cancelled' "
     "WHEN r.ok_id IS NOT NULL THEN 'ok' ELSE 'failed' END"
 )
 
@@ -111,7 +112,7 @@ class RequestFilter:
     capability: str | None = None
     provider: str | None = None        # any attempt went to this provider
     model: str | None = None           # any attempt was routed to this model
-    status: str | None = None          # ok | failed | pending | running
+    status: str | None = None          # ok | failed | pending | running | cancelled
     kind: str | None = None            # job | direct
     search: str | None = None          # request id (exact)
     sort: str = "time"

@@ -179,7 +179,7 @@ async def test_cancel_flag_stops_a_running_run(cfg):
     assert res[0].cancel_requested is True
     assert await asyncio.wait_for(task, 5) == "cancelled"
     assert fake.cancel_calls == 1 and (await _types(rid))[-1] == "run.cancelled"
-    assert (await _row(rid))[1].status == "error"
+    assert (await _row(rid))[1].status == "cancelled"
 
 
 async def test_cancel_before_start_never_starts_the_adapter(cfg):

@@ -10,10 +10,22 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from pydantic import BaseModel, Field, model_validator
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aibroker.agent.accounts import pick_account
 from aibroker.agent.client_tools import (
@@ -50,6 +62,7 @@ from aibroker.providers.subscriptions import (
     subscription_model_verified,
     subscription_tool_model_canary,
 )
+from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
     DecisionFailed,
@@ -64,7 +77,14 @@ from aibroker.services import (
     submit_deep_job,
     submit_job,
 )
-from aibroker.services.deep_jobs import AUDIO_FIELD
+from aibroker.services.deep_jobs import (
+    AUDIO_FIELD,
+    IdempotencyConflict,
+    build_request,
+    payload_hash,
+    submit_job_ex,
+)
+from aibroker.services.job_meta import check_labels, check_token, resolve_trace_id
 from aibroker.services.request_cap import admit_request
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.vision_payload import inline_image_problem
@@ -124,6 +144,20 @@ class ChatRequest(BaseModel):
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
     tool_choice: str | dict[str, Any] | None = None
     stream: bool | None = None
+    # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
+    # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
+    trace_id: str | None = None
+    labels: dict[str, str] | None = None
+
+    @field_validator("trace_id")
+    @classmethod
+    def valid_trace_id(_cls, value: str | None) -> str | None:
+        return None if value is None else check_token(value, "trace_id")
+
+    @field_validator("labels")
+    @classmethod
+    def valid_labels(_cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return check_labels(value)
 
     @model_validator(mode="after")
     def valid_tools(self) -> ChatRequest:
@@ -414,7 +448,11 @@ class DeepSubmitResponse(BaseModel):
 
 class DeepJobResponse(BaseModel):
     job_id: int
-    status: str = Field(description="pending|done|error")
+    status: str = Field(description="pending|done|error|cancelled")
+    trace_id: str | None = Field(None, description="client trace id given at submit, if any")
+    labels: dict[str, str] | None = Field(None, description="client labels given at submit, if any")
+    cancel_requested: bool | None = Field(
+        None, description="true while a cancel was requested but the job is not terminal yet")
     text: str | None = None
     provider: str | None = None
     model: str | None = None
@@ -516,9 +554,14 @@ def _job_response(row: Any) -> DeepJobResponse:
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     # Subscription runs only: the account is chosen at creation and never changes.
     account_id = request.get("account_id") if request.get("client_job") else None
+    tags: dict[str, Any] = {"trace_id": getattr(row, "trace_id", None),
+                            "labels": getattr(row, "labels", None)}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
-                               requested_model=requested_model, account_id=account_id)
+                               requested_model=requested_model, account_id=account_id, **tags)
+    if row.status == "cancelled":
+        return DeepJobResponse(job_id=row.id, status="cancelled",
+                               requested_model=requested_model, account_id=account_id, **tags)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -529,6 +572,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         return DeepJobResponse(
             job_id=row.id, status="pending",
             requested_model=requested_model, account_id=account_id,
+            cancel_requested=True if getattr(row, "cancel_requested", False) else None, **tags,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
@@ -553,6 +597,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
         refusal=meta.get("refusal"),
         files=live_files(meta.get("files")),
+        **tags,
     )
 
 
@@ -599,15 +644,45 @@ class JobSubmitResponse(BaseModel):
     status: str = "pending"
     poll_url: str
     poll_after_s: int = Field(description="suggested wait before the first poll")
+    trace_id: str | None = None
+    labels: dict[str, str] | None = None
 
 
-@router.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
+def _client_request(body: ChatRequest) -> dict[str, Any]:
+    """The client payload as the plain path stores it (== the plain payload_hash input). Subscription
+    jobs hash THIS too for an Idempotency-Key, so the broker-picked account never causes a 409."""
+    return build_request(
+        messages=[m.model_dump(exclude_unset=True) for m in body.messages], model=body.model,
+        max_tokens=body.max_tokens, temperature=body.temperature,
+        response_format=body.response_format, workflow=body.workflow,
+        extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
+                "tool_choice": body.tool_choice} if body.tools else None))
+
+
+async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
+    """200 + the job's CURRENT poll body for an Idempotency-Key replay (never a new job)."""
+    row = await get_job(job_id, ctx.project.id)
+    if row is None:  # pragma: no cover — pruned between the key lookup and this read
+        raise HTTPException(404, "job not found")
+    _require_agent_read_access(ctx, row)
+    content = {**jsonable_encoder(_job_response(row)), "poll_url": f"/v1/jobs/{job_id}"}
+    return JSONResponse(content, headers={
+        "Idempotent-Replay": "true", REQUEST_ID_HEADER: job_request_id(job_id)})
+
+
+@router.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED,
+             responses={200: {"model": DeepJobResponse,
+                              "description": "Idempotent-Replay: same Idempotency-Key + payload"},
+                        409: {"description": "idempotency_key_conflict: key used with another payload"}})
 async def jobs_submit(
     body: ChatRequest,
     response: Response,
     capability: str = Query("chat:fast"),
+    idempotency_key: Annotated[str | None, Header(
+        description="<=128 chars [A-Za-z0-9._:-]; same key + payload returns the same job")] = None,
+    x_trace_id: Annotated[str | None, Header(description="alternative to body `trace_id`")] = None,
     ctx: ProjectCtx = Depends(require_project),
-) -> JobSubmitResponse:
+) -> JobSubmitResponse | JSONResponse:
     """Submit any chat `capability` as an async job. Returns a job_id
     immediately — poll GET /v1/jobs/{job_id}. Takes the same body shape as the
     removed sync chat (incl. response_format), but never holds the connection."""
@@ -619,16 +694,27 @@ async def jobs_submit(
             f"{sorted(_JOB_CAPABILITIES)}",
         )
     _require_capability_scope(ctx, scope_for(capability))  # type: ignore[arg-type]
+    try:
+        trace_id = resolve_trace_id(body.trace_id, x_trace_id)
+        if idempotency_key is not None:
+            check_token(idempotency_key, "Idempotency-Key")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    client_hash = (payload_hash(ctx.project.id, capability, _client_request(body))
+                   if idempotency_key else None)
     subscription = subscription_model(body.model)
     # Subscription jobs validate their own attachments in subscription_messages.
     _require_image_access(ctx, [m.model_dump(exclude_unset=True) for m in body.messages],
                           check_decode=subscription is None)
     if subscription is not None:
-        _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
         if not ctx.has_scope(AGENT_SCOPE):
             raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
         if not project_allowed(ctx.project.id):
             raise AgentProjectNotAllowed(ctx.project.id)
+        # A retry of a known key must not meet config checks that changed since the first submit.
+        if (known := await known_job_id(ctx.project.id, idempotency_key, client_hash)) is not None:
+            return await _replay(ctx, known)
+        _validate_pin(body.model, capability, [*chain_for(capability), subscription.provider])
         if subscription.provider == "codex-sub" and not get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED:
             raise HTTPException(503, "codex subscription route is not enabled")
         if not subscription_model_verified(subscription.id):
@@ -662,7 +748,7 @@ async def jobs_submit(
             raise HTTPException(400, problem)
         await admit_request(ctx.project)
         try:
-            job_id, _ = await create_run(
+            job_id, created = await create_run(
                 project=ctx.project, capability=PROVIDERS[subscription.provider], prompt=prompt,
                 task_id="jobs", account_id=account_id, session_id=None, idempotency_key=None,
                 wall_timeout_s=1800, idle_timeout_s=300, allowed_tools=[], model=cli_model,
@@ -672,26 +758,43 @@ async def jobs_submit(
                             "workflow": body.workflow,
                             "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
                             "tool_choice": body.tool_choice},
+                job_idempotency_key=idempotency_key, job_payload_hash=client_hash,
+                trace_id=trace_id, labels=body.labels,
             )
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
+        except IdempotencyConflict as exc:   # lost the key race to a different payload
+            raise idempotency_conflict(exc) from exc
+        if idempotency_key and not created:
+            return await _replay(ctx, job_id)
         response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
         await wake_worker(PROVIDERS[subscription.provider], job_id)
-        return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2)
+        return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
+                                 trace_id=trace_id, labels=body.labels)
+    if (known := await known_job_id(ctx.project.id, idempotency_key, client_hash)) is not None:
+        return await _replay(ctx, known)
     _validate_pin(body.model, capability)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
     await admit_request(ctx.project)
-    job_id = await submit_job(  # pragma: no cover
-        project=ctx.project, capability=capability,
-        messages=messages,
-        model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
-        response_format=body.response_format, workflow=body.workflow,
-        extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
-                "tool_choice": body.tool_choice} if body.tools else None),
-    )
-    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return JobSubmitResponse(  # pragma: no cover
+    try:
+        outcome = await submit_job_ex(
+            project=ctx.project, capability=capability,
+            messages=messages,
+            model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
+            response_format=body.response_format, workflow=body.workflow,
+            extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
+                    "tool_choice": body.tool_choice} if body.tools else None),
+            trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
+        )
+    except IdempotencyConflict as exc:   # lost the key race to a different payload
+        raise idempotency_conflict(exc) from exc
+    if outcome.replayed:
+        return await _replay(ctx, outcome.job_id)
+    job_id = outcome.job_id
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return JobSubmitResponse(
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
+        trace_id=trace_id, labels=body.labels,
     )
 
 
