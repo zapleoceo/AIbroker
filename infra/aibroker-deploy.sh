@@ -22,7 +22,9 @@ set -euo pipefail
 # have `profiles:` (tests/test_deploy_script_profiles.py enforces it).
 AGENT_SERVICES="agent-worker agent-worker-codex"
 
-REMOTE_DIR=/var/www/aibroker
+# AIBROKER_DEPLOY_DIR exists only so tests can run this script; the forced-command
+# ssh cannot pass env, so prod always uses the default.
+REMOTE_DIR="${AIBROKER_DEPLOY_DIR:-/var/www/aibroker}"
 cd "$REMOTE_DIR"
 
 echo "--- git fetch ---"
@@ -39,8 +41,11 @@ docker compose --profile agent build --quiet $AGENT_SERVICES
 
 # Stopping a worker is the documented rollback (docs/agent-runs.md): deploy must
 # not start a worker the owner stopped, only refresh the ones that are running.
+# Capture first: a failing `ps` inside `for ... in $(...)` would not trip `set -e`,
+# the script would see "no active workers" and go green (the 2026-10-13 incident again).
+RUNNING="$(docker compose --profile agent ps --status running --services)"
 ACTIVE_AGENT=""
-for svc in $(docker compose --profile agent ps --status running --services); do
+for svc in $RUNNING; do
     case " $AGENT_SERVICES " in *" $svc "*) ACTIVE_AGENT="$ACTIVE_AGENT $svc" ;; esac
 done
 ACTIVE_AGENT="${ACTIVE_AGENT# }"
@@ -73,7 +78,10 @@ if [ -n "$DRIFT" ]; then
     exit 12
 fi
 if [ -n "$ACTIVE_AGENT" ]; then
-    DRIFT="$(docker compose --profile agent up -d --dry-run --no-deps $ACTIVE_AGENT 2>&1         | sed 's/^ *DRY-RUN MODE - *//'         | grep -vE '(Running|Healthy|Waiting)$'         | grep -E '^ *Container ' || true)"
+    DRIFT="$(docker compose --profile agent up -d --dry-run --no-deps $ACTIVE_AGENT 2>&1 \
+        | sed 's/^ *DRY-RUN MODE - *//' \
+        | grep -vE '(Running|Healthy|Waiting)$' \
+        | grep -E '^ *Container ' || true)"
     if [ -n "$DRIFT" ]; then
         echo "::error:: agent workers are NOT running the deployed config:"
         echo "$DRIFT"
@@ -85,13 +93,17 @@ echo "all services match the compose file"
 # ── Health gate, every service (not just api) ───────────────────────────────
 # Services without a healthcheck (both agent workers) report an empty Health; for
 # those "running" is all we can assert. `ps -a` so an exited container shows up
-# instead of vanishing from the list. Anything still "starting" keeps us waiting; "unhealthy" or
-# a non-running state fails the deploy.
+# instead of vanishing from the list. Anything still "starting" keeps us waiting;
+# "unhealthy" or a non-running state fails the deploy. `ps -a` also lists leftover
+# `docker compose run` one-offs (e.g. an exited aibroker-api-run-<hash>); those are
+# skipped by name. PS is captured first so a failing `ps` aborts instead of looking empty.
 echo "--- waiting for services (up to 180s) ---"
 for i in $(seq 1 60); do
     BAD=""
-    while IFS='|' read -r svc health state; do
+    PS="$(docker compose --profile agent ps -a --format '{{.Service}}|{{.Health}}|{{.State}}|{{.Name}}')"
+    while IFS='|' read -r svc health state name; do
         [ -z "$svc" ] && continue
+        case "$name" in *-run-*) continue ;; esac
         # A stopped, owner-parked worker is not part of this deploy.
         case " $AGENT_SERVICES " in
             *" $svc "*) case " $ACTIVE_AGENT " in *" $svc "*) ;; *) continue ;; esac ;;
@@ -101,7 +113,7 @@ for i in $(seq 1 60); do
             starting)   BAD="$BAD $svc(starting)" ;;
             *)          BAD="$BAD $svc(health=$health)" ;;
         esac
-    done < <(docker compose --profile agent ps -a --format '{{.Service}}|{{.Health}}|{{.State}}')
+    done <<< "$PS"
 
     if [ -z "$BAD" ]; then
         echo "all services healthy after $((i * 3))s"
