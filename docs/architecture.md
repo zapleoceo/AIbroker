@@ -116,6 +116,16 @@ against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
 quietly break cooldown/failover; upgrades must re-run the integration suite
 deliberately.
 
+## Stale prepared statements (2026-10-13)
+
+Raw-SQL statements on application tables use explicit column lists, not star projections:
+`selector._KEY_COLS` (key pick) and `job_queue._JOB_COLS_SQL` (job claim), built from the ORM
+`__table__.columns`. Behind pgbouncer, a `RETURNING *` changes result type after `ADD COLUMN`
+and fails with `InvalidCachedStatementError`. `db/resilience.retry_stale_statement` wraps the
+key pick, job claim and job finish (`deep_jobs._finish`) and retries once in a fresh
+transaction; `is_stale_statement_error` is the matcher. See
+[deploy-ops.md](deploy-ops.md#migrations-vs-pgbouncer-prepared-statements-2026-10-13).
+
 ## Module map (core refactor 2026-10-03)
 
 One provider = one registry entry; one attempt = one template. Design note:

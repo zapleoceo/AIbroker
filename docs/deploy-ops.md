@@ -175,6 +175,37 @@ recorded from the first request. The index line should be run separately with
 `CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
 `AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
 
+### Migrations vs pgbouncer prepared statements (2026-10-13)
+
+Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)
+made the API fail repeatedly with `InvalidCachedStatementError`. Jobs were requeued (none
+lost) until the idle pgbouncer server backends were terminated.
+
+- **Why.** pgbouncer runs in transaction pooling mode (`max_prepared_statements=500`) and keeps
+  server-side prepared statements keyed by query text. After `ADD COLUMN`, a `RETURNING *` or
+  `SELECT *` statement changes its result type; Postgres cannot re-plan it, and re-preparing
+  from the client reaches the same stale server statement.
+- **Rule.** No star projections (`RETURNING *`, `SELECT *`) in raw SQL on application tables.
+  Column lists are built from the ORM model (`Model.__table__.columns`); see
+  [conventions.md](conventions.md#sqlalchemy). Guarded by `tests/test_stale_statement.py`
+  (allowlist: CTE reads in `routes/dashboard_requests.py`).
+- **Consequence.** A column present in the model but not yet migrated makes those queries
+  fail, so migrations ALWAYS run before the code deploy.
+- **Safety net.** `retry_stale_statement` (`db/resilience.py`, matcher `is_stale_statement_error`)
+  retries once in a fresh transaction on `InvalidCachedStatementError` (key pick, job claim,
+  job finish) and logs one WARNING. It does not replace the migration order.
+- **Operator step after DDL on a hot table.** From the postgres container, terminate only idle
+  pgbouncer server backends:
+
+  ```sql
+  SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+  WHERE datname='aibroker' AND usename='aibroker'
+    AND client_addr='<pgbouncer container IP>' AND state='idle';
+  ```
+
+  No API restart is needed; a restart does not help, because the stale statements live in
+  pgbouncer's server connections. Do not read the postgres admin password for pgbouncer's console.
+
 ## Agent runs: operator step before deploying the allowlist
 
 Agent runs are fail-closed behind `AGENT_ALLOWED_PROJECT_IDS` (comma-separated project ids,

@@ -12,7 +12,7 @@ src/aibroker/
   db/
     engine.py          Async engine + sessionmaker + Base
     models.py          ORM models
-    resilience.py      retry_terminal_write — retry transient failures on money-already-spent writes
+    resilience.py      retry_terminal_write — retry transient failures on money-already-spent writes; retry_stale_statement — retry once on InvalidCachedStatementError
   routing/
     chains.py          Capability → provider order
     selector.py        LRU + atomic pick_and_reserve
@@ -84,6 +84,9 @@ split.
 - `async with get_session() as s` — never reuse sessions.
 - `session.execute(select(...))` not legacy `session.query(...)`.
 - Commit explicitly (or rely on `get_session()`'s context manager).
+- No star projections (`RETURNING *`, `SELECT *`) in raw SQL on application tables: build
+  column lists from `Model.__table__.columns`. Guarded by `tests/test_stale_statement.py`;
+  why: [deploy-ops.md](deploy-ops.md#migrations-vs-pgbouncer-prepared-statements-2026-10-13).
 
 ## FastAPI routes
 
