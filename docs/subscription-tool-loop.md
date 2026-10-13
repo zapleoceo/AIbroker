@@ -51,10 +51,11 @@ The pinned schema proves protocol availability, not live model conformance.
 The pending call and result use `deep_jobs.result_meta` under row locks. The
 worker checks its lease fence before publishing or consuming a callback and
 never replays a possibly executed client operation after lease loss. On lease
-loss or a crash inside the executor stream, `clear_pending_call` withdraws the
-unanswered call: poll stops advertising it and later result submits get 409. A
-hard worker death is bounded by the 300-second deadline; the reaper then marks
-the run `worker_lost`.
+loss, `clear_pending_call` withdraws the call only while it is still waiting:
+poll stops advertising it and later result submits get 409. A result already
+accepted with 202 is kept. On a crash, the run's terminal write replaces
+`result_meta`, which withdraws the call. A hard worker death is bounded by the
+300-second deadline; the reaper then marks the run `worker_lost`.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
 invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a

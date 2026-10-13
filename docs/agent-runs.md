@@ -209,8 +209,9 @@ writes files into the workspace.
    renewal request, so it is never later than the DB's `lease_until`; DB errors and hangs are both
    covered). The stream loop then stops the CLI at once (cancel, like a timeout) and the run
    ends with **no terminal write**; the stale-run sweep later closes it as `run.failed
-   worker_lost`. It is never re-run. Before ending, the run withdraws its unanswered client
-   tool call (`clear_pending_call`), so poll stops advertising it and later result submits get 409.
+   worker_lost`. It is never re-run. Before ending, `clear_pending_call` withdraws a still-waiting
+   client tool call, so poll stops advertising it and later result submits get 409; an already
+   accepted (202) result is kept.
    Busy -> the run goes back to `pending` with a delay (`requeue_run`), failing
    `session_busy` after `session_busy_max` tries. Two runs never use one session at once.
    Every acquisition returns a `Lease` with a FENCE token that grows by one on each takeover
