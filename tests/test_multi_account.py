@@ -170,6 +170,24 @@ async def test_recent_start_on_the_account_means_a_live_worker(monkeypatch):
     assert await worker.fail_unclaimed_runs() == 1
 
 
+async def test_run_queued_behind_a_long_run_that_just_finished_is_not_reaped(monkeypatch):
+    pid, _ = await _project()
+    long_run, queued = await _run(pid, "owner", "a"), await _run(pid, "owner", "b")
+    async with get_session() as s:       # started 2 h ago (wall timeout up to 7200 s), done now
+        job = await s.get(DeepJobRow, long_run)
+        job.status, job.started_at = "done", _now() - timedelta(hours=2)
+        job.completed_at = _now() - timedelta(seconds=30)
+    await _age(queued, 7200)
+    _pending_max(monkeypatch, 1800)
+    assert await worker.fail_unclaimed_runs() == 0
+    assert (await get_run(queued, pid))[1].status == "pending"
+    async with get_session() as s:       # only its last event is recent
+        job = await s.get(DeepJobRow, long_run)
+        job.completed_at = None
+        (await s.get(AgentRunRow, long_run)).last_event_at = _now() - timedelta(seconds=30)
+    assert await worker.fail_unclaimed_runs() == 0
+
+
 async def test_a_run_claimed_between_the_scan_and_the_write_is_not_failed(monkeypatch):
     pid, _ = await _project()
     rid = await _run(pid, "ghost")

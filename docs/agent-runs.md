@@ -450,7 +450,7 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 - **Unclaimed runs:** a never-started run (no events, no quota wait) still `pending` after
   `AGENT_PENDING_MAX_S` (default 1800 s, 0 = off) is failed by the worker loop (`fail_unclaimed_runs`) with
   `run.failed` `error_class: account_unavailable`, "no worker claimed this run for account X", but only
-  when no worker is alive for that account and capability: it has no `running` run and none that started
+  when no worker is alive for that account and capability: it has no `running` run and no run that started, finished or logged an event
   within the window, so a run queued behind a long run is never reaped. The failure is atomic with a
   still-`pending` check (the queue row is locked `FOR UPDATE SKIP LOCKED`, as in the claim). Quota-parked
   runs and runs waiting for a client tool are never touched.

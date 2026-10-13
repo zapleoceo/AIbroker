@@ -184,7 +184,8 @@ async def fail_unclaimed_runs() -> int:
             select(AgentRunRow.account_id, DeepJobRow.capability)
             .join(DeepJobRow, DeepJobRow.id == AgentRunRow.run_id).where(
                 DeepJobRow.capability.like("agent:%"),
-                (DeepJobRow.status == "running") | (DeepJobRow.started_at >= cutoff))
+                (DeepJobRow.status == "running") | (DeepJobRow.started_at >= cutoff)
+                | (DeepJobRow.completed_at >= cutoff) | (AgentRunRow.last_event_at >= cutoff))
             .distinct())).all())
     done = 0
     for run_id, account, capability in rows:
@@ -217,13 +218,13 @@ async def agent_worker_loop(stop: asyncio.Event,
         try:
             await fail_stale_agent_runs()
             await expire_overdue_waiting()
-            await fail_unclaimed_runs()
             for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
                 for run_id in await claim_agent_runs(cap, free):
                     t = asyncio.create_task(_guarded(run_id, cfg))
                     inflight[cap].add(t)
                     t.add_done_callback(inflight[cap].discard)
+            await fail_unclaimed_runs()     # after the claim: a free slot takes queued work first
         except Exception:  # noqa: BLE001 - a bad tick must not kill the lane
             log.exception("agent worker tick failed")
         if wake is None:
