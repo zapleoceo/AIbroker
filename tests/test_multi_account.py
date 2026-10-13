@@ -145,6 +145,51 @@ async def test_reaper_skips_quota_parked_started_and_claimed_runs(monkeypatch):
         assert (await get_run(rid, pid))[0].outcome is None
 
 
+async def test_run_queued_behind_a_running_run_of_the_account_is_not_reaped(monkeypatch):
+    pid, _ = await _project()
+    busy, queued = await _run(pid, "owner", "a"), await _run(pid, "owner", "b")
+    async with get_session() as s:
+        (await s.get(DeepJobRow, busy)).status = "running"
+    await _age(queued, 7200)
+    _pending_max(monkeypatch, 1800)
+    assert await worker.fail_unclaimed_runs() == 0
+    assert (await get_run(queued, pid))[1].status == "pending"
+
+
+async def test_recent_start_on_the_account_means_a_live_worker(monkeypatch):
+    pid, _ = await _project()
+    done, queued = await _run(pid, "owner", "a"), await _run(pid, "owner", "b")
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, done)
+        job.status, job.started_at = "done", _now() - timedelta(seconds=60)
+    await _age(queued, 7200)
+    _pending_max(monkeypatch, 1800)
+    assert await worker.fail_unclaimed_runs() == 0
+    async with get_session() as s:      # an OLD start no longer counts
+        (await s.get(DeepJobRow, done)).started_at = _now() - timedelta(seconds=7200)
+    assert await worker.fail_unclaimed_runs() == 1
+
+
+async def test_a_run_claimed_between_the_scan_and_the_write_is_not_failed(monkeypatch):
+    pid, _ = await _project()
+    rid = await _run(pid, "ghost")
+    await _age(rid, 7200)
+    _pending_max(monkeypatch, 1800)
+    real = worker.append_event
+
+    async def claim_first(run_id, event, *a, **kw):
+        async with get_session() as s:
+            job = await s.get(DeepJobRow, run_id)
+            job.status, job.started_at = "running", _now()
+        return await real(run_id, event, *a, **kw)
+
+    monkeypatch.setattr(worker, "append_event", claim_first)
+    assert await worker.fail_unclaimed_runs() == 0
+    row, job = await get_run(rid, pid)
+    assert job.status == "running" and row.outcome is None
+    assert [e.type for e in await list_events(rid)] == []
+
+
 async def test_reaper_can_be_disabled(monkeypatch):
     pid, _ = await _project()
     rid = await _run(pid, "ghost")

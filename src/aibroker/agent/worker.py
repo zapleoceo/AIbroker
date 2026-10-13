@@ -163,32 +163,38 @@ async def _guarded(run_id: int, cfg: ExecConfig) -> None:  # pragma: no cover
 
 
 async def fail_unclaimed_runs() -> int:
-    """A run nobody claimed within AGENT_PENDING_MAX_S (typically: no worker serves its account)
-    ends `run.failed` account_unavailable instead of waiting forever. Only runs that never
-    started (no events, no quota wait) are touched; quota-parked and client-tool waits are not."""
+    """A run nobody claimed within AGENT_PENDING_MAX_S because NO worker is alive for its account
+    ends `run.failed` account_unavailable instead of waiting forever. Only never-started runs
+    (no events, no quota wait) are candidates, and only when the account has no `running` run and
+    no run that started within the window (a run queued behind a long run on a live worker is
+    never reaped). The failure is written atomically with a still-`pending` check."""
     limit = get_settings().AGENT_PENDING_MAX_S
     if limit <= 0:
         return 0
     cutoff = _now() - timedelta(seconds=limit)
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow.id, AgentRunRow.account_id)
+            select(DeepJobRow.id, AgentRunRow.account_id, DeepJobRow.capability)
             .join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
                 DeepJobRow.status == "pending", DeepJobRow.capability.like("agent:%"),
                 DeepJobRow.created_at < cutoff, AgentRunRow.last_seq == 0,
                 AgentRunRow.quota_waits == 0, AgentRunRow.outcome.is_(None))
         )).all()
+        live = set((await s.execute(
+            select(AgentRunRow.account_id, DeepJobRow.capability)
+            .join(DeepJobRow, DeepJobRow.id == AgentRunRow.run_id).where(
+                DeepJobRow.capability.like("agent:%"),
+                (DeepJobRow.status == "running") | (DeepJobRow.started_at >= cutoff))
+            .distinct())).all())
     done = 0
-    for run_id, account in rows:
+    for run_id, account, capability in rows:
+        if (account, capability) in live:
+            continue
         with contextlib.suppress(RunConflict):
-            async with get_session() as s:      # claimed since the scan? then leave it alone
-                job = await s.get(DeepJobRow, run_id)
-                if job is None or job.status != "pending":
-                    continue
             await append_event(run_id, ev.RunFailed(
                 error_class="account_unavailable",
                 message=f"no worker claimed this run for account {account} "
-                        f"within {int(limit)}s"))
+                        f"within {int(limit)}s"), only_if_pending=True)
             done += 1
     return done
 

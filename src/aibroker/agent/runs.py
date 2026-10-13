@@ -163,13 +163,22 @@ def _clip(value: Any) -> Any:
     return value
 
 
-async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None) -> int:
+async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
+                       *, only_if_pending: bool = False) -> int:
     """Store the next event of a run (single writer per run) -> its seq. Terminal
     events also close the run: outcome set, queue row moved to done/error. With a `lease`
-    the write is FENCED: StaleLease if the session was taken over by a newer holder."""
+    the write is FENCED: StaleLease if the session was taken over by a newer holder.
+    `only_if_pending` makes the write atomic with "nobody claimed it": the queue row is locked
+    (FOR UPDATE SKIP LOCKED, like the claim) and must still be `pending`, else RunConflict."""
     now = _now()
     async with get_session() as s:
         await check_fence(s, lease)
+        if only_if_pending:
+            locked = (await s.execute(
+                select(DeepJobRow).where(DeepJobRow.id == run_id)
+                .with_for_update(skip_locked=True))).scalar_one_or_none()
+            if locked is None or locked.status != "pending":
+                raise RunConflict(f"agent run {run_id} was claimed or is locked")
         run = await s.get(AgentRunRow, run_id)
         if run is None:
             raise LookupError(f"agent run {run_id} not found")
