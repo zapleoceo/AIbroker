@@ -89,7 +89,7 @@ _STALE_RUNNING_S = 25 * 60
 # finish naturally, then are cancelled and the jobs THIS process still holds are
 # put straight back to `pending`. Without it every deploy left them `running`
 # with no executor until the 25-min stale reclaim above (2026-10-13: vision jobs
-# 552804/552805 sat 22 min after a restart). Clamped below main.py's 10 s wait
+# 552804/552805 sat 22 min after a restart). Clamped below main.py's 15 s wait
 # on the dispatcher so the requeue itself is never cut off.
 # Whole-stop budget vs Docker's `stop_grace_period: 30s` (SIGKILL timer starts at
 # SIGTERM): uvicorn drains open HTTP requests first (`--timeout-graceful-shutdown
