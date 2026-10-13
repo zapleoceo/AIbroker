@@ -11,13 +11,23 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import BillingMode, StreamEvent
 from aibroker.agent.billing import BILLING_REFUSED
 
 _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many requests|"
-                    r"credit balance|exceeded your", re.I)
+                    r"credit balance|exceeded your|"
+                    # Claude Code subscription caps: "You've hit your weekly limit",
+                    # "5-hour limit reached"; NOT "context/token/output limit".
+                    r"hit your (?:[\w-]+ )*limit|\b(?:weekly|session|5-hour|daily|opus) limit",
+                    re.I)
+_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+_RESETS = re.compile(
+    r"resets?\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+)?"
+    r"(?P<hour>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ap>[ap]m)\s*(?:\((?P<tz>[^)]+)\))?", re.I)
 
 
 _SANDBOX = re.compile(
@@ -49,7 +59,38 @@ def parse_reset_at(message: str, now: datetime | None = None) -> str | None:
     if m:
         step = timedelta(hours=1) if m.group(2).lower().startswith("h") else timedelta(minutes=1)
         return (now + int(m.group(1)) * step).isoformat()
-    return None
+    return _parse_resets_clock(message or "", now)
+
+
+def _parse_resets_clock(message: str, now: datetime) -> str | None:
+    """'resets Oct 15, 8pm (UTC)' / 'resets 8:30am (UTC)' -> ISO UTC. Without a date: today if
+    still ahead, else tomorrow; with a date already past: next year. Unknown tz -> None."""
+    m = _RESETS.search(message)
+    if not m or not 1 <= int(m["hour"]) <= 12:
+        return None
+    tzname = (m["tz"] or "UTC").strip()
+    try:
+        tz = UTC if tzname.upper() in ("UTC", "GMT", "Z") else ZoneInfo(tzname)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    hour = int(m["hour"]) % 12 + (12 if m["ap"].lower() == "pm" else 0)
+    minute = int(m["min"] or 0)
+    local_now = now.astimezone(tz)
+    try:
+        if m["mon"]:
+            mon = _MONTHS.get(m["mon"].lower())
+            if mon is None:
+                return None
+            at = datetime(local_now.year, mon, int(m["day"]), hour, minute, tzinfo=tz)
+            if at < local_now:
+                at = at.replace(year=at.year + 1)
+        else:
+            at = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if at < local_now:
+                at += timedelta(days=1)
+    except ValueError:
+        return None
+    return at.astimezone(UTC).isoformat()
 
 
 def _json(line: str) -> dict[str, Any] | None:
