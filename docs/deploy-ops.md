@@ -35,7 +35,8 @@ Push to `master` → `.github/workflows/deploy.yml` runs **five jobs** (`docs`,
    The wrapper (`infra/aibroker-deploy.sh`) does `git fetch` +
    `reset --hard origin/master` → `docker compose build` → `up -d
    --remove-orphans` → drift gate (exit 12) → health gate on every service,
-   up to 180s (exit 11). See "Deploy entrypoint" below.
+   up to 180s (exit 11). The script exports `COMPOSE_PROFILES=agent`, so the
+   agent workers are included in every step. See "Deploy entrypoint" below.
 
 ### What this guarantees
 
@@ -178,10 +179,9 @@ not mark a candidate verified for ordinary jobs, change scope or budget, or
 permit API-billed fallback. A live model still needs the usual billing guard.
 
 The approved internal RPC uses `agent_claude_rpc` and `agent_codex_rpc` named
-volumes. The ordinary deploy recreates the API with both mounts. Since the
-workers are behind the `agent` Compose profile, build and recreate those two
-containers separately after the API deploy; otherwise database polling remains
-active and no socket is used. The volumes contain only `worker.sock`, owned by
+volumes. The ordinary deploy recreates the API with both mounts, and the agent
+workers (`agent-worker`, `agent-worker-codex`) are rebuilt and recreated by the
+same deploy (see "Deploy entrypoint"). The volumes contain only `worker.sock`, owned by
 uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
 auth volumes into API. No new Docker network, host port, capability, or sandbox
 relaxation is required.
@@ -209,7 +209,26 @@ and unreviewed; it now lives in the repo and is installed with
 backup and refuses to install a script that fails `bash -n`).
 
 Installing is deliberately NOT part of the deploy: a deploy must not rewrite
-the entrypoint currently executing it.
+the entrypoint currently executing it. CI does not install it either. The server
+runs the INSTALLED copy, so a change to `infra/aibroker-deploy.sh` takes effect
+only after an operator runs `infra/install-deploy.sh` on the server.
+
+### Agent profile is part of every deploy (since 2026-10-13)
+
+Services under the compose profile `agent` are invisible to a plain
+`docker compose up -d`. Before the fix, deploy never rebuilt or recreated
+`agent-worker` / `agent-worker-codex` and the gates did not check them: on
+2026-10-13 `aibroker-agent-worker` kept running PR #56 code while master was at
+#62. Now the script exports `COMPOSE_PROFILES=agent`, so `build`, `up -d`, the
+drift gate (`up -d --dry-run`) and the health gate all cover both workers.
+
+- A deploy recreates a worker whenever its image or config changed. That
+  interrupts an in-flight agent run, so deploy only when no agent runs are active.
+- The workers have no compose healthcheck and `restart: "no"`. The health gate
+  requires `state=running` for them, so a stopped worker is either started by
+  `up -d` or fails the deploy (exit 11).
+- `tests/test_deploy_script_profiles.py` guards that every compose profile used
+  by a service is activated by the deploy script.
 
 ### What it checks, and why
 
