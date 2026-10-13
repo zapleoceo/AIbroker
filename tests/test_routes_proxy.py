@@ -974,3 +974,44 @@ async def test_jobs_chat_capability_rejects_undecodable_inline_image():
     r = client.post("/v1/jobs?capability=chat:fast",
                     headers={"X-Project-Key": plain}, json=_IMG_BODY)
     assert r.status_code == 400
+
+
+async def test_deep_poll_refuses_agent_job_on_policy_violation(monkeypatch):
+    """Unlike the scope test above, policy_violation is NOT stubbed here."""
+    from aibroker.routes import proxy
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    plain, pid = await _make_project(["llm:agent"])
+    await _agent_job(pid, 5904)                                  # AGENT_PROJECT_POLICY unset
+    for route in ("deep", "jobs"):
+        r = client.get(f"/v1/{route}/5904", headers={"X-Project-Key": plain})
+        assert r.status_code == 403, route
+        assert "AGENT-SECRET-OUTPUT" not in r.text
+
+
+async def test_deep_submit_with_image_requires_vision_scope():
+    plain, _ = await _make_project(["llm:deep"])               # no llm:vision
+    r = client.post("/v1/deep", headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 403
+    assert "llm:vision" in r.json()["detail"]
+
+
+async def test_deep_submit_rejects_undecodable_inline_image():
+    plain, _ = await _make_project(["llm:deep", "llm:vision"])
+    r = client.post("/v1/deep", headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("role", ["assistant", "tool"])
+async def test_jobs_chat_capability_image_in_non_user_message_requires_vision_scope(role):
+    plain, _ = await _make_project(["llm:chat"])
+    history = [{"role": "user", "content": "hi"}]
+    image = _IMG_BODY["messages"][0]["content"]
+    if role == "tool":
+        history += [{"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": image}]
+    else:
+        history.append({"role": role, "content": image})
+    r = client.post("/v1/jobs?capability=chat:fast", headers={"X-Project-Key": plain},
+                    json={"messages": history})
+    assert r.status_code == 403, r.text

@@ -210,12 +210,23 @@ async def agent_run_submit(
                                   poll_url=f"/v1/agent/runs/{run_id}")
 
 
-@router.get("/runs/{run_id}", response_model=AgentRunResponse)
-async def agent_run_get(run_id: int, ctx: ProjectCtx = Depends(require_project)) -> AgentRunResponse:
-    _require_agent_scope(ctx)
+async def _owned_run(run_id: int, ctx: ProjectCtx) -> Any:
+    """The caller's run, re-checked against AGENT_PROJECT_POLICY on read: a policy
+    removed after the run was queued must close its output, like scope and allowlist."""
     hit = await get_run(run_id, ctx.project.id)
     if hit is None:
         raise HTTPException(404, "run not found")
+    run = hit[0]
+    violation = policy_violation(ctx.project.id, run.model, run.account_id, run.capability)
+    if violation:
+        raise AgentPolicyViolation(violation)
+    return hit
+
+
+@router.get("/runs/{run_id}", response_model=AgentRunResponse)
+async def agent_run_get(run_id: int, ctx: ProjectCtx = Depends(require_project)) -> AgentRunResponse:
+    _require_agent_scope(ctx)
+    hit = await _owned_run(run_id, ctx)
     return _shape(*hit, await get_attestation(run_id))
 
 
@@ -226,9 +237,7 @@ async def agent_run_events(
 ) -> AgentEventsResponse:
     """Poll events after `after_seq`; pass `next_after_seq` back until `finished`."""
     _require_agent_scope(ctx)
-    hit = await get_run(run_id, ctx.project.id)
-    if hit is None:
-        raise HTTPException(404, "run not found")
+    hit = await _owned_run(run_id, ctx)
     rows = await list_events(run_id, after_seq, limit)
     last = rows[-1].seq if rows else after_seq
     return AgentEventsResponse(

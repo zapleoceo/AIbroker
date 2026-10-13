@@ -287,3 +287,20 @@ def test_docs_name_the_setting_the_errors_and_the_operator_step():
         assert code in runs, code
     ops = (ROOT / "docs" / "deploy-ops.md").read_text(encoding="utf-8")
     assert "AGENT_PROJECT_POLICY" in ops and '"11"' in ops
+
+
+async def test_run_reads_are_closed_when_the_policy_is_removed_after_queueing(monkeypatch):
+    """GET /runs/{id} and /events return agent output, so they re-check the policy like scope."""
+    _policy(monkeypatch, GOOD)
+    key = await _project(11)
+    created = await _post(key)
+    assert created.status_code == 202, created.text
+    rid = created.json()["run_id"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for path in (f"/v1/agent/runs/{rid}", f"/v1/agent/runs/{rid}/events"):
+            assert (await c.get(path, headers={"X-Project-Key": key})).status_code == 200, path
+        _policy(monkeypatch, {"11": {"models": ["other-model"], "accounts": ["owner"]}})
+        for path in (f"/v1/agent/runs/{rid}", f"/v1/agent/runs/{rid}/events"):
+            r = await c.get(path, headers={"X-Project-Key": key})
+            assert r.status_code == 403, path
+            assert r.json() == {"error": "model_not_allowed"}, path
