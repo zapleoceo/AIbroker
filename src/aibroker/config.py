@@ -179,11 +179,12 @@ class Settings(BaseSettings):
     AGENT_IMAGE_MAX_BYTES: int = 2 * 1024 * 1024   # per exported generated image
     AGENT_IMAGES_MAX_COUNT: int = 4
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
-    # Subscription jobs (POST /v1/jobs -> agent:*). MAX_WALL_S is the absolute safety bound of one
-    # attempt, client-tool waits included. IDLE_S is the stall watchdog: it is reset only by a
-    # parsed CLI event (the parsers expose no partial/thinking events, so one silent step longer
-    # than IDLE_S is killed) and is suspended while a client tool call waits for its result.
-    AGENT_SUBSCRIPTION_MAX_WALL_S: int = Field(1800, ge=10)
+    # Subscription jobs (POST /v1/jobs -> agent:*). IDLE_S is the stall watchdog: it is reset only
+    # by a parsed CLI event or an App Server item notification of this turn (Claude/Codex exec
+    # emit nothing while thinking, so one silent step longer than IDLE_S is killed there) and is
+    # suspended while a client tool call waits for its result. MAX_WALL_S is only the outer bound
+    # for slot and lease safety of one attempt (4 h), tool waits included, not a work budget.
+    AGENT_SUBSCRIPTION_MAX_WALL_S: int = Field(14400, ge=10)
     AGENT_SUBSCRIPTION_IDLE_S: int = Field(300, ge=5)
     # The prompt is held as body, parsed string, dedup-hash JSON and the stored request (~30 B/char
     # at the non-ASCII peak in the API, ~10 in the worker): 1M chars is ~30 MB, far below the 1g

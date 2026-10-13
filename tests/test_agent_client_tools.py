@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from test_agent_codex_app_server import TOOL, _Adapter, _Process
+from sqlalchemy import select
+from test_agent_codex_app_server import TOOL, _Adapter, _Process, _Writer
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentRunSpec
@@ -27,7 +28,7 @@ from aibroker.agent.runs import create_run
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import Settings, get_settings
 from aibroker.db import get_session
-from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
+from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.providers import subscriptions
 from aibroker.routes import proxy
 
@@ -236,7 +237,7 @@ def test_client_tool_limit_defaults_are_the_documented_ones():
     assert fields["AGENT_CLIENT_TOOL_MAX_CALLS"].default == 64
     assert fields["AGENT_CLIENT_TOOL_MAX_BYTES"].default == 1024 * 1024
     assert fields["AGENT_CLIENT_TOOL_WAIT_S"].default == 900
-    assert fields["AGENT_SUBSCRIPTION_MAX_WALL_S"].default == 1800
+    assert fields["AGENT_SUBSCRIPTION_MAX_WALL_S"].default == 14400
     assert fields["AGENT_SUBSCRIPTION_IDLE_S"].default == 300
 
 
@@ -288,3 +289,81 @@ async def test_one_mib_tool_results_and_prompt_limit_stay_bounded_in_memory():
         meta = (await s.get(DeepJobRow, job_id)).result_meta
     assert "client_tool" not in meta and len(json.dumps(meta)) < 2048
     assert peak < 96 * 1024 * 1024
+
+
+class _TimedWriter(_Writer):
+    """After turn/start: the turn reply, then `feed(reader)` runs in the background."""
+
+    def __init__(self, reader, feed):
+        super().__init__(reader)
+        self.feed = feed
+
+    def write(self, data):
+        message = json.loads(data)
+        if message.get("method") == "turn/start":
+            self.sent.append(message)
+            self.reader.put({"id": 3, "result": {"turn": {"id": "turn-1"}}})
+            if self.feed:
+                self._task = asyncio.get_running_loop().create_task(self.feed(self.reader))
+        else:
+            super().write(data)
+
+
+async def _app_server_stream(monkeypatch, tmp_path, feed, idle_s):
+    job_id = await _job()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    spec = AgentRunSpec(run_id=job_id, capability="agent:codex", prompt="think",
+                        workspace=str(tmp_path), account_id="owner", model="gpt-6.1-sol",
+                        client_tools=[TOOL], tool_choice=None)
+    process = _Process()
+    process.stdin = _TimedWriter(process.stdout, feed)
+
+    async def spawn(*_a, **_k):
+        return process
+
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides", lambda _h: [])
+
+    class Adapter(_Adapter):
+        def start(self, run):
+            return run_tool_turn(self, run)
+
+    terminal, _ = await _stream(job_id, Adapter(home), spec, {}, 60.0, idle_s,
+                                exec_config_from_settings())
+    async with get_session() as s:
+        rows = (await s.execute(select(AgentRunEventRow.type)
+                                .where(AgentRunEventRow.run_id == job_id))).scalars().all()
+    return terminal, rows
+
+
+async def test_item_notifications_keep_a_long_reasoning_turn_alive_past_idle(monkeypatch, tmp_path):
+    async def feed(reader):
+        for _ in range(6):                       # 1.2 s of reasoning/command items, idle is 0.5 s
+            await asyncio.sleep(0.2)
+            reader.put({"method": "item/started", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": {"type": "reasoning"}}})
+            reader.put({"method": "item/completed", "params": {
+                "threadId": "thread-1", "turnId": "turn-1", "item": {"type": "reasoning"}}})
+        reader.put({"method": "turn/completed", "params": {
+            "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}})
+
+    terminal, rows = await _app_server_stream(monkeypatch, tmp_path, feed, 0.5)
+    assert terminal.type == "run.completed"
+    assert "progress" not in rows
+
+
+async def test_notifications_of_another_turn_do_not_keep_the_run_alive(monkeypatch, tmp_path):
+    async def feed(reader):
+        for _ in range(6):
+            await asyncio.sleep(0.2)
+            reader.put({"method": "item/started", "params": {
+                "threadId": "thread-1", "turnId": "other", "item": {"type": "reasoning"}}})
+
+    terminal, _ = await _app_server_stream(monkeypatch, tmp_path, feed, 0.5)
+    assert terminal.type == "run.timed_out" and terminal.limit == "idle"
+
+
+async def test_a_truly_silent_app_server_is_ended_by_idle(monkeypatch, tmp_path):
+    terminal, _ = await _app_server_stream(monkeypatch, tmp_path, None, 0.5)
+    assert terminal.type == "run.timed_out" and terminal.limit == "idle"

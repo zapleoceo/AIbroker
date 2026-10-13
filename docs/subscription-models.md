@@ -131,20 +131,23 @@ All are settings (names in [deploy-ops.md](deploy-ops.md#subscription-job-limits
   the catalog `job_request`). Over it is an explicit `400`, never a silent truncation. About
   250k tokens, the CLI context ceiling; memory is about 30 MB per submit at the non-ASCII peak.
 - **Idle watchdog**: `AGENT_SUBSCRIPTION_IDLE_S` = 300. Only a parsed CLI event resets it (raw or
-  empty stdout lines do not). The parsers expose no partial or thinking events, so one silent step
-  longer than the limit (very long thinking before the first or next finished message) is killed as
+  empty stdout lines do not). On the Codex App Server path every valid `item/*` notification of the
+  run's thread and turn (reasoning, commands, messages) also resets it, through a payload-free
+  `progress` event that is never stored; notifications of another turn count for nothing. Claude and
+  Codex exec emit nothing while thinking, so one silent step longer than the limit is killed as
   `timed_out` / `idle`; raise the setting if such tasks are expected. While a client tool call
   waits for its result the idle watchdog is suspended and the tool deadline rules.
-- **Hard cap**: `AGENT_SUBSCRIPTION_MAX_WALL_S` = 1800 for one attempt, client tool waits included.
-  It is stored per run as `wall_timeout_s`.
+- **Outer cap**: `AGENT_SUBSCRIPTION_MAX_WALL_S` = 14400 (4 h) for one attempt, client tool waits
+  included. It is a bound for slot and lease safety, not a work budget: idle is the stall detector.
+  It is stored per run as `wall_timeout_s`, and the stale-run reaper reads that per-run value.
+- **Returned files**: 2 MiB each, 8 MiB total, 20 files. Generated PNGs: 2 MiB each, 4 images. An
+  image that does not fit is listed in `files` with `skipped` (`too_large`, `cap_reached` or
+  `invalid_image`), no content, and its size, like any other returned file.
 
 Code map: `job_contract.ignored_subscription_params` names the ignored params,
 `job_contract.subscription_prompt_max_chars` reads the prompt limit, and
 `client_tools.max_calls` / `max_bytes` / `tool_wait_s` read the tool limits at call time (so a
 settings change needs no import-time reload).
-- **Returned files**: 2 MiB each, 8 MiB total, 20 files. Generated PNGs: 2 MiB each, 4 images. An
-  image that does not fit is listed in `files` with `skipped` (`too_large`, `cap_reached` or
-  `invalid_image`), no content, and its size, like any other returned file.
 
 For the Orchestra adapter, submit the ordinary text request (no `tools`,
 `response_format` or `stream`; `max_tokens` and `temperature` are ignored):

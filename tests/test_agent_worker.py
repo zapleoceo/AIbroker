@@ -138,6 +138,19 @@ async def test_unanswered_tool_is_ended_at_the_tool_deadline(cfg, monkeypatch, t
     assert (await list_events(rid))[-1].payload["limit"] == "idle" and fake.cancel_calls == 1
 
 
+async def test_progress_keeps_idle_alive_stores_no_event_and_marks_the_run_active(
+        cfg, tool_gate, monkeypatch):
+    monkeypatch.setattr("aibroker.agent.executor._TOUCH_EVERY_S", 0.0)
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    steps = []
+    for _ in range(8):
+        steps += [("sleep", 0.1), ev.Progress()]
+    _use(FakeAgentCLI([*steps, ev.RunCompleted(final_text="ok")]))
+    assert await execute_run(rid, cfg) == "completed"
+    assert "progress" not in await _types(rid)
+    assert (await _row(rid))[0].last_event_at is not None
+
+
 async def test_silent_tool_job_without_a_pending_call_is_ended_by_idle(cfg, tool_gate):
     rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
     _use(FakeAgentCLI([_answer(0), ("hang",)]))
@@ -199,6 +212,16 @@ async def test_reaper_fails_a_run_gone_silent_past_idle_tool_wait_and_grace():
     rid = await _run(wall=20000, idle=300)
     quiet = max(300, get_settings().AGENT_CLIENT_TOOL_WAIT_S) + worker.STALE_GRACE_S + 5
     await _age(rid, started_s=quiet + 10, last_event_s=quiet)
+    assert await worker.fail_stale_agent_runs() == 1
+
+
+async def test_reaper_follows_the_per_run_wall_which_defaults_to_four_hours():
+    wall = get_settings().AGENT_SUBSCRIPTION_MAX_WALL_S
+    assert wall == 14400
+    alive = await _run(wall=wall, idle=300)
+    await _age(alive, started_s=wall + worker.STALE_GRACE_S - 30, last_event_s=1)
+    assert await worker.fail_stale_agent_runs() == 0
+    await _age(alive, started_s=wall + worker.STALE_GRACE_S + 5, last_event_s=1)
     assert await worker.fail_stale_agent_runs() == 1
 
 

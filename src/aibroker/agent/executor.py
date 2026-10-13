@@ -45,6 +45,7 @@ from aibroker.providers.subscriptions import (
 log = logging.getLogger(__name__)
 
 _TOOL_WAIT_SLACK_S = 60.0
+_TOUCH_EVERY_S = 30.0       # progress is shown to the stale-run reaper this often
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,15 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
         return []
 
 
+async def _touch_run(run_id: int, lease: Lease | None) -> None:
+    """Mark activity without an event row: a long silent-but-alive turn must not look dead."""
+    async with get_session() as s:
+        await check_fence(s, lease)
+        row = await s.get(AgentRunRow, run_id)
+        if row is not None:
+            row.last_event_at = _now()
+
+
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                   totals: dict[str, int | None], wall_s: float, idle_s: float,
                   cfg: ExecConfig, lease: Lease | None = None,
@@ -349,6 +359,7 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
 
     task = asyncio.create_task(pump())
     t0 = last = last_poll = time.monotonic()
+    last_touch = t0
     tool_pending = False     # a client tool call waits for its result: its own deadline rules
     terminal: ev.AnyEvent | None = None
     lease_lost = False
@@ -379,6 +390,12 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             if item is None:
                 break
             last = time.monotonic()      # only a parsed CLI event counts as activity, never raw output
+            if isinstance(item, ev.Progress):
+                # liveness only: resets idle, stores no event; the reaper reads last_event_at
+                if last - last_touch >= _TOUCH_EVERY_S:
+                    last_touch = last
+                    await _touch_run(run_id, lease)
+                continue
             if spec.client_tools and isinstance(item, ev.ToolCall | ev.ToolResult):
                 tool_pending = isinstance(item, ev.ToolCall)
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):

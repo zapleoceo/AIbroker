@@ -209,7 +209,7 @@ that must see them; the compose file does not pass them through by default, so t
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AGENT_SUBSCRIPTION_MAX_WALL_S` | 1800 | hard cap of one attempt, tool waits included |
+| `AGENT_SUBSCRIPTION_MAX_WALL_S` | 14400 | outer bound (slot and lease safety) of one attempt, tool waits included |
 | `AGENT_SUBSCRIPTION_IDLE_S` | 300 | stall watchdog, reset only by a parsed CLI event |
 | `AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS` | 1000000 | prompt limit of `POST /v1/jobs` (explicit `400` above) |
 | `AGENT_CLIENT_TOOL_MAX_CALLS` | 64 | client tool calls per run |
@@ -219,8 +219,10 @@ that must see them; the compose file does not pass them through by default, so t
 
 Body limits: nginx allows 28 MB on `location = /v1/jobs` (a 1M-character prompt is at most about 4 MB
 even as UTF-8) and 4 MB on every other location, including `/v1/jobs/{id}/tool-results`. A 1 MiB
-tool result is JSON-escaped by the client; text with many control characters or quotes can
-grow past 4 MB and be refused by nginx before it reaches the API. The agent worker memory limit is 1g;
+tool result is JSON-escaped by the client; text with many control characters can grow up to 6x
+(six characters per control character) and exceed 4 MB, and nginx then refuses it with `413` before it reaches the API. If such
+results are expected, raise `client_max_body_size` of the default `location /` to 8m (recommended;
+`infra/nginx-aib.conf` is not changed by this work). The agent worker memory limit is 1g;
 the prompt is held about 10 bytes per character there, so the default limit needs about 10 MB.
 
 ## Redis container (2026-07-16)

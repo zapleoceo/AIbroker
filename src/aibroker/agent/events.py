@@ -88,6 +88,12 @@ class Usage(_Event):
     source: str = "cli_reported"   # where the numbers come from; never a price
 
 
+class Progress(_Event):
+    """Payload-free liveness of the CLI (a valid notification of this thread and turn). It only
+    resets the executor's idle watchdog and is never persisted."""
+    type: Literal["progress"] = "progress"
+
+
 class RunWaitingQuota(_Event):
     """Non-terminal: the CLI hit its usage limit; the run waits and is retried later on the
     SAME account and billing route (never an API fallback)."""
@@ -135,7 +141,7 @@ class RunTimedOut(_Event):
 
 AnyEvent = (RunStarted | SessionAssigned | ModelRerouted | MessageDelta | ToolCall | ToolResult | FileChanged
             | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota
-            | BillingAttested)
+            | BillingAttested | Progress)
 AgentEvent = Annotated[AnyEvent, Field(discriminator="type")]
 _ADAPTER: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)
 

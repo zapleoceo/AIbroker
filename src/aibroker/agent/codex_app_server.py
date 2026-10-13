@@ -198,6 +198,12 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage":
                     final_text = str(item.get("text") or "")
+                yield ev.Progress()
+            elif isinstance(method, str) and method.startswith("item/") and "id" not in message:
+                # reasoning / command / message progress of THIS turn; foreign identities count for nothing
+                if (params.get("threadId") in (None, thread_id)
+                        and params.get("turnId") in (None, turn_id)):
+                    yield ev.Progress()
             elif method == "turn/completed":
                 if (params.get("threadId") not in (None, thread_id)
                         or (params.get("turn") or {}).get("id") != turn_id):

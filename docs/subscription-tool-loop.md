@@ -80,10 +80,12 @@ should use the Broker call ID as its own idempotency key. One outstanding call,
 `AGENT_CLIENT_TOOL_MAX_CALLS` calls per run (64), `AGENT_CLIENT_TOOL_MAX_BYTES` for the arguments and
 for each result (1 MiB; a larger result is `413`), `AGENT_CLIENT_TOOL_WAIT_S` for one call to
 be answered (900 s), and exact-result idempotent retries while the job runs are enforced.
-The sum of waits is bounded by the run's hard cap `AGENT_SUBSCRIPTION_MAX_WALL_S` (1800 s), not by
+The sum of waits is bounded by the run's outer cap `AGENT_SUBSCRIPTION_MAX_WALL_S` (14400 s), not by
 calls x wait. While a call is pending the executor suspends the idle watchdog (the adapter ends the
 wait at the tool deadline; the executor only backstops it with that deadline plus 60 s); a CLI that is
-silent with no pending call is ended by `AGENT_SUBSCRIPTION_IDLE_S`. The App Server stdout line limit
+silent with no pending call is ended by `AGENT_SUBSCRIPTION_IDLE_S`; the App Server adapter reports
+every valid `item/*` notification of its thread and turn as a payload-free `progress` event, which
+resets idle (and refreshes `last_event_at` every 30 s for the reaper) without storing a row. The App Server stdout line limit
 is 16 MiB, so a long notification or tool argument line is read whole. Cancel keeps working during a
 wait: the worker notices the flag within a second. A result sent after terminal state is rejected.
 The current `deep_jobs` pending/done/error status values remain

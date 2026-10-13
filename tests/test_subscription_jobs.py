@@ -89,7 +89,7 @@ async def test_http_catalog_contract_matches_subscription_job_validation(monkeyp
     assert ignored == [[], ["max_tokens", "temperature"], ["max_tokens", "temperature"]] * 2
     for call in create.await_args_list:      # no cap or temperature reaches the run or the CLI
         assert {"max_tokens", "temperature"}.isdisjoint(call.kwargs)
-        assert call.kwargs["wall_timeout_s"] == 1800 and call.kwargs["idle_timeout_s"] == 300
+        assert call.kwargs["wall_timeout_s"] == 14400 and call.kwargs["idle_timeout_s"] == 300
 
 
 def test_compose_default_catalog_sentinel_keeps_defaults_and_malformed_fails_closed(monkeypatch):

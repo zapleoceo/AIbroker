@@ -160,6 +160,7 @@ reported - never dollars. Text is clipped to `MAX_TEXT_CHARS` on store.
 | `tool.call` / `tool.result` | `ToolCall` / `ToolResult` | call_id, name, input / ok, output |
 | `file.changed` | `FileChanged` | path, action (created/modified/deleted) |
 | `usage` | `Usage` | input_tokens, output_tokens, cache_read_tokens, turns |
+| `progress` | `Progress` | - (liveness only: resets idle, never stored; App Server `item/*` notifications) |
 | `run.completed` | `RunCompleted` | final_text, files (`FileRef`) |
 | `run.failed` | `RunFailed` | error_class, message |
 | `run.cancelled` | `RunCancelled` | - |
