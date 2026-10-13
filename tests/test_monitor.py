@@ -117,6 +117,8 @@ def _paid_key(provider: str = "deepseek", **kw) -> SimpleNamespace:
         "cooldown_until": None, "scopes": ["llm:chat"],
         "daily_cost_cap_usd": None, "daily_cost_used_usd": 0.0,
         "daily_reset_at": None,
+        "tier": "paid", "monthly_cost_cap_usd": None, "monthly_cost_used_usd": 0.0,
+        "monthly_reset_at": None,
     }
     base.update(kw)
     return SimpleNamespace(**base)
@@ -153,6 +155,15 @@ def test_paid_key_usable_cost_cap_follows_fresh_semantics():
     under = _paid_key(daily_cost_cap_usd=5.0, daily_cost_used_usd=1.0,
                       daily_reset_at=_NOW.date())
     assert _paid_key_usable(under, {"deepseek"}, "llm:chat", _NOW)
+
+
+def test_paid_key_usable_monthly_cap_follows_fresh_semantics():
+    month = _NOW.date().replace(day=1)
+    over = _paid_key(monthly_cost_cap_usd=5.0, monthly_cost_used_usd=5.0, monthly_reset_at=month)
+    assert not _paid_key_usable(over, {"deepseek"}, "llm:chat", _NOW)
+    stale = _paid_key(monthly_cost_cap_usd=5.0, monthly_cost_used_usd=5.0,
+                      monthly_reset_at=month - timedelta(days=3))
+    assert _paid_key_usable(stale, {"deepseek"}, "llm:chat", _NOW)
 
 
 def test_paid_tail_caps_cover_every_paid_led_lane():

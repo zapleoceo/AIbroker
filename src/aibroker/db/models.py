@@ -85,6 +85,8 @@ class ApiKeyRow(Base):
     monthly_cost_used_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     daily_reset_at: Mapped[date | None] = mapped_column(Date)
+    # First day of the UTC month monthly_cost_used_usd belongs to (lazy monthly reset).
+    monthly_reset_at: Mapped[date | None] = mapped_column(Date)
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime)

@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   monthly_cost_used_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   total_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
   daily_reset_at DATE,
+  monthly_reset_at DATE,                      -- first day of the UTC month monthly_cost_used_usd belongs to
   cooldown_until TIMESTAMP,
   error_count INT NOT NULL DEFAULT 0,
   last_used_at TIMESTAMP,

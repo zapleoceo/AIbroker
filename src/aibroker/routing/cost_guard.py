@@ -12,7 +12,12 @@ from sqlalchemy import text
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
-from aibroker.routing.selector import FRESH_DAILY_COST_SQL
+from aibroker.routing.selector import (
+    FRESH_DAILY_COST_SQL,
+    FRESH_MONTHLY_COST_SQL,
+    month_params,
+    month_start_utc,
+)
 
 
 class CostGuardError(Exception):
@@ -110,28 +115,50 @@ async def reserve_cost(
         if api_key.daily_cost_cap_usd == 0:
             raise CostGuardError("api_key", 0.0, api_key.daily_cost_used_usd or 0.0,
                                  estimated_cost)
-        if project.daily_cost_cap_usd == 0:
+        if api_key.monthly_cost_cap_usd == 0:
+            raise CostGuardError("api_key", 0.0, api_key.monthly_cost_used_usd or 0.0,
+                                 estimated_cost)
+        if project.daily_cost_cap_usd == 0 or project.monthly_cost_cap_usd == 0:
             raise CostGuardError("project", 0.0, 0.0, estimated_cost)
 
-    # 1. per-key — atomic reserve-and-admit in one statement.
-    if api_key.daily_cost_cap_usd is not None:
+    # 1. per-key — atomic reserve-and-admit in ONE statement covering every capped
+    # window (daily and/or monthly): all counters are debited together or none is.
+    # The monthly window mirrors the daily one (lazy reset keyed on the UTC month).
+    key_daily = api_key.daily_cost_cap_usd is not None
+    key_monthly = api_key.monthly_cost_cap_usd is not None
+    if key_daily or key_monthly:
+        sets: list[str] = []
+        conds = ["k.id = :id"]
+        if key_daily:
+            sets += [f"daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c",
+                     "daily_reset_at = CURRENT_DATE"]
+            conds.append(f"{FRESH_DAILY_COST_SQL} + :c <= k.daily_cost_cap_usd")
+        if key_monthly:
+            sets += [f"monthly_cost_used_usd = {FRESH_MONTHLY_COST_SQL} + :c",
+                     "monthly_reset_at = :month_start"]
+            conds.append(f"{FRESH_MONTHLY_COST_SQL} + :c <= k.monthly_cost_cap_usd")
+        params: dict[str, object] = {"id": api_key.id, "c": estimated_cost}
+        if key_monthly:
+            params.update(month_params())
         async with get_session() as s:
             row = (await s.execute(
                 text(
-                    "UPDATE api_keys AS k "
-                    f"SET daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c, "
-                    "    daily_reset_at = CURRENT_DATE "
-                    "WHERE k.id = :id "
-                    f"  AND {FRESH_DAILY_COST_SQL} + :c <= k.daily_cost_cap_usd "
-                    "RETURNING k.id"
+                    f"UPDATE api_keys AS k SET {', '.join(sets)} "
+                    f"WHERE {' AND '.join(conds)} RETURNING id"
                 ),
-                {"id": api_key.id, "c": estimated_cost},
+                params,
             )).first()
         if row is None:
+            if key_monthly and api_key.monthly_reset_at == month_start_utc() and (
+                (api_key.monthly_cost_used_usd or 0.0) + estimated_cost
+                > api_key.monthly_cost_cap_usd
+            ):
+                raise CostGuardError("api_key", api_key.monthly_cost_cap_usd,
+                                     api_key.monthly_cost_used_usd, estimated_cost)
             raise CostGuardError(
                 "api_key",
-                api_key.daily_cost_cap_usd,
-                api_key.daily_cost_used_usd,
+                api_key.daily_cost_cap_usd if key_daily else api_key.monthly_cost_cap_usd,
+                api_key.daily_cost_used_usd if key_daily else api_key.monthly_cost_used_usd,
                 estimated_cost,
             )
 
@@ -164,6 +191,26 @@ async def reserve_cost(
                 estimated_cost,
             )
 
+    # 2b. per-project monthly — live SUM over the UTC calendar month (self-resetting
+    # by construction, exactly like the daily project check).
+    if project.monthly_cost_cap_usd is not None:
+        m_start = datetime.combine(month_start_utc(), datetime.min.time())
+        async with get_session() as s:
+            m_used = (
+                await s.execute(
+                    text(
+                        "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_log "
+                        "WHERE project_id = :pid AND created_at >= :start"
+                    ),
+                    {"pid": project.id, "start": m_start},
+                )
+            ).scalar() or 0.0
+        if m_used + estimated_cost > project.monthly_cost_cap_usd:
+            await release_cost(api_key=api_key, estimated_cost=estimated_cost)
+            raise CostGuardError(
+                "project", project.monthly_cost_cap_usd, float(m_used), estimated_cost
+            )
+
     # 3. global
     s = get_settings()
     if s.GLOBAL_DAILY_CAP_USD > 0:
@@ -187,13 +234,17 @@ async def release_cost(*, api_key: ApiKeyRow, estimated_cost: float) -> None:
     instead: a paid key with NO per-key cap but a project/global cap took no
     reservation yet got refunded on a project/global block, corrupting its daily
     counter. See fix 2026-07-10.)"""
-    if api_key.daily_cost_cap_usd is None or estimated_cost <= 0:
+    key_daily = api_key.daily_cost_cap_usd is not None
+    key_monthly = api_key.monthly_cost_cap_usd is not None
+    if not (key_daily or key_monthly) or estimated_cost <= 0:
         return
+    sets = []
+    if key_daily:
+        sets.append("daily_cost_used_usd = GREATEST(0, daily_cost_used_usd - :c)")
+    if key_monthly:
+        sets.append("monthly_cost_used_usd = GREATEST(0, monthly_cost_used_usd - :c)")
     async with get_session() as s:
         await s.execute(
-            text(
-                "UPDATE api_keys SET daily_cost_used_usd = "
-                "GREATEST(0, daily_cost_used_usd - :c) WHERE id = :id"
-            ),
+            text(f"UPDATE api_keys SET {', '.join(sets)} WHERE id = :id"),
             {"c": estimated_cost, "id": api_key.id},
         )
