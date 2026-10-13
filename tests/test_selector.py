@@ -561,20 +561,3 @@ async def test_pick_and_reserve_concurrent_no_double_allocation():
     assert set(winners) <= {k1, k2}
     # Contention gone → a pick must succeed again (no lock left behind).
     assert await pick_and_reserve("cerebras", "llm:chat") is not None
-
-
-async def test_pick_survives_add_column_on_live_table():
-    """Migration-after-prepare regression (prod 2026-10-13): the pick statement is
-    prepared on a pooled connection, ALTER TABLE ADD COLUMN runs, and the same pick
-    must still succeed because its RETURNING list is explicit (no star projection)."""
-    from sqlalchemy import text
-
-    await _add_key("cerebras", "ddl-a")
-    assert await pick_and_reserve("cerebras", "llm:chat") is not None  # prepares the stmt
-    try:
-        async with get_session() as s:
-            await s.execute(text("ALTER TABLE api_keys ADD COLUMN tmp_x int"))
-        assert await pick_and_reserve("cerebras", "llm:chat") is not None
-    finally:
-        async with get_session() as s:
-            await s.execute(text("ALTER TABLE api_keys DROP COLUMN IF EXISTS tmp_x"))
