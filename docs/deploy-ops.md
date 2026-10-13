@@ -130,7 +130,7 @@ A deploy recreates `aibroker-api`. Before this, a job it was executing stayed
 (2026-10-13: vision jobs 552804/552805 sat 22 min after a restart).
 
 On a graceful SIGTERM the dispatcher waits up to `JOB_SHUTDOWN_GRACE_S` (default
-**5 s**, clamped to a **max of 8 s**, below the 10 s shutdown wait) for the jobs it
+**5 s**, clamped to a **max of 8 s**, see the budget below) for the jobs it
 has in flight. Jobs still running after that are cancelled, and every job this
 process claimed and has not finished is returned to the queue by
 `release_claimed_jobs()`: `running` → `pending`, `started_at` cleared,
@@ -138,6 +138,16 @@ process claimed and has not finished is returned to the queue by
 attempt). The release is guarded by the claimed `started_at`, so a job that
 finished, or was re-claimed elsewhere, is left alone. Released jobs are picked up
 within seconds; each one logs an INFO line `shutdown: job N returned to pending`.
+
+Shutdown budget (SIGKILL arrives `stop_grace_period` after SIGTERM, so the whole
+sequence must fit in it): uvicorn first drains open HTTP requests, capped by
+`--timeout-graceful-shutdown 10` (Dockerfile) = **10 s**; then the lifespan gives
+the dispatcher **15 s** (`wait_for` in `main.py`: in-flight grace <= 8 s + cancel +
+release); 10 + 15 = **25 s** < `stop_grace_period: 30s` (`aibroker-api` in
+docker-compose.yml). Without those two settings a long HTTP request would eat the
+default 10 s and the container would be killed before the release ran. The release
+runs shielded, so the `wait_for` timeout cannot abort it. `aibroker-monitor` runs no
+dispatcher and keeps the default.
 
 The 25-minute stale reclaim now covers only hard crashes (SIGKILL, OOM, host loss).
 

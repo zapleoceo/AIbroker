@@ -59,8 +59,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
         yield
     finally:
         stop.set()
+        # Shutdown budget (docker stop_grace_period 30s, SIGKILL after it):
+        # uvicorn already spent up to 10 s draining HTTP (--timeout-graceful-
+        # shutdown 10) before we got here; dispatcher = in-flight grace (<= 8 s)
+        # + release, so 15 s; 10 + 15 = 25 s < 30 s. The dispatcher shields its
+        # release, so even this timeout cannot abort the requeue.
         try:
-            await asyncio.wait_for(dispatcher, timeout=10)
+            await asyncio.wait_for(dispatcher, timeout=15)
         except (TimeoutError, asyncio.CancelledError):
             dispatcher.cancel()
         if agent_worker is not None:

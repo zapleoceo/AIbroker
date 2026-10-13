@@ -30,11 +30,11 @@ import contextlib
 import logging
 import os
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import asyncpg
-from sqlalchemy import text, update
+from sqlalchemy import func, text, update
 
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -91,6 +91,10 @@ _STALE_RUNNING_S = 25 * 60
 # with no executor until the 25-min stale reclaim above (2026-10-13: vision jobs
 # 552804/552805 sat 22 min after a restart). Clamped below main.py's 10 s wait
 # on the dispatcher so the requeue itself is never cut off.
+# Whole-stop budget vs Docker's `stop_grace_period: 30s` (SIGKILL timer starts at
+# SIGTERM): uvicorn drains open HTTP requests first (`--timeout-graceful-shutdown
+# 10`), then main.py gives the dispatcher 15 s = this grace (<= 8) + cancel +
+# release. 10 + 15 = 25 s, leaving ~5 s for the engine close.
 _SHUTDOWN_GRACE_S = min(float(os.environ.get("JOB_SHUTDOWN_GRACE_S", "5")), 8.0)
 
 # Jobs this process claimed and has not finished: job id -> the started_at it
@@ -248,7 +252,7 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
         )
 
 
-async def _release_claim(job_id: int, started_at: datetime | None) -> bool:  # pragma: no cover
+async def _release_claim(job_id: int, started_at: datetime | None) -> bool:
     """Hand a job this process claimed back to the queue, eligible immediately.
     Guarded on status='running' AND the exact started_at we claimed with (the
     same claim guard as _requeue_or_fail/_finish): a job that finished, or was
@@ -263,7 +267,7 @@ async def _release_claim(job_id: int, started_at: datetime | None) -> bool:  # p
             .where(DeepJobRow.id == job_id, DeepJobRow.status == "running",
                    DeepJobRow.started_at == started_at)
             .values(status="pending", started_at=None,
-                    run_after=datetime.now(UTC).replace(tzinfo=None))
+                    run_after=func.now())   # DB clock, like the claim's now()
         )
         return bool(res.rowcount)
 
@@ -578,7 +582,15 @@ async def dispatcher_loop(stop: asyncio.Event) -> None:  # pragma: no cover — 
     try:
         await _dispatch(stop, inflight)
     finally:
-        await _shutdown_inflight(inflight)
+        # main.py bounds this with wait_for, which CANCELS us on timeout. The
+        # release runs as its own shielded task and is awaited to the end even
+        # then, so a timeout can never abort it half-way.
+        work = asyncio.ensure_future(_shutdown_inflight(inflight))
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            await work
+            raise
         log.info("job dispatcher stopped")
 
 

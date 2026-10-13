@@ -656,7 +656,7 @@ async def _stuck_dispatch(rows) -> list[asyncio.Task]:
 
 async def test_shutdown_requeues_inflight_job_without_burning_retries():
     pid = await _make_project(["llm:chat"])
-    started = datetime(2026, 10, 13, 9, 25, 7)
+    started = datetime(2026, 10, 13, 9, 25, 7, 123456)
     await _running_job(970001, pid, started)
     tasks = await _stuck_dispatch([DeepJobRow(id=970001, started_at=started)])
     before = datetime.now(UTC).replace(tzinfo=None)
@@ -666,13 +666,14 @@ async def test_shutdown_requeues_inflight_job_without_burning_retries():
     row = await _row(970001)
     assert row.status == "pending" and row.started_at is None
     assert row.retry_count == 2                      # operator restart: no retry burnt
-    assert before <= row.run_after <= datetime.now(UTC).replace(tzinfo=None)
+    # DB clock (SQLite CURRENT_TIMESTAMP truncates to seconds)
+    assert before.replace(microsecond=0) <= row.run_after <= datetime.now(UTC).replace(tzinfo=None)
     assert not job_queue._CLAIMED
 
 
 async def test_shutdown_leaves_job_that_finished_during_grace():
     pid = await _make_project(["llm:chat"])
-    started = datetime(2026, 10, 13, 9, 25, 8)
+    started = datetime(2026, 10, 13, 9, 25, 8, 123456)
     await _running_job(970002, pid, started)
     job_queue._CLAIMED.clear()
     release = asyncio.Event()
@@ -697,7 +698,7 @@ async def test_shutdown_never_touches_another_process_claim():
     """Same row re-claimed elsewhere (different started_at) or already pending:
     the guarded UPDATE changes nothing."""
     pid = await _make_project(["llm:chat"])
-    ours, theirs = datetime(2026, 10, 13, 9, 25, 9), datetime(2026, 10, 13, 9, 50, 8)
+    ours, theirs = datetime(2026, 10, 13, 9, 25, 9, 123456), datetime(2026, 10, 13, 9, 50, 8, 123456)
     await _running_job(970003, pid, theirs, retry_count=3)
     tasks = await _stuck_dispatch([DeepJobRow(id=970003, started_at=ours)])
 
@@ -709,7 +710,7 @@ async def test_shutdown_never_touches_another_process_claim():
 
 async def test_release_claim_is_idempotent_and_ignores_missing_started_at():
     pid = await _make_project(["llm:chat"])
-    started = datetime(2026, 10, 13, 9, 25, 10)
+    started = datetime(2026, 10, 13, 9, 25, 10, 123456)
     await _running_job(970004, pid, started)
     assert await job_queue._release_claim(970004, started) is True
     assert await job_queue._release_claim(970004, started) is False   # no double requeue
@@ -718,7 +719,7 @@ async def test_release_claim_is_idempotent_and_ignores_missing_started_at():
 
 async def test_release_claimed_jobs_survives_a_failing_row():
     pid = await _make_project(["llm:chat"])
-    started = datetime(2026, 10, 13, 9, 25, 11)
+    started = datetime(2026, 10, 13, 9, 25, 11, 123456)
     await _running_job(970005, pid, started)
     job_queue._CLAIMED.clear()
     job_queue._CLAIMED.update({970099: started, 970005: started})
@@ -732,3 +733,24 @@ async def test_release_claimed_jobs_survives_a_failing_row():
     with patch.object(job_queue, "_release_claim", flaky):
         assert await job_queue.release_claimed_jobs() == 1
     assert (await _row(970005)).status == "pending"
+
+
+async def test_wait_for_timeout_during_shutdown_still_completes_the_release():
+    """main.py bounds the dispatcher with wait_for, which cancels it on timeout.
+    That cancel lands mid-finally (inside the grace) — the release must still
+    run to completion."""
+    pid = await _make_project(["llm:chat"])
+    started = datetime(2026, 10, 13, 9, 30, 1, 654321)
+    await _running_job(970006, pid, started)
+    tasks = await _stuck_dispatch([DeepJobRow(id=970006, started_at=started)])
+
+    async def fake_dispatch(stop, inflight):
+        inflight.update(tasks)
+
+    with patch.object(job_queue, "_dispatch", fake_dispatch),          patch.object(job_queue, "_SHUTDOWN_GRACE_S", 0.3):
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(job_queue.dispatcher_loop(asyncio.Event()), timeout=0.05)
+        await asyncio.sleep(0.6)     # the shielded release outlives the cancel
+
+    row = await _row(970006)
+    assert row.status == "pending" and row.started_at is None
