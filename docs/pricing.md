@@ -11,12 +11,14 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | Path | Price source |
 | --- | --- |
 | OpenRouter chat | `usage.cost` from the response when present (the real bill), else the LiteLLM estimate. `_prefer_reported_cost`. |
-| OpenRouter decisions (`/api/alpha/decisions`) | `usage.cost` only (not in LiteLLM's map). Same helper `reported_cost`. |
+| OpenRouter decisions (`/api/alpha/decisions`) | `usage.cost` when OpenRouter reports it (even `0`); otherwise the registry/LiteLLM estimate (`estimate_llm_cost`), never a silent `$0`. Same helper `reported_cost`. |
 | All other chat/vision/structured | `litellm.cost_per_token` from LiteLLM's map (pinned `litellm==1.103.2`) x `peak_multiplier` (DeepSeek weekday peak). |
 | Embeddings | Same map, input tokens only. |
 | Whisper-style ASR | Per audio minute from `ModelSpec.usd_per_minute` (provider registry) x duration. Groq bills at least 10 s per request (`MIN_BILLED_AUDIO_S`). |
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
 | `local/*` (Qwen3-VL) | Free, no external bill. |
+
+The usage write after a successful paid call is shielded from request cancellation (`asyncio.shield` in `services/attempt.py`). The provider has already billed, so the ledger row lands even if the client disconnects; the cancel still propagates once the write has landed.
 
 ## Cached tokens
 
