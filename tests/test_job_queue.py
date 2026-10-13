@@ -94,6 +94,28 @@ async def test_execute_budget_exhausted_finishes_without_burning_retries():
     assert alert_mock.await_args.kwargs["throttle_min"] == 24 * 60
 
 
+async def test_execute_monthly_budget_exhausted_says_monthly():
+    """A spent MONTHLY cap must not tell clients to retry at 00:00 UTC."""
+    from aibroker.services.llm_service import BUDGET_EXHAUSTED_MONTHLY
+
+    pid = 990203
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="cap-fixture-m", project_key_hash="h",
+                         project_key_prefix="pk_m", allowed_scopes=["llm:chat"]))
+
+    async def fake_run_chat(**kw):
+        return BUDGET_EXHAUSTED_MONTHLY
+
+    with patch.object(job_queue, "run_chat", fake_run_chat),          patch.object(job_queue, "_finish", AsyncMock()) as finish,          patch.object(job_queue, "_requeue_or_fail", AsyncMock()) as requeue,          patch.object(job_queue, "alert", AsyncMock()) as alert_mock:
+        await job_queue._execute(_unclaimed_row(pid, retry_count=0))
+    requeue.assert_not_called()
+    msg = finish.await_args.kwargs["error_message"]
+    assert msg == ("monthly budget cap reached — retry after the 1st of next month, "
+                   "00:00 UTC")
+    assert "00:00 UTC" in msg and "daily" not in msg
+    assert "monthly" in alert_mock.await_args.args[1]
+
+
 @pytest.mark.skipif(not ON_SQLITE, reason="asserts the SQLite degradation path")
 async def test_dispatcher_loop_sqlite_no_listener_and_clean_stop():
     """On SQLite the LISTEN task must never start (dialect guard) and the loop

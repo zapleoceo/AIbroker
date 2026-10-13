@@ -145,18 +145,22 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
-Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable, no
-backfill). **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
+Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable) and
+backfills it once. **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
 references the column on every request, so code that lands first breaks key selection
 until the column exists. Operator command:
 
 ```
-docker exec -i aibroker-postgres psql -U aibroker aibroker \n  < /var/www/aibroker/infra/sql/migrations/019_api_keys_monthly_reset.sql
+docker exec -i aibroker-postgres psql -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/019_api_keys_monthly_reset.sql
 ```
 
-Existing `monthly_cost_used_usd` values were never reset. They read as 0 for the current
-month on first touch after deploy, so no backfill is needed. `infra/sql/init.sql` already
-mirrors 019.
+Existing `monthly_cost_used_usd` values were never reset (lifetime sums). The migration
+sets `lock_timeout = '5s'` and then backfills, once and idempotently (guard
+`monthly_reset_at IS NULL`), every key that has a `monthly_cost_cap_usd`: its counter becomes
+the real spend of the current UTC month from `usage_log` (`created_at` is naive UTC), so a
+capped key keeps its month-to-date spend. Keys without a monthly cap keep a NULL stamp and
+read as 0. `infra/sql/init.sql` mirrors the DDL of 019 only (the backfill is data, not schema).
 
 Migration 018 (agent session leases) adds `agent_session_leases`. Apply it BEFORE deploying
 code that takes session leases (the agent worker lane); the agent worker itself connects only

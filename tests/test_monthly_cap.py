@@ -123,6 +123,27 @@ async def test_monthly_cap_zero_admits_free_tier_and_registry_free():
     await reserve_cost(api_key=free, project=_project(monthly=0.0), estimated_cost=0.0)
 
 
+async def test_blocked_window_is_reported():
+    """CostGuardError.window says which budget blocked (drives the retry hint)."""
+    from aibroker.services.llm_service import cap_message
+
+    mk = await _add_key(monthly_cost_cap_usd=1.0, monthly_cost_used_usd=1.0)
+    with pytest.raises(CostGuardError) as ei:
+        await reserve_cost(api_key=mk, project=_project(), estimated_cost=0.1)
+    assert ei.value.window == "monthly"
+    with pytest.raises(CostGuardError) as ei:
+        await reserve_cost(api_key=await _add_key(), project=_project(monthly=0.0),
+                           estimated_cost=1.0)
+    assert (ei.value.kind, ei.value.window) == ("project", "monthly")
+    dk = await _add_key(daily_cost_cap_usd=1.0, daily_cost_used_usd=1.0)
+    with pytest.raises(CostGuardError) as ei:
+        await reserve_cost(api_key=dk, project=_project(), estimated_cost=0.1)
+    assert ei.value.window == "daily"
+    assert cap_message("daily") == "daily budget cap reached — retry after 00:00 UTC"
+    assert cap_message("monthly").startswith("monthly budget cap reached")
+    assert "1st of next month" in cap_message("monthly")
+
+
 async def test_monthly_used_resets_at_month_boundary():
     key = await _add_key(monthly_cost_cap_usd=1.0, monthly_cost_used_usd=999.0,
                          monthly_reset_at=month_start_utc() - timedelta(days=31))

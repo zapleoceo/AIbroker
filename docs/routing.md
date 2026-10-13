@@ -1434,14 +1434,16 @@ whatever its tier. Project level: a live SUM over `usage_log` since the start of
 month (step 2b of `reserve_cost`); cap 0 = free providers only, the same rule as daily.
 There is no global monthly cap. The monitor's paid-key usability check
 (`monitor._paid_key_usable`) honours the monthly cap too. Existing `monthly_cost_used_usd`
-values were never reset, so they restart from 0 for the current month on first touch
-after deploy. Migration 019 (`api_keys.monthly_reset_at`) must be applied before deploy,
+values were never reset; migration 019 backfills every key that has a monthly cap with
+its real spend of the current UTC month, so the counter does not restart from 0. Other
+keys read as 0 on first touch. Migration 019 (`api_keys.monthly_reset_at`) must be applied before deploy,
 see **Schema migrations** in [deploy-ops.md](deploy-ops.md).
 
-**Known gap: monthly blocks show the daily wording.** Any `CostGuardError` from either
-monthly window maps to `daily budget cap reached — retry after 00:00 UTC`
-(`llm_service._CAP_MESSAGE`). That retry hint is wrong for a monthly cap, whose window
-resets on the 1st of the next UTC month. Fixing the message is a separate change.
+**Which window blocked.** `CostGuardError.window` is `"daily"` or `"monthly"` (global is
+daily). `llm_service.cap_message(window)` turns it into the client text: daily is
+`daily budget cap reached — retry after 00:00 UTC`, monthly is `monthly budget cap
+reached — retry after the 1st of next month, 00:00 UTC`. `run_chat` returns
+`BUDGET_EXHAUSTED` or `BUDGET_EXHAUSTED_MONTHLY` accordingly.
 
 **Real reservation pattern (2026-07-03).** `run_chat` estimates the
 worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —

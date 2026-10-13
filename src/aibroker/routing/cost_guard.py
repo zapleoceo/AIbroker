@@ -23,8 +23,12 @@ from aibroker.routing.selector import (
 class CostGuardError(Exception):
     """Raised when a cap would be exceeded by the attempted call."""
 
-    def __init__(self, kind: str, limit: float, used: float, attempted: float):
+    def __init__(self, kind: str, limit: float, used: float, attempted: float,
+                 window: str = "daily"):
         self.kind = kind
+        # Which budget window blocked: "daily" (resets 00:00 UTC) or "monthly"
+        # (resets on the 1st of the next UTC month). Drives the client retry hint.
+        self.window = window
         self.limit = limit
         self.used = used
         self.attempted = attempted
@@ -117,9 +121,11 @@ async def reserve_cost(
                                  estimated_cost)
         if api_key.monthly_cost_cap_usd == 0:
             raise CostGuardError("api_key", 0.0, api_key.monthly_cost_used_usd or 0.0,
-                                 estimated_cost)
-        if project.daily_cost_cap_usd == 0 or project.monthly_cost_cap_usd == 0:
+                                 estimated_cost, window="monthly")
+        if project.daily_cost_cap_usd == 0:
             raise CostGuardError("project", 0.0, 0.0, estimated_cost)
+        if project.monthly_cost_cap_usd == 0:
+            raise CostGuardError("project", 0.0, 0.0, estimated_cost, window="monthly")
 
     # 1. per-key — atomic reserve-and-admit in ONE statement covering every capped
     # window (daily and/or monthly): all counters are debited together or none is.
@@ -154,12 +160,14 @@ async def reserve_cost(
                 > api_key.monthly_cost_cap_usd
             ):
                 raise CostGuardError("api_key", api_key.monthly_cost_cap_usd,
-                                     api_key.monthly_cost_used_usd, estimated_cost)
+                                     api_key.monthly_cost_used_usd, estimated_cost,
+                                     window="monthly")
             raise CostGuardError(
                 "api_key",
                 api_key.daily_cost_cap_usd if key_daily else api_key.monthly_cost_cap_usd,
                 api_key.daily_cost_used_usd if key_daily else api_key.monthly_cost_used_usd,
                 estimated_cost,
+                window="daily" if key_daily else "monthly",
             )
 
     # 2. per-project
@@ -208,7 +216,8 @@ async def reserve_cost(
         if m_used + estimated_cost > project.monthly_cost_cap_usd:
             await release_cost(api_key=api_key, estimated_cost=estimated_cost)
             raise CostGuardError(
-                "project", project.monthly_cost_cap_usd, float(m_used), estimated_cost
+                "project", project.monthly_cost_cap_usd, float(m_used), estimated_cost,
+                window="monthly",
             )
 
     # 3. global
@@ -234,6 +243,10 @@ async def release_cost(*, api_key: ApiKeyRow, estimated_cost: float) -> None:
     instead: a paid key with NO per-key cap but a project/global cap took no
     reservation yet got refunded on a project/global block, corrupting its daily
     counter. See fix 2026-07-10.)"""
+    # TODO(monthly-reset): a refund that lands after a UTC day/month boundary subtracts
+    # from the NEW window's counter (GREATEST(0, ...) is not checked against the
+    # daily_reset_at / monthly_reset_at stamp), so it can under-count by <= one
+    # estimate; the in-flight window is milliseconds, so it was left as is.
     key_daily = api_key.daily_cost_cap_usd is not None
     key_monthly = api_key.monthly_cost_cap_usd is not None
     if not (key_daily or key_monthly) or estimated_cost <= 0:
