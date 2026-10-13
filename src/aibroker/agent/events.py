@@ -95,6 +95,7 @@ class RunWaitingQuota(_Event):
     not_before: str
     attempt: int
     reset_reported: bool = False
+    reason: str = ""      # the CLI's limit wording (<=300 chars), kept for a deadline expiry
 
 
 class BillingAttested(_Event):

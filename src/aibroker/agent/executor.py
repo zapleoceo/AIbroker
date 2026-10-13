@@ -206,7 +206,8 @@ async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFaile
     """Quota exhausted = WAIT: requeue until the reported reset time (+5 s), else
     exponential backoff capped at quota_backoff_cap_s. Same account, same subscription
     route - never API/OpenRouter, never another account. Past the run's overall
-    deadline it ends `run.timed_out` instead."""
+    deadline it ends `run.failed` (quota_exhausted) carrying the CLI's wording and reset time -
+    still no fallback, no retry on another account."""
     now = _now()
     reset = None
     if failed.reset_at:
@@ -217,9 +218,13 @@ async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFaile
     not_before = now + timedelta(seconds=delay)
     deadline = job.created_at + timedelta(seconds=float(job.request.get("deadline_s", 21600)))
     if not_before >= deadline:
-        return await _finish(run.run_id, ev.RunTimedOut(limit="deadline"), totals, mode, lease)
+        when = f"reset {failed.reset_at}" if reset else f"next retry {not_before.isoformat()}Z"
+        return await _finish(run.run_id, ev.RunFailed(
+            error_class="quota_exhausted", reset_at=failed.reset_at,
+            message=f"{failed.message} ({when} is past the job deadline)"), totals, mode, lease)
     await record_usage(run.run_id, totals, mode, lease)
-    await park_for_quota(run.run_id, not_before, reset_reported=reset is not None, lease=lease)
+    await park_for_quota(run.run_id, not_before, reset_reported=reset is not None, lease=lease,
+                         reason=failed.message[:300])
     return "waiting_quota"
 
 
