@@ -123,6 +123,29 @@ callers poll their result within seconds.
 Tune per environment with `JOB_RETENTION_DAYS` / `JOB_RETENTION_BATCH` /
 `JOB_RETENTION_EVERY_TICKS`.
 
+## Graceful shutdown returns in-flight jobs (2026-10-13)
+
+A deploy recreates `aibroker-api`. Before this, a job it was executing stayed
+`running` after the SIGTERM with no executor until the 25-minute stale reclaim
+(2026-10-13: vision jobs 552804/552805 sat 22 min after a restart).
+
+On a graceful SIGTERM the dispatcher waits up to `JOB_SHUTDOWN_GRACE_S` (default
+**5 s**, clamped to a **max of 8 s**, below the 10 s shutdown wait) for the jobs it
+has in flight. Jobs still running after that are cancelled, and every job this
+process claimed and has not finished is returned to the queue by
+`release_claimed_jobs()`: `running` → `pending`, `started_at` cleared,
+`run_after = now`, `retry_count` unchanged (an operator restart is not a failed
+attempt). The release is guarded by the claimed `started_at`, so a job that
+finished, or was re-claimed elsewhere, is left alone. Released jobs are picked up
+within seconds; each one logs an INFO line `shutdown: job N returned to pending`.
+
+The 25-minute stale reclaim now covers only hard crashes (SIGKILL, OOM, host loss).
+
+Residual risk: a paid provider call that completed but whose finish had not
+committed within the grace is re-run, so double billing is possible in that
+narrow window. Agent jobs are untouched; they are executed by agent workers, not
+by this dispatcher.
+
 ## Schema migrations
 
 Applied via `psql` directly against the running container — there is no
