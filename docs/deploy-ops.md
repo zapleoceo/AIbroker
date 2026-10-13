@@ -230,6 +230,13 @@ was at #62.
   `worker_lost` by the reaper. Deploy only when no agent runs are active.
 - **Gates:** the drift gate and the health gate cover the active workers. The workers
   have no compose healthcheck, so an active worker must only be `running`.
+- **Fail closed:** the running-workers probe and the health-gate `ps` output are
+  captured before use. A failing docker/compose query aborts the deploy instead of
+  being read as "no workers".
+- **One-offs:** the health gate skips leftover `docker compose run` containers
+  (names containing `-run-`).
+- **`AIBROKER_DEPLOY_DIR`** (default `/var/www/aibroker`) exists only so tests can
+  run the script. The forced-command SSH cannot set it, so prod always uses the default.
 - `tests/test_deploy_script_profiles.py` guards that every profiled service is listed
   in the script, that the default build runs before the agent build, and that the
   health gate uses `ps -a`.
