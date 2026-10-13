@@ -147,13 +147,16 @@ async def take_result(run_id: int, call_id: str,
 
 
 async def clear_pending_call(run_id: int) -> None:
-    """Withdraw an unanswered call when its worker stops without a terminal event (lost lease,
-    crash), so poll stops advertising it and submit_result refuses a result nobody will read."""
+    """On lease loss, withdraw a still-waiting call so poll stops advertising it and
+    submit_result refuses a result nobody will read. A `ready` call is kept: its result was
+    already acknowledged with 202 and an identical retry must stay idempotent. A crash needs
+    no call here: the terminal write in runs.py replaces result_meta."""
     async with get_session() as s:
         job = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == run_id)
                                .with_for_update())).scalar_one_or_none()
         if job is None or job.status != "running":
             return
         meta = dict(job.result_meta or {})
-        if meta.pop("client_tool", None) is not None:
+        if (meta.get("client_tool") or {}).get("state") == "waiting":
+            del meta["client_tool"]
             job.result_meta = meta

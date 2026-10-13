@@ -149,7 +149,7 @@ class _Idle:
         return None
 
 
-async def test_submit_after_run_ended_is_refused():
+async def test_lease_loss_withdraws_pending_call():
     job_id = await _job()
     await publish_call(job_id, "c1", "lookup", {"id": 3})
     lease = Lease("owner", "s", job_id, 1)
@@ -192,3 +192,17 @@ async def test_cancel_during_tool_wait_yields_cancelled_outcome(monkeypatch, tmp
     cfg = replace(exec_config_from_settings(), cancel_poll_s=60.0)   # only the tool wait can notice
     terminal, _ = await _stream(job_id, Adapter(home), spec, {}, 60.0, 60.0, cfg)
     assert ev.OUTCOME_BY_TYPE[terminal.type] == "cancelled"
+
+
+async def test_lease_loss_keeps_accepted_ready_result():
+    job_id = await _job()
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    assert await submit_result(job_id, 91, "c1", True, "ok") is True
+    lease = Lease("owner", "s", job_id, 1)
+    lease.lost.set()
+    spec = AgentRunSpec(run_id=job_id, capability="agent:codex", prompt="p",
+                        workspace=".", account_id="owner")
+    with pytest.raises(StaleLease):
+        await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
+    assert await submit_result(job_id, 91, "c1", True, "ok") is False   # idempotent retry
+    assert await take_result(job_id, "c1") == (True, "ok")
