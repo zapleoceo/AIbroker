@@ -341,7 +341,7 @@ relaxation is required.
 | `agent-worker` (Claude) | 1 | 1g | 256 | unchanged |
 | `agent-worker-codex` | 2 | 2g | 512 | 1024m (was 512m) |
 
-`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `3`)
+`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `2`)
 sets parallel Codex runs per container. The Codex limits above are sized for 2 (measured 2026-10-13: one run peaks at about
 +140 MiB RSS over a 187 MiB idle worker, about 50 pids, about one core; the host has 4 vCPU and
 ~3.2 GB available). Raise it only
