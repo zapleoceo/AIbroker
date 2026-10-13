@@ -9,6 +9,7 @@ binds the engine to it and the Postgres-only tests run for real.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 
 # Tests NEVER read DATABASE_URL / DIRECT_DATABASE_URL from the environment: on
@@ -50,6 +51,7 @@ isolate_env(os.environ, tempfile.mkdtemp(prefix="aib-alert-state-"))
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -92,9 +94,33 @@ def _reset_affinity():
     affinity.reset()
 
 
+_SQLITE_TEMPLATE: list = []
+
+
+def _sqlite_template(tmp_path_factory):
+    """Schema built once per run into a template file (WAL mode persists in its header);
+    each test copies it instead of re-running create_all."""
+    if not _SQLITE_TEMPLATE:
+        import sqlite3
+
+        path = tmp_path_factory.mktemp("sqlite-template") / "template.db"
+        sync_engine = create_engine(f"sqlite:///{path.as_posix()}")
+        Base.metadata.create_all(sync_engine)
+        sync_engine.dispose()
+        con = sqlite3.connect(path)
+        con.execute("PRAGMA journal_mode=WAL")  # readers don't block the writer
+        con.close()
+        _SQLITE_TEMPLATE.append(path)
+    return _SQLITE_TEMPLATE[0]
+
+
 @pytest_asyncio.fixture(autouse=True)
-async def db():
+async def db(tmp_path_factory):
     """Fresh schema per test. Postgres when DATABASE_URL targets it, else SQLite.
+
+    SQLite uses a per-test temporary database FILE with NullPool, so every session gets its own
+    connection exactly like Postgres (a shared `:memory:` connection let concurrent sessions
+    interleave transactions: a rollback in one undid another's flushed work).
 
     On Postgres we use NullPool: the sync Starlette TestClient runs requests in
     its own event-loop portal, and a pooled asyncpg connection bound to the
@@ -104,7 +130,19 @@ async def db():
     if _IS_PG:
         e = create_async_engine(_DB_URL, poolclass=NullPool)
     else:
-        e = create_async_engine("sqlite+aiosqlite:///:memory:")
+        db_file = tmp_path_factory.mktemp("sqlite") / "test.db"
+        shutil.copyfile(_sqlite_template(tmp_path_factory), db_file)
+        e = create_async_engine(
+            f"sqlite+aiosqlite:///{db_file.as_posix()}",
+            poolclass=NullPool,
+            connect_args={"timeout": 30},
+        )
+
+        @event.listens_for(e.sync_engine, "connect")
+        def _sqlite_pragmas(dbapi_conn, _record):
+            # FK enforcement stays at SQLite's default (off), exactly as with :memory:.
+            dbapi_conn.execute("PRAGMA synchronous=OFF")  # throwaway file: skip fsync
+
     async with e.begin() as conn:
         if _IS_PG:
             from sqlalchemy import text
@@ -114,7 +152,7 @@ async def db():
             )
             await _allow_ddl(conn)
             await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(Base.metadata.create_all)
     engine_mod._engine = e
     engine_mod._sessionmaker = async_sessionmaker(e, expire_on_commit=False)
     yield
@@ -123,6 +161,8 @@ async def db():
             await _allow_ddl(conn)
             await conn.run_sync(Base.metadata.drop_all)
     await e.dispose()
+    if not _IS_PG:
+        shutil.rmtree(db_file.parent, ignore_errors=True)
     engine_mod._engine = None
     engine_mod._sessionmaker = None
 

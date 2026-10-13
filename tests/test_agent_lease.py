@@ -481,7 +481,6 @@ async def test_heartbeat_sets_lost_when_the_renewal_is_refused():
 # and the executor's event writes interleave their transactions on it and collide on the
 # event seq (CI: IntegrityError UNIQUE run_id, seq). Postgres gives each session its own
 # connection; the CI integration job runs this there.
-@pytest.mark.skipif(ON_SQLITE, reason="heartbeat and event writes share SQLite's single connection")
 async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
     rid = await _resume_run()
     fake = FakeAgentCLI([ev.MessageDelta(text="working"), ("hang",)])
@@ -509,7 +508,6 @@ async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
 
 # Same single-shared-connection effect as above: a wall-clock window around the TTL on SQLite
 # depends on heartbeat/event write interleaving; the integration job runs it on Postgres.
-@pytest.mark.skipif(ON_SQLITE, reason="heartbeat and event writes share SQLite's single connection")
 @pytest.mark.parametrize("failure", ["raises", "hangs"])
 async def test_db_errors_past_the_ttl_stop_the_cli(tmp_path, monkeypatch, failure):
     from aibroker.agent import lock as lock_mod
