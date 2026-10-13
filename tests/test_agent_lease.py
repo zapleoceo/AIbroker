@@ -477,6 +477,11 @@ async def test_heartbeat_sets_lost_when_the_renewal_is_refused():
         assert await _wait_until(lease.lost.is_set, 1.0)
 
 
+# The in-memory SQLite test DB has ONE shared connection: the lease heartbeat (every 0.1 s)
+# and the executor's event writes interleave their transactions on it and collide on the
+# event seq (CI: IntegrityError UNIQUE run_id, seq). Postgres gives each session its own
+# connection; the CI integration job runs this there.
+@pytest.mark.skipif(ON_SQLITE, reason="heartbeat and event writes share SQLite's single connection")
 async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
     rid = await _resume_run()
     fake = FakeAgentCLI([ev.MessageDelta(text="working"), ("hang",)])
