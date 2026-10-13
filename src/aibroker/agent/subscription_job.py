@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
+from referencing import Registry
 
 
 def _has_ref(value: Any) -> bool:
@@ -49,12 +51,27 @@ def response_format_problem(response_format: dict[str, Any] | None) -> str | Non
     return "unsupported_for_subscription_model: response_format type"
 
 
+@lru_cache(maxsize=128)
+def _checked_validator(schema_json: str) -> Draft202012Validator | None:
+    """Checked validator for a schema (keyed on its canonical JSON), or None when the
+    schema is unusable (invalid, or a $ref it cannot resolve). The empty Registry
+    means NO retrieval: a remote $ref is never fetched (SSRF), it just fails to
+    resolve at validation time. The None verdict is cached too."""
+    try:
+        schema = json.loads(schema_json)
+        Draft202012Validator.check_schema(schema)
+        return Draft202012Validator(schema, registry=Registry())
+    except Exception:  # noqa: BLE001 - unusable schema: parse-only, never a crash
+        return None
+
+
 def output_problem(text: str, response_format: dict[str, Any] | None) -> str | None:
     """The ONE structured-output check, shared by the subscription path and the API
     chat gate (services/llm_service.py): json_object must be a JSON object,
     json_schema must validate. A schema the broker cannot evaluate (invalid, or
-    unresolvable $ref) degrades to parse-only rather than failing every answer -
-    the caller's schema bug must not make a healthy provider look broken."""
+    unresolvable $ref; remote refs are never fetched) degrades to parse-only rather
+    than failing every answer - the caller's schema bug must not make a healthy
+    provider look broken."""
     if not response_format:
         return None
     try:
@@ -64,13 +81,21 @@ def output_problem(text: str, response_format: dict[str, Any] | None) -> str | N
     if response_format["type"] == "json_object" and not isinstance(value, dict):
         return "InvalidJSON: expected a JSON object"
     if response_format["type"] == "json_schema":
+        wrapper = response_format.get("json_schema")
+        schema = wrapper.get("schema") if isinstance(wrapper, dict) else None
+        if not isinstance(schema, dict):
+            return None
         try:
-            schema = response_format["json_schema"]["schema"]
-            Draft202012Validator.check_schema(schema)
-            Draft202012Validator(schema).validate(value)
+            validator = _checked_validator(json.dumps(schema, sort_keys=True))
+        except (TypeError, ValueError):
+            return None
+        if validator is None:
+            return None
+        try:
+            validator.validate(value)
         except ValidationError:
             return "InvalidJSON: response does not match json_schema"
-        except Exception:  # noqa: BLE001 - unusable schema/ref: parse-only, never a crash
+        except Exception:  # noqa: BLE001 - unresolvable $ref at validation: parse-only
             return None
     return None
 

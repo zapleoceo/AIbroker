@@ -96,3 +96,66 @@ async def test_downgraded_provider_schema_violation_walks_to_next(monkeypatch):
     )
     assert picks.count("cerebras") == 1 and "gemini" in picks
     assert out.text == '{"answer": 3}'
+
+
+def _rf(schema):
+    return {"type": "json_schema", "json_schema": {"schema": schema}}
+
+
+def test_remote_ref_never_touches_network(monkeypatch):
+    import socket
+
+    from aibroker.agent import subscription_job as sj
+    sj._checked_validator.cache_clear()
+    calls: list = []
+
+    def boom(*a, **k):
+        calls.append(a)
+        raise AssertionError("network touched")
+
+    monkeypatch.setattr(socket, "create_connection", boom)
+    monkeypatch.setattr(socket.socket, "connect", boom)
+    for ref in ("http://169.254.169.254/latest/meta-data/", "https://example.invalid/s.json"):
+        for schema in ({"$ref": ref}, {"type": "object", "properties": {"a": {"$ref": ref}}}):
+            assert sj.output_problem('{"a": 1}', _rf(schema)) is None  # parse-only
+            assert sj.output_problem("nope", _rf(schema)).startswith("InvalidJSON")
+    assert calls == []
+
+
+def test_local_defs_ref_still_validates():
+    from aibroker.agent import subscription_job as sj
+    schema = {"$defs": {"n": {"type": "integer"}}, "type": "object",
+              "properties": {"a": {"$ref": "#/$defs/n"}}}
+    assert sj.output_problem('{"a": 1}', _rf(schema)) is None
+    assert sj.output_problem('{"a": "x"}', _rf(schema)).startswith("InvalidJSON")
+
+
+def test_json_schema_wrapper_without_schema_is_parse_only():
+    from aibroker.agent import subscription_job as sj
+    for rf in ({"type": "json_schema"}, {"type": "json_schema", "json_schema": {}},
+               {"type": "json_schema", "json_schema": {"schema": "x"}}):
+        assert sj.output_problem("[1]", rf) is None
+        assert sj.output_problem("nope", rf).startswith("InvalidJSON")
+
+
+def test_checked_schema_is_cached(monkeypatch):
+    from jsonschema import Draft202012Validator
+
+    from aibroker.agent import subscription_job as sj
+    sj._checked_validator.cache_clear()
+    n = {"c": 0}
+    real = Draft202012Validator.check_schema
+
+    def spy(schema, *a, **k):
+        n["c"] += 1
+        return real(schema, *a, **k)
+
+    monkeypatch.setattr(Draft202012Validator, "check_schema", spy)
+    rf = _rf({"type": "object", "properties": {"cached": {"type": "integer"}}})
+    sj.output_problem('{"cached": 1}', rf)
+    sj.output_problem('{"cached": 2}', rf)
+    assert n["c"] == 1
+    bad = _rf({"type": "no-such-type"})
+    sj.output_problem("{}", bad)
+    sj.output_problem("{}", bad)
+    assert n["c"] == 2  # the unusable verdict is cached too
