@@ -1,5 +1,6 @@
--- Apply BEFORE deploying the code that reads deep_jobs (every ORM select of DeepJobRow lists these columns):
---   docker exec -i aibroker-postgres psql -U aibroker aibroker \
+-- Order (docs/deploy-ops.md): deploy PR #76 first (explicit claim column lists), THEN apply this
+-- file, check the indexes are valid, THEN deploy the code that reads these columns:
+--   docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
 --     < /var/www/aibroker/infra/sql/migrations/020_deep_jobs_trace_idempotency.sql
 -- Run it with `psql -v ON_ERROR_STOP=1 -f` (autocommit per statement), NOT `psql -1` / a wrapping
 -- transaction: the two CREATE INDEX CONCURRENTLY statements cannot run inside one. ON_ERROR_STOP makes a
