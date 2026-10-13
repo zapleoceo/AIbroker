@@ -252,7 +252,8 @@ class DeepJobRow(Base):
     trace_id: Mapped[str | None] = mapped_column(String(128))
     labels: Mapped[dict[str, str] | None] = mapped_column(JSONB)
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
-    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_expr.false(),
+                                                   nullable=False)
 
     __table_args__ = (
         Index("ux_deep_jobs_idempotency", "project_id", "idempotency_key", unique=True,
