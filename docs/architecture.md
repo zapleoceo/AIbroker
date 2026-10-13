@@ -314,7 +314,9 @@ broker finishes its fallback chain). See `docs/api.md`.
   `submit_job_ex` -> `SubmitOutcome`, `IdempotencyConflict`); `services/job_control.py`
   (`cancel_job` -> `CancelResult`, `cancel_matching` -> `BulkCancel`, `cancel_flag`,
   `AgentCancelForbidden`); `routes/jobs_control.py` (`jobs_cancel`, `jobs_cancel_bulk`,
-  request/response models `BulkCancelRequest`, `CancelResponse`, `BulkCancelResponse`).
+  request/response models `BulkCancelRequest`, `CancelResponse`, `BulkCancelResponse`;
+  `known_job_id` = the route-level replay lookup before pin validation and admission,
+  `idempotency_conflict` = the 409 `idempotency_key_conflict` body with `existing_job_id`).
 - `drain_once()` is one deterministic pass (claim + run to completion) — what
   the loop repeats, and what tests drive directly.
 - Queue state lives on `deep_jobs` (migrations 008 `capability`, 009
