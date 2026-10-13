@@ -1,17 +1,25 @@
 """Durable client tool handoff: ownership, schema, replay, and terminal state."""
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from test_agent_codex_app_server import TOOL, _Adapter, _Process
 
+from aibroker.agent import events as ev
+from aibroker.agent.adapter import AgentRunSpec
 from aibroker.agent.client_tools import (
     ClientToolConflict,
     publish_call,
     submit_result,
     take_result,
 )
+from aibroker.agent.codex_app_server import run_tool_turn
+from aibroker.agent.executor import _stream, exec_config_from_settings
+from aibroker.agent.lock import Lease, StaleLease
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
@@ -101,3 +109,86 @@ def test_tool_canary_is_exact_project_and_model(monkeypatch):
     assert not subscriptions.subscription_tool_model_canary("codex-sub/gpt-6-luna", 12)
     settings.AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS = "12,12"
     assert not subscriptions.subscription_tool_model_canary("codex-sub/gpt-6.1-sol", 12)
+
+
+async def _expire(job_id: int) -> None:
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, job_id)
+        meta = dict(row.result_meta)
+        meta["client_tool"] = {**meta["client_tool"], "deadline": "2000-01-01T00:00:00"}
+        row.result_meta = meta
+
+
+async def test_take_result_returns_ready_result_after_deadline():
+    job_id = await _job()
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    assert await submit_result(job_id, 91, "c1", True, "ok") is True
+    await _expire(job_id)       # the worker's ~1s poll lands after the deadline
+    assert await take_result(job_id, "c1") == (True, "ok")
+
+
+async def test_poll_hides_expired_pending_call():
+    job_id = await _job()
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    await _expire(job_id)
+    async with get_session() as s:
+        response = proxy._job_response(await s.get(DeepJobRow, job_id))
+    assert response.status == "pending"
+    assert response.tool_calls is None and response.finish_reason is None
+    assert response.poll_after_s is not None
+
+
+class _Idle:
+    """Adapter that never emits: the run is parked in a tool wait when its lease is lost."""
+
+    async def start(self, spec):
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    async def cancel(self):
+        return None
+
+
+async def test_submit_after_run_ended_is_refused():
+    job_id = await _job()
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    lease = Lease("owner", "s", job_id, 1)
+    lease.lost.set()
+    spec = AgentRunSpec(run_id=job_id, capability="agent:codex", prompt="p",
+                        workspace=".", account_id="owner")
+    with pytest.raises(StaleLease):
+        await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
+    async with get_session() as s:
+        assert proxy._job_response(await s.get(DeepJobRow, job_id)).tool_calls is None
+    with pytest.raises(ClientToolConflict):
+        await submit_result(job_id, 91, "c1", True, "ok")
+
+
+async def test_cancel_during_tool_wait_yields_cancelled_outcome(monkeypatch, tmp_path):
+    job_id = await _job()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    spec = AgentRunSpec(run_id=job_id, capability="agent:codex", prompt="Find id 7",
+                        workspace=str(tmp_path), account_id="owner", model="gpt-6.1-sol",
+                        client_tools=[TOOL], tool_choice="required")
+
+    async def spawn(*args, **kwargs):
+        return _Process()
+
+    async def publish_then_cancel(run_id, call_id, name, arguments, fences):
+        await publish_call(run_id, call_id, name, arguments, fences)
+        async with get_session() as s:
+            (await s.get(AgentRunRow, run_id)).cancel_requested = True
+
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.publish_call", publish_then_cancel)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides",
+                        lambda home: [])   # the POSIX CODEX_HOME check is not under test
+
+    class Adapter(_Adapter):
+        def start(self, run):
+            return run_tool_turn(self, run)
+
+    cfg = replace(exec_config_from_settings(), cancel_poll_s=60.0)   # only the tool wait can notice
+    terminal, _ = await _stream(job_id, Adapter(home), spec, {}, 60.0, 60.0, cfg)
+    assert ev.OUTCOME_BY_TYPE[terminal.type] == "cancelled"
