@@ -159,6 +159,9 @@ def supports_tools(spec: ModelSpec) -> bool | None:
     if spec.provider == "codex-sub":
         return (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
                 and subscription_tool_model_verified(spec.id))
+    if spec.provider == "claude-sub":
+        return (get_settings().AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED
+                and subscription_tool_model_verified(spec.id))
     if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
             or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):
         return False

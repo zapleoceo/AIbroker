@@ -4,7 +4,7 @@ Run the official **Codex CLI** / **Claude Code CLI** as workers driven by the br
 Status: the universal jobs API, Claude and Codex CLI adapters, and subscription
 catalog routes are implemented. The owner-enabled Codex route has completed
 live text and generated-PNG requests through the production Broker and
-Orchestra. Input vision and client-controlled subscription tools remain
+Orchestra. Input vision and client-controlled subscription tools (Codex and Claude) remain
 separate rollout gates; see `docs/subscription-tool-loop.md`.
 
 `GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
@@ -786,6 +786,23 @@ the API hides them after the 1-hour file TTL. A failing export never fails the r
 receives as an actual image - not a description. Direct worker run `551063`
 met the PNG generation and export criterion. Delivery through the universal
 HTTP route and Orchestra remains to be checked by its client.
+
+## Claude client tools (MCP bridge files)
+
+When a `claude-sub/*` job carries `tools` and the Claude tool gate allows its exact model
+(`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` default `false`,
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` default `"[]"`), `ClaudeCLI.start` hands the run to
+`claude_tools.run_claude_tool_turn`. The run workspace gets a `.aibroker-mcp/` directory (mode 0700,
+removed with the workspace) holding `tools.json`, `mcp.json` (`--mcp-config`; only `command` and `args`,
+no environment, no secrets) and the relay socket `b.sock` (0600). `sun_path` allows 108 bytes, so a
+socket path over 100 characters (`MAX_SOCKET_PATH`) fails the run as `tool_invalid`. The argv carries
+no built-in tool: `--tools ""`, `--allowedTools=mcp__broker__*`, `--disallowedTools` with the usual
+scoped denies plus every built-in tool name (`BUILTIN_DENY`); `ToolSearch` is deliberately not denied.
+`allowed_tools` and attachments are refused. `ToolRelay`, `announce`, `write_bridge_files`,
+`mcp_tool_list` and `run_claude_tool_turn` are in `aibroker.agent.claude_tools`; the stdio shim is
+`aibroker.agent.mcp_bridge`. Call ids, invalid-call caps and failure classes are described in
+[subscription tool loop](subscription-tool-loop.md#claude-client-tools-mcp-bridge). The executor
+re-checks the gate with `subscription_tools_available` and fails a queued run `route_disabled`.
 
 ## Not done yet
 

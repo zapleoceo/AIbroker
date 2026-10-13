@@ -45,6 +45,19 @@ from aibroker.agent.tools import disallowed_tools, tool_names, validate_tools
 Probe = Callable[[list[str], Mapping[str, str]], Awaitable[str]]
 
 ATTACHMENT_READ = "Read(inputs/**)"
+MCP_ALLOW = "mcp__broker__*"     # server name "broker" is fixed in claude_tools.SERVER_NAME
+# Bare names remove a tool from the model's context; belt and braces next to `--tools ""`.
+# Names from code.claude.com/docs/en/tools-reference plus legacy ones (LS, NotebookRead, Task).
+# ToolSearch stays allowed: it may be the way the CLI loads the deferred mcp__broker__ tools.
+BUILTIN_DENY = (
+    "Bash", "PowerShell", "Monitor", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "NotebookRead", "Glob", "Grep", "LS", "LSP", "WebFetch", "WebSearch", "Agent", "Task",
+    "Skill", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskOutput",
+    "TaskStop", "Workflow", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+    "EnterWorktree", "ExitWorktree", "CronCreate", "CronDelete", "CronList", "SendMessage",
+    "ListAgents", "RemoteTrigger", "ScheduleWakeup", "PushNotification", "SendUserFile",
+    "SendFeedback", "Artifact", "ReadMcpResourceTool", "ListMcpResourcesTool",
+)
 CLI_ENV_KEYS = ("PATH", "HOME", "CLAUDE_CONFIG_DIR", "DISABLE_AUTOUPDATER", "LANG", "TMPDIR")
 
 
@@ -57,15 +70,20 @@ def cli_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def build_claude_argv(run: AgentRunSpec, binary: str = "claude",
-                      config_dir: str | None = None) -> list[str]:
+                      config_dir: str | None = None, mcp_config: str | None = None) -> list[str]:
     """`claude -p --output-format stream-json --verbose` with validated, `=`-joined options.
-    ValueError when a requested tool is not acceptable."""
+    ValueError when a requested tool is not acceptable. With `mcp_config` (client tools) the
+    broker MCP server is the ONLY tool source: no built-in tool, only `mcp__broker__*` allowed."""
     tools = list(run.allowed_tools)
     validate_tools(tools)
+    if mcp_config and tools:
+        raise ValueError("client tools exclude CLI tools")
     if run.attachments and ATTACHMENT_READ not in tools:
         tools.append(ATTACHMENT_READ)   # scoped: the CLI may open ONLY the attached files
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose",
             "--setting-sources=user", "--strict-mcp-config"]
+    if mcp_config:
+        argv += ["--mcp-config", mcp_config]
     # Restrict the built-in tool set itself to the requested ones (empty = no tools at all).
     argv += [f"--tools={','.join(tool_names(tools))}"] if tools else ["--tools", ""]
     if run.model:
@@ -74,7 +92,10 @@ def build_claude_argv(run: AgentRunSpec, binary: str = "claude",
         argv.append(f"--resume={run.session_id}")
     if tools:
         argv.append("--allowedTools=" + ",".join(tools))
-    argv.append("--disallowedTools=" + ",".join(disallowed_tools(config_dir)))
+    elif mcp_config:
+        argv.append(f"--allowedTools={MCP_ALLOW}")
+    denied = disallowed_tools(config_dir) + (list(BUILTIN_DENY) if mcp_config else [])
+    argv.append("--disallowedTools=" + ",".join(denied))
     return argv
 
 
@@ -187,6 +208,11 @@ class SubprocessCLI:
         except ValueError as exc:
             yield ev.RunFailed(error_class="tool_invalid", message=str(exc)[:500])
             return
+        async for item in self.exec_argv(argv, run):
+            yield item
+
+    async def exec_argv(self, argv: list[str], run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        """Spawn `argv` in its own process group and stream the parsed events."""
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=run.workspace, env=self.process_env(run),
@@ -233,6 +259,15 @@ class ClaudeCLI(SubprocessCLI):
 
     def stdin_payload(self, run: AgentRunSpec) -> str:
         return build_claude_prompt(run)
+
+    async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        if run.client_tools and run.tool_choice != "none":
+            from aibroker.agent.claude_tools import run_claude_tool_turn
+            stream = run_claude_tool_turn(self, run)
+        else:
+            stream = super().start(run)
+        async for item in stream:
+            yield item
 
     def preflight(self, run: AgentRunSpec) -> tuple[str, str] | None:
         problem = settings_problem(self._env.get("CLAUDE_CONFIG_DIR"), run.workspace)

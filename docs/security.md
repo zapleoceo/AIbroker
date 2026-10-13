@@ -99,6 +99,19 @@ If `X-Project-Key` leaks:
 - **No KMS** — `TOKEN_SECRET` is on disk. If someone roots the box, all keys can be decrypted.
 - **No PII redaction** in audit_log. Today we don't log message bodies — but if that changes, redact first.
 
+## Claude client tools: MCP bridge
+
+With `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` and a verified model, a `claude-sub/*` run spawns a per-run
+stdio MCP shim (`python -I -m aibroker.agent.mcp_bridge`, stdlib only; `-I` keeps the workspace off `sys.path`).
+The shim holds no credential and no database URL: `mcp.json` has only `command` and `args`. It relays each
+call over a Unix socket (`<workspace>/.aibroker-mcp/b.sock`, mode 0600 inside a 0700 directory removed with
+the workspace) to `ToolRelay` in the worker, which owns the database access and the session fence leases and
+applies the same schema check and limits as the Codex path (16 calls, 64 KiB, 300 s). The CLI environment stays
+the minimal `cli_env`. Every built-in tool is disabled (`--tools ""`, only `mcp__broker__*` allowed, built-in
+names denied), so a prompt-injected model can only call the caller's declared functions; the broker never
+executes them. Client results are withheld from the stored run events. Repeated schema-invalid calls
+end the run (3 rejected calls, or more than 16 calls in total).
+
 ## Site review hardening (2026-10-02)
 
 - **Security headers** on every response (`main._security_headers`, middleware; a header a route already set is kept): `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, `Strict-Transport-Security: max-age=31536000`. The CSP is deliberately `frame-ancestors` only — the pages use inline `<script>`/`<style>` and the Telegram login widget, so no `script-src`/`style-src`. HSTS carries no `includeSubDomains`/`preload`.

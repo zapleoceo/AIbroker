@@ -48,7 +48,7 @@ from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
     subscription_model_verified,
-    subscription_tool_model_canary,
+    subscription_tools_available,
 )
 from aibroker.routing import chain_for, scope_for
 from aibroker.services import (
@@ -645,11 +645,9 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
-        if body.tools and not (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
-                               and (catalog.supports_tools(subscription)
-                                    or subscription_tool_model_canary(subscription.id,
-                                                                      ctx.project.id))):
-            raise HTTPException(503, "Codex subscription client tools are not enabled for this project and model")
+        if body.tools and not subscription_tools_available(subscription.id, ctx.project.id):
+            vendor = "Claude" if subscription.provider == "claude-sub" else "Codex"
+            raise HTTPException(503, f"{vendor} subscription client tools are not enabled for this project and model")
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
         try:
             messages, attachments = subscription_messages(messages)

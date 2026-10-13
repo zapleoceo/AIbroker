@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS: str = "[]"
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS: str = ""
+    # Claude Code client tools through the broker-provided stdio MCP bridge; off until a live
+    # canary confirms the exact model id (ids like "claude-sub/claude-sonnet-5-5").
+    AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED: bool = False
+    AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS: str = "[]"
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

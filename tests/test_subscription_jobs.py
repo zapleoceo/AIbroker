@@ -152,22 +152,22 @@ async def test_jobs_subscription_pin_reuses_submit_shape_and_exact_cli_model(mon
 
 
 @pytest.mark.asyncio
-async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enqueue(monkeypatch):
+async def test_jobs_subscription_rejects_unsupported_images_and_gates_tools_before_enqueue(monkeypatch):
     create = AsyncMock()
     monkeypatch.setattr(proxy, "create_run", create)
     monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
     monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
-    for messages, tools in (
-        ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], None),
+    for messages, tools, status in (
+        ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], None, 400),
         ([{"role": "user", "content": "hi"}], [{"type": "function", "function": {
-            "name": "f", "description": "d", "parameters": {"type": "object"}}}]),
+            "name": "f", "description": "d", "parameters": {"type": "object"}}}], 503),
     ):
         body = proxy.ChatRequest.model_validate({"messages": messages,
                                                   "model": "claude-sub/claude-sonnet-5-5",
                                                   **({"tools": tools} if tools else {})})
         with pytest.raises(HTTPException) as exc:
             await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == status
     create.assert_not_awaited()
 
 

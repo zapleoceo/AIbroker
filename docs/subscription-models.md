@@ -38,7 +38,7 @@ Every catalog row now has a `job_request` field. Subscription rows report
 with `forwarded: false`: omit these fields, or send exactly those defaults.
 For example, `max_tokens: 16` fits the generic `ChatRequest` range but is
 rejected by the subscription route before enqueue. The same contract marks
-tools and tool history unsupported by default, and streaming unsupported. Codex input images are accepted
+tools and tool history unsupported by default (supported per exact model once its tool gate is enabled and the ID verified), and streaming unsupported. Codex input images are accepted
 only for separately verified vision model IDs. JSON schemas cannot contain
 references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
@@ -97,7 +97,12 @@ and `stream: true` are rejected before enqueue by default. The Codex App Server
 client-tool path can be enabled separately with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED` and advertised per exact ID with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS`; see
-[subscription tool loop](subscription-tool-loop.md). Claude still rejects them.
+[subscription tool loop](subscription-tool-loop.md). Claude has its own gate,
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` (default `false`) and
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` (default `"[]"`, ids like
+`"claude-sub/claude-sonnet-5-5"`); until both allow the exact ID, tools on a
+`claude-sub/*` pin answer `503` and the catalog reports `supports_tools: false`.
+When enabled they run through a broker MCP bridge with the same contract as Codex.
 Claude subscription jobs still reject image input and `vision`. A Codex model
 with separately verified vision accepts up to five embedded, single-frame PNG,
 JPEG, WebP, or GIF images, each at most 5 MiB,
