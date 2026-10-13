@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, text
 
 from aibroker.agent import codex_cli, executor
 from aibroker.agent import events as ev
@@ -24,7 +24,7 @@ from aibroker.agent.runs import create_run, list_events
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import DeepJobRow, ProjectRow
+from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 
 THREADS = ["123e4567-e89b-12d3-a456-426614174010", "123e4567-e89b-12d3-a456-426614174011"]
 SECRET = "SECRET-TOKEN-VALUE"
@@ -68,7 +68,7 @@ class _Codex(CodexCLI):
         return None
 
 
-async def _runs(n, base=9400):
+async def _runs(n, base=9400, *, timeout_s=30):
     ids = []
     for i in range(n):
         plain = generate_project_key()
@@ -78,8 +78,8 @@ async def _runs(n, base=9400):
                 project_key_prefix=plain[:12], allowed_scopes=[AGENT_SCOPE], is_active=True, notes=""))
         rid, _ = await create_run(
             project=SimpleNamespace(id=base + i), capability="agent:codex", prompt="p", task_id="t",
-            account_id="a", session_id=None, idempotency_key=None, wall_timeout_s=30,
-            idle_timeout_s=30, allowed_tools=[])
+            account_id="a", session_id=None, idempotency_key=None, wall_timeout_s=timeout_s,
+            idle_timeout_s=timeout_s, allowed_tools=[])
         async with get_session() as s:
             (await s.get(DeepJobRow, rid)).status = "running"
         ids.append(rid)
@@ -509,27 +509,43 @@ async def test_a_lost_startup_lease_during_startup_stops_the_cli(tmp_path, monke
 
 
 async def test_a_cli_error_before_any_model_event_is_stopped_before_the_gate_opens(tmp_path, monkeypatch):
-    """The CLI ends its own start-up with an error (e.g. a failed refresh) while the gate is held:
-    the executor still stops it and releases the gate only after that stop finished."""
+    """Run 1's CLI ends its own start-up with an error (e.g. a failed refresh) while it holds the
+    gate: the executor still stops it, and a waiting run 2 stays blocked until that stop finished."""
     home = tmp_path / "home"
     _auth(home)                                      # refresh due
-    (rid,) = await _runs(1, base=9520)
-    rig = _Rig(monkeypatch, [rid])
-    rig.stop_gate.clear()                            # the CLI's stop is blocked (TERM->KILL window)
+    ids = await _runs(2, base=9520)
+    rig = _Rig(monkeypatch, ids)
+    rig.stop_gate.clear()                            # run 1's stop is blocked (TERM->KILL window)
+    normal_start = SubprocessCLI.start
 
-    async def failing_start(sub_self, run):
+    async def start(sub_self, run):
+        if run.run_id != ids[0]:
+            async for item in normal_start(sub_self, run):
+                yield item
+            return
         rig.entered.append(run.run_id)
+        await rig.gates[ids[0]].wait()               # run 2 gets to wait first
         yield ev.SessionAssigned(session_id=THREADS[0])
         yield ev.RunFailed(error_class="cli_error", message="synthetic start-up error")
 
-    monkeypatch.setattr(SubprocessCLI, "start", failing_start)
+    monkeypatch.setattr(SubprocessCLI, "start", start)
     _register(home)
-    t = asyncio.create_task(execute_run(rid, _cfg(tmp_path, cancel_grace_s=30)))
-    await _until(rig.stop_started.is_set)            # stopped although the CLI ended by itself
-    assert rig.released == [] and rig.holder == rid  # the gate is still held during the stop
-    rig.stop_gate.set()
-    assert await asyncio.wait_for(t, 10) == "failed"
-    assert rig.released == [rid] and rig.stops == [rid]
+    cfg = _cfg(tmp_path, cancel_grace_s=30)
+    t1 = asyncio.create_task(execute_run(ids[0], cfg))
+    await _until(lambda: rig.entered == [ids[0]])
+    t2 = asyncio.create_task(execute_run(ids[1], cfg))
+    await _until(lambda: rig.attempts_by(ids[1]) >= 2)       # run 2 waits for the gate
+    rig.gates[ids[0]].set()                          # run 1's CLI fails by itself
+    await _until(rig.stop_started.is_set)            # ...and is stopped although it ended itself
+    n = rig.attempts_by(ids[1])
+    await _until(lambda: rig.attempts_by(ids[1]) >= n + 3)  # run 2 keeps being refused meanwhile
+    assert rig.released == [] and rig.holder == ids[0] and ids[1] not in rig.entered
+    rig.stop_gate.set()                              # the CLI is gone
+    assert await asyncio.wait_for(t1, 10) == "failed"
+    assert rig.released == [ids[0]]
+    await _until(lambda: ids[1] in rig.entered)      # only now run 2 starts
+    rig.release_all()
+    assert await asyncio.wait_for(t2, 10) == "completed"
 
 
 async def test_a_cancel_that_races_the_last_poll_at_the_cap_still_ends_cancelled(tmp_path, monkeypatch):
@@ -548,3 +564,57 @@ async def test_a_cancel_that_races_the_last_poll_at_the_cap_still_ends_cancelled
     cfg = _cfg(tmp_path, codex_auth_wait_s=0.0, session_busy_max=0)
     assert await execute_run(rid, cfg) == "cancelled"
     assert [e.type for e in await list_events(rid)] == ["run.cancelled"]
+
+
+async def test_the_old_60s_startup_cap_no_longer_releases_a_silent_gate(tmp_path, monkeypatch):
+    """Deterministic, no real waiting: a fake executor clock jumps 120 s past the old 60 s
+    codex_auth_startup_s cap while the CLI is still silent; the gate must stay held."""
+    home = tmp_path / "home"
+    _auth(home)                                      # refresh due
+    (rid,) = await _runs(1, base=9540, timeout_s=3600)   # idle/wall far beyond the jump
+    rig = _Rig(monkeypatch, [rid])
+    clock = {"offset": 0.0}
+    real_monotonic, real_time = executor.time.monotonic, executor.time.time
+    monkeypatch.setattr(executor, "time", SimpleNamespace(
+        monotonic=lambda: real_monotonic() + clock["offset"], time=real_time))
+    polls: list[float] = []
+    cancel = False
+
+    async def cancelled(run_id):
+        polls.append(clock["offset"])
+        return cancel
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancelled)
+    _register(home)
+    t = asyncio.create_task(execute_run(rid, _cfg(tmp_path, cancel_poll_s=0.01)))
+    await _until(lambda: rig.entered == [rid])       # the CLI started and stays silent
+    clock["offset"] = 120.0                          # well past the old 60 s cap
+    await _until(lambda: polls.count(120.0) >= 5)    # the stream loop ran after the jump
+    assert rig.released == [] and rig.holder == rid  # a silent start-up keeps the gate
+    cancel = True
+    assert await asyncio.wait_for(t, 10) == "cancelled"
+    assert rig.released == [rid]
+
+
+async def test_a_cancel_after_the_gate_on_a_taken_over_resume_writes_nothing(tmp_path, monkeypatch):
+    """A resumed run whose session lease was taken over while it waited for the gate must not
+    write an unfenced terminal event when it then sees the cancel."""
+    home = tmp_path / "home"
+    _auth(home)                                      # refresh due -> the gate is taken
+    (rid,) = await _runs(1, base=9550)
+    async with get_session() as s:                   # a resume of an earlier session of this project
+        (await s.get(AgentRunRow, rid)).resume_session_id = THREADS[0]
+    rig = _Rig(monkeypatch, [rid])
+
+    async def cancel_after_takeover(run_id):
+        async with get_session() as s:               # another worker took the session over
+            await s.execute(text(
+                "UPDATE agent_session_leases SET run_id = 777, fence = fence + 1 "
+                "WHERE account_id = 'a' AND session_id = :s"), {"s": THREADS[0]})
+        return True
+
+    monkeypatch.setattr(executor, "_cancel_flag", cancel_after_takeover)
+    _register(home)
+    assert await execute_run(rid, _cfg(tmp_path)) is None      # stopped as a zombie
+    assert rig.entered == []
+    assert await list_events(rid) == []              # no unfenced run.cancelled
