@@ -507,6 +507,9 @@ async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
         assert (await s.get(DeepJobRow, rid)).status == "running"
 
 
+# Same single-shared-connection effect as above: a wall-clock window around the TTL on SQLite
+# depends on heartbeat/event write interleaving; the integration job runs it on Postgres.
+@pytest.mark.skipif(ON_SQLITE, reason="heartbeat and event writes share SQLite's single connection")
 @pytest.mark.parametrize("failure", ["raises", "hangs"])
 async def test_db_errors_past_the_ttl_stop_the_cli(tmp_path, monkeypatch, failure):
     from aibroker.agent import lock as lock_mod
