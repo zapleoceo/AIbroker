@@ -37,7 +37,9 @@ the same constants and validator used by `POST /v1/jobs`.
 
 Access requires the capability's existing scope plus `llm:agent`, the server
 project allowlist, and the exact CLI model and `owner` account in
-`AGENT_PROJECT_POLICY`. The worker rechecks these. The configured list of
+`AGENT_PROJECT_POLICY`. The worker rechecks these, and `GET /v1/jobs/{id}` and
+`GET /v1/deep/{id}` recheck them on every read, as do the agent run reads
+(`/v1/agent/runs/{id}` and `/events`). The configured list of
 subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
 `claude-sub`/`codex-sub`). `AGENT_SUBSCRIPTION_VERIFIED_MODELS` uses the same
 shape and must be a subset. Malformed or inconsistent input exposes no
@@ -91,8 +93,8 @@ JPEG, WebP, or GIF images, each at most 5 MiB,
 URLs are accepted; remote URLs are not fetched. The server fully decodes each
 image, stores it as a temporary run attachment, passes the actual file through
 Codex CLI `--image`, and removes the workspace after the run. An image requires
-the existing `llm:vision` scope even when sent on a chat capability; this
-change does not grant that scope to any project. A model-level
+the existing `llm:vision` scope even when sent on a chat or other non-vision
+capability; this change does not grant that scope to any project. A model-level
 live input-vision canary is required before adding an ID to the vision list;
 the authenticated Orchestra request is a further integration check.
 

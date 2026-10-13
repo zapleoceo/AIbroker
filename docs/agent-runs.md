@@ -48,6 +48,12 @@ project_not_allowed` - no CLI start, no `billing.attested`. Compose passes the v
 `api` and `agent-worker`; the operator sets `AGENT_ALLOWED_PROJECT_IDS=11` in `.env` BEFORE
 deploying this change, otherwise the owner test project is locked out (by design).
 
+The same checks run on every read of an `agent:*` job, through `GET /v1/jobs/{id}` and
+`GET /v1/deep/{id}`. A project that lost `llm:agent`, left the allowlist, or no longer matches
+`AGENT_PROJECT_POLICY` gets 403 for previously created results too. `GET /v1/agent/runs/{id}` and `/events` re-check
+`AGENT_PROJECT_POLICY` against the run's stored model, account and capability, so a removed policy
+closes the run's output (403 `agent_policy_missing`, `model_not_allowed`, `account_not_allowed`).
+
 **Per-project policy (fail-closed, narrowing only).** `AGENT_PROJECT_POLICY` is JSON in the environment,
 e.g. `{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}` (`ProjectPolicy`, `policy_for`,
 `policy_violation` in `aibroker.agent.policy`). On `POST /v1/agent/runs`, after the scope and project

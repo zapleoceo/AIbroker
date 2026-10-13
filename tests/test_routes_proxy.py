@@ -907,3 +907,111 @@ async def test_read_audio_upload_happy_and_empty(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         await proxy._read_audio_upload(_FakeUpload(b""))
     assert ei.value.status_code == 400
+
+
+# ─── agent re-authorization on EVERY poll route + image gate by content ──────
+
+
+async def _agent_job(pid: int, job_id: int) -> None:
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=job_id, project_id=pid, capability="agent:claude", status="done",
+            request={"model": "claude-sonnet-5-5", "account_id": "owner"},
+            result_text="AGENT-SECRET-OUTPUT", result_meta={}))
+
+
+async def test_deep_poll_refuses_agent_job_after_agent_scope_revoked(monkeypatch):
+    """/v1/deep/{id} must apply the same agent gate as /v1/jobs/{id}: results of an
+    agent run stay closed once llm:agent is revoked or the allowlist drops the project."""
+    from aibroker.routes import proxy
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    revoked, pid = await _make_project(["llm:chat"])           # no llm:agent
+    await _agent_job(pid, 5901)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    for route in ("deep", "jobs"):
+        r = client.get(f"/v1/{route}/5901", headers={"X-Project-Key": revoked})
+        assert r.status_code == 403, route
+        assert "AGENT-SECRET-OUTPUT" not in r.text
+    # scope still held but the project was removed from AGENT_ALLOWED_PROJECT_IDS
+    dropped, pid2 = await _make_project(["llm:agent"])
+    await _agent_job(pid2, 5902)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: False)
+    for route in ("deep", "jobs"):
+        r = client.get(f"/v1/{route}/5902", headers={"X-Project-Key": dropped})
+        assert r.status_code == 403, route
+        assert "AGENT-SECRET-OUTPUT" not in r.text
+    # control: still authorized -> readable on both routes
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    assert client.get("/v1/deep/5902", headers={"X-Project-Key": dropped}).status_code == 200
+
+
+async def test_deep_poll_non_agent_job_unchanged():
+    plain, pid = await _make_project(["llm:deep"])             # no llm:agent needed
+    async with get_session() as s:
+        await s.execute(insert(DeepJobRow).values(
+            id=5903, project_id=pid, capability="deep", status="done",
+            request={"messages": []}, result_text="plain answer", result_meta={}))
+    r = client.get("/v1/deep/5903", headers={"X-Project-Key": plain})
+    assert r.status_code == 200
+    assert r.json()["text"] == "plain answer"
+
+
+_IMG_BODY = {"messages": [{"role": "user", "content": [
+    {"type": "text", "text": "describe"},
+    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAAnotanimage"}}]}]}
+
+
+async def test_jobs_chat_capability_with_image_requires_vision_scope():
+    plain, _ = await _make_project(["llm:chat"])               # no llm:vision
+    r = client.post("/v1/jobs?capability=chat:fast",
+                    headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 403
+    assert "llm:vision" in r.json()["detail"]
+
+
+async def test_jobs_chat_capability_rejects_undecodable_inline_image():
+    plain, _ = await _make_project(["llm:chat", "llm:vision"])
+    r = client.post("/v1/jobs?capability=chat:fast",
+                    headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 400
+
+
+async def test_deep_poll_refuses_agent_job_on_policy_violation(monkeypatch):
+    """Unlike the scope test above, policy_violation is NOT stubbed here."""
+    from aibroker.routes import proxy
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    plain, pid = await _make_project(["llm:agent"])
+    await _agent_job(pid, 5904)                                  # AGENT_PROJECT_POLICY unset
+    for route in ("deep", "jobs"):
+        r = client.get(f"/v1/{route}/5904", headers={"X-Project-Key": plain})
+        assert r.status_code == 403, route
+        assert "AGENT-SECRET-OUTPUT" not in r.text
+
+
+async def test_deep_submit_with_image_requires_vision_scope():
+    plain, _ = await _make_project(["llm:deep"])               # no llm:vision
+    r = client.post("/v1/deep", headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 403
+    assert "llm:vision" in r.json()["detail"]
+
+
+async def test_deep_submit_rejects_undecodable_inline_image():
+    plain, _ = await _make_project(["llm:deep", "llm:vision"])
+    r = client.post("/v1/deep", headers={"X-Project-Key": plain}, json=_IMG_BODY)
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("role", ["assistant", "tool"])
+async def test_jobs_chat_capability_image_in_non_user_message_requires_vision_scope(role):
+    plain, _ = await _make_project(["llm:chat"])
+    history = [{"role": "user", "content": "hi"}]
+    image = _IMG_BODY["messages"][0]["content"]
+    if role == "tool":
+        history += [{"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": image}]
+    else:
+        history.append({"role": role, "content": image})
+    r = client.post("/v1/jobs?capability=chat:fast", headers={"X-Project-Key": plain},
+                    json={"messages": history})
+    assert r.status_code == 403, r.text

@@ -41,10 +41,10 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 |---|---|
 | `llm:chat` | `/v1/jobs?capability=chat:*` (+ `structured`/`prefilter`/`translate`) access |
 | `llm:embed` | `/v1/embed` access — any provider |
-| `llm:vision` | `capability=vision` access |
+| `llm:vision` | `capability=vision` access; also required for any `image_url` block on `/v1/jobs` (any capability) or `/v1/deep` |
 | `llm:edit` | `capability=chat:edit` — reserved edit/coach lane |
 | `llm:deep` | `/v1/deep` — deep-reasoning models |
-| `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs` |
+| `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs`. Re-checked on every read of an `agent:*` job and of `/v1/agent/runs` results, so revoking it closes existing results |
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
 
 Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
