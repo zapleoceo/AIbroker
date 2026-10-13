@@ -1773,7 +1773,8 @@ Per key:
    - 401/403/auth → `mark_dead`, **try next key**.
    - other → log, **try next key**.
 4. **JSON quality gate:** when the request asked for JSON (`response_format`
-   type `json_object`/`json_schema`) and the body doesn't parse, the response is
+   type `json_object`/`json_schema`) and the body fails the structured-output check
+   (`json_object` must parse to an object; `json_schema` must validate), the response is
    billed but treated as a failure → **next PROVIDER** (2026-07-02: was next
    key). Malformed JSON is a model property — sibling keys of the same provider
    re-mangle the same prompt, so retrying them just multiplied the wasted

@@ -82,8 +82,10 @@ temporary attachments without placing base64 bytes in the CLI prompt;
 file bytes when the client polls the job.
 
 Subscription jobs accept text role turns and `response_format` `json_object`
-or `json_schema`; the final JSON is validated, with invalid output ending in
-an error. Tool declarations, tool history, nondefault temperature, max_tokens,
+or `json_schema`; the final JSON is validated by the same check as the API path
+(`json_object` must parse to an object, `json_schema` must match the schema; an
+unevaluable schema falls back to parse-only), and invalid output ends in an
+`InvalidJSON` error. Tool declarations, tool history, nondefault temperature, max_tokens,
 and `stream: true` are rejected before enqueue by default. The Codex App Server
 client-tool path can be enabled separately with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED` and advertised per exact ID with
