@@ -205,7 +205,9 @@ relaxation is required.
 ## Subscription live-test evidence (2026-10-13)
 
 `AGENT_SUBSCRIPTION_TESTED_MODELS` is read by the `api` service only (not the workers). It is a JSON
-object from catalog id to evidence, e.g. `{"claude-sonnet-5-5": {"chat:fast": "job_123"}}`. It only
+object from catalog id to evidence, e.g.
+`AGENT_SUBSCRIPTION_TESTED_MODELS='{"codex-sub/gpt-6.1-sol":{"text":552530,"tools":552530,"vision":"attachment:552738"},"codex-sub/gpt-6-luna":{"text":551107},"claude-sub/claude-sonnet-5-5":{"text":548175}}'`.
+Evidence strings are capped at 200 chars and an entry at 16 keys. It only
 feeds `tested` and `evidence` on `GET /v1/models`; it never enables a model, which remains
 `AGENT_SUBSCRIPTION_VERIFIED_MODELS`. Empty or unset means `{}`. Malformed JSON or a non-object logs
 an ERROR and is treated as empty; the subscription catalog is unaffected. Unknown ids and invalid

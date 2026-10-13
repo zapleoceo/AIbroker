@@ -57,3 +57,30 @@ def test_unknown_id_ignored_with_warning(monkeypatch, caplog):
 def test_non_subscription_rows_omit_the_fields():
     rows = [r for r in listing() if r["billing_type"] != "subscription"]
     assert rows and all("tested" not in r and "evidence" not in r for r in rows)
+
+
+def test_oversized_entry_rejected_with_warning(monkeypatch, caplog):
+    import json
+    big = {"codex-sub/gpt-6.1-sol": {"text": "x" * 201},
+           "claude-sub/claude-sonnet-5-5": {f"k{i}": i for i in range(17)}}
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_TESTED_MODELS", json.dumps(big))
+    with caplog.at_level(logging.WARNING):
+        rows = _rows()
+    assert rows["codex-sub/gpt-6.1-sol"]["tested"] is False
+    assert rows["claude-sub/claude-sonnet-5-5"]["tested"] is False
+    assert sum(r.levelno == logging.WARNING for r in caplog.records) >= 2
+    ok = {"codex-sub/gpt-6.1-sol": {"text": "x" * 200}}
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_TESTED_MODELS", json.dumps(ok))
+    assert _rows()["codex-sub/gpt-6.1-sol"]["tested"] is True
+
+
+def test_malformed_value_errors_once_per_distinct_value(monkeypatch, caplog):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_TESTED_MODELS", "bad-once-xyz")
+    with caplog.at_level(logging.ERROR):
+        _rows()
+        _rows()
+        n1 = sum(r.levelno == logging.ERROR for r in caplog.records)
+        monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_TESTED_MODELS", "bad-twice-xyz")
+        _rows()
+        n2 = sum(r.levelno == logging.ERROR for r in caplog.records)
+    assert n1 == 1 and n2 == 2
