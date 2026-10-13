@@ -484,7 +484,13 @@ async def test_refused_renewal_stops_the_cli_within_a_heartbeat(tmp_path):
     cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True,
                      cancel_poll_s=0.05, lease_ttl_s=5.0, lease_heartbeat_s=0.1)
     task = asyncio.create_task(execute_run(rid, cfg))
-    assert await _wait_until(lambda: fake.started is not None)
+    if not await _wait_until(lambda: fake.started is not None):
+        async with get_session() as s:
+            job = await s.get(DeepJobRow, rid)
+        detail = (task.done() and not task.cancelled() and repr(task.exception()), job.status,
+                  job.run_after, job.error_message, await _events(rid))
+        task.cancel()
+        pytest.fail(f"run never started the CLI: {detail}")
     t0 = time.monotonic()
     await _steal()                                              # a newer holder: renewal -> False
     assert await asyncio.wait_for(task, 8) is None
