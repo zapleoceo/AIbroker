@@ -9,14 +9,24 @@ from typing import Any
 from sqlalchemy import select
 
 from aibroker.agent.lock import Lease, check_fence
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow
 from aibroker.services.tool_contract import validate_result
 
-MAX_CALLS = 16
-MAX_ARGUMENT_BYTES = 64 * 1024
-MAX_RESULT_BYTES = 64 * 1024
-TOOL_WAIT_S = 300
+
+def max_calls() -> int:
+    return get_settings().AGENT_CLIENT_TOOL_MAX_CALLS
+
+
+def max_bytes() -> int:
+    """Limit for tool arguments and for one tool result, each."""
+    return get_settings().AGENT_CLIENT_TOOL_MAX_BYTES
+
+
+def tool_wait_s() -> int:
+    """How long ONE call waits for the caller's result; the run's wall cap still bounds the sum."""
+    return get_settings().AGENT_CLIENT_TOOL_WAIT_S
 
 
 class ClientToolConflict(Exception):
@@ -47,7 +57,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
     if not isinstance(call_id, str) or not 1 <= len(call_id) <= 128:
         raise ClientToolConflict("invalid call id")
     raw = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-    if len(raw.encode()) > MAX_ARGUMENT_BYTES:
+    if len(raw.encode()) > max_bytes():
         raise ClientToolConflict("tool arguments exceed limit")
     async with get_session() as s:
         for lease in fences:
@@ -68,12 +78,12 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
             raise ClientToolConflict("tool call is outside the declared schema")
         meta = dict(job.result_meta or {})
         history = list(meta.get("client_tool_history") or [])
-        if meta.get("client_tool") or len(history) >= MAX_CALLS or any(
+        if meta.get("client_tool") or len(history) >= max_calls() or any(
             item["call_id"] == call_id for item in history
         ):
             raise ClientToolConflict("tool call already pending or limit reached")
         meta["client_tool"] = {"call_id": call_id, "name": name, "arguments": raw,
-                               "deadline": (_now() + timedelta(seconds=TOOL_WAIT_S)).isoformat(),
+                               "deadline": (_now() + timedelta(seconds=tool_wait_s())).isoformat(),
                                "state": "waiting"}
         job.result_meta = meta
 
@@ -81,7 +91,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
 async def submit_result(run_id: int, project_id: int, call_id: str,
                         success: bool, content: str) -> bool:
     """Commit a same-project result once; identical retries return False."""
-    if len(content.encode()) > MAX_RESULT_BYTES:
+    if len(content.encode()) > max_bytes():
         raise ValueError("tool result exceeds limit")
     digest = _digest(success, content)
     async with get_session() as s:

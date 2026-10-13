@@ -25,6 +25,7 @@ OUT_DIR = "out"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _MAX_DEPTH = 3
 _MAX_PIXELS = 50_000_000
+_MAX_SKIPPED = 20       # bounds the listing, not the delivery
 _SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
@@ -83,7 +84,9 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
                           session_id: str | None = None) -> list[FileRef]:
     """Copy PNGs from this new Codex thread's directory into <workspace>/out.
     `since` is the run's start (epoch seconds): older files are excluded. Anything unsafe,
-    oversized, undecodable or over the count is skipped silently (never partially copied)."""
+    oversized, undecodable or over the count is never partially copied; a candidate that is this
+    run's own but not delivered (too large, over the count, not a PNG) is listed WITHOUT content and
+    with the reason in `skipped`, so the caller sees what the cap dropped."""
     if not codex_home or not session_id or not _SESSION_ID.fullmatch(session_id):
         return []
     root = Path(codex_home) / GENERATED_DIR
@@ -99,28 +102,37 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     expires = (datetime.now(UTC) + timedelta(seconds=ttl_s)).isoformat()
     refs: list[FileRef] = []
     seen: set[str] = set()
+    skipped: list[FileRef] = []
     for path in _candidates(root):
-        if len(refs) >= max_count:
-            break
         if baseline is not None and f"{session_id}/{path.relative_to(root).as_posix()}" in baseline:
             continue
         try:
             st = os.lstat(path)
-            if (not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes or st.st_size == 0
-                    or st.st_mtime < since):
+            if not stat.S_ISREG(st.st_mode) or st.st_size == 0 or st.st_mtime < since:
                 continue
             if real_root not in path.resolve().parents:         # traversal / symlinked parent
+                continue
+            if st.st_size > max_bytes or len(refs) >= max_count:
+                if len(skipped) < _MAX_SKIPPED:
+                    skipped.append(FileRef(
+                        path=f"{OUT_DIR}/{path.name}", size=st.st_size,
+                        skipped="too_large" if st.st_size > max_bytes else "cap_reached"))
                 continue
             fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as fh:
                 data = fh.read(max_bytes + 1)
         except OSError:
             continue
-        if len(data) > max_bytes:
+        if len(data) > max_bytes:       # grew between lstat and read
             continue
         dims = _decode_png(data)
         digest = hashlib.sha256(data).hexdigest()
-        if dims is None or digest in seen:
+        if dims is None:
+            if len(skipped) < _MAX_SKIPPED:
+                skipped.append(FileRef(path=f"{OUT_DIR}/{path.name}", size=len(data),
+                                       skipped="invalid_image"))
+            continue
+        if digest in seen:
             continue
         seen.add(digest)
         out_dir.mkdir(mode=0o700, exist_ok=True)
@@ -129,4 +141,4 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
         refs.append(FileRef(
             path=f"{OUT_DIR}/{name}", size=len(data), sha256=digest, width=dims[0], height=dims[1],
             content_b64=base64.b64encode(data).decode(), expires_at=expires))
-    return refs
+    return [*refs, *skipped]

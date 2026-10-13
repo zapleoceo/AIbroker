@@ -293,7 +293,12 @@ def test_undecodable_oversized_and_excess_files_are_skipped(tmp_path):
     (gen / "huge.png").write_bytes(_png(300, 300))
     (gen / "zz-ok.png").write_bytes(good)
     refs = _export(home, ws, max_bytes=len(good) + 10)
-    assert [(r.width, r.height) for r in refs] == [(4, 4)]
+    assert [(r.width, r.height) for r in refs if not r.skipped] == [(4, 4)]
+    # what is dropped is named, never silent; an empty file is not an image of this run at all
+    assert {r.path: r.skipped for r in refs if r.skipped} == {
+        "out/truncated.png": "invalid_image", "out/fake.png": "invalid_image",
+        "out/text.png": "invalid_image", "out/huge.png": "too_large"}
+    assert all(r.content_b64 is None for r in refs if r.skipped)
 
 
 def test_count_cap_and_duplicate_content(tmp_path):
@@ -303,7 +308,11 @@ def test_count_cap_and_duplicate_content(tmp_path):
         (gen / f"i{i}.png").write_bytes(_png(2 + i, 2))
     (gen / "dup.png").write_bytes(_png(2, 2))
     refs = _export(home, ws, max_count=3)
-    assert len(refs) == 3 and len({r.sha256 for r in refs}) == 3
+    delivered = [r for r in refs if not r.skipped]
+    assert len(delivered) == 3 and len({r.sha256 for r in delivered}) == 3
+    capped = [r for r in refs if r.skipped]
+    assert len(capped) == 2 and {r.skipped for r in capped} == {"cap_reached"}
+    assert all(r.content_b64 is None and r.size > 0 for r in capped)
 
 
 def test_no_directory_or_no_home_is_just_empty(tmp_path):

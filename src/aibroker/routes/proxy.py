@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from aibroker.agent.accounts import pick_account
 from aibroker.agent.client_tools import (
-    MAX_RESULT_BYTES,
     ClientToolConflict,
     is_waiting,
     submit_result,
@@ -41,6 +40,7 @@ from aibroker.providers.job_contract import (
     JOB_MAX_TOKENS_MIN,
     JOB_TEMPERATURE_MAX,
     JOB_TEMPERATURE_MIN,
+    ignored_subscription_params,
     subscription_prompt_problem,
     subscription_request_problem,
 )
@@ -442,6 +442,9 @@ class DeepJobResponse(BaseModel):
     finish_reason: str | None = None
     refusal: str | None = None
     files: list[dict[str, Any]] | None = None
+    ignored_params: list[str] | None = Field(
+        None, description="subscription jobs: request params the caller set that the CLI route "
+                          "accepted but did not apply (max_tokens, temperature)")
     # Vision only, and only when the self-hosted `local` provider answered:
     # what the image was, and what shape `text` is in. Additive on purpose —
     # `text` stays prose for every provider, so a client that only reads `text`
@@ -516,9 +519,11 @@ def _job_response(row: Any) -> DeepJobResponse:
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     # Subscription runs only: the account is chosen at creation and never changes.
     account_id = request.get("account_id") if request.get("client_job") else None
+    ignored_params = (request.get("client_job") or {}).get("ignored_params")
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
-                               requested_model=requested_model, account_id=account_id)
+                               requested_model=requested_model, account_id=account_id,
+                               ignored_params=ignored_params)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -529,6 +534,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         return DeepJobResponse(
             job_id=row.id, status="pending",
             requested_model=requested_model, account_id=account_id,
+            ignored_params=ignored_params,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
@@ -553,6 +559,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
         refusal=meta.get("refusal"),
         files=live_files(meta.get("files")),
+        ignored_params=meta.get("ignored_params", ignored_params),
     )
 
 
@@ -665,11 +672,14 @@ async def jobs_submit(
             job_id, _ = await create_run(
                 project=ctx.project, capability=PROVIDERS[subscription.provider], prompt=prompt,
                 task_id="jobs", account_id=account_id, session_id=None, idempotency_key=None,
-                wall_timeout_s=1800, idle_timeout_s=300, allowed_tools=[], model=cli_model,
+                wall_timeout_s=get_settings().AGENT_SUBSCRIPTION_MAX_WALL_S,
+                idle_timeout_s=get_settings().AGENT_SUBSCRIPTION_IDLE_S,
+                allowed_tools=[], model=cli_model,
                 attachments=attachments,
                 client_job={"capability": capability, "provider": subscription.provider,
                             "model": subscription.id, "response_format": body.response_format,
                             "workflow": body.workflow,
+                            "ignored_params": ignored_subscription_params(body.model_fields_set),
                             "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
                             "tool_choice": body.tool_choice},
             )
@@ -750,7 +760,7 @@ async def jobs_poll(
 class ClientToolResultIn(BaseModel):
     call_id: str = Field(min_length=1, max_length=128)
     success: bool
-    content: str = Field(max_length=MAX_RESULT_BYTES)
+    content: str      # size is checked in bytes against the configured limit (413)
 
 
 @router.post("/jobs/{job_id}/tool-results", status_code=status.HTTP_202_ACCEPTED)

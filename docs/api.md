@@ -107,7 +107,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`) |
-| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its 300 s deadline without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
+| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its deadline (`AGENT_CLIENT_TOOL_WAIT_S`, default 900 s) without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
@@ -220,6 +220,14 @@ values return `422`:
   1..16384 (default 1024), `temperature` 0..2 (default 0.7).
 - deep (`DeepRequest`, the `/v1/deep` alias): `max_tokens` 1..32768
   (default 4096) — the deep lane legitimately generates long answers.
+
+Subscription models (`claude-sub/*`, `codex-sub/*`) share these ranges but only **ignore** both
+params, because the CLI has no such control: a value in range is accepted (`202`), an out-of-range value
+is `422` like everywhere else. The poll response carries `ignored_params`, the list of those params
+the caller set (`[]` for none; `null` on non-subscription jobs). A subscription prompt over
+`AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS` (default 1,000,000 characters) is `400`. Returned `files` of
+such a job can carry entries with `skipped` (`too_large`, `cap_reached`, `invalid_image`) and no
+content for a file or generated image that exceeded a cap (2 MiB each, 8 MiB total).
 
 Rationale: an oversized `max_tokens` inflates the cost-guard's worst-case
 reservation estimate and silently knocks every capped paid key out of the

@@ -160,6 +160,7 @@ reported - never dollars. Text is clipped to `MAX_TEXT_CHARS` on store.
 | `tool.call` / `tool.result` | `ToolCall` / `ToolResult` | call_id, name, input / ok, output |
 | `file.changed` | `FileChanged` | path, action (created/modified/deleted) |
 | `usage` | `Usage` | input_tokens, output_tokens, cache_read_tokens, turns |
+| `progress` | `Progress` | - (liveness only: resets idle, never stored; App Server `item/*` notifications) |
 | `run.completed` | `RunCompleted` | final_text, files (`FileRef`) |
 | `run.failed` | `RunFailed` | error_class, message |
 | `run.cancelled` | `RunCancelled` | - |
@@ -185,8 +186,10 @@ writes files into the workspace.
   (`FOR UPDATE SKIP LOCKED`); `concurrency_for` gives the slots
   (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Slots are never shared
   with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
-- `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
-  becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
+- `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`, or silent
+  (`agent_runs.last_event_at`) for longer than `max(idle_timeout, AGENT_CLIENT_TOOL_WAIT_S) + 300 s`,
+  becomes `run.failed worker_lost`. A run that keeps emitting events is never reaped before its
+  hard cap, which the executor enforces first. It is **never re-run** (a CLI run has side effects).
 - `drain_agent_once` is the deterministic one-pass used by tests; `agent_worker_loop` is the
   forever loop.
 
@@ -228,8 +231,10 @@ writes files into the workspace.
    pooling.
 3. **Workspace**: `create_workspace` makes `AGENT_WORKSPACE_ROOT/run-<id>` with mode 0700;
    it is removed afterwards, also on failure (`cleanup_workspace`).
-4. `run.started`, then the adapter stream. **Wall** (`wall_timeout_s`) and **idle** (no event
-   for `idle_timeout_s`) timeouts give `run.timed_out`; the cancel flag
+4. `run.started`, then the adapter stream. **Wall** (`wall_timeout_s`, the hard cap) and **idle** (no parsed event
+   for `idle_timeout_s`; raw stdout never counts, and the watchdog is suspended while a client tool
+   call awaits its result, see [subscription-tool-loop.md](subscription-tool-loop.md))
+   timeouts give `run.timed_out`; the cancel flag
    (`cancel_requested`, polled every `AGENT_CANCEL_POLL_S`) gives `run.cancelled`. Both call
    `adapter.cancel()` (the adapter contract owns SIGTERM then SIGKILL), bounded by
    `AGENT_CANCEL_GRACE_S`. A cancel during a client tool wait (`ClientToolCancelled`) ends
@@ -239,7 +244,8 @@ writes files into the workspace.
    quota exhaustion, which waits (below).
 6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files`:
    regular, non-symlink files inside the workspace only; per-file cap
-   (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
+   (`AGENT_FILE_MAX_BYTES`, 2 MiB), total cap (`AGENT_FILES_TOTAL_BYTES`, 8 MiB), count cap
+   (`AGENT_FILES_MAX_COUNT`, 20); over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
    then the API returns `expired: true` and no content.
 
@@ -778,7 +784,9 @@ Accepted files: regular files only (no symlinked file, directory or source direc
 no traversal out of the directory), with a new path since this run's pre-start snapshot. A shared-home
 DB lease still serializes normal Codex runs across workers. Each image is at most
 `AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
-de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
+de-duplicated by content. An image of this run that is over the size or count cap, or not a
+decodable PNG, is not copied but listed in the same `files` array with no content and `skipped`
+(`too_large`, `cap_reached`, `invalid_image`) and its size (at most 20 such entries). Each delivered image is returned by the API as a normal run file under `out/` with `sha256`,
 `width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
 metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though
 the API hides them after the 1-hour file TTL. A failing export never fails the run.

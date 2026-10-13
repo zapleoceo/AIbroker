@@ -34,11 +34,13 @@ poll response reports it as `account_id`. A started run never changes account; s
 [agent-runs.md](agent-runs.md#multiple-claude-subscription-accounts).
 
 Every catalog row now has a `job_request` field. Subscription rows report
-`max_tokens.accepted.const: 1024` and `temperature.accepted.const: 0.7`, both
-with `forwarded: false`: omit these fields, or send exactly those defaults.
-For example, `max_tokens: 16` fits the generic `ChatRequest` range but is
-rejected by the subscription route before enqueue. The same contract marks
-tools and tool history unsupported by default, and streaming unsupported. Codex input images are accepted
+`max_tokens.accepted` and `temperature.accepted` as the same `minimum`/`maximum` range as every other
+`/v1/jobs` model (1..16384, 0..2), with `forwarded: false`: any value in range is accepted and
+**ignored** (the CLI has no such control), so one request body works on every model. A value outside
+the range is rejected by the shared request validation with `422`, as on every other model. The
+params the caller actually set are echoed as `ignored_params` (for example `["max_tokens"]`; `[]`
+when none) in the poll response and in `result_meta`, so nobody assumes they took effect. The same
+contract marks tools and tool history unsupported by default, and streaming unsupported. Codex input images are accepted
 only for separately verified vision model IDs. JSON schemas cannot contain
 references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
@@ -92,8 +94,7 @@ Subscription jobs accept text role turns and `response_format` `json_object`
 or `json_schema`; the final JSON is validated by the same check as the API path
 (`json_object` must parse to an object, `json_schema` must match the schema;
 schemas that cannot be evaluated are rejected at intake), and invalid output ends in an
-`InvalidJSON` error. Tool declarations, tool history, nondefault temperature, max_tokens,
-and `stream: true` are rejected before enqueue by default. The Codex App Server
+`InvalidJSON` error. Tool declarations, tool history and `stream: true` are rejected before enqueue by default. The Codex App Server
 client-tool path can be enabled separately with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED` and advertised per exact ID with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS`; see
@@ -122,9 +123,34 @@ a decodable 1254x1254 PNG with SHA-256
 `d19fae578ae4d4c0a03c3e5466ff197b4b3bde4c5a0447e44d1ab1e810e685a`.
 This does not verify input vision or client tool-call conformance.
 
+### Limits of a subscription job (2026-10-13)
+
+All are settings (names in [deploy-ops.md](deploy-ops.md#subscription-job-limits)); defaults:
+
+- **Prompt**: `AGENT_SUBSCRIPTION_PROMPT_MAX_CHARS` = 1,000,000 characters (`max_prompt_chars` in
+  the catalog `job_request`). Over it is an explicit `400`, never a silent truncation. About
+  250k tokens, the CLI context ceiling; memory is about 30 MB per submit at the non-ASCII peak.
+- **Idle watchdog**: `AGENT_SUBSCRIPTION_IDLE_S` = 300. Only a parsed CLI event resets it (raw or
+  empty stdout lines do not). On the Codex App Server path every valid `item/*` notification of the
+  run's thread and turn (reasoning, commands, messages) also resets it, through a payload-free
+  `progress` event that is never stored; notifications of another turn count for nothing. Claude and
+  Codex exec emit nothing while thinking, so one silent step longer than the limit is killed as
+  `timed_out` / `idle`; raise the setting if such tasks are expected. While a client tool call
+  waits for its result the idle watchdog is suspended and the tool deadline rules.
+- **Outer cap**: `AGENT_SUBSCRIPTION_MAX_WALL_S` = 14400 (4 h) for one attempt, client tool waits
+  included. It is a bound for slot and lease safety, not a work budget: idle is the stall detector.
+  It is stored per run as `wall_timeout_s`, and the stale-run reaper reads that per-run value.
+- **Returned files**: 2 MiB each, 8 MiB total, 20 files. Generated PNGs: 2 MiB each, 4 images. An
+  image that does not fit is listed in `files` with `skipped` (`too_large`, `cap_reached` or
+  `invalid_image`), no content, and its size, like any other returned file.
+
+Code map: `job_contract.ignored_subscription_params` names the ignored params,
+`job_contract.subscription_prompt_max_chars` reads the prompt limit, and
+`client_tools.max_calls` / `max_bytes` / `tool_wait_s` read the tool limits at call time (so a
+settings change needs no import-time reload).
+
 For the Orchestra adapter, submit the ordinary text request (no `tools`,
-`response_format`, `stream`, nondefault `temperature`, or nondefault
-`max_tokens`):
+`response_format` or `stream`; `max_tokens` and `temperature` are ignored):
 
 ```json
 {"messages":[{"role":"user","content":"$imagegen Generate exactly one real PNG image of a red apple on a white background. Use the built-in GPT image generation tool; do not draw it with code or SVG."}],"model":"codex-sub/gpt-6.1-sol"}

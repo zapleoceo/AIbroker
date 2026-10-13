@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +89,146 @@ OK = [ev.SessionAssigned(session_id="S1"), ev.MessageDelta(text="hi"),
       ev.Usage(input_tokens=10, output_tokens=5, turns=1),
       ev.Usage(input_tokens=2, output_tokens=1, turns=1),
       ev.RunCompleted(final_text="done")]
+
+
+# --- subscription timeout model: idle watchdog, tool deadline, hard cap ---------------------
+
+TOOL_JOB = {"tools": [{"type": "function", "function": {"name": "lookup",
+                                                         "parameters": {"type": "object"}}}],
+            "tool_choice": None, "provider": "codex-sub", "model": "codex-sub/gpt-6.1-sol"}
+
+
+@pytest.fixture
+def tool_gate(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED", True)
+    monkeypatch.setattr("aibroker.agent.executor.subscription_tool_model_verified", lambda _m: True)
+
+
+def _call(i):
+    return ev.ToolCall(call_id=f"c{i}", name="lookup", input={})
+
+
+def _answer(i):
+    return ev.ToolResult(call_id=f"c{i}", ok=True, output="[withheld]")
+
+
+async def test_many_quick_tool_round_trips_complete_within_the_hard_cap(cfg, tool_gate):
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    steps = []
+    for i in range(40):
+        steps += [_call(i), ("sleep", 0.02), _answer(i)]
+    _use(FakeAgentCLI([*steps, ev.RunCompleted(final_text="ok")]))
+    assert await execute_run(rid, cfg) == "completed"
+
+
+async def test_tool_wait_longer_than_idle_is_bounded_by_the_tool_deadline_not_idle(cfg, tool_gate):
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    _use(FakeAgentCLI([_call(0), ("sleep", 0.8), _answer(0), ev.RunCompleted(final_text="ok")]))
+    assert await execute_run(rid, cfg) == "completed"
+
+
+async def test_unanswered_tool_is_ended_at_the_tool_deadline(cfg, monkeypatch, tool_gate):
+    monkeypatch.setattr(get_settings(), "AGENT_CLIENT_TOOL_WAIT_S", 1)
+    monkeypatch.setattr("aibroker.agent.executor._TOOL_WAIT_SLACK_S", 0.0)
+    rid = await _run(wall=30, idle=0.2, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    fake = _use(FakeAgentCLI([_call(0), ("hang",)]))
+    t0 = time.monotonic()
+    assert await execute_run(rid, cfg) == "timed_out"
+    assert 0.9 <= time.monotonic() - t0 < 5          # idle (0.2 s) did not fire during the wait
+    assert (await list_events(rid))[-1].payload["limit"] == "idle" and fake.cancel_calls == 1
+
+
+async def test_progress_keeps_idle_alive_stores_no_event_and_marks_the_run_active(
+        cfg, tool_gate, monkeypatch):
+    monkeypatch.setattr("aibroker.agent.executor._TOUCH_EVERY_S", 0.0)
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    steps = []
+    for _ in range(8):
+        steps += [("sleep", 0.1), ev.Progress()]
+    _use(FakeAgentCLI([*steps, ev.RunCompleted(final_text="ok")]))
+    assert await execute_run(rid, cfg) == "completed"
+    assert "progress" not in await _types(rid)
+    assert (await _row(rid))[0].last_event_at is not None
+
+
+async def test_silent_tool_job_without_a_pending_call_is_ended_by_idle(cfg, tool_gate):
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    _use(FakeAgentCLI([_answer(0), ("hang",)]))
+    assert await execute_run(rid, cfg) == "timed_out"
+    assert (await list_events(rid))[-1].payload["limit"] == "idle"
+
+
+async def test_hard_cap_ends_a_run_that_keeps_making_progress(cfg):
+    rid = await _run(wall=0.6, idle=0.3)
+    steps = []
+    for _ in range(50):
+        steps += [("sleep", 0.1), ev.MessageDelta(text="tick")]
+    _use(FakeAgentCLI([*steps, ev.RunCompleted(final_text="late")]))
+    assert await execute_run(rid, cfg) == "timed_out"
+    assert (await list_events(rid))[-1].payload["limit"] == "wall"
+
+
+async def test_raw_output_without_a_parsed_event_does_not_reset_idle(cfg):
+    class Chatty(FakeAgentCLI):
+        async def start(self, run):
+            self.started = run
+            for _ in range(100):
+                self.last_output_at = time.monotonic()     # raw lines are no activity
+                await asyncio.sleep(0.05)
+            yield ev.RunCompleted(final_text="late")
+
+    rid = await _run(wall=30, idle=0.3)
+    _use(Chatty([]))
+    assert await execute_run(rid, cfg) == "timed_out"
+    assert (await list_events(rid))[-1].payload["limit"] == "idle"
+
+
+async def test_cancel_works_while_a_tool_result_is_awaited(cfg, tool_gate):
+    rid = await _run(wall=30, idle=0.3, client_job=TOOL_JOB, model="gpt-6.1-sol")
+    fake = _use(FakeAgentCLI([_call(0), ("hang",)]))
+    task = asyncio.create_task(execute_run(rid, cfg))
+    await asyncio.sleep(0.6)                              # past idle: only the pending call holds it
+    assert not task.done()
+    await cancel_run(rid, (await _row(rid))[0].project_id)
+    assert await asyncio.wait_for(task, 5) == "cancelled"
+    assert fake.cancel_calls == 1
+
+
+async def _age(rid, *, started_s, last_event_s):
+    from aibroker.agent.runs import _now
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, rid)
+        job.started_at = _now() - timedelta(seconds=started_s)
+        (await s.get(AgentRunRow, rid)).last_event_at = _now() - timedelta(seconds=last_event_s)
+
+
+async def test_reaper_spares_a_run_that_keeps_emitting_events():
+    rid = await _run(wall=20000, idle=300)
+    await _age(rid, started_s=5000, last_event_s=5)
+    assert await worker.fail_stale_agent_runs() == 0
+
+
+async def test_reaper_fails_a_run_gone_silent_past_idle_tool_wait_and_grace():
+    rid = await _run(wall=20000, idle=300)
+    quiet = max(300, get_settings().AGENT_CLIENT_TOOL_WAIT_S) + worker.STALE_GRACE_S + 5
+    await _age(rid, started_s=quiet + 10, last_event_s=quiet)
+    assert await worker.fail_stale_agent_runs() == 1
+
+
+async def test_reaper_follows_the_per_run_wall_which_defaults_to_four_hours():
+    wall = get_settings().AGENT_SUBSCRIPTION_MAX_WALL_S
+    assert wall == 14400
+    alive = await _run(wall=wall, idle=300)
+    await _age(alive, started_s=wall + worker.STALE_GRACE_S - 30, last_event_s=1)
+    assert await worker.fail_stale_agent_runs() == 0
+    await _age(alive, started_s=wall + worker.STALE_GRACE_S + 5, last_event_s=1)
+    assert await worker.fail_stale_agent_runs() == 1
+
+
+async def test_reaper_fails_a_run_past_its_hard_cap_even_with_recent_events():
+    rid = await _run(wall=100, idle=300)
+    await _age(rid, started_s=100 + worker.STALE_GRACE_S + 5, last_event_s=1)
+    assert await worker.fail_stale_agent_runs() == 1
 
 
 # --- happy path, usage, billing separation -----------------------------------

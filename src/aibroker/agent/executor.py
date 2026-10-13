@@ -20,7 +20,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
-from aibroker.agent.client_tools import clear_pending_call
+from aibroker.agent.client_tools import clear_pending_call, tool_wait_s
 from aibroker.agent.codex_cli import CodexCLI
 from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
@@ -44,14 +44,17 @@ from aibroker.providers.subscriptions import (
 
 log = logging.getLogger(__name__)
 
+_TOOL_WAIT_SLACK_S = 60.0
+_TOUCH_EVERY_S = 30.0       # progress is shown to the stale-run reaper this often
+
 
 @dataclass(frozen=True)
 class ExecConfig:
     workspace_root: str
     cancel_poll_s: float = 1.0
     cancel_grace_s: float = 15.0
-    file_max_bytes: int = 256 * 1024
-    files_total_bytes: int = 1024 * 1024
+    file_max_bytes: int = 2 * 1024 * 1024
+    files_total_bytes: int = 8 * 1024 * 1024
     files_max_count: int = 20
     files_ttl_s: int = 3600
     image_max_bytes: int = 2 * 1024 * 1024
@@ -292,8 +295,7 @@ async def _drive(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
         started_at = time.time() - 1.0
         terminal, changed = await _stream(
             run_id, adapter, spec, totals, float(req.get("wall_timeout_s", 1800)),
-            float(req.get("wall_timeout_s", 1800) if spec.client_tools else
-                  req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
+            float(req.get("idle_timeout_s", 300)), cfg, lease, image_lease)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
             return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
         if isinstance(terminal, ev.RunCompleted):
@@ -329,6 +331,15 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
         return []
 
 
+async def _touch_run(run_id: int, lease: Lease | None) -> None:
+    """Mark activity without an event row: a long silent-but-alive turn must not look dead."""
+    async with get_session() as s:
+        await check_fence(s, lease)
+        row = await s.get(AgentRunRow, run_id)
+        if row is not None:
+            row.last_event_at = _now()
+
+
 async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                   totals: dict[str, int | None], wall_s: float, idle_s: float,
                   cfg: ExecConfig, lease: Lease | None = None,
@@ -348,6 +359,8 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
 
     task = asyncio.create_task(pump())
     t0 = last = last_poll = time.monotonic()
+    last_touch = t0
+    tool_pending = False     # a client tool call waits for its result: its own deadline rules
     terminal: ev.AnyEvent | None = None
     lease_lost = False
     try:
@@ -356,9 +369,12 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             if any(held is not None and held.lost.is_set() for held in (lease, image_lease)):
                 lease_lost = True       # stop the CLI at once, like a cancel, but write nothing
                 break
+            # While the caller executes a tool the CLI is silent by design; the adapter ends the
+            # wait at the tool deadline, this bound only backstops an adapter that hangs there.
+            limit_idle = max(idle_s, tool_wait_s() + _TOOL_WAIT_SLACK_S) if tool_pending else idle_s
             if now - t0 >= wall_s:
                 terminal = ev.RunTimedOut(limit="wall")
-            elif now - last >= idle_s:
+            elif now - last >= limit_idle:
                 terminal = ev.RunTimedOut(limit="idle")
             elif now - last_poll >= cfg.cancel_poll_s:
                 last_poll = now
@@ -366,14 +382,22 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
                     terminal = ev.RunCancelled()
             if terminal is not None:
                 break
-            wait = min(cfg.cancel_poll_s, wall_s - (now - t0), idle_s - (now - last))
+            wait = min(cfg.cancel_poll_s, wall_s - (now - t0), limit_idle - (now - last))
             try:
                 item = await asyncio.wait_for(q.get(), timeout=max(wait, 0.001))
             except TimeoutError:
                 continue
             if item is None:
                 break
-            last = time.monotonic()
+            last = time.monotonic()      # only a parsed CLI event counts as activity, never raw output
+            if isinstance(item, ev.Progress):
+                # liveness only: resets idle, stores no event; the reaper reads last_event_at
+                if last - last_touch >= _TOUCH_EVERY_S:
+                    last_touch = last
+                    await _touch_run(run_id, lease)
+                continue
+            if spec.client_tools and isinstance(item, ev.ToolCall | ev.ToolResult):
+                tool_pending = isinstance(item, ev.ToolCall)
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):
                 terminal = item
                 break

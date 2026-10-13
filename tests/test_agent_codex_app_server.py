@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -133,7 +134,8 @@ async def test_dynamic_tool_callback_waits_for_caller_then_completes(monkeypatch
     monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
     events = [item async for item in run_tool_turn(_Adapter(home), run)]
     assert [item.type for item in events] == ["session.assigned", "tool.call",
-                                               "tool.result", "usage", "run.completed"]
+                                               "tool.result", "progress", "usage",
+                                               "run.completed"]
     assert events[-2].total_tokens == 16
     assert events[-2].reasoning_tokens == 3
     assert events[-1].final_text == "Found 7"
@@ -426,3 +428,31 @@ async def test_payloads_never_reach_logs_or_errors_on_failure(monkeypatch, tmp_p
     assert events[-1].type == "run.failed"
     assert SECRET not in events[-1].model_dump_json()
     assert SECRET not in caplog.text
+
+
+async def test_two_mib_notification_line_is_read_whole(monkeypatch, tmp_path):
+    """The pipe is a real StreamReader with the limit the adapter asks for; 1 MiB would raise."""
+    run, home = _run(tmp_path)
+    big = "x" * (2 * 1024 * 1024)
+    process = _Process()
+    reader_box = {}
+
+    class _Real(asyncio.StreamReader):
+        def put(self, value):
+            self.feed_data((json.dumps(value) + chr(10)).encode())
+
+    async def spawn(*_args, **kwargs):
+        reader_box["limit"] = kwargs["limit"]
+        reader = _Real(limit=kwargs["limit"])
+        process.stdout = reader
+        process.stdin = _ScriptWriter(reader, [_TURN_OK, {"method": "item/completed", "params": {
+            "threadId": "thread-1", "turnId": "turn-1",
+            "item": {"type": "agentMessage", "text": big}}}, _DONE[1]])
+        return process
+
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides", lambda _h: [])
+    run = replace(run, tool_choice=None)
+    events = [item async for item in run_tool_turn(_Adapter(home), run)]
+    assert reader_box["limit"] >= 16 * 1024 * 1024
+    assert events[-1].type == "run.completed" and events[-1].final_text == big

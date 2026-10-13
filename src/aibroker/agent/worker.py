@@ -13,6 +13,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from aibroker.agent import events as ev
+from aibroker.agent.client_tools import tool_wait_s
 from aibroker.agent.constants import AGENT_CAPABILITIES
 from aibroker.agent.executor import ExecConfig, exec_config_from_settings, execute_run
 from aibroker.agent.real_cli import register_real_adapters
@@ -93,15 +94,26 @@ async def claim_agent_runs(capability: str, limit: int) -> list[int]:
 
 async def fail_stale_agent_runs() -> int:
     """A `running` run whose worker died is FAILED (worker_lost), never re-run: a CLI run
-    has side effects. Deadline = started_at + its wall timeout + grace."""
+    has side effects. Stale = past started_at + wall + grace (the executor's hard cap), or silent
+    for longer than the executor's own idle / tool-wait bound + grace (`last_event_at`). A run that
+    keeps emitting events is therefore never reaped before its hard cap."""
     now = _now()
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow).where(DeepJobRow.status == "running",
-                                     DeepJobRow.capability.like("agent:%"))
-        )).scalars().all()
-        stale = [r.id for r in rows if r.started_at is not None and now > r.started_at
-                 + timedelta(seconds=float(r.request.get("wall_timeout_s", 1800)) + STALE_GRACE_S)]
+            select(DeepJobRow, AgentRunRow.last_event_at)
+            .join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id, isouter=True)
+            .where(DeepJobRow.status == "running", DeepJobRow.capability.like("agent:%"),
+                   DeepJobRow.started_at.is_not(None))
+        )).all()
+        silent_bound = tool_wait_s()
+        stale = []
+        for r, last_event_at in rows:
+            wall = float(r.request.get("wall_timeout_s", 1800))
+            quiet = max(float(r.request.get("idle_timeout_s", 300)), silent_bound)
+            seen = max(r.started_at, last_event_at or r.started_at)
+            if (now > r.started_at + timedelta(seconds=wall + STALE_GRACE_S)
+                    or now > seen + timedelta(seconds=quiet + STALE_GRACE_S)):
+                stale.append(r.id)
     failed = 0
     for run_id in stale:
         try:
