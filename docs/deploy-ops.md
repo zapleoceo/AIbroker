@@ -202,6 +202,15 @@ uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
 auth volumes into API. No new Docker network, host port, capability, or sandbox
 relaxation is required.
 
+## Subscription live-test evidence (2026-10-13)
+
+`AGENT_SUBSCRIPTION_TESTED_MODELS` is read by the `api` service only (not the workers). It is a JSON
+object from catalog id to evidence, e.g. `{"claude-sonnet-5-5": {"chat:fast": "job_123"}}`. It only
+feeds `tested` and `evidence` on `GET /v1/models`; it never enables a model, which remains
+`AGENT_SUBSCRIPTION_VERIFIED_MODELS`. Empty or unset means `{}`. Malformed JSON or a non-object logs
+an ERROR and is treated as empty; the subscription catalog is unaffected. Unknown ids and invalid
+entries are logged as warnings and skipped.
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —

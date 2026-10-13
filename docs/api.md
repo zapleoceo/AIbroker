@@ -622,6 +622,11 @@ the subscription fee is outside this price. An unknown price has no invented zer
 Entries are ordered the way a bare name resolves (free providers by rank,
 paid last). Free-tier keys bill $0 whatever the nominal price shows.
 
+Subscription rows also carry two informational fields: `tested` (bool) and `evidence`
+(object mapping a capability to a job id or a short note, or `null`). `tested: true` means
+a live test proved that route; it never decides selection, which is still `available`.
+Non-subscription rows have neither field. See [subscription-models.md](subscription-models.md).
+
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
 `["text"]` for chat and embedding. It is `null` when the lane does not define
