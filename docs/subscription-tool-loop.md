@@ -77,8 +77,10 @@ are not stored.
 
 Model retry (like pydantic_ai `ModelRetry`) keeps one bad call from costing a whole re-run.
 `publish_call` raises `ClientToolInvalidArguments` (a `ClientToolConflict` subclass carrying
-`label` and `detail`) only for the schema case; every other conflict (not running, cancelled,
-duplicate, size limit) still fails closed. The first `AGENT_TOOL_ARG_RETRIES` (default 2, range
+`label` and `detail`) only for the argument-schema case (label `InvalidToolArguments`); every
+other conflict still fails closed, including `UnknownToolCall`, `UnexpectedToolCall` (another
+tool than `tool_choice` forces) and `InvalidToolCall`, as well as not running, cancelled,
+duplicate and size limit. The first `AGENT_TOOL_ARG_RETRIES` (default 2, range
 0..5) such calls per run are answered to the App Server as a tool result with `success: false`
 and the text `Tool arguments rejected: <detail>. Call <tool> again with arguments that satisfy
 its schema.`; nothing is published to the client, no `tool.call` event is emitted, the call is
