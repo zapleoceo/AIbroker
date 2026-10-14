@@ -45,12 +45,12 @@ def test_fenced_json_tolerance_unchanged():
         assert _gate(rf)('```json\n{"answer": 1}\n```', {}).error_kind == "InvalidJSON"
 
 
-def test_unusable_schema_degrades_to_parse_only():
+def test_unusable_schema_fails_closed():
     bad = {"type": "json_schema", "json_schema": {"schema": {"type": "no-such-type"}}}
-    assert _gate(bad)('{"x": 1}', {}) is None
+    assert _gate(bad)('{"x": 1}', {}).error_kind == "InvalidJSON"
     assert _gate(bad)("nope", {}).error_kind == "InvalidJSON"
     ref = {"type": "json_schema", "json_schema": {"schema": {"$ref": "#/$defs/missing"}}}
-    assert _gate(ref)('{"x": 1}', {}) is None
+    assert _gate(ref)('{"x": 1}', {}).error_kind == "InvalidJSON"
 
 
 async def _noop():
@@ -119,8 +119,8 @@ def test_remote_ref_never_touches_network():
             mock.patch.object(socket.socket, "connect", boom):
         for ref in ("http://169.254.169.254/latest/meta-data/", "https://example.invalid/s.json"):
             for schema in ({"$ref": ref}, {"type": "object", "properties": {"a": {"$ref": ref}}}):
-                assert sj.output_problem('{"a": 1}', _rf(schema)) is None  # parse-only
-                assert sj.output_problem("nope", _rf(schema)).startswith("InvalidJSON")
+                assert sj.output_problem('{"a": 1}', _rf(schema)).startswith("InvalidJSON")  # fail closed
+                assert sj.json_schema_problem(_rf(schema)) == "json_schema has a remote reference"
     assert calls == []
 
 
@@ -132,11 +132,13 @@ def test_local_defs_ref_still_validates():
     assert sj.output_problem('{"a": "x"}', _rf(schema)).startswith("InvalidJSON")
 
 
-def test_json_schema_wrapper_without_schema_is_parse_only():
+def test_json_schema_wrapper_without_schema_is_rejected_and_fails_closed():
     from aibroker.agent import subscription_job as sj
     for rf in ({"type": "json_schema"}, {"type": "json_schema", "json_schema": {}},
                {"type": "json_schema", "json_schema": {"schema": "x"}}):
-        assert sj.output_problem("[1]", rf) is None
+        assert sj.response_format_problem(rf) == "json_schema.schema must be an object"
+        assert sj.json_schema_problem(rf) == "json_schema.schema must be an object"
+        assert sj.output_problem("[1]", rf).startswith("InvalidJSON")
         assert sj.output_problem("nope", rf).startswith("InvalidJSON")
 
 
@@ -163,7 +165,7 @@ def test_checked_schema_is_cached(monkeypatch):
     assert n["c"] == 2  # the unusable verdict is cached too
 
 
-def test_oversized_schema_is_parse_only_and_not_cached(monkeypatch):
+def test_oversized_schema_fails_closed_and_is_not_cached(monkeypatch):
     from jsonschema import Draft202012Validator
 
     from aibroker.agent import subscription_job as sj
@@ -172,6 +174,59 @@ def test_oversized_schema_is_parse_only_and_not_cached(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("checked")))
     big = {"type": "object", "required": ["x"], "properties": {
         f"p{i}": {"type": "integer"} for i in range(sj.MAX_SCHEMA_BYTES // 10)}}
-    assert sj.output_problem('{"y": 1}', _rf(big)) is None  # would fail "required" if checked
+    assert sj.output_problem('{"x": 1}', _rf(big)).startswith("InvalidJSON")  # even a conforming answer
     assert sj.output_problem("nope", _rf(big)).startswith("InvalidJSON")
+    assert "exceeds" in sj.json_schema_problem(_rf(big))
     assert sj._checked_validator.cache_info().currsize == 0
+
+
+def test_nan_and_infinity_are_not_json():
+    from aibroker.agent import subscription_job as sj
+    for text in ('{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}', '{"a": 1e999}'):
+        assert sj.output_problem(text, {"type": "json_object"}).startswith("InvalidJSON")
+        assert sj.output_problem(text, _rf({"type": "object"})).startswith("InvalidJSON")
+    assert sj.output_problem('{"a": 1.5}', {"type": "json_object"}) is None
+
+
+def test_oversized_description_cannot_make_required_pass_silently():
+    from aibroker.agent import subscription_job as sj
+    rf = _rf({"type": "object", "required": ["answer"], "description": "x" * (sj.MAX_SCHEMA_BYTES + 1)})
+    assert sj.response_format_problem(rf).startswith("json_schema.schema exceeds")
+    assert sj.json_schema_problem(rf).startswith("json_schema.schema exceeds")
+    assert sj.output_problem("{}", rf).startswith("InvalidJSON")
+
+
+def test_dynamic_and_recursive_refs_are_rejected_and_fail_closed():
+    from aibroker.agent import subscription_job as sj
+    for key in ("$dynamicRef", "$recursiveRef"):
+        rf = _rf({"type": "object", "properties": {"a": {key: "#missing"}}})
+        assert sj.json_schema_problem(rf) == "json_schema has an unresolvable reference"
+        assert sj.response_format_problem(rf).startswith("unsupported_for_subscription_model")
+        assert sj.output_problem('{"a": 1}', rf).startswith("InvalidJSON")
+
+
+def test_validator_exception_fails_closed(monkeypatch):
+    from jsonschema import Draft202012Validator
+
+    from aibroker.agent import subscription_job as sj
+    sj._checked_validator.cache_clear()
+
+    def boom(self, instance):
+        raise RuntimeError("validator blew up")
+
+    monkeypatch.setattr(Draft202012Validator, "validate", boom)
+    assert sj.output_problem('{"a": 1}', _rf({"type": "object"})).startswith("InvalidJSON")
+
+
+async def test_plain_job_submit_rejects_unvalidatable_json_schema_with_400():
+    from aibroker.agent import subscription_job as sj
+    from tests.test_routes_proxy import _make_project, client
+    plain, _ = await _make_project(["llm:chat"])
+    bad = [_rf({"type": "object", "description": "x" * (sj.MAX_SCHEMA_BYTES + 1)}),
+           _rf({"$dynamicRef": "#nope"}), _rf({"$ref": "https://example.invalid/s.json"}),
+           _rf({"type": "no-such-type"}), {"type": "json_schema"}]
+    for rf in bad:
+        r = client.post("/v1/jobs?capability=chat:fast", headers={"X-Project-Key": plain},
+                        json={"messages": [{"role": "user", "content": "hi"}],
+                              "response_format": rf})
+        assert r.status_code == 400, (rf, r.text)

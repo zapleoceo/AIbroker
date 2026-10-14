@@ -39,7 +39,11 @@ from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_viola
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run
 from aibroker.agent.subscription_input import subscription_messages
-from aibroker.agent.subscription_job import live_files, prompt_for_messages
+from aibroker.agent.subscription_job import (
+    json_schema_problem,
+    live_files,
+    prompt_for_messages,
+)
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.config import get_settings
 from aibroker.providers import catalog
@@ -774,6 +778,9 @@ async def jobs_submit(
     if (known := await known_job_id(ctx.project.id, idempotency_key, client_hash)) is not None:
         return await _replay(ctx, known)
     _validate_pin(body.model, capability)
+    if (body.response_format and body.response_format.get("type") == "json_schema"
+            and (problem := json_schema_problem(body.response_format))):   # never parse-only
+        raise HTTPException(400, problem)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
     await admit_request(ctx.project)
     try:

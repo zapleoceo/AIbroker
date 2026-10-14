@@ -246,9 +246,13 @@ answer, on the API path and on subscription jobs alike, with one validator:
 the request schema (JSON Schema draft 2020-12). A non-conforming answer is an
 `InvalidJSON` rejection: the API path bills it and walks to the next provider, and
 if every attempt fails the job ends with a content failure. Markdown-fenced JSON is
-not accepted. Remote `$ref`s are never fetched; a schema the broker cannot evaluate (invalid,
-containing a remote `$ref`, or over 64 KiB as JSON) is evaluated parse-only. `strict: false` is still
-validated. Off-schema, array or scalar JSON used to come back as
+not accepted. Parsing is strict (`loads_strict` in `aibroker.strict_json`, shared with the tool-call gate): `NaN`,
+`Infinity`, non-finite numbers and duplicate keys are not JSON. Remote refs are never fetched. A
+`json_schema` the broker cannot FULLY validate (invalid, over 64 KiB as JSON, a remote or unresolvable
+`$ref` / `$dynamicRef` / `$recursiveRef`, or no `json_schema.schema` object) is rejected at submit with HTTP
+400 (`json_schema_problem`, on the plain job path and the subscription path alike) and fails closed at
+output time (`InvalidJSON`, also on any validator error); parse-only is never presented as schema
+validation. `strict: false` is still validated. Off-schema, array or scalar JSON used to come back as
 success, so expect more `InvalidJSON` rejections, especially on providers
 downgraded from `json_schema` to `json_object` (deepseek, cerebras).
 
