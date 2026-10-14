@@ -24,6 +24,7 @@ from sqlalchemy import text
 
 from aibroker.db import get_session
 from aibroker.routes.dashboard_queries import (
+    _dialect,
     _opt_int,
     _opt_str,
     _row,
@@ -48,11 +49,25 @@ _SLICES = (timedelta(days=1), timedelta(days=7), timedelta(days=30))
 _MARGIN = timedelta(days=1)
 
 STATUSES = ("ok", "failed", "pending", "running", "cancelled")
-KINDS = ("job", "direct")
+KINDS = ("job", "direct", "agent")   # `agent`: subscription agent runs (deep_jobs only)
 
 _GK = "COALESCE(u.request_id, 'u-' || CAST(u.id AS VARCHAR(20)))"
 _JOB_GK = "'job-' || CAST(j.id AS VARCHAR(20))"
 _JOB_PREFIX = "job-"
+_AGENT_LIKE = "j.capability LIKE 'agent:%'"
+# Agent runs never write usage_log (subscription billing), so their provider /
+# model / tokens come from deep_jobs + agent_runs: provider = what the run
+# reported, else derived from the capability; model = the pinned CLI model.
+_AGENT_PROVIDER = (
+    "COALESCE(j.result_meta ->> 'provider', CASE j.capability "
+    "WHEN 'agent:codex' THEN 'codex-sub' WHEN 'agent:claude' THEN 'claude-sub' END)")
+_LABEL_KEYS = ("exam_run_id", "run_id")
+# Agent run duration in ms, the one dialect switch here: the latency sort must order
+# agent rows by the duration the row shows (their latency_ms is not an attempt sum).
+_DURATION_SQL = {
+    "postgresql": "CAST(EXTRACT(EPOCH FROM (j.completed_at - j.started_at)) * 1000 AS BIGINT)",
+    "sqlite": "CAST((julianday(j.completed_at) - julianday(j.started_at)) * 86400000 AS INTEGER)",
+}
 _SEARCH_RE = re.compile(r"(?:(job|u)-)?(\d+)")
 
 # Whitelisted ORDER BY (alias-prefixed at use) — user input only selects a key.
@@ -88,7 +103,35 @@ _GROUPED = (
 )
 _JOB_COLS = ("j.id AS job_id, j.status AS job_status, j.created_at AS job_created, "
              "j.started_at AS job_started, j.completed_at AS job_completed, "
-             "j.retry_count AS job_retries, j.error_message AS job_error")
+             "j.retry_count AS job_retries, j.error_message AS job_error, "
+             "j.labels ->> 'exam_run_id' AS lbl_exam, j.labels ->> 'run_id' AS lbl_run")
+# Same column count/order in both halves of the UNION: plain jobs carry NULLs.
+_AGENT_NONE = "0 AS is_agent, NULL AS agent_provider, NULL AS agent_model, NULL AS agent_served"
+_AGENT_COLS = (f"CASE WHEN {_AGENT_LIKE} THEN 1 ELSE 0 END AS is_agent, "
+               f"{_AGENT_PROVIDER} AS agent_provider, ar.model AS agent_model, "
+               "j.result_meta ->> 'model_served' AS agent_served")
+
+
+def parse_label(raw: str | None) -> tuple[str | None, str] | None:
+    """`exam_run_id:abc` / `run_id:abc` pin the key; a bare value matches either
+    label. None when empty."""
+    if not raw:
+        return None
+    key, sep, val = raw.partition(":")
+    if sep and key in _LABEL_KEYS and val:
+        return key, val
+    return None, raw
+
+
+def _label_sql(exprs: Mapping[str, str], label: str | None) -> tuple[str, str] | None:
+    """(condition, bound value); `exprs` maps lbl_exam / lbl_run to the SQL
+    expression that reads each label in the caller's scope."""
+    parsed = parse_label(label)
+    if parsed is None:
+        return None
+    key, val = parsed
+    cols = {"exam_run_id": ("lbl_exam",), "run_id": ("lbl_run",)}.get(key or "", ("lbl_exam", "lbl_run"))
+    return "(" + " OR ".join(f"{exprs[c]} = :lbl" for c in cols) + ")", val
 
 
 def search_target(term: str | None) -> tuple[str, int | None] | None:
@@ -113,7 +156,8 @@ class RequestFilter:
     provider: str | None = None        # any attempt went to this provider
     model: str | None = None           # any attempt was routed to this model
     status: str | None = None          # ok | failed | pending | running | cancelled
-    kind: str | None = None            # job | direct
+    kind: str | None = None            # job | direct | agent
+    label: str | None = None           # exam_run_id / run_id label of a job
     search: str | None = None          # request id (exact)
     sort: str = "time"
     desc: bool = True
@@ -134,6 +178,7 @@ class RequestFilter:
             model=_opt_str(params.get("model")),
             status=status if status in STATUSES else None,
             kind=kind if kind in KINDS else None,
+            label=_opt_str(params.get("label"), 140),
             search=_opt_str(params.get("q"), 64),
             sort=sort if sort in _SORTS else "time",
             desc=params.get("dir", "desc") != "asc",
@@ -145,7 +190,8 @@ class RequestFilter:
         out: dict[str, str] = {}
         for key, val in (("project", self.project_id), ("workflow", self.workflow),
                          ("capability", self.capability), ("provider", self.provider),
-                         ("model", self.model), ("status", self.status), ("type", self.kind), ("q", self.search)):
+                         ("model", self.model), ("status", self.status), ("type", self.kind),
+                         ("label", self.label), ("q", self.search)):
             if val is not None:
                 out[key] = str(val)
         if self.sort != "time" or not self.desc:
@@ -172,6 +218,10 @@ class RequestFilter:
             conds.append(f"u.request_id LIKE '{_JOB_PREFIX}%'")
         elif self.kind == "direct":
             conds.append(f"(u.request_id IS NULL OR u.request_id NOT LIKE '{_JOB_PREFIX}%')")
+        elif self.kind == "agent":
+            conds.append("1 = 0")          # agent runs have no usage_log attempts
+        if self.label:
+            conds.append(f"u.request_id LIKE '{_JOB_PREFIX}%'")   # labels live on jobs only
         target = search_target(self.search)
         if target:
             kind, num = target
@@ -186,9 +236,9 @@ class RequestFilter:
         return conds, p
 
     def _job_conditions(self, since: datetime | None) -> tuple[list[str], dict[str, Any]] | None:
-        """Conditions for jobs WITHOUT attempts (they only exist in deep_jobs),
-        or None when this filter can never match one."""
-        if self.provider or self.model or self.workflow or self.kind == "direct":
+        """Conditions for jobs WITHOUT attempts (they only exist in deep_jobs:
+        queued, or agent runs), or None when this filter can never match one."""
+        if self.workflow or self.kind == "direct":
             return None
         conds, p = _win(self.start if since is None else max(since, self.start or since),
                         self.end, "j.created_at")
@@ -197,6 +247,18 @@ class RequestFilter:
             if val is not None:
                 conds.append(f"{col} = :{key}")
                 p[key] = val
+        if self.provider or self.model or self.kind == "agent":
+            conds.append(_AGENT_LIKE)      # only agent runs report provider/model here
+        if self.provider:
+            conds.append(f"{_AGENT_PROVIDER} = :prov")
+            p["prov"] = self.provider
+        if self.model:
+            conds.append("ar.model = :mod")
+            p["mod"] = self.model
+        if lab := _label_sql({"lbl_exam": "j.labels ->> 'exam_run_id'",
+                              "lbl_run": "j.labels ->> 'run_id'"}, self.label):
+            conds.append(lab[0])
+            p["lbl"] = lab[1]
         target = search_target(self.search)
         if target:
             kind, num = target
@@ -225,9 +287,13 @@ class RequestFilter:
             p["state"] = self.status
         if self._hit_sql():
             conds.append("r2.prov_hit = 1")
+        if lab := _label_sql({"lbl_exam": "r2.lbl_exam", "lbl_run": "r2.lbl_run"}, self.label):
+            conds.append(lab[0])
+            p["lbl"] = lab[1]
         return conds, p
 
-    def sql(self, since: datetime | None = None) -> tuple[str, dict[str, Any]]:
+    def sql(self, since: datetime | None = None,
+            dialect: str = "postgresql") -> tuple[str, dict[str, Any]]:
         """The CTE chain up to (and including) the filtered, ordered page
         window `pg`; `take` / `offset` are bound by the caller. `since` keeps
         only requests that started at or after it (see _SLICES)."""
@@ -242,17 +308,21 @@ class RequestFilter:
             "SELECT g.gk, g.first_id, g.last_id, g.ok_id, g.tries, g.first_at, "
             "g.project_id, g.capability, g.workflow, g.cost_usd, g.tokens_in, "
             "g.tokens_out, g.cache_read_tokens, g.cache_write_tokens, g.latency_ms"
-            f"{prov_cols}, {_JOB_COLS} FROM g "
+            f"{prov_cols}, {_JOB_COLS}, {_AGENT_NONE} FROM g "
             f"LEFT JOIN deep_jobs j ON g.gk = {_JOB_GK}"
         )
         jc = self._job_conditions(since)
         if jc is not None:
             conds, jp = jc
             p.update(jp)
+            hit_col = ", 1" if hit else ""      # conditions above already matched
             joined += (
                 f" UNION ALL SELECT {_JOB_GK}, NULL, NULL, NULL, 0, NULL, j.project_id, "
-                "j.capability, NULL, 0.0, 0, 0, 0, 0, 0, "
-                f"{_JOB_COLS} FROM deep_jobs j {_where(conds)}"
+                "j.capability, NULL, 0.0, COALESCE(ar.usage_input_tokens, 0), "
+                "COALESCE(ar.usage_output_tokens, 0), COALESCE(ar.usage_cache_read_tokens, 0), "
+                f"0, CASE WHEN {_AGENT_LIKE} THEN COALESCE({_DURATION_SQL.get(dialect, '0')}, 0) "
+                f"ELSE 0 END{hit_col}, {_JOB_COLS}, {_AGENT_COLS} "
+                f"FROM deep_jobs j LEFT JOIN agent_runs ar ON ar.run_id = j.id {_where(conds)}"
             )
         oc, op = self._outer_conditions(since)
         p.update(op)
@@ -268,7 +338,9 @@ class RequestFilter:
 
 
 _FINAL = (
-    "SELECT pg.*, p.name AS project, s.provider, s.model, s.model_served, "
+    "SELECT pg.*, p.name AS project, COALESCE(s.provider, pg.agent_provider) AS provider, "
+    "COALESCE(s.model, pg.agent_model) AS model, "
+    "COALESCE(s.model_served, pg.agent_served) AS model_served, "
     "s.status AS served_status, s.http_status, s.error_kind, k.label AS key_label "
     "FROM pg LEFT JOIN projects p ON p.id = pg.project_id "
     "LEFT JOIN usage_log s ON s.id = pg.served_id "
@@ -289,12 +361,19 @@ def _shape(r: Any, now: datetime) -> dict[str, Any]:
         end = d["job_started"] if d["state"] != "pending" and d["job_started"] else now
         d["wait_ms"] = max(0, int((end - d["job_created"]).total_seconds() * 1000))
     d["cost_usd"] = float(d["cost_usd"] or 0.0)
+    d["is_agent"] = bool(d["is_agent"])
+    d["billing"] = "subscription" if d["is_agent"] else None
+    d["labels"] = {k: v for k, v in (("exam_run_id", d["lbl_exam"]), ("run_id", d["lbl_run"])) if v}
+    d["duration_ms"] = None
+    if d["is_agent"] and d["job_started"] and d["job_completed"]:
+        d["duration_ms"] = max(0, int((d["job_completed"] - d["job_started"]).total_seconds() * 1000))
+        d["latency_ms"] = d["duration_ms"]
     return d
 
 
 async def _fetch(f: RequestFilter, since: datetime | None, take: int, offset: int
                  ) -> list[dict[str, Any]]:
-    head, p = f.sql(since)
+    head, p = f.sql(since, await _dialect())
     p.update(take=take, offset=offset)
     async with get_session() as s:
         rows = (await s.execute(text(

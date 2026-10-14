@@ -63,12 +63,21 @@
 
 {# "N tries → provider · model" (served), or what is known while the request is still open. #}
 {% macro req_outcome(r) -%}
-{%- if not r.tries -%}
+{%- if r.is_agent -%}
+  <b>{{ r.provider }}</b><span class="dim"> · {{ r.model or "—" }}</span>{% if r.model_served and r.model_served != r.model %}<span class="dim" title="{{ t('model served', 'модель ответа') }}"> → {{ r.model_served }}</span>{% endif %}
+{%- elif not r.tries -%}
   <span class="dim">{{ t("no attempt yet", "попыток ещё не было") }}</span>
 {%- else -%}
   {%- if r.tries > 1 %}<span class="dim">{{ tn(r.tries, "try", "tries", "попытка", "попытки", "попыток") }}{% if r.state == "ok" %} →{% else %} ·{% endif %}</span> {% endif -%}
   <b>{{ r.provider }}</b><span class="dim"> · {{ r.model_served or r.model or "—" }}</span>
 {%- endif -%}
+{%- endmacro %}
+
+{# exam_run_id / run_id labels of a job; each is a link to the journal filtered by it. #}
+{% macro req_labels(r) -%}
+{%- for k, v in r.labels.items() -%}
+<a class="pill" href="/dashboard/requests?label={{ (k ~ ':' ~ v)|urlencode }}&amp;{{ rng.qs }}" title="{{ k }}">{{ v }}</a>
+{%- endfor -%}
 {%- endmacro %}
 
 {% macro delta(d) -%}
