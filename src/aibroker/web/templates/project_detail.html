@@ -37,7 +37,11 @@
 {% if tab == "usage" %}
 <section class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr))">
   <div class="card kpi"><div class="kpi-label">{{ t("Calls", "Вызовы") }}</div><div class="kpi-value">{{ tot.calls|num }}</div>
-    <div class="kpi-sub"><span class="good">{{ tot.ok_n|num }} ok</span> · <span class="{{ 'bad' if tot.err_n }}">{{ tot.err_n|num }} {{ "failed" }}</span></div></div>
+    <div class="kpi-sub"><span class="good">{{ tot.ok_n|num }} ok</span> · <span class="{{ 'bad' if tot.err_n }}">{{ tot.err_n|num }} {{ "failed" }}</span>{% if tot.agent.n %} · {{ tot.api_calls|num }} API + {{ tot.agent.n|num }} {{ t("agent", "агент") }}{% endif %}</div></div>
+  {% if tot.agent.n %}
+  <div class="card kpi"><div class="kpi-label">{{ t("Agent runs", "Запуски агентов") }}</div><div class="kpi-value">{{ tot.agent.n|num }}</div>
+    <div class="kpi-sub"><span class="good">{{ tot.agent.done|num }} ok</span> · <span class="{{ 'bad' if tot.agent.error }}">{{ tot.agent.error|num }} failed</span> · {{ tot.agent.cancelled|num }} {{ t("cancelled", "отменено") }}{% if tot.agent.active %} · {{ tot.agent.active|num }} {{ t("live", "в работе") }}{% endif %} · {{ t("subscription", "подписка") }}</div></div>
+  {% endif %}
   <div class="card kpi"><div class="kpi-label">{{ t("Spend", "Расходы") }}</div><div class="kpi-value">{{ tot.spend|money }}</div>
     <div class="kpi-sub">{{ t("daily cap", "дневной лимит") }} {{ cap|money if cap else "—" }}</div></div>
   <div class="card kpi"><div class="kpi-label">{{ t("Tokens in / out", "Токены вх / исх") }}</div><div class="kpi-value" style="font-size:20px">{{ tot.tin|compact }} / {{ tot.tout|compact }}</div>
@@ -55,6 +59,14 @@
 {% endif %}
 
 <div class="grid-2">
+  <section class="card">
+    <div class="card-head"><h2>{{ t("Requests by day", "Запросы по дням") }}</h2><p>{{ t("API calls + agent runs", "API-вызовы + запуски агентов") }}</p></div>
+    <div class="card-body">
+      <div>{{ d.daily|map(attribute="api")|list|spark }}</div>
+      <div>{{ d.daily|map(attribute="agent")|list|spark }}</div>
+      <p class="muted">{{ t("API calls", "API-вызовы") }} {{ (d.daily|sum(attribute="api"))|num }} · {{ t("agent runs", "запуски агентов") }} {{ (d.daily|sum(attribute="agent"))|num }}</p>
+    </div>
+  </section>
   <section class="card">
     <div class="card-head"><h2>{{ t("By provider", "По провайдерам") }}</h2></div>
     <div class="card-body">
@@ -120,6 +132,30 @@
   {% else %}{{ m.empty("inbox", "No calls yet", "Вызовов пока нет") }}{% endif %}
 </section>
 
+{% if d.agent_recent %}
+<section class="card">
+  <div class="card-head"><h2>{{ t("Recent agent runs", "Последние запуски агентов") }}</h2>
+    <a href="/dashboard/requests?project={{ project.id }}&amp;type=agent&amp;{{ rng.qs }}">{{ t("Open in Requests", "Открыть в Запросах") }}</a></div>
+  <div class="table-wrap"><table class="table rtable">
+    <thead><tr><th>{{ t("When", "Когда") }}</th><th>{{ t("Provider · model", "Провайдер · модель") }}</th><th>{{ t("Capability", "Способность") }}</th><th>{{ t("Labels", "Метки") }}</th><th class="num">{{ t("Tokens in/out", "Токены вх/исх") }}</th><th class="num">{{ t("Duration", "Длительность") }}</th><th>{{ t("Billing", "Оплата") }}</th><th>{{ t("Status", "Статус") }}</th></tr></thead>
+    <tbody>
+      {% for r in d.agent_recent %}
+      <tr class="clickable">
+        <td data-label="When" class="nowrap"><button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.ref }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" aria-haspopup="dialog">{{ r.created_at|time_tag("mdhms") }}</button></td>
+        <td data-label="Provider · model" class="cell-trunc full">{{ m.req_outcome(r) }}</td>
+        <td data-label="Capability"><span class="pill">{{ r.capability or "—" }}</span></td>
+        <td data-label="Labels">{{ m.req_labels(r) }}</td>
+        <td data-label="Tokens" class="num mono">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}{% if r.cache_read_tokens %}<br><span class="dim">{{ r.cache_read_tokens|num }} {{ t("cache", "кэш") }}</span>{% endif %}</td>
+        <td data-label="Duration" class="num mono">{% if r.duration_ms is not none %}{{ r.duration_ms|ms_t }}{% else %}—{% endif %}</td>
+        <td data-label="Billing">{{ t("subscription", "подписка") }}</td>
+        <td data-label="Status">{{ m.req_status(r) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
 {% elif tab == "models" %}
 <section class="card">
   <div class="card-head"><h2>{{ t("Top models", "Топ моделей") }}</h2><p>{{ t("cache hit = cached share of input tokens", "кэш-хит — доля кэшированных входных токенов") }}</p></div>
@@ -129,7 +165,7 @@
     <tbody>
       {% for r in d.by_model %}
       <tr>
-        <td data-label="Model" class="cell-trunc full" title="{{ r.k }}"><a href="/dashboard/requests?project={{ project.id }}&amp;model={{ r.k|urlencode }}&amp;{{ rng.qs }}">{{ r.k }}</a></td>
+        <td data-label="Model" class="cell-trunc full" title="{{ r.k }}"><a href="/dashboard/requests?project={{ project.id }}&amp;model={{ r.k|urlencode }}&amp;{{ rng.qs }}">{{ r.k }}</a>{% if r.served %}<span class="dim"> → {{ r.served|join(", ") }}</span>{% endif %}</td>
         <td data-label="Calls" class="num">{{ r.n|num }}</td>
         <td data-label="Success" class="num">{{ ((r.ok_n / r.n * 100)|pct(0)) if r.n else "—" }}</td>
         <td data-label="Cache hit" class="num">{{ ((r.cache_r / r.tin * 100)|pct(0)) if r.tin and r.cache_r else "—" }}</td>

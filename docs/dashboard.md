@@ -53,6 +53,28 @@ path, else ignored) to land back on the page they came from.
 `routes/dashboard_labels.py` holds friendly error labels and `key_status` (`KeyStatus`,
 `reason_labels`); `provider_catalogue` drives the add-key drawer.
 
+### Subscription agent runs (project page and journal)
+
+`agent:codex` / `agent:claude` jobs (`deep_jobs` + `agent_runs`) never write `usage_log`, so
+`routes/dashboard_agent.py` counts them separately and folds them into the project page
+(`project_breakdown_with_agents` = `project_breakdown` + `agent_breakdown` + `merge_agent`):
+Usage KPIs (an "Agent runs" tile, calls = API + agent), "Requests by day", by provider / model /
+capability, the Models tab (pinned model, plus `result_meta.model_served` when present) and a
+"Recent agent runs" table. Provider is `result_meta.provider`, else derived from the capability
+(`agent_provider`: `agent:codex` -> `codex-sub`, `agent:claude` -> `claude-sub`); model is
+`agent_runs.model` (the pinned CLI model); tokens in/out/cache come from `agent_runs.usage_*`;
+cost is always 0 (billing = subscription, no invented price); duration = `completed_at -
+started_at`. **No double counting:** a plain job's attempts are counted only through `usage_log`,
+an agent job only through `deep_jobs`/`agent_runs`.
+
+The Requests journal reuses the existing `job-<id>` machinery: agent jobs are rows of the
+"job without attempts" branch, now LEFT JOINed to `agent_runs`, so they show provider, pinned
+model, status (ok / failed / cancelled / pending / running), tokens in/out/cache, duration, time
+and "subscription" as cost. New filters: `type=agent` (agent runs only) and `label=` (`exam_run_id`
+/ `run_id` of the job; `label=exam_run_id:ex-1` pins the key, a bare value matches either);
+`provider` and `model` now also match agent jobs; labels are shown as pills linking to the label
+filter and exported to the CSV (`billing`, `labels` columns). `parse_label` parses the filter value.
+
 ### One row per client request
 
 `routes/dashboard_requests.py` builds the Requests list (`query_requests`, `RequestFilter`,

@@ -25,6 +25,7 @@ from aibroker.providers.registry import default_models, provider_names
 from aibroker.routes import dashboard_queries as q
 from aibroker.routes import dashboard_requests as rq
 from aibroker.routes import dashboard_views as views
+from aibroker.routes.dashboard_agent import project_breakdown_with_agents
 from aibroker.routes.dashboard_assets import ASSETS_VERSION
 from aibroker.routes.dashboard_data import (
     _fetch_keys,
@@ -200,14 +201,15 @@ def _csv_cell(v: Any) -> Any:
 
 _CSV_COLUMNS = ("request_id", "created_at", "type", "project", "workflow", "capability",
                 "status", "tries", "provider", "model", "model_served", "tokens_in",
-                "tokens_out", "cache_read_tokens", "cache_write_tokens", "cost_usd",
-                "wait_ms", "latency_ms", "retries", "error")
+                "tokens_out", "cache_read_tokens", "cache_write_tokens", "cost_usd", "billing",
+                "wait_ms", "latency_ms", "retries", "labels", "error")
 
 
 def _csv_row(r: dict[str, Any]) -> list[Any]:
     cells = {**r, "type": "job" if r["is_job"] else "direct", "status": r["state"],
              "created_at": r["created_at"].isoformat() + "Z",
-             "retries": r["job_retries"], "error": r["job_error"]}
+             "retries": r["job_retries"], "error": r["job_error"],
+             "labels": " ".join(f"{k}={v}" for k, v in r["labels"].items())}
     return [_csv_cell(cells.get(c)) for c in _CSV_COLUMNS]
 
 
@@ -228,13 +230,15 @@ async def requests_csv(request: Request) -> Response:
 
 
 # (en, ru) vocabulary shared by the filter selects and the active-filter chips.
-_KIND_LABELS = {"job": ("Queue", "Очередь"), "direct": ("Direct", "Прямой")}
+_KIND_LABELS = {"job": ("Queue", "Очередь"), "direct": ("Direct", "Прямой"),
+                "agent": ("Agent run", "Агент")}
 _STATUS_LABELS = {"ok": ("ok", "ок"), "failed": ("failed", "ошибка"),
                   "pending": ("pending", "ожидает"), "running": ("running", "в работе"),
                   "cancelled": ("cancelled", "отменён")}
 _FILTER_NAMES = {"q": ("ID", "ID"), "type": ("Type", "Тип"), "status": ("Status", "Статус"),
                  "project": ("Project", "Проект"), "workflow": ("Workflow", "Сценарий"),
-                 "capability": ("Capability", "Способность"), "model": ("Model", "Модель"), "provider": ("Provider", "Провайдер")}
+                 "capability": ("Capability", "Способность"), "model": ("Model", "Модель"), "provider": ("Provider", "Провайдер"),
+                 "label": ("Label", "Метка")}
 
 
 def _filter_chips(f: rq.RequestFilter, rng: DateRange, projects: list[Any]) -> list[dict[str, Any]]:
@@ -246,7 +250,7 @@ def _filter_chips(f: rq.RequestFilter, rng: DateRange, projects: list[Any]) -> l
         ("q", "q", f.search), ("type", "type", f.kind), ("status", "status", f.status),
         ("project", "project", f.project_id), ("workflow", "workflow", f.workflow),
         ("capability", "capability", f.capability), ("provider", "provider", f.provider),
-        ("model", "model", f.model),
+        ("model", "model", f.model), ("label", "label", f.label),
     ):
         if val is None:
             continue
@@ -395,7 +399,7 @@ async def render_project_detail(request: Request, project_id: int, *,
     project = next((p for p in projects if p.id == project_id), None)
     if project is None:
         return RedirectResponse("/dashboard?flash=!Project+not+found", status_code=303)
-    d = await q.project_breakdown(project_id, rng.start, rng.end, rng.bucket)
+    d = await project_breakdown_with_agents(project_id, rng.start, rng.end, rng.bucket)
     today = today_in(tz)
     _, today_spend = await _fetch_range_and_proj_spend(*_range_where(today, today, tz))
     t = d["totals"]
