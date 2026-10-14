@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -49,21 +50,43 @@ _SHOWN_RULES = {"maxLength", "minLength", "maxItems", "minItems", "maximum", "mi
                 "required", "additionalProperties", "enum", "const", "pattern", "format"}
 
 
+def _safe_path(schema: dict[str, Any], path: Any) -> str:
+    """The instance path with ONLY names the client's schema declares in `properties`; a key the
+    model chose (free-form dict, additional/pattern properties) is shown as `*`, an index as-is."""
+    cur: Any = schema
+    out = []
+    for seg in path:
+        if isinstance(seg, int):
+            out.append(str(seg))
+            cur = cur.get("items") if isinstance(cur, dict) else None
+        elif isinstance(cur, dict) and isinstance(cur.get("properties"), dict)                 and seg in cur["properties"]:
+            out.append(str(seg)[:40])
+            cur = cur["properties"][seg]
+        else:
+            out.append("*")
+            cur = cur.get("additionalProperties") if isinstance(cur, dict) else None
+    return "/".join(out)[:80] or "<root>"
+
+
 def schema_violation(tools: list[dict[str, Any]], name: str, arguments: Any) -> str:
-    """Which declared-schema rule a tool call broke, WITHOUT any argument value: JSON path, the
-    rule, its limit and the observed size/type (at most 3 errors). '' when it cannot be told."""
-    schema = next((t.get("function", {}).get("parameters") for t in tools
-                   if t.get("function", {}).get("name") == name), None)
-    if not isinstance(schema, dict):
+    """Which declared-schema rule a tool call broke, WITHOUT any argument value or model-chosen
+    key: JSON path (schema-declared names only), the rule, its limit and the observed size/type
+    (the first 3 errors - never a full scan of a large argument). '' when it cannot be told."""
+    tool = next((t.get("function", {}) for t in tools
+                 if t.get("function", {}).get("name") == name), None)
+    if tool is None:
         return f"undeclared tool {name[:40]!r}" if isinstance(name, str) else ""
+    schema = tool.get("parameters")
+    if not isinstance(schema, dict):
+        return "tool has no parameters schema"
     try:
-        errors = sorted(Draft202012Validator(schema).iter_errors(arguments),
-                        key=lambda e: [str(p) for p in e.absolute_path])[:3]
+        errors = sorted(islice(Draft202012Validator(schema).iter_errors(arguments), 3),
+                        key=lambda e: [str(p) for p in e.absolute_path])
     except Exception:  # noqa: BLE001 - diagnosis only; the call is rejected either way
         return ""
     parts = []
     for e in errors:
-        path = "/".join(str(p) for p in e.absolute_path)[:80] or "<root>"
+        path = _safe_path(schema, e.absolute_path)
         rule = e.validator if e.validator in _SHOWN_RULES else "schema"
         sized = rule != "type" and isinstance(e.instance, (str, list, dict))
         got = f"len {len(e.instance)}" if sized else f"type {type(e.instance).__name__}"
@@ -100,7 +123,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
         if label:
             detail = schema_violation(tools, name, arguments)
             # ids, label and rule only - never argument values
-            log.warning("client tool call rejected: run=%d call=%s tool=%s label=%s %s",
+            log.warning("client tool call rejected: run=%d call=%r tool=%r label=%s %s",
                         run_id, call_id[:40], str(name)[:40], label, detail)
             raise ClientToolConflict(f"tool call is outside the declared schema [{label}]"
                                      + (f": {detail}" if detail else ""))

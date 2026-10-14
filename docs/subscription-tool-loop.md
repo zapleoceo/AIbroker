@@ -71,7 +71,9 @@ A call whose arguments break the declared schema fails the run with
 `tool call is outside the declared schema [<validate_result label>]: <path>: <rule> <limit> (got len|type ...)`
 (also logged at WARNING with run and call ids):
 `schema_violation` names up to three violated rules (JSON path, rule, limit, observed size or
-type) and never an argument value; the arguments themselves are not stored.
+type; only the first 3 errors are computed) and never an argument value or a model-chosen key
+(path segments outside the schema's declared `properties` show as `*`); the arguments themselves
+are not stored.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
 invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a

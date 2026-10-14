@@ -277,3 +277,30 @@ async def test_publish_call_rejection_logs_label_and_rule_without_values(caplog)
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "label=InvalidToolArguments" in text and "id: type integer" in text
     assert "SYNTHETIC" not in text
+
+
+def test_schema_violation_never_shows_a_model_chosen_key():
+    from aibroker.agent.client_tools import schema_violation
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "properties": {"m": {"type": "object",
+                                               "additionalProperties": {"type": "integer"}}},
+        "additionalProperties": {"type": "integer"},
+        "patternProperties": {"^LEAK": {"type": "integer"}}}}}]
+    args = {"LEAKED-KEY-sk-abc123": "x", "LEAK2": "y", "m": {"MODELKEY": "v"}}
+    detail = schema_violation(tools, "t", args)
+    assert "LEAK" not in detail and "MODELKEY" not in detail and "sk-" not in detail
+    assert "*: type integer (got type str)" in detail and "m/*: type integer" in detail
+
+
+def test_schema_violation_stops_after_three_errors_on_a_large_argument():
+    import time
+
+    from aibroker.agent.client_tools import schema_violation
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "properties": {"a": {"type": "array", "items": {"type": "string"}}}}}}]
+    started = time.monotonic()
+    detail = schema_violation(tools, "t", {"a": list(range(30000))})
+    assert time.monotonic() - started < 0.5
+    assert detail.count("type string") == 3 and detail.startswith("a/0:")
+    no_params = [{"type": "function", "function": {"name": "t"}}]
+    assert schema_violation(no_params, "t", {}) == "tool has no parameters schema"
