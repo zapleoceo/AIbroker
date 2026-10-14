@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +15,8 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow
 from aibroker.services.tool_contract import validate_result
+
+log = logging.getLogger(__name__)
 
 MAX_CALLS = 16
 MAX_ARGUMENT_BYTES = 64 * 1024
@@ -92,10 +95,14 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
         tools = client.get("tools") or []
         call = {"id": call_id, "type": "function",
                 "function": {"name": name, "arguments": raw}}
-        if validate_result("", {"finish_reason": "tool_calls", "tool_calls": [call]},
-                           tools, client.get("tool_choice")):
+        label = validate_result("", {"finish_reason": "tool_calls", "tool_calls": [call]},
+                                tools, client.get("tool_choice"))
+        if label:
             detail = schema_violation(tools, name, arguments)
-            raise ClientToolConflict("tool call is outside the declared schema"
+            # ids, label and rule only - never argument values
+            log.warning("client tool call rejected: run=%d call=%s tool=%s label=%s %s",
+                        run_id, call_id[:40], str(name)[:40], label, detail)
+            raise ClientToolConflict(f"tool call is outside the declared schema [{label}]"
                                      + (f": {detail}" if detail else ""))
         meta = dict(job.result_meta or {})
         history = list(meta.get("client_tool_history") or [])

@@ -264,5 +264,16 @@ def test_schema_violation_names_the_rule_but_never_a_value():
 
 async def test_publish_call_rejection_carries_the_schema_detail(monkeypatch):
     job_id = await _job()
-    with pytest.raises(ClientToolConflict, match=r"outside the declared schema: id: type integer \(got type str\)"):
+    with pytest.raises(ClientToolConflict, match=r"outside the declared schema \[InvalidToolArguments\]: id: type integer \(got type str\)"):
         await publish_call(job_id, "c1", "lookup", {"id": "string"})
+
+
+async def test_publish_call_rejection_logs_label_and_rule_without_values(caplog):
+    import logging
+    job_id = await _job()
+    with caplog.at_level(logging.WARNING, logger="aibroker.agent.client_tools"), \
+            pytest.raises(ClientToolConflict):
+        await publish_call(job_id, "c1", "lookup", {"id": "SYNTHETIC-SECRET-VALUE"})
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "label=InvalidToolArguments" in text and "id: type integer" in text
+    assert "SYNTHETIC" not in text
