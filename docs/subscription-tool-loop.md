@@ -40,7 +40,8 @@ or same `callId`), fails the run closed; a repeated `thread/start` reply is igno
    *only* the functions declared by this job as dynamic tools. It does not
    expose a host port, store a new credential, or call Orchestra directly.
 3. On `item/tool/call`, the worker checks the thread and turn IDs, then persists
-   the call ID, name, arguments, and a 300-second deadline before exposing it. `GET
+   the call ID, name, arguments, and a deadline (`AGENT_TOOL_WAIT_S`: 90 s in production,
+   code default 300 s) before exposing it. `GET
    /v1/jobs/{id}` reports `status: pending`, `tool_calls`, and a distinct
    `finish_reason: tool_calls` while the call waits (`is_waiting`). The model
    process remains paused. The deadline bounds only the wait for a result: once
@@ -65,7 +66,7 @@ loss, `clear_pending_call` withdraws the call only while it is still waiting:
 poll stops advertising it and later result submits get 409. A result already
 accepted with 202 is kept. On a crash, the run's terminal write replaces
 `result_meta`, which withdraws the call. A hard worker death is bounded by the
-300-second deadline; the reaper then marks the run `worker_lost`.
+tool-call deadline (`AGENT_TOOL_WAIT_S`); the reaper then marks the run `worker_lost`.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
 invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a
