@@ -19,6 +19,10 @@ from aibroker.agent.adapter import BillingMode, StreamEvent
 from aibroker.agent.billing import BILLING_REFUSED
 
 log = logging.getLogger(__name__)
+_EXEC_EVENT_TYPES = frozenset({"thread.started", "turn.started", "turn.completed", "turn.failed",
+                               "item.started", "item.updated", "item.completed", "error"})
+_SAFE_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
+_MAX_LOGGED_SHAPES = 20
 _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many requests|"
                     r"credit balance|exceeded your|"
                     # Documented Claude Code caps ("You've hit your weekly limit"); a bare
@@ -245,17 +249,29 @@ class CodexParser:
         self.error: str | None = None
         self._calls = 0
         self._shapes: set[str] = set()
+        self._shapes_dropped = 0
+
+    @staticmethod
+    def _safe_keys(names: Any) -> list[str]:
+        """Key names that look like identifiers (sorted, max 30); anything else is only counted."""
+        keys = [k for k in names if isinstance(k, str) and _SAFE_KEY.fullmatch(k)]
+        unsafe = sum(1 for k in names if not (isinstance(k, str) and _SAFE_KEY.fullmatch(k)))
+        out = sorted(keys)[:30]
+        return out + [f"<unsafe-key>x{unsafe}"] if unsafe else out
 
     def _log_shape(self, data: dict[str, Any]) -> None:
         """Diagnostics: log each distinct event shape once, KEY NAMES only (never values)."""
-        kind = data.get("type")
-        kind = kind[:60] if isinstance(kind, str) else "<non-str>"
-        keys = sorted(str(k)[:40] for k in data)[:30]
+        raw = data.get("type")
+        kind = raw if isinstance(raw, str) and raw in _EXEC_EVENT_TYPES else "<other>"
+        keys = self._safe_keys(list(data))
         item = data.get("item")
         if kind.startswith("item.") and isinstance(item, dict):
-            keys.append("item=" + ",".join(sorted(str(k)[:40] for k in item)[:30]))
+            keys.append("item=" + ",".join(self._safe_keys(list(item))))
         shape = f"{kind}|{keys}"
         if shape in self._shapes:
+            return
+        if len(self._shapes) >= _MAX_LOGGED_SHAPES:
+            self._shapes_dropped += 1      # reported once by finish(); nothing else is logged
             return
         self._shapes.add(shape)
         log.info("codex exec event keys type=%s keys=%s", kind, keys)
@@ -310,6 +326,9 @@ class CodexParser:
         return []
 
     def finish(self, returncode: int, stderr_tail: str = "") -> StreamEvent:
+        if self._shapes_dropped:
+            log.info("codex exec event shapes capped at %d (dropped %d)",
+                     _MAX_LOGGED_SHAPES, self._shapes_dropped)
         if self.turn_done and returncode == 0 and self.error is None:
             return ev.RunCompleted(final_text=self.final_text)
         msg = self.error or stderr_tail.strip() or f"codex exited {returncode} without a finished turn"

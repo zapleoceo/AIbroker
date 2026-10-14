@@ -142,7 +142,8 @@ def test_served_model_meta_nothing_observed_is_unknown_and_null():
     meta = served_model_meta([])
     assert meta == {"model_served": None, "model_observed_best": None,
                     "model_served_kind": "unknown",
-                    "model_served_source": "none", "model_observations": []}
+                    "model_served_source": "none", "model_observations": [],
+                    "observations_truncated": False, "observations_complete": True}
 
 
 def test_observations_are_capped():
@@ -177,7 +178,7 @@ async def test_poll_reports_evidence_for_a_subscription_job():
     e = result.evidence
     assert e.model_requested == REQUESTED and e.model_served == "claude-x-resp"
     assert e.model_served_kind == "response" and e.provider == "codex-sub"
-    assert e.account_id == "owner" and e.model_rerouted is False
+    assert e.account_id == "owner" and e.model_rerouted is None   # no app-server path: unknown
     assert [o.kind for o in e.model_observations] == ["thread_config", "response"]
 
 
@@ -221,14 +222,26 @@ def test_cap_never_drops_the_best_observation():
                                      "m", "response", "b")) == 1
 
 
-def test_codex_parser_key_logging_is_bounded(caplog):
+def test_codex_parser_logs_only_allowlisted_types_and_safe_keys(caplog):
     p = CodexParser()
-    big = {f"k{i:03d}" + "x" * 80: 1 for i in range(60)}
+    token = "sk-tok_ABCDEF0123456789"
     with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
-        p.feed(json.dumps({"type": ["not", "a", "string"], **big}))
-    msg = caplog.records[-1].getMessage()
-    assert "type=<non-str>" in msg
-    assert "x" * 41 not in msg and "k059" not in msg      # names cut at 40, keys capped at 30
+        p.feed(json.dumps({"type": token, token: 1, "bad key!": 2, "x" * 80: 3, "ok_key": 4}))
+        p.feed(json.dumps({"type": ["not", "a", "string"]}))
+    text = chr(10).join(r.getMessage() for r in caplog.records)
+    assert token not in text and "bad key" not in text and "x" * 41 not in text
+    assert "type=<other>" in text and "ok_key" in text and "<unsafe-key>x3" in text
+
+
+def test_codex_parser_caps_logged_shapes(caplog):
+    p = CodexParser()
+    with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
+        for i in range(1000):
+            p.feed(json.dumps({"type": "item.completed", f"k{i}": 1}))
+        p.finish(0)
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) <= 21
+    assert lines[-1] == "codex exec event shapes capped at 20 (dropped 980)"
 
 
 async def test_thread_config_only_job_keeps_top_level_model_served_null():
@@ -250,3 +263,76 @@ async def test_observations_survive_failed_cancelled_and_timed_out_runs():
         await append_event(rid, terminal)
         meta = (await get_run(rid, pid))[1].result_meta
         assert meta["model_observations"] == [{"model": "m1", "kind": "response", "source": "r"}],             terminal.type
+
+
+async def _subscription_job(pid, *, tools=None):
+    plain = generate_project_key()
+    async with get_session() as session:
+        session.add(ProjectRow(id=pid, name=f"ev-{pid}", project_key_hash=hash_project_key(plain),
+                               project_key_prefix=plain[:12],
+                               allowed_scopes=["llm:chat", "llm:agent"], is_active=True, notes=""))
+    run_id, _ = await create_run(
+        project=SimpleNamespace(id=pid), capability="agent:codex", prompt="p", task_id="t",
+        account_id="owner", session_id=None, idempotency_key=None, wall_timeout_s=30,
+        idle_timeout_s=30, allowed_tools=[], model="gpt-6.1-sol",
+        client_job={"provider": "codex-sub", "model": REQUESTED, "response_format": None,
+                    "tools": tools or []})
+    return run_id
+
+
+async def test_evidence_is_returned_for_every_terminal_outcome():
+    for pid, terminal, status, outcome in (
+            (41, ev.RunFailed(error_class="x", message="m"), "error", "failed"),
+            (42, ev.RunCancelled(), "cancelled", "cancelled"),
+            (43, ev.RunTimedOut(limit="wall"), "error", "timed_out")):
+        rid = await _job(pid)
+        await append_event(rid, ev.ModelObserved(model="gpt-6.1-sol", kind="thread_config",
+                                                 source="s"))
+        await append_event(rid, terminal)
+        result = proxy._job_response((await get_run(rid, pid))[1])
+        assert result.status == status
+        e = result.evidence
+        assert e.run_status == outcome and e.provider == "codex-sub" and e.account_id == "owner"
+        assert e.model_requested == REQUESTED and e.model_served == "gpt-6.1-sol"
+        assert e.model_served_kind == "thread_config" and e.model_rerouted is None
+
+
+async def test_evidence_is_available_while_the_run_is_in_flight():
+    rid = await _job(44)
+    await append_event(rid, ev.ModelObserved(model="m1", kind="response", source="r"))
+    result = proxy._job_response((await get_run(rid, 44))[1])
+    assert result.status == "pending" and result.evidence.model_served == "m1"
+    assert result.evidence.run_status in ("pending", "running")
+
+
+async def test_model_rerouted_is_false_only_for_a_completed_app_server_run():
+    app = await _subscription_job(45, tools=[{"type": "function"}])
+    await append_event(app, ev.RunCompleted(final_text="ok"))
+    assert proxy._job_response((await get_run(app, 45))[1]).evidence.model_rerouted is False
+    exec_run = await _subscription_job(46)                       # Codex exec: no tools
+    await append_event(exec_run, ev.RunCompleted(final_text="ok"))
+    assert proxy._job_response((await get_run(exec_run, 46))[1]).evidence.model_rerouted is None
+    failed = await _subscription_job(47, tools=[{"type": "function"}])
+    await append_event(failed, ev.RunFailed(error_class="x", message="m"))
+    assert proxy._job_response((await get_run(failed, 47))[1]).evidence.model_rerouted is None
+
+
+async def test_eleven_distinct_responses_are_flagged_truncated_and_fail_closed():
+    rid = await _job(48)
+    for i in range(11):
+        await append_event(rid, ev.ModelObserved(model=f"resp-{i}", kind="response", source="r"))
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    result = proxy._job_response((await get_run(rid, 48))[1])
+    e = result.evidence
+    assert e.observations_truncated is True and e.observations_complete is False
+    assert len(e.model_observations) == 10 and e.model_served_kind == "response"
+    assert result.model_served is None                      # fail closed: the 11th was dropped
+    assert (await get_run(rid, 48))[1].result_meta["observations_truncated"] is True
+
+
+async def test_untruncated_single_response_still_fills_top_level():
+    rid = await _job(49)
+    await append_event(rid, ev.ModelObserved(model="only", kind="response", source="r"))
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    result = proxy._job_response((await get_run(rid, 49))[1])
+    assert result.model_served == "only" and result.evidence.observations_complete is True

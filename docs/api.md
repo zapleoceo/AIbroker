@@ -130,12 +130,18 @@ reported by the CLI, with `null` for unavailable counts. An unknown
 entry in that run's `/v1/agent/runs/{id}/events` stream and fails the tool
 turn; absence of that entry does not attest model identity.
 
-Subscription polls (`status: done`) also carry an `evidence` object (absent for plain
-deep jobs): `provider`, `account_id`, `billing_mode` (the run's billing type),
+Subscription polls also carry an `evidence` object (absent for plain deep jobs) for every
+status: while the run is in flight, and for done, error, cancelled and timed-out jobs, with
+`run_status` (`pending` | `running` | `completed` | `failed` | `cancelled` | `timed_out`): `provider`, `account_id`, `billing_mode` (the run's billing type),
 `model_requested` (the pin), `model_served` (`str|null`), `model_served_kind`
 (`response` | `thread_config` | `session_init` | `unknown`), `model_served_source`,
-`model_observations` (`[{model, kind, source}]`, all observations, never overwritten)
-and `model_rerouted` (always `false`: a reroute fails the run). `response` comes from
+`model_observations` (`[{model, kind, source}]`: one entry per kind and model, capped at 10;
+when the cap drops or evicts an observation `observations_truncated` is `true` and
+`observations_complete` is `false`, and the top-level `model_served` fails closed to `null`
+if more than one distinct `response` model is stored), and `model_rerouted` (`false` only for
+a completed Codex app-server run, where reroute notifications are observed and fail the run
+closed; `null` = unknown: Claude, Codex exec, nothing observed, or a run that did not
+complete). `response` comes from
 an API response message; `thread_config` is the model the CLI configured for the
 thread, not proof of each response's backend; `unknown` means nothing was observed,
 `model_served` is `null`, and it never falls back to the requested model.

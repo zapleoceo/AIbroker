@@ -10,7 +10,9 @@ separate rollout gates; see `docs/subscription-tool-loop.md`.
 **Served-model evidence (additive).** A run records `model.observed` events
 (`model`, `kind`, `source`) for every model the CLI reports, and the job keeps the
 deduped list (one entry per kind and model, max 10; a stronger kind replaces the weakest
-entry when full) as `model_observations`, kept on failed, cancelled and timed-out runs too.
+entry when full, otherwise the new one is dropped, and either way `observations_truncated`
+is set, `observations_complete` is `false`, and the top-level `model_served` is `null` when
+more than one distinct `response` model is stored) as `model_observations`, kept on failed, cancelled and timed-out runs too.
 The poll `evidence` carries the strongest kind seen as `model_served`, `model_served_kind`
 and `model_served_source`, while the top-level `model_served` stays strict and is filled
 only by `response`-level evidence:

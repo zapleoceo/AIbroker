@@ -184,34 +184,49 @@ _MAX_MODEL_OBSERVATIONS = 10
 _EVIDENCE_RANK = {"response": 3, "thread_config": 2, "session_init": 1}
 
 
-def add_model_observation(existing: Any, model: str, kind: str, source: str) -> list[dict[str, str]]:
-    """Append {model, kind, source} to the observation list, deduped, capped; never overwrites."""
+def _fold_observation(existing: Any, model: str, kind: str,
+                      source: str) -> tuple[list[dict[str, str]], bool]:
+    """Fold one observation in: (items, truncated). `truncated` is True when an observation was
+    dropped or an entry was evicted to make room (the list is then incomplete)."""
     items = [o for o in (existing or []) if isinstance(o, dict)]
     entry = {"model": model, "kind": kind, "source": source}
     if any(o.get("kind") == kind and o.get("model") == model for o in items):
-        return items                      # one entry per (kind, model)
+        return items, False               # one entry per (kind, model)
     if len(items) < _MAX_MODEL_OBSERVATIONS:
         items.append(entry)
-    else:
-        # Full: a stronger kind replaces the weakest entry, so the best evidence is never dropped.
-        weakest = min(range(len(items)), key=lambda i: _EVIDENCE_RANK.get(items[i].get("kind"), 0))
-        if _EVIDENCE_RANK.get(kind, 0) > _EVIDENCE_RANK.get(items[weakest].get("kind"), 0):
-            items[weakest] = entry
-    return items
+        return items, False
+    # Full: a stronger kind replaces the weakest entry, so the best evidence is never dropped.
+    weakest = min(range(len(items)), key=lambda i: _EVIDENCE_RANK.get(items[i].get("kind"), 0))
+    if _EVIDENCE_RANK.get(kind, 0) > _EVIDENCE_RANK.get(items[weakest].get("kind"), 0):
+        items[weakest] = entry
+    return items, True
 
 
-def served_model_meta(observations: Any) -> dict[str, Any]:
+def add_model_observation(existing: Any, model: str, kind: str, source: str) -> list[dict[str, str]]:
+    """Append {model, kind, source} to the observation list: deduped per (kind, model) and capped
+    at 10 (see `_fold_observation` / `observations_truncated` for what the cap drops)."""
+    return _fold_observation(existing, model, kind, source)[0]
+
+
+def served_model_meta(observations: Any, truncated: bool = False) -> dict[str, Any]:
     """result_meta fields for the served model: the strongest evidence wins (response >
     thread_config > session_init, first seen within a kind); nothing observed -> null model with
     kind "unknown". The requested model is never used as a fallback. All observations are kept.
     Top-level `model_served` is strict: set only for response-level evidence; the best weaker
-    value lives in `model_observed_best` (shown only inside the poll `evidence`)."""
+    value lives in `model_observed_best` (shown only inside the poll `evidence`). When the list
+    was truncated and more than one distinct `response` model is stored, a dropped observation
+    could change the answer, so the top-level value fails closed to null."""
     items = [o for o in (observations or []) if isinstance(o, dict) and o.get("kind") in _EVIDENCE_RANK]
     best = max(items, key=lambda o: _EVIDENCE_RANK[o["kind"]], default=None)
     if best is None:
         return {"model_served": None, "model_observed_best": None, "model_served_kind": "unknown",
-                "model_served_source": "none", "model_observations": []}
-    return {"model_served": best["model"] if best["kind"] == "response" else None,
+                "model_served_source": "none", "model_observations": [],
+                "observations_truncated": bool(truncated),
+                "observations_complete": not truncated}
+    responses = {o["model"] for o in items if o["kind"] == "response"}
+    strict = best["kind"] == "response" and not (truncated and len(responses) > 1)
+    return {"model_served": best["model"] if strict else None,
+            "observations_truncated": bool(truncated), "observations_complete": not truncated,
             "model_observed_best": best["model"], "model_served_kind": best["kind"],
             "model_served_source": best.get("source") or "none", "model_observations": items}
 
@@ -277,8 +292,10 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             # thread/start, before any tool call, so this unlocked read-modify-write cannot race
             # the client_tools FOR UPDATE path today.
             meta = dict(job.result_meta or {})
-            meta["model_observations"] = add_model_observation(
+            meta["model_observations"], cut = _fold_observation(
                 meta.get("model_observations"), event.model, event.kind, event.source)
+            if cut:
+                meta["observations_truncated"] = True
             job.result_meta = meta
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
@@ -288,6 +305,18 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 history = (job.result_meta or {}).get("client_tool_history") or []
                 usage_observed = (job.result_meta or {}).get("usage_observed") or {}
                 observations = (job.result_meta or {}).get("model_observations") or []
+                truncated = bool((job.result_meta or {}).get("observations_truncated"))
+                # every terminal outcome of a subscription job keeps its evidence envelope data
+                evidence_meta: dict[str, Any] = {}
+                if client_job:
+                    evidence_meta = {
+                        **served_model_meta(observations, truncated),
+                        "account_id": run.account_id, "provider": client_job["provider"],
+                        "model": client_job["model"], "billing_type": run.billing_mode,
+                        "run_outcome": OUTCOME_BY_TYPE[event.type],
+                        "app_server_path": bool(client_job.get("tools"))
+                        and run.capability == "agent:codex",
+                    }
                 job.status = ("done" if event.type == "run.completed"
                               else "cancelled" if event.type == "run.cancelled" else "error")
                 job.completed_at = now
@@ -297,33 +326,25 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                                        "client_tool_history": history,
                                        "usage_observed": usage_observed}
                     if client_job:
-                        job.result_meta.update(served_model_meta(observations))
+                        job.result_meta.update(evidence_meta)
                         job.result_meta.update({
-                            "account_id": run.account_id,
-                            "provider": client_job["provider"],
-                            "model": client_job["model"],
                             "tokens_in": run.usage_input_tokens,
                             "tokens_out": run.usage_output_tokens,
                             "cache_read_tokens": run.usage_cache_read_tokens,
                             "total_tokens": usage_observed.get("total_tokens"),
                             "reasoning_tokens": usage_observed.get("reasoning_tokens"),
                             "cost_usd": None,
-                            "billing_type": run.billing_mode,
                             "finish_reason": "stop",
                         })
                 elif event.type == "run.failed":
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
-                    if observations:
-                        job.result_meta["model_observations"] = observations
-                    if client_job:
-                        job.result_meta["account_id"] = run.account_id
+                    job.result_meta.update(evidence_meta)
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
-                    if observations:
-                        job.result_meta["model_observations"] = observations
+                    job.result_meta.update(evidence_meta)
                     job.error_message = event.type
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,

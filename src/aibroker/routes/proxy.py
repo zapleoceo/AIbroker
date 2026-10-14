@@ -37,7 +37,7 @@ from aibroker.agent.client_tools import (
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
-from aibroker.agent.runs import RunRejected, create_run
+from aibroker.agent.runs import RunRejected, create_run, served_model_meta
 from aibroker.agent.subscription_input import subscription_messages
 from aibroker.agent.subscription_job import (
     json_schema_problem,
@@ -472,7 +472,17 @@ class JobEvidence(BaseModel):
         "thread configuration, not proof of each response's backend) | session_init | unknown")
     model_served_source: str = "none"
     model_observations: list[ModelObservation] = Field(default_factory=list)
-    model_rerouted: bool = Field(False, description="a reroute fails the run, so always false here")
+    run_status: str | None = Field(
+        None, description="pending|running while in flight; completed|failed|cancelled|timed_out "
+                          "once terminal")
+    observations_truncated: bool = Field(
+        False, description="an observation was dropped or evicted at the cap of 10")
+    observations_complete: bool = Field(
+        True, description="false when observations_truncated: the summary may be incomplete")
+    model_rerouted: bool | None = Field(
+        None, description="false ONLY for a completed Codex app-server run (reroute notifications "
+                          "are observed there and fail the run closed); null when unknown "
+                          "(Claude, Codex exec, nothing observed, or a run that did not complete)")
 
 
 class DeepJobResponse(BaseModel):
@@ -572,17 +582,30 @@ async def deep_submit(
     )
 
 
-def _job_evidence(meta: dict[str, Any]) -> JobEvidence | None:
-    """Evidence for a finished subscription (client_job) run; None for a plain deep job."""
-    if not (meta.get("account_id") and meta.get("provider") and "model_served_kind" in meta):
+def _job_evidence(meta: dict[str, Any], request: dict[str, Any] | None = None,
+                  run_status: str | None = None) -> JobEvidence | None:
+    """Evidence envelope of a subscription (client_job) run, for any status; None for a plain job.
+    Derived from the stored observations, so it is also available while the run is in flight."""
+    cj = (request or {}).get("client_job")
+    if not cj and not (meta.get("account_id") and meta.get("provider")
+                       and "model_served_kind" in meta):
         return None
+    cj = cj or {}
+    truncated = bool(meta.get("observations_truncated"))
+    served = served_model_meta(meta.get("model_observations"), truncated)
+    outcome = meta.get("run_outcome")
     return JobEvidence(
-        provider=meta.get("provider"), account_id=meta.get("account_id"),
-        billing_mode=meta.get("billing_type"), model_requested=meta.get("model"),
-        model_served=meta.get("model_observed_best"),
-        model_served_kind=meta.get("model_served_kind") or "unknown",
-        model_served_source=meta.get("model_served_source") or "none",
-        model_observations=[ModelObservation(**o) for o in meta.get("model_observations") or []],
+        provider=meta.get("provider") or cj.get("provider"),
+        account_id=meta.get("account_id") or (request or {}).get("account_id"),
+        billing_mode=meta.get("billing_type"),
+        model_requested=meta.get("model") or cj.get("model"),
+        model_served=served["model_observed_best"],
+        model_served_kind=served["model_served_kind"],
+        model_served_source=served["model_served_source"],
+        model_observations=[ModelObservation(**o) for o in served["model_observations"]],
+        run_status=outcome or run_status,
+        observations_truncated=truncated, observations_complete=not truncated,
+        model_rerouted=False if outcome == "completed" and meta.get("app_server_path") else None,
     )
 
 
@@ -605,10 +628,14 @@ def _job_response(row: Any) -> DeepJobResponse:
                             "labels": getattr(row, "labels", None)}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
-                               requested_model=requested_model, account_id=account_id, **tags)
+                               requested_model=requested_model, account_id=account_id,
+                               evidence=_job_evidence(row.result_meta or {}, request, "failed"),
+                               **tags)
     if row.status == "cancelled":
         return DeepJobResponse(job_id=row.id, status="cancelled",
-                               requested_model=requested_model, account_id=account_id, **tags)
+                               requested_model=requested_model, account_id=account_id,
+                               evidence=_job_evidence(row.result_meta or {}, request, "cancelled"),
+                               **tags)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -619,6 +646,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         return DeepJobResponse(
             job_id=row.id, status="pending",
             requested_model=requested_model, account_id=account_id,
+            evidence=_job_evidence(row.result_meta or {}, request, str(row.status)),
             cancel_requested=True if getattr(row, "cancel_requested", False) else None, **tags,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
@@ -630,7 +658,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         provider=meta.get("provider"), model=meta.get("model"),
         requested_model=requested_model,
         model_served=meta.get("model_served"),
-        evidence=_job_evidence(meta),
+        evidence=_job_evidence(meta, request, "completed"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
