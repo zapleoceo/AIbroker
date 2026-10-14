@@ -14,10 +14,12 @@ from aibroker.agent.adapter import AgentRunSpec, StreamEvent
 from aibroker.agent.client_tools import (
     ClientToolCancelled,
     ClientToolConflict,
+    ClientToolInvalidArguments,
     publish_call,
     take_result,
 )
 from aibroker.agent.codex_cli import CONFIG_OVERRIDES, permission_overrides
+from aibroker.config import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +63,14 @@ def _input_items(run: AgentRunSpec) -> list[dict[str, str]]:
     items += [{"type": "localImage", "path": str(Path(run.workspace) / path)}
               for path in run.attachments]
     return items
+
+
+def _reminder_text(run: AgentRunSpec) -> str:
+    choice = run.tool_choice
+    name = ((choice.get("function") or {}).get("name") if isinstance(choice, dict)
+            else run.client_tools[0]["function"]["name"] if len(run.client_tools) == 1 else None)
+    target = f"the {name} tool" if isinstance(name, str) else "one of the declared tools"
+    return f"You must now call {target} with your final answer; do not reply with plain text."
 
 
 def _reported_count(usage: dict[str, Any], name: str) -> int | None:
@@ -135,6 +145,12 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         await send({"id": 3, "method": "turn/start", "params": {
             "threadId": thread_id, "input": _input_items(run), "cwd": run.workspace,
             "approvalPolicy": "never", "model": run.model}})
+        settings = get_settings()
+        arg_retries = settings.AGENT_TOOL_ARG_RETRIES
+        reminders_left = settings.AGENT_TOOL_REQUIRED_REMINDERS
+        rejected = 0
+        turn_request = 3
+        old_turn_requests: set[int] = set()
         final_text = ""
         calls = 0
         turn_id: str | None = None
@@ -144,7 +160,9 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         async for raw in proc.stdout:
             message = json.loads(raw)
             _log_message(message)
-            if _is_response(message, 3):
+            if any(_is_response(message, old) for old in old_turn_requests):
+                raise ClientToolConflict("duplicate turn response")
+            if _is_response(message, turn_request):
                 if turn_id is not None:
                     raise ClientToolConflict("duplicate turn response")
                 if message.get("error"):
@@ -166,8 +184,23 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                     raise ClientToolConflict("duplicate dynamic tool call")
                 seen_requests.add(message["id"])
                 seen_calls.add(call_id)
-                await publish_call(run.run_id, call_id, name, params.get("arguments"),
-                                   run.fence_leases)
+                try:
+                    await publish_call(run.run_id, call_id, name, params.get("arguments"),
+                                       run.fence_leases)
+                except ClientToolInvalidArguments as exc:
+                    if rejected >= arg_retries:
+                        raise
+                    rejected += 1
+                    # model-retry: tell the model which rule broke (never a value), same turn;
+                    # nothing is published to the client and the call is not counted
+                    await send({"id": message["id"], "result": {"contentItems": [{
+                        "type": "inputText",
+                        "text": f"Tool arguments rejected: {exc.detail or exc.label}. "
+                                f"Call {name[:80]} again with arguments that satisfy its schema."}],
+                        "success": False}})
+                    yield ev.ToolResult(call_id=call_id, ok=False,
+                                        output="[arguments rejected]")
+                    continue
                 calls += 1
                 arguments = params["arguments"]
                 yield ev.ToolCall(call_id=call_id, name=name,
@@ -219,7 +252,17 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                     raise ClientToolConflict("App Server turn did not complete")
                 if calls == 0 and (run.tool_choice == "required"
                                    or isinstance(run.tool_choice, dict)):
-                    raise ClientToolConflict("required client tool was not called")
+                    if reminders_left <= 0:
+                        raise ClientToolConflict("required client tool was not called")
+                    reminders_left -= 1
+                    old_turn_requests.add(turn_request)
+                    turn_request += 1
+                    turn_id = None
+                    await send({"id": turn_request, "method": "turn/start", "params": {
+                        "threadId": thread_id, "cwd": run.workspace, "approvalPolicy": "never",
+                        "model": run.model,
+                        "input": [{"type": "text", "text": _reminder_text(run)}]}})
+                    continue
                 if thread_usage is not None:
                     usage = ev.Usage(input_tokens=_reported_count(thread_usage, "inputTokens"),
                                      output_tokens=_reported_count(thread_usage, "outputTokens"),

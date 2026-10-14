@@ -28,6 +28,16 @@ class ClientToolConflict(Exception):
     """A tool call or result is absent, expired, invalid, or no longer current."""
 
 
+class ClientToolInvalidArguments(ClientToolConflict):
+    """The call broke the declared schema (validate_result label + rule detail, never a value).
+    Unlike every other conflict the model may be told and may retry within the run."""
+
+    def __init__(self, label: str, detail: str) -> None:
+        super().__init__(f"tool call is outside the declared schema [{label}]"
+                         + (f": {detail}" if detail else ""))
+        self.label, self.detail = label, detail
+
+
 class ClientToolCancelled(ClientToolConflict):
     """The caller cancelled the run while it waited for a tool result: not a protocol fault."""
 
@@ -125,8 +135,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
             # ids, label and rule only - never argument values
             log.warning("client tool call rejected: run=%d call=%r tool=%r label=%s %s",
                         run_id, call_id[:40], str(name)[:40], label, detail)
-            raise ClientToolConflict(f"tool call is outside the declared schema [{label}]"
-                                     + (f": {detail}" if detail else ""))
+            raise ClientToolInvalidArguments(label, detail)
         meta = dict(job.result_meta or {})
         history = list(meta.get("client_tool_history") or [])
         if meta.get("client_tool") or len(history) >= MAX_CALLS or any(

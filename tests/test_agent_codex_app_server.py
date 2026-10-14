@@ -8,6 +8,7 @@ import logging
 import pytest
 
 from aibroker.agent.adapter import AgentRunSpec
+from aibroker.agent.client_tools import ClientToolConflict
 from aibroker.agent.codex_app_server import _is_response, run_tool_turn
 
 TOOL = {"type": "function", "function": {"name": "lookup", "description": "Find an id",
@@ -426,3 +427,200 @@ async def test_payloads_never_reach_logs_or_errors_on_failure(monkeypatch, tmp_p
     assert events[-1].type == "run.failed"
     assert SECRET not in events[-1].model_dump_json()
     assert SECRET not in caplog.text
+
+
+# --- model-retry inside one run: rejected arguments, reminder turn -------------------------
+
+class _Dyn(_Writer):
+    """Answer each of OUR messages with ``react(message)`` -> server messages to emit."""
+
+    def __init__(self, reader, react):
+        super().__init__(reader)
+        self.react = react
+
+    def write(self, data):
+        message = json.loads(data)
+        self.sent.append(message)
+        if message.get("method") == "initialize":
+            self.reader.put({"id": 1, "result": {}})
+        elif message.get("method") == "thread/start":
+            self.reader.put({"id": 2, "result": {"thread": {"id": "thread-1"}}})
+        else:
+            for item in self.react(message):
+                self.reader.put(item)
+
+
+def _call(req_id, call_id, args, turn="turn-1", tool="lookup"):
+    return {"id": req_id, "method": "item/tool/call", "params": {
+        "threadId": "thread-1", "turnId": turn, "namespace": None, "callId": call_id,
+        "tool": tool, "arguments": args}}
+
+
+def _done(turn):
+    return [{"method": "item/completed", "params": {"threadId": "thread-1", "turnId": turn,
+             "item": {"type": "agentMessage", "text": "done"}}},
+            {"method": "turn/completed", "params": {
+                "threadId": "thread-1", "turn": {"id": turn, "status": "completed"}}}]
+
+
+async def _dyn(monkeypatch, tmp_path, react, publish, *, arg_retries=2, reminders=1,
+               tool_choice="required"):
+    from dataclasses import replace
+
+    from aibroker.config import get_settings
+    run, home = _run(tmp_path)
+    run = replace(run, tool_choice=tool_choice)
+    process = _Process()
+    process.stdin = _Dyn(process.stdout, react)
+
+    async def spawn(*_a, **_k):
+        return process
+
+    async def take(*_a):
+        return True, "{}"
+    settings = get_settings()
+    monkeypatch.setattr(settings, "AGENT_TOOL_ARG_RETRIES", arg_retries)
+    monkeypatch.setattr(settings, "AGENT_TOOL_REQUIRED_REMINDERS", reminders)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides", lambda _h: ["a=b"])
+    monkeypatch.setattr("aibroker.agent.codex_app_server.publish_call", publish)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
+    events = [item async for item in run_tool_turn(_Adapter(home), run)]
+    return events, process.stdin.sent
+
+
+def _bad_then_good(published):
+    from aibroker.agent.client_tools import ClientToolInvalidArguments
+
+    async def publish(_run, call_id, _name, arguments, _fences):
+        if arguments.get("id") == "bad":
+            raise ClientToolInvalidArguments("InvalidToolArguments",
+                                             "id: type integer (got type str)")
+        published.append(call_id)
+    return publish
+
+
+def _replies(sent):
+    return [m for m in sent if "result" in m and "method" not in m and m["id"] not in (1, 2, 3)]
+
+
+async def test_invalid_arguments_are_rejected_to_the_model_and_the_run_continues(
+        monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    published = []
+
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c-bad", {"id": "bad", "token": SECRET})]
+        if m.get("id") == 7:
+            return [_call(8, "c-good", {"id": 1})]
+        if m.get("id") == 8:
+            return _done("turn-1")
+        return []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _bad_then_good(published))
+    assert events[-1].type == "run.completed", events[-1]
+    assert published == ["c-good"]
+    first = _replies(sent)[0]
+    assert first["id"] == 7 and first["result"]["success"] is False
+    text = first["result"]["contentItems"][0]["text"]
+    assert "id: type integer (got type str)" in text and "lookup" in text and SECRET not in text
+    types = [(e.type, getattr(e, "call_id", None), getattr(e, "ok", None)) for e in events]
+    assert ("tool.call", "c-bad", None) not in types
+    assert ("tool.result", "c-bad", False) in types
+    assert ("tool.call", "c-good", None) in types
+    for e in events:
+        if e.type != "tool.call":
+            assert SECRET not in e.model_dump_json()
+    assert SECRET not in caplog.text
+
+
+async def test_invalid_arguments_beyond_the_retry_budget_fail_with_the_labelled_error(
+        monkeypatch, tmp_path):
+    published = []
+
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c1", {"id": "bad"})]
+        if m.get("id") in (7, 8):
+            return [_call(m["id"] + 1, f"c{m['id']}", {"id": "bad"})]
+        return []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _bad_then_good(published),
+                              arg_retries=2)
+    assert events[-1].type == "run.failed"
+    assert ("outside the declared schema [InvalidToolArguments]: id: type integer"
+            in events[-1].message)
+    assert len(_replies(sent)) == 2 and not published
+
+
+async def test_zero_arg_retries_fails_on_the_first_invalid_call(monkeypatch, tmp_path):
+    def react(m):
+        return [_TURN_OK, _call(7, "c1", {"id": "bad"})] if m.get("method") == "turn/start" else []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _bad_then_good([]), arg_retries=0)
+    assert events[-1].type == "run.failed" and not _replies(sent)
+
+
+async def test_a_non_schema_conflict_still_fails_closed_without_a_retry(monkeypatch, tmp_path):
+    async def publish(*_a):
+        raise ClientToolConflict("job was cancelled")
+
+    def react(m):
+        return [_TURN_OK, _call(7, "c1", {"id": 1})] if m.get("method") == "turn/start" else []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, publish)
+    assert events[-1].type == "run.failed" and "job was cancelled" in events[-1].message
+    assert not _replies(sent)
+
+
+async def test_required_tool_not_called_sends_one_reminder_turn_then_completes(
+        monkeypatch, tmp_path):
+    published = []
+
+    async def publish(_run, call_id, *_rest):
+        published.append(call_id)
+
+    def react(m):
+        if m.get("method") == "turn/start" and m["id"] == 3:
+            return [_TURN_OK, *_done("turn-1")]
+        if m.get("method") == "turn/start" and m["id"] == 4:
+            return [{"id": 4, "result": {"turn": {"id": "turn-2"}}},
+                    _call(9, "c-late", {"id": 1}, turn="turn-2")]
+        if m.get("id") == 9:
+            return _done("turn-2")
+        return []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, publish)
+    assert events[-1].type == "run.completed", events[-1]
+    starts = [m for m in sent if m.get("method") == "turn/start"]
+    assert [m["id"] for m in starts] == [3, 4]
+    assert starts[1]["params"]["threadId"] == "thread-1"
+    assert "call the lookup tool" in starts[1]["params"]["input"][0]["text"]
+    assert published == ["c-late"]
+
+
+async def test_required_tool_reminder_budget_exhausted_fails_as_before(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start":
+            turn = f"turn-{m['id'] - 2}"
+            return [{"id": m["id"], "result": {"turn": {"id": turn}}}, *_done(turn)]
+        return []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _bad_then_good([]), reminders=1)
+    assert events[-1].type == "run.failed"
+    assert "required client tool was not called" in events[-1].message
+    assert len([m for m in sent if m.get("method") == "turn/start"]) == 2
+
+
+async def test_zero_reminders_fails_immediately(monkeypatch, tmp_path):
+    def react(m):
+        return [_TURN_OK, *_done("turn-1")] if m.get("method") == "turn/start" else []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _bad_then_good([]), reminders=0)
+    assert events[-1].type == "run.failed"
+    assert len([m for m in sent if m.get("method") == "turn/start"]) == 1
+
+
+async def test_old_turn_response_replayed_after_a_reminder_fails_closed(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start" and m["id"] == 3:
+            return [_TURN_OK, *_done("turn-1")]
+        if m.get("method") == "turn/start" and m["id"] == 4:
+            return [{"id": 3, "result": {"turn": {"id": "turn-evil"}}}]
+        return []
+    events, _ = await _dyn(monkeypatch, tmp_path, react, _bad_then_good([]))
+    assert events[-1].type == "run.failed" and "duplicate turn response" in events[-1].message

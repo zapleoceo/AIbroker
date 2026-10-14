@@ -74,6 +74,23 @@ A call whose arguments break the declared schema fails the run with
 type; only the first 3 errors are computed) and never an argument value or a model-chosen key
 (path segments outside the schema's declared `properties` show as `*`); the arguments themselves
 are not stored.
+
+Model retry (like pydantic_ai `ModelRetry`) keeps one bad call from costing a whole re-run.
+`publish_call` raises `ClientToolInvalidArguments` (a `ClientToolConflict` subclass carrying
+`label` and `detail`) only for the schema case; every other conflict (not running, cancelled,
+duplicate, size limit) still fails closed. The first `AGENT_TOOL_ARG_RETRIES` (default 2, range
+0..5) such calls per run are answered to the App Server as a tool result with `success: false`
+and the text `Tool arguments rejected: <detail>. Call <tool> again with arguments that satisfy
+its schema.`; nothing is published to the client, no `tool.call` event is emitted, the call is
+not counted in `client_tool_history`, and the run timeline shows a `tool.result` with
+`ok: false` and `[arguments rejected]` (never a value). The next violation fails the run with
+the labelled error above. Second case: when the turn completes with `tool_choice` `required`
+(or a specific tool) and no client tool was called, the worker sends up to
+`AGENT_TOOL_REQUIRED_REMINDERS` (default 1, range 0..3) follow-up `turn/start` requests on the
+same thread (`You must now call the <tool> tool with your final answer; do not reply with plain
+text.`) and tracks the new turn id for all identity checks; a replayed response to an earlier
+turn request still fails closed as `duplicate turn response`. Past the budget the run fails
+with `required client tool was not called`.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
 invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a

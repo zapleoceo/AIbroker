@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     # How long a subscription run waits for the caller's tool result before the call expires (and
     # its worker slot is freed). The run keeps its slot while it waits.
     AGENT_TOOL_WAIT_S: int = Field(300, ge=10, le=1800)
+    # Model-retry inside one run (docs/subscription-tool-loop.md): schema-breaking tool calls the
+    # model may be told about, and "call the tool now" follow-up turns after a plain-text finish.
+    AGENT_TOOL_ARG_RETRIES: int = Field(2, ge=0, le=5)
+    AGENT_TOOL_REQUIRED_REMINDERS: int = Field(1, ge=0, le=3)
     AGENT_WORKSPACE_ROOT: str = "/var/lib/aibroker/agent-workspaces"
     # The owner has checked in the Claude account settings that usage credits / extra usage are
     # OFF (a missing API key does NOT prove that). Until true, autonomous/exam agent runs are

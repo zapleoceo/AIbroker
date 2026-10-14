@@ -839,6 +839,8 @@ docker compose up -d
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
 | `AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS` | JSON `{"codex-sub":[...]}` (api; default empty): verified Codex models whose live image generation was confirmed - the catalog lists them with `output_modalities` `["text", "image"]`; prod 2026-10-14: `gpt-6.1-sol` (PNG jobs 551063, 551214) |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the two Claude agent workers, which use the DB lightly, and 4 / 6 for `agent-worker-codex`, which runs `AGENT_CONCURRENCY_CODEX` (6-7) runs at once (each run: event writes, 1 s cancel poll, lease/auth-gate heartbeats, client-tool poll); read in `aibroker.db.engine.init_engine` |
+| `AGENT_TOOL_ARG_RETRIES` | schema-breaking client tool calls per Codex subscription run that are answered to the model as a rejected tool result instead of failing the run (default 2, range 0..5); see [subscription tool loop](subscription-tool-loop.md) |
+| `AGENT_TOOL_REQUIRED_REMINDERS` | follow-up turns per run that tell the model to call the required client tool after it finished with plain text (default 1, range 0..3) |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
 
