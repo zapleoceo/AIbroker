@@ -191,7 +191,8 @@ writes files into the workspace.
   sets `AGENT_CONCURRENCY_CODEX=2` in `.env` for the production plan. **Auth-refresh guard:**
   concurrent Codex processes share `CODEX_HOME/auth.json`, and ChatGPT refresh tokens rotate, so two
   simultaneous refreshes could invalidate the login. Before starting the CLI the executor reads ONLY
-  the non-secret `last_refresh` timestamp (assumed ISO-8601, possibly with nanoseconds and `Z`;
+  the non-secret `last_refresh` timestamp (`codex_cli.read_last_refresh`; `refresh_maybe_due` decides;
+  assumed ISO-8601, possibly with nanoseconds and `Z`;
   field name and format are UNVERIFIED here - no real file is kept in the repo - so an absent,
   oversized (> 1 MiB), malformed or unparseable value counts as "due" and fails safe; never a
   token). If it is missing, unreadable or older than
