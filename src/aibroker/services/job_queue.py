@@ -116,12 +116,12 @@ _CLAIMED: dict[int, datetime | None] = {}
 # table or blow up WAL — it simply takes several passes to catch up.
 _JOB_RETENTION_DAYS = int(os.environ.get("JOB_RETENTION_DAYS", "7"))
 _JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
-# Dispatcher ticks between retention sweeps. The tick fires as often as once a
-# second, and this is pure housekeeping — at the 5s idle poll this is roughly
-# every 25 minutes, and a busy loop only makes it more frequent, never less.
 # Stale-running requeue cadence. Its window is _STALE_RUNNING_S (25 min), so
 # sweeping every ~1-5 s tick bought nothing but a write-lock round trip.
 _REQUEUE_STALE_EVERY_S = 60.0
+# Dispatcher ticks between retention sweeps. The tick fires as often as once a
+# second, and this is pure housekeeping — at the 5s idle poll this is roughly
+# every 25 minutes, and a busy loop only makes it more frequent, never less.
 _PURGE_EVERY_TICKS = int(os.environ.get("JOB_RETENTION_EVERY_TICKS", "300"))
 
 # usage_log / audit_log had NO retention at all (2026-09-07 review) — the

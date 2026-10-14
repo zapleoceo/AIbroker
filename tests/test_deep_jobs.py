@@ -298,6 +298,15 @@ async def test_finish_leaves_request_without_audio_untouched():
     assert b.request == {"messages": []} and b.result_text == "t"
 
 
+async def test_finish_without_meta_writes_sql_null_not_json_null():
+    await _fin_row(984204, {"messages": []}, None)
+    await deep_jobs._finish(984204, status="error", error_message="boom")
+    async with get_session() as s:
+        is_null = (await s.execute(text(
+            "SELECT result_meta IS NULL FROM deep_jobs WHERE id = 984204"))).scalar_one()
+    assert is_null                       # as the ORM path wrote it; JSON 'null' would be False
+
+
 async def test_finish_fence_a_stale_worker_does_not_clobber_the_live_claim():
     ours = datetime(2026, 10, 13, 9, 30, 1, 654321)
     theirs = datetime(2026, 10, 13, 9, 45, 0, 1)

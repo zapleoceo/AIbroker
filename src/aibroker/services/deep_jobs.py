@@ -26,7 +26,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
-from sqlalchemy import select, text, update
+from sqlalchemy import null, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -353,7 +353,9 @@ async def _finish(
         stmt = stmt.where(DeepJobRow.started_at == expect_started_at)
     async with get_session() as s:
         await s.execute(stmt.values(
-            status=status, result_text=result_text, result_meta=result_meta,
+            status=status, result_text=result_text,
+            # SQL NULL, not JSON 'null', when there is no meta (as the ORM path wrote it)
+            result_meta=null() if result_meta is None else result_meta,
             error_message=error_message,
             completed_at=datetime.now(UTC).replace(tzinfo=None),
             request=text(_strip_audio_sql(s.bind.dialect.name)),
