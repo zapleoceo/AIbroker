@@ -344,18 +344,51 @@ async def _finish(  # pragma: no cover — job execution is the dispatcher's (jo
             row.request = {**row.request, AUDIO_FIELD: None}
 
 
-async def get_job(job_id: int, project_id: int) -> DeepJobRow | None:
-    """Fetch a job, scoped to the caller's own project. Pure read — every
+class JobView(NamedTuple):
+    """The slice of a deep_jobs row the poll routes read. `request` holds ONLY the
+    keys they use (`model`, `account_id`, `client_job`) — never the prompt or the
+    base64 audio that make the full JSONB up to ~80 KB and more."""
+    id: int
+    project_id: int
+    capability: str
+    status: str
+    result_text: str | None
+    result_meta: dict[str, Any] | None
+    error_message: str | None
+    created_at: datetime
+    trace_id: str | None
+    labels: dict[str, str] | None
+    cancel_requested: bool
+    request: dict[str, Any]
+
+
+_POLL_REQUEST_KEYS = ("model", "account_id", "client_job")
+
+
+async def get_job(job_id: int, project_id: int) -> JobView | None:
+    """Fetch a job, scoped to the caller's own project, WITHOUT loading the
+    `request` JSONB: only the three JSON paths the poll needs are selected.
+    Pure read — every
     lifecycle transition (running → done/error, requeue, give-up after
     retries) is owned by the dispatcher (services/job_queue.py). It used to
     lazily flip a stale `pending` row to error, but that raced the dispatcher
     and prematurely failed jobs still legitimately retrying under backoff."""
     async with get_session() as s:
-        return (await s.execute(  # pragma: no cover
-            select(DeepJobRow).where(
-                DeepJobRow.id == job_id, DeepJobRow.project_id == project_id
-            )
-        )).scalar_one_or_none()
+        r = (await s.execute(
+            select(
+                DeepJobRow.id, DeepJobRow.project_id, DeepJobRow.capability,
+                DeepJobRow.status, DeepJobRow.result_text, DeepJobRow.result_meta,
+                DeepJobRow.error_message, DeepJobRow.created_at, DeepJobRow.trace_id,
+                DeepJobRow.labels, DeepJobRow.cancel_requested,
+                *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
+            ).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
+        )).one_or_none()
+    if r is None:
+        return None
+    # A missing key and a JSON null both read back as None; the callers treat
+    # them alike, so only non-null keys are rebuilt (`.get(k, default)` keeps working).
+    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[11:], strict=True) if v is not None}
+    return JobView(*r[:11], request=request)
 
 
 def next_poll_after_s(created_at: datetime) -> int:

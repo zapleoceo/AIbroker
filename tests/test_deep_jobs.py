@@ -219,3 +219,49 @@ async def test_submit_degrades_to_plain_insert_when_column_missing():
         async with get_session() as s:
             await s.execute(
                 text("ALTER TABLE deep_jobs ADD COLUMN payload_hash VARCHAR(32)"))
+
+
+async def test_get_job_poll_view_matches_full_row_and_skips_prompt_and_audio():
+    """get_job reads three JSON paths, not the whole `request`: the poll response must
+    be identical to the one built from the full row, for plain, subscription and
+    transcription jobs, in every status."""
+    from aibroker.routes import proxy
+
+    pid = 984000
+    async with get_session() as s:
+        s.add(ProjectRow(id=pid, name="pollview", project_key_hash="h",
+                         project_key_prefix="pk_pv", allowed_scopes=["llm:chat"]))
+    big = "x" * 5000
+    requests = {
+        "plain": {"messages": [{"role": "user", "content": big}], "model": "gpt-oss-120b",
+                  "max_tokens": 64, "temperature": 0.7, "workflow": "t"},
+        "subscription": {"prompt": big, "account_id": "owner", "model": "gpt-5", "task_id": "jobs",
+                         "client_job": {"capability": "chat:fast", "provider": "codex",
+                                        "model": "codex/gpt-5", "tools": [], "tool_choice": None}},
+        "transcription": {"audio_b64": big, "filename": "a.ogg", "messages": [], "model": None},
+    }
+    jid = 984100
+    for name, req in requests.items():
+        for status in ("pending", "running", "done", "error", "cancelled"):
+            jid += 1
+            async with get_session() as s:
+                s.add(DeepJobRow(
+                    id=jid, project_id=pid, status=status, request=req,
+                    result_text="ok" if status == "done" else None,
+                    error_message="boom" if status == "error" else None,
+                    result_meta={"provider": "codex", "model": "m", "tokens_in": 3,
+                                 "account_id": "owner", "model_served_kind": "exact"}
+                    if name == "subscription" else {"provider": "p", "model": "m"},
+                    trace_id="t-1", labels={"a": "b"}, cancel_requested=status == "running"))
+            async with get_session() as s:
+                full = await s.get(DeepJobRow, jid)
+                expected = proxy._job_response(full)
+                policy_args = (full.request.get("model"), full.request.get("account_id", ""),
+                               full.capability)
+            view = await deep_jobs.get_job(jid, pid)
+            assert proxy._job_response(view) == expected, (name, status)
+            assert (view.request.get("model"), view.request.get("account_id", ""),
+                    view.capability) == policy_args
+            assert set(view.request) <= {"model", "account_id", "client_job"}
+    assert await deep_jobs.get_job(jid, pid + 1) is None        # scoped to the project
+    assert await deep_jobs.get_job(1, pid) is None

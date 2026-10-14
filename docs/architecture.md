@@ -281,6 +281,10 @@ broker finishes its fallback chain). See `docs/api.md`.
   at once instead of waiting for a NOTIFY or the idle poll. The stale-`running`
   requeue sweep runs on startup and then at most every `_REQUEUE_STALE_EVERY_S`=60 s
   (its window is 25 min), not on every tick.
+  *Poll read:* `get_job` returns a `JobView` built from explicit columns plus the three
+  JSON paths the poll routes use (`request->model`, `account_id`, `client_job`), so a
+  poll never loads the multi-KB `request` JSONB (prompts, base64 audio); the poll
+  response is unchanged.
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to
