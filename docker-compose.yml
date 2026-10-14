@@ -476,7 +476,7 @@ services:
       CLAUDE_CONFIG_DIR: ""
       # Independent owner check of the Codex account; never inherit Claude's approval.
       AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}
-      # Parallel Codex runs per container; the limits below are sized for 2. The code default is 1.
+      # Parallel Codex runs per container; the limits below are sized for 7. The code default is 1.
       AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
@@ -507,9 +507,9 @@ services:
     # NEEDS OWNER OK before first start: resource limits (security-sensitive container limits).
     # The Codex sandbox needs unprivileged user namespaces: if the host/seccomp profile forbids them,
     # every run fails closed as sandbox_unavailable (see docs/agent-runs.md).
-    cpus: 2
-    mem_limit: 2g
-    pids_limit: 512
+    cpus: 3
+    mem_limit: 3g
+    pids_limit: 768
     restart: "no"
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
