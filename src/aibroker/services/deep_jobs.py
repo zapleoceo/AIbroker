@@ -26,7 +26,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 
 from aibroker.db import get_session
@@ -311,37 +311,49 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
+def _strip_audio_sql(dialect: str) -> str:
+    """SQL for the new `request`: the base64 audio nulled (the rest kept), or the
+    column untouched when there is no audio. Same truthiness the old Python check
+    had: a missing, null or empty `audio_b64` is left alone."""
+    if dialect == "postgresql":
+        has = f"COALESCE(request->>'{AUDIO_FIELD}', '') <> ''"
+        strip = f"jsonb_set(request, '{{{AUDIO_FIELD}}}', 'null'::jsonb)"
+    else:   # SQLite (tests)
+        has = f"COALESCE(json_extract(request, '$.{AUDIO_FIELD}'), '') <> ''"
+        strip = f"json_set(request, '$.{AUDIO_FIELD}', json('null'))"
+    return f"CASE WHEN {has} THEN {strip} ELSE request END"
+
+
 @retry_stale_statement
 @retry_terminal_write
-async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
+async def _finish(
     job_id: int, *, status: str,
     result_text: str | None = None,
     result_meta: dict[str, Any] | None = None,
     error_message: str | None = None,
     expect_started_at: datetime | None = None,
 ) -> None:
+    """One UPDATE, no row load. Claim guard: if the caller passes the started_at it
+    claimed the job with and the row now holds a different value, the job was
+    re-queued (started_at→NULL) and re-claimed by another worker — this is a stale
+    worker returning late; the WHERE then matches nothing and the live claim's
+    result is not clobbered. A deleted row matches nothing either.
+
+    Async transcription carries the whole audio file base64'd in the request
+    payload. Once the job is terminal that blob is dead weight — nobody re-reads
+    it, and deep_jobs is already the biggest table we back up nightly. It is nulled
+    in the same statement (rest of the request kept for debugging), so audio lives
+    in the DB only while it's being worked on."""
+    stmt = update(DeepJobRow).where(DeepJobRow.id == job_id)
+    if expect_started_at is not None:
+        stmt = stmt.where(DeepJobRow.started_at == expect_started_at)
     async with get_session() as s:
-        row = await s.get(DeepJobRow, job_id)
-        if row is None:  # pragma: no cover — job row deleted underneath us
-            return
-        # Claim guard: if the caller passes the started_at it claimed the job
-        # with and the row now holds a different value, the job was re-queued
-        # (started_at→NULL) and re-claimed by another worker — this is a stale
-        # worker returning late; don't clobber the live claim's result.
-        if expect_started_at is not None and row.started_at != expect_started_at:
-            return
-        row.status = status
-        row.result_text = result_text
-        row.result_meta = result_meta
-        row.error_message = error_message
-        row.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        # Async transcription carries the whole audio file base64'd in the
-        # request payload. Once the job is terminal that blob is dead weight —
-        # nobody re-reads it, and deep_jobs is already the biggest table we
-        # back up nightly. Drop it here (keep the rest of the request for
-        # debugging), so audio lives in the DB only while it's being worked on.
-        if isinstance(row.request, dict) and row.request.get(AUDIO_FIELD):
-            row.request = {**row.request, AUDIO_FIELD: None}
+        await s.execute(stmt.values(
+            status=status, result_text=result_text, result_meta=result_meta,
+            error_message=error_message,
+            completed_at=datetime.now(UTC).replace(tzinfo=None),
+            request=text(_strip_audio_sql(s.bind.dialect.name)),
+        ).execution_options(synchronize_session=False))
 
 
 class JobView(NamedTuple):

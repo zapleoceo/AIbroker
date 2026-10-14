@@ -265,3 +265,55 @@ async def test_get_job_poll_view_matches_full_row_and_skips_prompt_and_audio():
             assert set(view.request) <= {"model", "account_id", "client_job"}
     assert await deep_jobs.get_job(jid, pid + 1) is None        # scoped to the project
     assert await deep_jobs.get_job(1, pid) is None
+
+
+async def _fin_row(job_id: int, request: dict, started_at: datetime | None) -> None:
+    await _ensure_project(_P1)
+    async with get_session() as s:
+        s.add(DeepJobRow(id=job_id, project_id=_P1, capability="chat:fast", status="running",
+                         request=request, started_at=started_at))
+
+
+async def test_finish_single_update_strips_audio_keeps_rest_and_sets_result():
+    started = datetime(2026, 10, 13, 9, 30, 1, 654321)
+    await _fin_row(984201, {"audio_b64": "QUJD", "filename": "a.ogg", "model": None}, started)
+    await deep_jobs._finish(984201, status="done", result_text="hello",
+                            result_meta={"provider": "p"}, expect_started_at=started)
+    async with get_session() as s:
+        row = await s.get(DeepJobRow, 984201)
+    assert (row.status, row.result_text, row.result_meta) == ("done", "hello", {"provider": "p"})
+    assert row.error_message is None and row.completed_at is not None
+    assert row.request == {"audio_b64": None, "filename": "a.ogg", "model": None}
+
+
+async def test_finish_leaves_request_without_audio_untouched():
+    req = {"messages": [{"role": "user", "content": "hi"}], "audio_b64": "", "model": "m"}
+    await _fin_row(984202, req, None)
+    await _fin_row(984203, {"messages": []}, None)
+    await deep_jobs._finish(984202, status="error", error_message="boom")
+    await deep_jobs._finish(984203, status="done", result_text="t")
+    async with get_session() as s:
+        a, b = await s.get(DeepJobRow, 984202), await s.get(DeepJobRow, 984203)
+    assert a.request == req and (a.status, a.error_message) == ("error", "boom")
+    assert b.request == {"messages": []} and b.result_text == "t"
+
+
+async def test_finish_fence_a_stale_worker_does_not_clobber_the_live_claim():
+    ours = datetime(2026, 10, 13, 9, 30, 1, 654321)
+    theirs = datetime(2026, 10, 13, 9, 45, 0, 1)
+    await _fin_row(984204, {"audio_b64": "QUJD"}, theirs)       # re-claimed by another worker
+    await _fin_row(984205, {"audio_b64": "QUJD"}, None)         # re-queued, not yet re-claimed
+    for jid in (984204, 984205):
+        await deep_jobs._finish(jid, status="done", result_text="stale", expect_started_at=ours)
+    async with get_session() as s:
+        for jid in (984204, 984205):
+            row = await s.get(DeepJobRow, jid)
+            assert row.status == "running" and row.result_text is None
+            assert row.request == {"audio_b64": "QUJD"} and row.completed_at is None
+    await deep_jobs._finish(984299, status="done")              # vanished row: silent no-op
+
+
+def test_strip_audio_sql_has_a_postgres_and_a_sqlite_branch():
+    pg, lite = deep_jobs._strip_audio_sql("postgresql"), deep_jobs._strip_audio_sql("sqlite")
+    assert "jsonb_set(request, '{audio_b64}', 'null'::jsonb)" in pg and "->>" in pg
+    assert "json_set(request, '$.audio_b64', json('null'))" in lite and "json_extract" in lite

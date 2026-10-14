@@ -284,7 +284,10 @@ broker finishes its fallback chain). See `docs/api.md`.
   *Poll read:* `get_job` returns a `JobView` built from explicit columns plus the three
   JSON paths the poll routes use (`request->model`, `account_id`, `client_job`), so a
   poll never loads the multi-KB `request` JSONB (prompts, base64 audio); the poll
-  response is unchanged.
+  response is unchanged. *Terminal write:* `_finish` is one
+  `UPDATE … WHERE id=:id [AND started_at=:expected]` (no row load); the claim fence is the
+  `started_at` predicate and the transcription `audio_b64` is nulled in the same statement
+  (`jsonb_set` on Postgres, `json_set` on SQLite).
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to
