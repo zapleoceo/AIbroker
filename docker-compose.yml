@@ -478,6 +478,8 @@ services:
       AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}
       # Parallel Codex runs per container; the limits below are sized for 2. The code default is 1.
       AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}
+      # A caller that never answers a tool call frees the slot after this many seconds.
+      AGENT_TOOL_WAIT_S: ${AGENT_TOOL_WAIT_S:-90}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}

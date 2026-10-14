@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     AGENT_WORKER_ENABLED: bool = False
     AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
     AGENT_CONCURRENCY_CLAUDE: int = 1
+    # How long a subscription run waits for the caller's tool result before the call expires (and
+    # its worker slot is freed). The run keeps its slot while it waits.
+    AGENT_TOOL_WAIT_S: int = Field(300, ge=10, le=1800)
     AGENT_WORKSPACE_ROOT: str = "/var/lib/aibroker/agent-workspaces"
     # The owner has checked in the Claude account settings that usage credits / extra usage are
     # OFF (a missing API key does NOT prove that). Until true, autonomous/exam agent runs are
