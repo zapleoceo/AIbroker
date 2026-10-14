@@ -143,7 +143,7 @@ def test_trace_id_and_labels_never_enter_the_payload_hash():
 
 def test_log_tag_is_empty_without_trace_or_labels():
     assert log_tag(None, None) == ""
-    assert log_tag("t", {"a": "b"}) == " trace_id=t labels={'a': 'b'}"
+    assert log_tag("t", {"a": "b"}) == " trace#e3b98a4da31a labels=1"
 
 
 # ─── Idempotency-Key ────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ One validator for body fields and headers, so both reject the same values.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 MAX_TOKEN_LEN = 128
@@ -35,6 +36,8 @@ def resolve_trace_id(body_trace_id: str | None, header_trace_id: str | None) -> 
 
 
 def log_tag(trace_id: str | None, labels: dict[str, str] | None) -> str:
-    """` trace_id=... labels={...}` suffix for job log lines; empty when the job has neither."""
-    parts = ([f"trace_id={trace_id}"] if trace_id else []) + ([f"labels={labels}"] if labels else [])
+    """` trace#<fingerprint> labels=<count>` suffix for job log lines; empty when the job has
+    neither. Client values are never logged raw: the token rules admit secret-looking strings."""
+    parts = ([f"trace#{hashlib.sha256(trace_id.encode()).hexdigest()[:12]}"] if trace_id else []) \
+        + ([f"labels={len(labels)}"] if labels else [])
     return (" " + " ".join(parts)) if parts else ""
