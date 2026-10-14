@@ -307,10 +307,12 @@ relaxation is required.
 | service | cpus | mem_limit | pids_limit | workspaces tmpfs |
 |---|---|---|---|---|
 | `agent-worker` (Claude) | 1 | 1g | 256 | unchanged |
-| `agent-worker-codex` | 2 | 2g | 512 | 1024m (was 512m) |
+| `agent-worker-codex` | 3 | 3g | 768 | 1024m (was 512m) |
 
-`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `2`)
-sets parallel Codex runs per container. The Codex limits above are sized for 2 (measured 2026-10-13: one run peaks at about
+`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `7`)
+sets parallel Codex runs per container. The Codex limits above are sized for 7 (measured 2026-10-14 at 4 parallel: peak 174% CPU,
+665 MiB, 184 pids, i.e. ~0.45 core and ~46 pids per run on average; CPU is the limit, so 3 of the
+host's 4 cores go to Codex and ~1 stays for api/postgres/neighbours. Earlier, one run peaked at about
 +140 MiB RSS over a 187 MiB idle worker, about 50 pids, about one core; the host has 4 vCPU and
 ~3.2 GB available). Raise it only
 after reading the auth-refresh guard in `agent-runs.md`: when `last_refresh` in the Codex

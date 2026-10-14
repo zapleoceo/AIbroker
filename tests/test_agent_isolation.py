@@ -99,9 +99,9 @@ def test_all_workers_share_the_same_hardening(name):
                    "ANTHROPIC_", "OPENAI_", "CODEX_API"):
         assert banned not in svc, (name, banned)
     assert "DIRECT_DATABASE_URL" not in svc and "@pgbouncer:6432/" in svc
-    limits = ("cpus: 2", "mem_limit: 2g", "pids_limit: 512") if name == "agent-worker-codex" else (
+    limits = ("cpus: 3", "mem_limit: 3g", "pids_limit: 768") if name == "agent-worker-codex" else (
         "cpus: 1", "mem_limit: 1g", "pids_limit: 256")
-    for line in limits:      # codex is sized for 2 parallel runs (AGENT_CONCURRENCY_CODEX)
+    for line in limits:      # codex is sized for 7 parallel runs (AGENT_CONCURRENCY_CODEX)
         assert re.search(rf"^    {line}$", svc, re.M), (name, line)
 
 
