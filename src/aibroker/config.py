@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_VERIFIED_MODELS: str = '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":[]}'
     # Input image capability is confirmed separately from a model's text availability.
     AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS: str = '{"codex-sub":[]}'
+    # Codex models whose image GENERATION (exported PNG files) was verified live; the catalog lists
+    # them with output_modalities ["text", "image"]. Must be verified Codex models.
+    AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS: str = '{"codex-sub":[]}'
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"

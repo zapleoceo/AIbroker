@@ -56,6 +56,19 @@ def _catalog() -> tuple[list[ModelSpec], frozenset[str]]:
         return [], frozenset()
 
 
+def subscription_image_output_verified(model: str) -> bool:
+    """Image generation (exported PNG) verified live for this exact, verified Codex model. A
+    listing-only flag: an invalid setting turns it off here and never refuses the catalog."""
+    if model not in _catalog()[1]:
+        return False
+    try:
+        ids = _configured_ids("AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS")
+    except ValueError:
+        return False
+    provider, _, mid = model.partition("/")
+    return provider == "codex-sub" and mid in ids.get("codex-sub", [])
+
+
 def subscription_models() -> list[ModelSpec]:
     return _catalog()[0]
 
