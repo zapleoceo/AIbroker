@@ -754,3 +754,35 @@ async def test_wait_for_timeout_during_shutdown_still_completes_the_release():
 
     row = await _row(970006)
     assert row.status == "pending" and row.started_at is None
+
+
+async def test_finished_job_wakes_dispatcher_to_refill_slot_at_once():
+    """With the slot cap reached and a backlog, a finishing job must trigger the
+    next claim right away â€” not after the idle poll."""
+    stop = asyncio.Event()
+    release = asyncio.Event()
+    claims: list[int] = []
+
+    async def fake_claim(free):
+        claims.append(free)
+        return [DeepJobRow(id=980000 + len(claims))] if free > 0 else []
+
+    async def fake_exec(row):
+        await release.wait()
+        release.clear()
+
+    with patch.object(job_queue, "_dialect_name", AsyncMock(return_value="sqlite")), \
+         patch.object(job_queue, "_requeue_stale_running", AsyncMock()), \
+         patch.object(job_queue, "_MAX_CONCURRENCY", 1), \
+         patch.object(job_queue, "_POLL_INTERVAL_S", 30.0), \
+         patch.object(job_queue, "_claim_batch", fake_claim), \
+         patch.object(job_queue, "_execute_guarded", fake_exec):
+        task = asyncio.create_task(job_queue.dispatcher_loop(stop))
+        await asyncio.sleep(0.1)
+        assert len(claims) == 1            # slot taken, loop now parked on the 30 s poll
+        release.set()                      # the one in-flight job finishes
+        await asyncio.sleep(0.2)
+        assert len(claims) >= 2, "freed slot waited for the idle poll"
+        stop.set()
+        release.set()
+        await asyncio.wait_for(task, timeout=5)

@@ -671,6 +671,9 @@ async def _dispatch(stop: asyncio.Event,
                     t = asyncio.create_task(_execute_guarded(row))
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
+                    # A finished job frees a slot: wake the loop now instead
+                    # of waiting for the next NOTIFY / idle poll.
+                    t.add_done_callback(lambda _t: wake.set())
             failures.ok()
         except Exception as e:  # noqa: BLE001 — a bad tick must not kill the loop
             extra_wait, full = failures.failed()
