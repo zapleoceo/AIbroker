@@ -835,7 +835,7 @@ docker compose up -d
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
-| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the three agent-worker services, which use the DB lightly; read in `aibroker.db.engine.init_engine` |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the two Claude agent workers, which use the DB lightly, and 4 / 6 for `agent-worker-codex`, which runs `AGENT_CONCURRENCY_CODEX` (6-7) runs at once (each run: event writes, 1 s cancel poll, lease/auth-gate heartbeats, client-tool poll); read in `aibroker.db.engine.init_engine` |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
 

@@ -468,9 +468,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
-      # Light DB use: a small pool (api keeps the 10/20 default).
-      DB_POOL_SIZE: "2"
-      DB_MAX_OVERFLOW: "3"
+      # 6-7 parallel Codex runs (AGENT_CONCURRENCY_CODEX): a larger pool than the other workers.
+      DB_POOL_SIZE: "4"
+      DB_MAX_OVERFLOW: "6"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret

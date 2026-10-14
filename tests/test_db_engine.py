@@ -109,5 +109,8 @@ def test_pool_defaults_unchanged_and_compose_overrides():
     s = get_settings()
     assert (s.DB_POOL_SIZE, s.DB_MAX_OVERFLOW) == (10, 20)
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
-    assert len(re.findall(r'DB_POOL_SIZE: "2"', compose)) == 4
-    assert len(re.findall(r'DB_MAX_OVERFLOW: "3"', compose)) == 4
+    assert len(re.findall(r'DB_POOL_SIZE: "2"', compose)) == 3          # monitor + 2 claude workers
+    assert len(re.findall(r'DB_MAX_OVERFLOW: "3"', compose)) == 3
+    # the codex worker runs AGENT_CONCURRENCY_CODEX (6-7) runs in parallel: a larger pool
+    assert len(re.findall(r'DB_POOL_SIZE: "4"', compose)) == 1
+    assert len(re.findall(r'DB_MAX_OVERFLOW: "6"', compose)) == 1
