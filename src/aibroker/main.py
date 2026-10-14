@@ -18,6 +18,7 @@ from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
+from aibroker.logging_setup import configure_logging
 from aibroker.routes import admin, agent, dashboard, health, jobs_control, landing, proxy, signup
 from aibroker.services.job_queue import dispatcher_loop
 from aibroker.services.request_cap import RequestCapExhausted
@@ -25,8 +26,8 @@ from aibroker.telemetry.request_context import new_request_id, request_scope, sa
 
 
 def _configure_logging() -> None:
+    configure_logging()                 # stdlib root logging, shared with the agent workers
     level = getattr(logging, get_settings().LOG_LEVEL.upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

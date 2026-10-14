@@ -11,6 +11,7 @@ import signal
 from aibroker.agent.rpc import start_worker_rpc, stop_worker_rpc
 from aibroker.agent.worker import agent_worker_loop, worker_capabilities
 from aibroker.db import close_engine, init_engine
+from aibroker.logging_setup import configure_logging
 
 PR_SET_DUMPABLE = 4
 log = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ def set_non_dumpable(libc: object | None = None) -> bool:
         return False
 
 
-async def run_worker() -> None:  # pragma: no cover - process harness
+async def run_worker() -> None:
+    configure_logging()                  # first: otherwise INFO from the aibroker loggers is dropped
     if not set_non_dumpable():
         raise RuntimeError("could not make the worker non-dumpable (PR_SET_DUMPABLE)")
     await init_engine()
