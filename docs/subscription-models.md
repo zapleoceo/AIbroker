@@ -104,7 +104,9 @@ and `stream: true` are rejected before enqueue by default. The Codex App Server
 client-tool path can be enabled separately with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED` and advertised per exact ID with
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS`; see
-[subscription tool loop](subscription-tool-loop.md). Claude still rejects them.
+[subscription tool loop](subscription-tool-loop.md). Claude has the same path
+behind `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` and
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS`.
 Claude subscription jobs still reject image input and `vision`. A Codex model
 with separately verified vision accepts up to five embedded, single-frame PNG,
 JPEG, WebP, or GIF images, each at most 5 MiB,
