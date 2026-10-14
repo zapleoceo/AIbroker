@@ -32,7 +32,8 @@ class _Reader:
         return value
 
     def put(self, value):
-        self.queue.put_nowait((json.dumps(value) + "\n").encode())
+        raw = value if isinstance(value, str) else json.dumps(value)
+        self.queue.put_nowait((raw + "\n").encode())
 
 
 class _Writer:
@@ -239,6 +240,36 @@ async def test_a_failed_client_result_reaches_the_model_as_an_mcp_error(monkeypa
     assert _reply(sent, "c4")["result"] == {"content": [{"type": "text", "text": "not found"}],
                                             "isError": True}
     assert events[-1].type == "run.completed"
+
+
+async def test_failed_runs_still_report_usage_and_bad_lines_are_skipped(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, {"type": "x"}, "{not json", _result("Overloaded", is_error=True)]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react)
+    assert [e.type for e in events][-2:] == ["usage", "run.failed"]
+    assert events[-2].output_tokens == 5
+
+
+async def test_a_cancel_of_an_answered_call_is_ignored(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 1}})]
+        if m.get("type") == "control_response" and m["response"]["request_id"] == "c1":
+            return [{"type": "control_cancel_request", "request_id": "c1"}, _result()]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react)
+    assert events[-1].type == "run.completed"
+
+
+def test_a_tool_name_longer_than_the_prefixed_api_limit_is_refused(tmp_path):
+    long = {"type": "function", "function": {"name": "a" * 52, "parameters": {"type": "object"}}}
+    with pytest.raises(ValueError, match="1,51"):
+        build_tool_argv(replace(_run(tmp_path), client_tools=[long]), "claude")
+    ok = {"type": "function", "function": {"name": "a" * 51, "parameters": {"type": "object"}}}
+    assert f"--allowedTools=mcp__broker__{'a' * 51}" in build_tool_argv(
+        replace(_run(tmp_path), client_tools=[ok]), "claude")
 
 
 @pytest.mark.parametrize("request_line", [

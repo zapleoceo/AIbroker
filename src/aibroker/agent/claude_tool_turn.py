@@ -34,7 +34,8 @@ from aibroker.config import get_settings
 SERVER = "broker"
 PREFIX = f"mcp__{SERVER}__"
 MCP_PROTOCOL = "2025-06-18"
-_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 64-char API tool-name limit minus the 13-char "mcp__broker__" prefix
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,51}$")
 _INIT = "broker-init-1"
 
 
@@ -51,7 +52,7 @@ def build_tool_argv(run: AgentRunSpec, binary: str = "claude",
     """argv of a client-tool run; ValueError for a tool name the CLI could not address."""
     names = [t["name"] for t in _mcp_tools(run)]
     if not all(isinstance(n, str) and _TOOL_NAME.fullmatch(n) for n in names):
-        raise ValueError("client tool names must match [A-Za-z0-9_-]{1,64}")
+        raise ValueError("client tool names must match [A-Za-z0-9_-]{1,51}")
     builtin = [ATTACHMENT_READ] if run.attachments else []
     argv = [binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--setting-sources=user", "--strict-mcp-config",
@@ -76,6 +77,11 @@ def _user(text: str) -> dict[str, Any]:
 
 def _tool_text(text: str, is_error: bool) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+def _counted(usage: ev.Usage) -> bool:
+    return any(v is not None for v in (usage.input_tokens, usage.output_tokens,
+                                       usage.cache_read_tokens))
 
 
 def _sum(a: int | None, b: int | None) -> int | None:
@@ -115,6 +121,7 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
     reminders_left = settings.AGENT_TOOL_REQUIRED_REMINDERS
     rejected = calls = seq = 0
     broker_uses: set[str] = set()
+    answered: set[str] = set()
     usage = ev.Usage(turns=0, source="claude_stream_json")
     try:
         await send({"type": "control_request", "request_id": _INIT,
@@ -122,13 +129,18 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         await send(_user(build_claude_prompt(run)))
         async for raw in proc.stdout:
             line = raw.decode(errors="replace").strip()
-            data = json.loads(line) if line.startswith("{") else None
+            try:
+                data = json.loads(line) if line.startswith("{") else None
+            except ValueError:
+                data = None                   # not a control line; the parser skips it too
             kind = data.get("type") if isinstance(data, dict) else None
             if kind == "control_response":
                 response = data.get("response") or {}
                 if response.get("request_id") != _INIT or response.get("subtype") != "success":
                     raise ClientToolConflict("Claude refused the control initialize")
                 continue
+            if kind == "control_cancel_request" and data.get("request_id") in answered:
+                continue                      # the CLI gave up on a call we already answered
             if kind in ("control_request", "control_cancel_request"):
                 request = data.get("request") or {}
                 message = request.get("message")
@@ -191,6 +203,7 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 await send({"type": "control_response", "response": {
                     "subtype": "success", "request_id": data.get("request_id"),
                     "response": {"mcp_response": reply}}})
+                answered.add(str(data.get("request_id")))
                 continue
             for item in parser.feed(line):
                 if isinstance(item, ev.ToolCall) and item.name.startswith(PREFIX):
@@ -216,15 +229,24 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                     yield usage
                     yield item
                     return
-                yield item
                 if item.type in ev.TERMINAL_TYPES:
+                    if _counted(usage):
+                        yield usage           # a failed run still reports what it spent
+                    yield item
                     return
+                yield item
         rc = await proc.wait()
         await stderr_task
+        if _counted(usage):
+            yield usage
         yield parser.finish(rc, adapter._stderr.decode(errors="replace"))
     except ClientToolCancelled:
+        if _counted(usage):
+            yield usage
         yield ev.RunCancelled()
     except (ClientToolConflict, ValueError, OSError) as exc:
+        if _counted(usage):
+            yield usage
         yield ev.RunFailed(error_class="client_tool_protocol", message=str(exc)[:500])
     finally:
         await adapter.cancel()

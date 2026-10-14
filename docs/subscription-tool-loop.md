@@ -153,7 +153,8 @@ in-process MCP servers (wire format taken from `claude-agent-sdk`, MIT):
   sends its MCP traffic to the worker as `control_request` / `mcp_message` lines
   and waits for our `control_response`. Built-in tools stay off (`--tools ""`;
   `Read(inputs/**)` only for attachments) and the allow-list names only
-  `mcp__broker__<tool>`. Tool names must match `[A-Za-z0-9_-]{1,64}`.
+  `mcp__broker__<tool>`. Tool names must match `[A-Za-z0-9_-]{1,51}` (the API's
+  64-character limit minus the prefix).
 - The worker writes a control `initialize`, then the prompt as a stream-json user
   message, and keeps stdin open. It answers MCP `initialize`, `tools/list` (the
   declared tools, `inputSchema` = the caller's `parameters`), `ping` and
@@ -163,12 +164,16 @@ in-process MCP servers (wire format taken from `claude-agent-sdk`, MIT):
   `content` text with `isError` = not `success`. A schema-breaking call is
   answered with `isError: true` and the rule (never a value), within
   `AGENT_TOOL_ARG_RETRIES`; any other conflict fails the run closed.
-- Any other control request (a permission prompt, another MCP server, a cancel)
-  fails the run closed (`client_tool_protocol`). The `apiKeySource` billing check
+- Any other control request (a permission prompt, another MCP server, a cancel
+  of a request we have not answered) fails the run closed (`client_tool_protocol`);
+  a cancel of an already answered request is ignored. A line that is not valid JSON
+  is skipped, as on the plain path. The `apiKeySource` billing check
   of the stream parser still applies.
 - `tool_choice` `required` (or a named function) with no call by the end of a
   turn sends up to `AGENT_TOOL_REQUIRED_REMINDERS` reminder user messages on the
-  same session; usage is summed over the turns.
+  same session; usage is summed over the turns (per-turn `result.usage` is
+  assumed - verified on the first live reminder run) and is reported on failed
+  and cancelled runs too.
 - `MCP_TOOL_TIMEOUT` is set for the CLI to `AGENT_TOOL_WAIT_S` + 60 s, so the CLI
   does not abandon a call the caller may still answer.
 
