@@ -88,3 +88,15 @@ async def test_redaction_violating_const_or_enum_ends_invalid_json_not_done(cons
     assert row.status == "error"
     assert row.error_message.startswith("invalid_json:")
     assert "sk-abcdefghijk1" not in (row.result_text or "")
+
+
+def test_duplicate_keys_never_hide_a_secret_in_structural_redaction():
+    """json.loads collapses duplicate keys, so `cleaned == value` returned the raw text with the
+    secret; strict parsing falls back to the text redaction instead."""
+    out = redact_final_text('{"a":"sk-AAAAAAAAAAAA","a":"x"}', {"type": "json_object"})
+    assert "sk-AAAAAAAAAAAA" not in out and REDACTED in out
+
+
+def test_an_unclosed_quote_does_not_mask_across_lines():
+    out = redact('access_token="abc\nlots of text "end')
+    assert out.startswith("access_token=" + REDACTED) and "lots of text" in out

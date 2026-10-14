@@ -712,7 +712,9 @@ token-named keys) are masked and the document is re-serialized, so a masked span
 or brace. The `key=value` token mask only consumes a quote it opened itself. The run is then validated
 (`output_problem`) twice: on the model's answer and on the redacted body that will actually be returned;
 if redaction made a valid answer invalid (a `const` / `enum` value that held a secret) the run ends
-`run.failed` `invalid_json`, never `done`.
+`run.failed` `invalid_json`, never `done`. A re-serialized answer keeps key order and unicode but
+not the model's whitespace or number spelling (`1.50` -> `1.5`); an answer with nothing to mask is
+returned byte for byte.
 
 **Codex acceptance run (canaries only).** `scripts/agent_codex_acceptance.sh` is for a SEPARATE test
 stack with no real login. The harness places a throwaway `CODEX_HOME` with a FAKE `auth.json`

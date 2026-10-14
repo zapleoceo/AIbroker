@@ -10,6 +10,8 @@ import json
 import re
 from typing import Any
 
+from aibroker.strict_json import loads_strict
+
 REDACTED = "[REDACTED]"
 
 _JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
@@ -17,7 +19,7 @@ _TOKEN_JSON = re.compile(
     r'("(?:refresh_token|access_token|id_token)"\s*:\s*)"[^"]*"', re.IGNORECASE)
 _TOKEN_KV = re.compile(
     r"\b((?:refresh_token|access_token|id_token)\s*[=:]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[\"']?[^\s\"',}]+)", re.IGNORECASE)
+    r"(?:\"[^\"\n]*\"|'[^'\n]*'|[\"']?[^\s\"',}]+)", re.IGNORECASE)
 _SK = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{8,}")
 _SESS = re.compile(r"\bsess-[A-Za-z0-9_-]{8,}")
 
@@ -53,8 +55,8 @@ def redact_final_text(text: str, response_format: dict[str, Any] | None = None) 
     so a masked span can never eat a quote or brace and break the client's JSON. Untouched
     text is returned byte for byte."""
     if response_format and response_format.get("type") in ("json_object", "json_schema"):
-        try:
-            value = json.loads(text)
+        try:   # strict: duplicate keys / NaN would let `cleaned == value` hide a secret
+            value = loads_strict(text)
         except (TypeError, ValueError):
             return redact(text)
         cleaned = redact_obj(value)
