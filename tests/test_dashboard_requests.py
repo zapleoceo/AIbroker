@@ -6,7 +6,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -235,7 +235,7 @@ def test_pagination_offers_load_more_then_stops(monkeypatch):
     # just after 00:00 UTC and "today" held only some of them.
     day = date(2026, 6, 29)
     monkeypatch.setattr(dashboard_range, "today_in", lambda tz: day)
-    noon = datetime(2026, 6, 29, 12, 0, tzinfo=UTC)
+    noon = datetime(2026, 6, 29, 12, 0)              # naive UTC, like ds.now() and the DateTime column
     ds.seed(ds.project(1), ds.key(1))
     ds.seed(*[ds.usage(100 + i, at=noon - timedelta(minutes=i)) for i in range(53)])
     first = _get("/dashboard/requests", params={"range": "today"}).text
