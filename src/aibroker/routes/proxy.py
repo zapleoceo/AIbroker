@@ -68,27 +68,27 @@ from aibroker.providers.subscriptions import (
 )
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
-from aibroker.services import (
-    DecisionFailed,
-    EmbedFailed,
-    EmbedRequestInvalid,
-    TranscribeFailed,
-    get_job,
-    next_poll_after_s,
-    run_decision,
-    run_embed,
-    run_transcribe,
-    submit_deep_job,
-    submit_job,
-)
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
     IdempotencyConflict,
     build_request,
+    get_job,
+    next_poll_after_s,
     payload_hash,
+    submit_deep_job,
+    submit_job,
     submit_job_ex,
 )
 from aibroker.services.job_meta import check_labels, check_token, resolve_trace_id
+from aibroker.services.llm_service import (
+    DecisionFailed,
+    EmbedFailed,
+    EmbedRequestInvalid,
+    TranscribeFailed,
+    run_decision,
+    run_embed,
+    run_transcribe,
+)
 from aibroker.services.request_cap import admit_request
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.vision_payload import inline_image_problem
