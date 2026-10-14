@@ -39,18 +39,27 @@ def _agent(id_: int, *, cap: str = "agent:codex", status: str = "done", pid: int
     return [job, run]
 
 
+def _seed(*rows: Any) -> None:
+    """ds.seed in FK order: Postgres enforces agent_runs.run_id -> deep_jobs.id, and one flush
+    does not order the two unrelated mappers, so jobs (and their parents) go in first."""
+    ds.seed(*[r for r in rows if not isinstance(r, AgentRunRow)])
+    runs = [r for r in rows if isinstance(r, AgentRunRow)]
+    if runs:
+        ds.seed(*runs)
+
+
 def _seed_project_one() -> None:
-    ds.seed(ds.project(1, "stepan"), ds.project(2, "vera"), ds.key(1, "gemini", "k1"))
-    ds.seed(ds.usage(1, minutes_ago=30), ds.usage(2, minutes_ago=20, provider="groq",
+    _seed(ds.project(1, "stepan"), ds.project(2, "vera"), ds.key(1, "gemini", "k1"))
+    _seed(ds.usage(1, minutes_ago=30), ds.usage(2, minutes_ago=20, provider="groq",
                                                   model="groq/x"))
-    ds.seed(*_agent(101, labels={"exam_run_id": "ex-1", "run_id": "r-1"},
+    _seed(*_agent(101, labels={"exam_run_id": "ex-1", "run_id": "r-1"},
                     meta={"model_served": "gpt-6.1-sol-2026"}, minutes_ago=15),
             *_agent(102, status="error", labels={"exam_run_id": "ex-2"}, minutes_ago=14),
             *_agent(103, cap="agent:claude", status="cancelled", model="claude-opus-5",
                     tin=10, tout=2, cache=0, minutes_ago=13),
             *_agent(104, status="running", minutes_ago=2, dur_s=None))
     # another project's agent job must never show up on project 1
-    ds.seed(*_agent(900, pid=2, labels={"exam_run_id": "other"}, model="other-model"))
+    _seed(*_agent(900, pid=2, labels={"exam_run_id": "other"}, model="other-model"))
 
 
 def _bd(pid: int = 1):
@@ -81,8 +90,8 @@ def test_project_totals_and_breakdowns_include_agent_jobs():
 
 
 def test_result_meta_provider_wins_over_capability_default():
-    ds.seed(ds.project(1, "stepan"))
-    ds.seed(*_agent(1, meta={"provider": "codex-sub-b"}), *_agent(2))
+    _seed(ds.project(1, "stepan"))
+    _seed(*_agent(1, meta={"provider": "codex-sub-b"}), *_agent(2))
     prov = {r["k"]: r["n"] for r in _bd()["by_provider"]}
     assert prov == {"codex-sub-b": 1, "codex-sub": 1}
     assert da.agent_provider("agent:claude", None) == "claude-sub"
@@ -100,9 +109,9 @@ def test_project_page_renders_agent_totals_models_and_runs():
 
 
 def test_no_double_counting_plain_job_counts_via_usage_log_agent_via_jobs():
-    ds.seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
+    _seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
     # plain job: 2 attempts (one failed, one ok) in usage_log, job row done
-    ds.seed(ds.job(7, "done", 1, 20, capability="chat:deep"),
+    _seed(ds.job(7, "done", 1, 20, capability="chat:deep"),
             ds.usage(1, minutes_ago=19, status="error", request_id="job-7",
                      capability="chat:deep"),
             ds.usage(2, minutes_ago=18, request_id="job-7", capability="chat:deep"))
@@ -111,7 +120,7 @@ def test_no_double_counting_plain_job_counts_via_usage_log_agent_via_jobs():
     rows = ds.run(rq.query_requests(rq.RequestFilter(project_id=1)))[0]
     assert [r["request_id"] for r in rows] == ["job-7"]            # one request, 2 tries
     # now an agent job: +1 everywhere, exactly once
-    ds.seed(*_agent(8, minutes_ago=5))
+    _seed(*_agent(8, minutes_ago=5))
     d = _bd()
     assert d["totals"]["calls"] == 3 and d["totals"]["agent"]["n"] == 1
     assert {r["k"]: r["n"] for r in d["by_provider"]} == {
@@ -184,10 +193,10 @@ def test_agent_job_drawer_opens():
 
 
 def test_agent_rows_survive_the_top_models_cut_with_many_paid_api_models():
-    ds.seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
-    ds.seed(*[ds.usage(i, minutes_ago=30 + i, model=f"paid/m{i:02d}", cost=1.0 + i)
+    _seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
+    _seed(*[ds.usage(i, minutes_ago=30 + i, model=f"paid/m{i:02d}", cost=1.0 + i)
               for i in range(1, 15)])
-    ds.seed(*_agent(500, model="gpt-6.1-sol"), *_agent(501, cap="agent:claude",
+    _seed(*_agent(500, model="gpt-6.1-sol"), *_agent(501, cap="agent:claude",
                                                         model="claude-opus-5"))
     d = _bd()
     names = [r["k"] for r in d["by_model"]]
@@ -199,10 +208,10 @@ def test_agent_rows_survive_the_top_models_cut_with_many_paid_api_models():
 
 
 def test_cache_hit_is_normalised_per_agent_and_never_above_100():
-    ds.seed(ds.project(1, "stepan"))
+    _seed(ds.project(1, "stepan"))
     # claude CLI: input_tokens EXCLUDES cache reads -> hit = 50000 / (10 + 50000)
     # codex: cached_input_tokens is a SUBSET of input_tokens -> hit = 800 / 1000
-    ds.seed(*_agent(1, cap="agent:claude", model="claude-opus-5", tin=10, tout=5, cache=50_000),
+    _seed(*_agent(1, cap="agent:claude", model="claude-opus-5", tin=10, tout=5, cache=50_000),
             *_agent(2, cap="agent:codex", model="gpt-6.1-sol", tin=1000, tout=5, cache=800))
     d = _bd()
     m = {r["k"]: r for r in d["by_model"]}
@@ -214,8 +223,8 @@ def test_cache_hit_is_normalised_per_agent_and_never_above_100():
 
 
 def test_latency_sort_orders_agent_rows_by_the_duration_shown():
-    ds.seed(ds.project(1, "stepan"))
-    ds.seed(*_agent(1, dur_s=10), *_agent(2, dur_s=300), *_agent(3, dur_s=60))
+    _seed(ds.project(1, "stepan"))
+    _seed(*_agent(1, dur_s=10), *_agent(2, dur_s=300), *_agent(3, dur_s=60))
     rows = ds.run(rq.query_requests(rq.RequestFilter(project_id=1, sort="latency")))[0]
     assert [r["duration_ms"] for r in rows] == [300_000, 60_000, 10_000]
     rows = ds.run(rq.query_requests(rq.RequestFilter(project_id=1, sort="latency", desc=False)))[0]
@@ -223,9 +232,9 @@ def test_latency_sort_orders_agent_rows_by_the_duration_shown():
 
 
 def test_agent_breakdown_skips_a_job_that_also_has_usage_rows():
-    ds.seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
-    ds.seed(*_agent(5), *_agent(6))
-    ds.seed(ds.usage(1, request_id="job-5", capability="agent:codex"))   # artificial overlap
+    _seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
+    _seed(*_agent(5), *_agent(6))
+    _seed(ds.usage(1, request_id="job-5", capability="agent:codex"))   # artificial overlap
     d = _bd()
     assert d["totals"]["agent"]["n"] == 1 and d["totals"]["api_calls"] == 1
     assert d["totals"]["calls"] == 2
