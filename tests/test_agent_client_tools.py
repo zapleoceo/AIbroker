@@ -268,6 +268,28 @@ async def test_publish_call_rejection_carries_the_schema_detail(monkeypatch):
         await publish_call(job_id, "c1", "lookup", {"id": "string"})
 
 
+async def test_wrong_or_undeclared_tool_fails_closed_without_a_retry():
+    from aibroker.agent.client_tools import ClientToolInvalidArguments
+    job_id = await _job()
+    with pytest.raises(ClientToolConflict, match=r"\[UnknownToolCall\]") as caught:
+        await publish_call(job_id, "c1", "nope", {"id": 1})
+    assert not isinstance(caught.value, ClientToolInvalidArguments)
+
+
+async def test_a_tool_other_than_the_forced_one_fails_closed_without_a_retry():
+    from aibroker.agent.client_tools import ClientToolInvalidArguments
+    job_id = await _job()
+    other = {"type": "function", "function": {"name": "other", "parameters": {"type": "object"}}}
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, job_id)
+        job.request = {**job.request, "client_job": {
+            "tools": [*TOOLS, other],
+            "tool_choice": {"type": "function", "function": {"name": "lookup"}}}}
+    with pytest.raises(ClientToolConflict, match=r"\[UnexpectedToolCall\]") as caught:
+        await publish_call(job_id, "c1", "other", {})
+    assert not isinstance(caught.value, ClientToolInvalidArguments)
+
+
 async def test_publish_call_rejection_logs_label_and_rule_without_values(caplog):
     import logging
     job_id = await _job()
