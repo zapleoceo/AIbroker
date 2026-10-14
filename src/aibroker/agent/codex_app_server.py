@@ -22,9 +22,21 @@ from aibroker.agent.codex_cli import CONFIG_OVERRIDES, permission_overrides
 log = logging.getLogger(__name__)
 
 
+_KNOWN_METHODS = frozenset({
+    "item/tool/call", "model/rerouted", "thread/tokenUsage/updated", "item/started",
+    "item/updated", "item/completed", "turn/started", "turn/completed", "thread/started", "error",
+})
+
+
 def _log_message(message: dict[str, Any]) -> None:
-    """Diagnosis aid: method and id only, never params or results."""
-    log.debug("app-server message method=%s id=%s", message.get("method"), message.get("id"))
+    """Diagnosis aid, logged before validation: a known method name and a bounded integer id
+    only; anything else is a constant, never the peer's own text, params or results."""
+    method = message.get("method")
+    shown = "-" if method is None else method if method in _KNOWN_METHODS else "other"
+    msg_id = message.get("id")
+    shown_id = msg_id if type(msg_id) is int and 0 <= msg_id < 1_000_000 else \
+        ("-" if msg_id is None else "other")
+    log.debug("app-server message method=%s id=%s", shown, shown_id)
 
 
 def _is_response(message: dict[str, Any], expected: int) -> bool:
@@ -110,11 +122,16 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         await send({"id": 2, "method": "thread/start", "params": {
             "model": run.model, "cwd": run.workspace, "approvalPolicy": "never",
             "permissions": "broker", "dynamicTools": _tool_specs(run)}})
-        thread = (await read_response(2)).get("thread") or {}
+        started = await read_response(2)
+        thread = started.get("thread") or {}
         thread_id = thread.get("id")
         if not isinstance(thread_id, str) or not thread_id:
             raise ClientToolConflict("App Server did not assign a thread")
         yield ev.SessionAssigned(session_id=thread_id)
+        configured = started.get("model")
+        if isinstance(configured, str) and configured.strip():
+            yield ev.ModelObserved(model=configured.strip()[:200], kind="thread_config",
+                                   source="codex.app_server.thread_start")
         await send({"id": 3, "method": "turn/start", "params": {
             "threadId": thread_id, "input": _input_items(run), "cwd": run.workspace,
             "approvalPolicy": "never", "model": run.model}})

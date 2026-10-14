@@ -7,10 +7,35 @@ live text and generated-PNG requests through the production Broker and
 Orchestra. Input vision and client-controlled subscription tools remain
 separate rollout gates; see `docs/subscription-tool-loop.md`.
 
+**Served-model evidence (additive).** A run records `model.observed` events
+(`model`, `kind`, `source`) for every model the CLI reports, and the job keeps the
+deduped list (one entry per kind and model, max 10; a stronger kind replaces the weakest
+entry when full, otherwise the new one is dropped, and either way `observations_truncated`
+is set, `observations_complete` is `false`, and the top-level `model_served` is `null` when
+more than one distinct `response` model is stored) as `model_observations`, kept on failed, cancelled and timed-out runs too.
+The poll `evidence` carries the strongest kind seen as `model_served`, `model_served_kind`
+and `model_served_source`, while the top-level `model_served` stays strict and is filled
+only by `response`-level evidence:
+`response` (read off an API response message: Claude `assistant.message.model`) beats
+`thread_config` (the model the CLI configured for the thread, Codex App Server
+`thread/start`; NOT proof of the backend of each response) beats `session_init`
+(Claude `system/init`). When nothing is observed `model_served` is `null`,
+`model_served_kind` is `unknown`, and the requested model is never substituted. When
+observations of different kinds disagree, all remain in `model_observations`. A
+`model.observed` event never releases the Codex auth-refresh gate. Codex `exec`
+reports no known model field; the parser only logs event key names to find one, from a fixed
+allowlist of structural names (plus candidate model fields); any other key is logged only as the
+constant `<key>` with a count, never its own text.
+Code map: the `ModelObserved` event (`agent/events.py`), `add_model_observation` and
+`served_model_meta` (`agent/runs.py`, accumulate and pick the strongest), and the poll
+models `ModelObservation` and `JobEvidence` (`routes/proxy.py`).
+
 `GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
 requested CLI pin and `model_served: null` when the actual served model is not
 independently attested.
-The same distinction applies to subscription results from `GET /v1/jobs/{id}`.
+The same distinction applies to subscription results from `GET /v1/jobs/{id}`: its top-level
+`model_served` is filled only by `response`-level evidence; `thread_config`, `session_init`
+and unknown leave it `null`, with the weaker evidence visible only inside `evidence`.
 Codex App Server `thread/start.model` and `turn/start.model` are requested
 settings; `turn/completed` does not report a general served-model identity.
 `model/rerouted` reports a reroute when one occurs; the App Server tool path

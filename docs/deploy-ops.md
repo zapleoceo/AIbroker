@@ -866,7 +866,7 @@ docker compose up -d
 | `SIGNUP_REQUEST_CAP` | lifetime request cap given to a new self-signup project (default 100) |
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
-| `LOG_LEVEL` | INFO / DEBUG |
+| `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
 

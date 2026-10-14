@@ -295,7 +295,8 @@ broker finishes its fallback chain). See `docs/api.md`.
     retries before erroring - see docs/routing.md "Content failures".
 - **Trace, idempotency, cancel (migration 020).** `deep_jobs` carries `trace_id`,
   `labels`, `idempotency_key` and `cancel_requested`. `submit_job_ex` stores them
-  (never in `payload_hash`), logs them in the job lines, and with an
+  (never in `payload_hash`), tags the job log lines with them only as a fingerprint
+  (`log_tag`: `trace#<sha256[:12]>` and the label COUNT - never the raw client values), and with an
   `Idempotency-Key` skips the in-flight dedup: an existing job for the same
   `(project, key)` is returned (`replayed`), a different payload raises
   `IdempotencyConflict` (409), and a lost insert race on the partial unique index

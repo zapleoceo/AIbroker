@@ -9,6 +9,7 @@ from aibroker.agent.events import (
     FileChanged,
     FileRef,
     MessageDelta,
+    ModelObserved,
     ModelRerouted,
     RunCompleted,
     RunFailed,
@@ -20,8 +21,8 @@ from aibroker.agent.events import (
 from aibroker.agent.lock import Lease
 
 BillingMode = Literal["subscription", "api", "unknown"]
-StreamEvent = (SessionAssigned | ModelRerouted | MessageDelta | ToolCall | ToolResult | FileChanged
-               | Usage | RunCompleted | RunFailed)
+StreamEvent = (SessionAssigned | ModelRerouted | ModelObserved | MessageDelta | ToolCall | ToolResult
+               | FileChanged | Usage | RunCompleted | RunFailed)
 
 
 @dataclass(frozen=True)

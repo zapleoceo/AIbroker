@@ -156,6 +156,9 @@ class _Rig:
                 await self.gates[run.run_id].wait()               # the CLI is "refreshing"
             yield ev.SessionAssigned(session_id=THREADS[ids.index(run.run_id)])
             self.session_seen[run.run_id].set()                   # the executor consumed it
+            if self.first_event == "observed":
+                yield ev.ModelObserved(model="gpt-6.1-sol", kind="thread_config",
+                                       source="codex.app_server.thread_start")
             if self.first_event != "session":
                 await self.gates[run.run_id].wait()               # first MODEL event not yet there
             yield ev.MessageDelta(text="hi")
@@ -232,6 +235,27 @@ async def test_lease_is_kept_past_session_assigned_until_a_model_event(tmp_path,
     await _until(lambda: ids[1] in rig.entered)
     rig.release_all()
     assert await asyncio.wait_for(t2, 10) == "completed"
+
+
+async def test_model_observed_does_not_release_the_gate(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home)
+    ids = await _runs(1, base=9460)
+    rig = _Rig(monkeypatch, ids, first_event="observed")
+    _register(home)
+    task = asyncio.create_task(execute_run(ids[0], _cfg(tmp_path)))
+
+    async def _stored():
+        return [e.type for e in await list_events(ids[0])]
+    for _ in range(500):
+        if "model.observed" in await _stored():
+            break
+        await asyncio.sleep(0.01)
+    assert "model.observed" in await _stored()          # processed and stored like any event
+    assert rig.released == []                           # ...but the refresh gate is still held
+    rig.gates[ids[0]].set()                             # the first model event (message.delta)
+    assert await asyncio.wait_for(task, 10) == "completed"
+    assert rig.released == [ids[0]]
 
 
 async def test_fresh_login_takes_no_lease_and_runs_stay_parallel(tmp_path, monkeypatch):

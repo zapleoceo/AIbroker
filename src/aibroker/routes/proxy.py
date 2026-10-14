@@ -37,7 +37,7 @@ from aibroker.agent.client_tools import (
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
 from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
-from aibroker.agent.runs import RunRejected, create_run
+from aibroker.agent.runs import RunRejected, create_run, served_model_meta
 from aibroker.agent.subscription_input import subscription_messages
 from aibroker.agent.subscription_job import (
     json_schema_problem,
@@ -450,6 +450,41 @@ class DeepSubmitResponse(BaseModel):
     poll_after_s: int = Field(description="suggested wait before the first poll")
 
 
+class ModelObservation(BaseModel):
+    model: str
+    kind: str = Field(description="response|thread_config|session_init")
+    source: str
+
+
+class JobEvidence(BaseModel):
+    """Subscription jobs only: what served the job and how well that is evidenced."""
+    provider: str | None = None
+    account_id: str | None = None
+    billing_mode: str | None = Field(None, description="from the run's billing type")
+    model_requested: str | None = Field(None, description="the requested pin")
+    model_served: str | None = Field(
+        None, description="the best observed model, labelled by model_served_kind (it may be "
+                          "only a thread_config or session_init value); null when none was "
+                          "observed - never the requested model. The top-level poll "
+                          "`model_served` is stricter: response-level evidence only")
+    model_served_kind: str = Field(
+        "unknown", description="response (API response message) | thread_config (the CLI's "
+        "thread configuration, not proof of each response's backend) | session_init | unknown")
+    model_served_source: str = "none"
+    model_observations: list[ModelObservation] = Field(default_factory=list)
+    run_status: str | None = Field(
+        None, description="pending|running while in flight; completed|failed|cancelled|timed_out "
+                          "once terminal")
+    observations_truncated: bool = Field(
+        False, description="an observation was dropped or evicted at the cap of 10")
+    observations_complete: bool = Field(
+        True, description="false when observations_truncated: the summary may be incomplete")
+    model_rerouted: bool | None = Field(
+        None, description="false ONLY for a completed Codex app-server run (reroute notifications "
+                          "are observed there and fail the run closed); null when unknown "
+                          "(Claude, Codex exec, nothing observed, or a run that did not complete)")
+
+
 class DeepJobResponse(BaseModel):
     job_id: int
     status: str = Field(description="pending|done|error|cancelled")
@@ -463,8 +498,10 @@ class DeepJobResponse(BaseModel):
     requested_model: str | None = Field(None, description="requested model pin, if provided")
     model_served: str | None = Field(
         None,
-        description="independently reported served model, when available; null also means "
-                    "unknown for subscription CLI runs, never inferred from the requested pin",
+        description="independently reported served model, when available. For subscription "
+                    "runs only response-level evidence fills it (an API response message); "
+                    "thread_config / session_init / nothing leave it null (see `evidence`); "
+                    "never inferred from the requested pin",
     )
     tokens_in: int | None = None
     tokens_out: int | None = None
@@ -479,6 +516,8 @@ class DeepJobResponse(BaseModel):
     latency_ms: int | None = None
     key_label: str | None = None
     request_id: int | None = None
+    evidence: JobEvidence | None = Field(
+        None, description="subscription jobs only: served-model evidence (see docs/api.md)")
     error: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
@@ -543,6 +582,33 @@ async def deep_submit(
     )
 
 
+def _job_evidence(meta: dict[str, Any], request: dict[str, Any] | None = None,
+                  run_status: str | None = None) -> JobEvidence | None:
+    """Evidence envelope of a subscription (client_job) run, for any status; None for a plain job.
+    Derived from the stored observations, so it is also available while the run is in flight."""
+    cj = (request or {}).get("client_job")
+    if not cj and not (meta.get("account_id") and meta.get("provider")
+                       and "model_served_kind" in meta):
+        return None
+    cj = cj or {}
+    truncated = bool(meta.get("observations_truncated"))
+    served = served_model_meta(meta.get("model_observations"), truncated)
+    outcome = meta.get("run_outcome")
+    return JobEvidence(
+        provider=meta.get("provider") or cj.get("provider"),
+        account_id=meta.get("account_id") or (request or {}).get("account_id"),
+        billing_mode=meta.get("billing_type"),
+        model_requested=meta.get("model") or cj.get("model"),
+        model_served=served["model_observed_best"],
+        model_served_kind=served["model_served_kind"],
+        model_served_source=served["model_served_source"],
+        model_observations=[ModelObservation(**o) for o in served["model_observations"]],
+        run_status=outcome or run_status,
+        observations_truncated=truncated, observations_complete=not truncated,
+        model_rerouted=False if outcome == "completed" and meta.get("app_server_path") else None,
+    )
+
+
 def _job_response(row: Any) -> DeepJobResponse:
     """Shape a deep_jobs row into the poll response — shared by /v1/deep and
     /v1/jobs.
@@ -562,10 +628,14 @@ def _job_response(row: Any) -> DeepJobResponse:
                             "labels": getattr(row, "labels", None)}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
-                               requested_model=requested_model, account_id=account_id, **tags)
+                               requested_model=requested_model, account_id=account_id,
+                               evidence=_job_evidence(row.result_meta or {}, request, "failed"),
+                               **tags)
     if row.status == "cancelled":
         return DeepJobResponse(job_id=row.id, status="cancelled",
-                               requested_model=requested_model, account_id=account_id, **tags)
+                               requested_model=requested_model, account_id=account_id,
+                               evidence=_job_evidence(row.result_meta or {}, request, "cancelled"),
+                               **tags)
     if row.status != "done":
         pending_tool = (row.result_meta or {}).get("client_tool") or {}
         call = None
@@ -576,6 +646,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         return DeepJobResponse(
             job_id=row.id, status="pending",
             requested_model=requested_model, account_id=account_id,
+            evidence=_job_evidence(row.result_meta or {}, request, str(row.status)),
             cancel_requested=True if getattr(row, "cancel_requested", False) else None, **tags,
             poll_after_s=next_poll_after_s(row.created_at) if call is None else None,
             tool_calls=[call] if call else None,
@@ -587,6 +658,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         provider=meta.get("provider"), model=meta.get("model"),
         requested_model=requested_model,
         model_served=meta.get("model_served"),
+        evidence=_job_evidence(meta, request, "completed"),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
