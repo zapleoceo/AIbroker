@@ -200,7 +200,8 @@ Exactly one terminal event ends a run (`TERMINAL_TYPES`).
 
 `AgentCLI` (`aibroker.agent.adapter`): `supports_resume`, `billing_mode()` (positive
 "subscription", else "api"/"unknown" which will be refused in C3), `start(AgentRunSpec)` ->
-async iterator of events, `cancel()`. One instance serves one run. `FakeAgentCLI`
+async iterator of events, `cancel()`. One instance serves one run. `AgentCLI` is a structural
+Protocol: nothing inherits it, and its stub bodies raise `NotImplementedError` (never a silent default). `FakeAgentCLI`
 (`aibroker.agent.fake`) is a scripted fake: emits events, hangs until cancelled, raises,
 writes files into the workspace.
 

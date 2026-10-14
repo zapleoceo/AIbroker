@@ -72,7 +72,8 @@ class AgentCLI(Protocol):
     def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
         """After a run, the WORKER (not the model) collects artifacts the CLI produced outside the
         workspace (Codex: generated images) -> ready file refs. No artifacts = []."""
-        ...
+        del run, since          # protocol stub: names are the contract, the body never runs
+        raise NotImplementedError
 
     async def list_models(self) -> list[ModelInfo] | None:
         """Catalog from the CLI itself (codex app-server model/list + provider/capabilities;
@@ -81,7 +82,8 @@ class AgentCLI(Protocol):
 
     def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
         """Async iterator of events; ends with run.completed / run.failed."""
-        ...
+        del run                 # protocol stub: names are the contract, the body never runs
+        raise NotImplementedError
 
     async def cancel(self) -> None:
         """Stop the run (real adapters: SIGTERM, grace, SIGKILL). Idempotent."""
