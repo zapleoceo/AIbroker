@@ -202,6 +202,8 @@ def _observed(model: Any, kind: Any, source: str) -> ev.ModelObserved | None:
     """A ModelObserved only for a real, non-empty string model; never fabricated."""
     if not isinstance(model, str) or not model.strip():
         return None
+    if model.strip() == "<synthetic>":   # Claude Code's locally generated message, not an API one
+        return None
     return ev.ModelObserved(model=model.strip()[:200], kind=kind, source=source)
 
 
@@ -247,15 +249,16 @@ class CodexParser:
     def _log_shape(self, data: dict[str, Any]) -> None:
         """Diagnostics: log each distinct event shape once, KEY NAMES only (never values)."""
         kind = data.get("type")
-        keys = sorted(str(k) for k in data)
+        kind = kind[:60] if isinstance(kind, str) else "<non-str>"
+        keys = sorted(str(k)[:40] for k in data)[:30]
         item = data.get("item")
-        if isinstance(kind, str) and kind.startswith("item.") and isinstance(item, dict):
-            keys.append("item=" + ",".join(sorted(str(k) for k in item)))
-        shape = f"{str(kind)[:60]}|{keys}"
+        if kind.startswith("item.") and isinstance(item, dict):
+            keys.append("item=" + ",".join(sorted(str(k)[:40] for k in item)[:30]))
+        shape = f"{kind}|{keys}"
         if shape in self._shapes:
             return
         self._shapes.add(shape)
-        log.info("codex exec event keys type=%s keys=%s", str(kind)[:60], keys)
+        log.info("codex exec event keys type=%s keys=%s", kind, keys)
 
     def feed(self, line: str) -> list[StreamEvent]:
         data = _json(line)

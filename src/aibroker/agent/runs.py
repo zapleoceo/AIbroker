@@ -188,21 +188,31 @@ def add_model_observation(existing: Any, model: str, kind: str, source: str) -> 
     """Append {model, kind, source} to the observation list, deduped, capped; never overwrites."""
     items = [o for o in (existing or []) if isinstance(o, dict)]
     entry = {"model": model, "kind": kind, "source": source}
-    if entry not in items and len(items) < _MAX_MODEL_OBSERVATIONS:
+    if any(o.get("kind") == kind and o.get("model") == model for o in items):
+        return items                      # one entry per (kind, model)
+    if len(items) < _MAX_MODEL_OBSERVATIONS:
         items.append(entry)
+    else:
+        # Full: a stronger kind replaces the weakest entry, so the best evidence is never dropped.
+        weakest = min(range(len(items)), key=lambda i: _EVIDENCE_RANK.get(items[i].get("kind"), 0))
+        if _EVIDENCE_RANK.get(kind, 0) > _EVIDENCE_RANK.get(items[weakest].get("kind"), 0):
+            items[weakest] = entry
     return items
 
 
 def served_model_meta(observations: Any) -> dict[str, Any]:
     """result_meta fields for the served model: the strongest evidence wins (response >
     thread_config > session_init, first seen within a kind); nothing observed -> null model with
-    kind "unknown". The requested model is never used as a fallback. All observations are kept."""
+    kind "unknown". The requested model is never used as a fallback. All observations are kept.
+    Top-level `model_served` is strict: set only for response-level evidence; the best weaker
+    value lives in `model_observed_best` (shown only inside the poll `evidence`)."""
     items = [o for o in (observations or []) if isinstance(o, dict) and o.get("kind") in _EVIDENCE_RANK]
     best = max(items, key=lambda o: _EVIDENCE_RANK[o["kind"]], default=None)
     if best is None:
-        return {"model_served": None, "model_served_kind": "unknown", "model_served_source": "none",
-                "model_observations": []}
-    return {"model_served": best["model"], "model_served_kind": best["kind"],
+        return {"model_served": None, "model_observed_best": None, "model_served_kind": "unknown",
+                "model_served_source": "none", "model_observations": []}
+    return {"model_served": best["model"] if best["kind"] == "response" else None,
+            "model_observed_best": best["model"], "model_served_kind": best["kind"],
             "model_served_source": best.get("source") or "none", "model_observations": items}
 
 
@@ -263,6 +273,9 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 meta["usage_observed"] = observed
                 job.result_meta = meta
         if event.type == "model.observed" and job is not None and client_job:
+            # The job row is read without a row lock here: the app-server ModelObserved arrives at
+            # thread/start, before any tool call, so this unlocked read-modify-write cannot race
+            # the client_tools FOR UPDATE path today.
             meta = dict(job.result_meta or {})
             meta["model_observations"] = add_model_observation(
                 meta.get("model_observations"), event.model, event.kind, event.source)
@@ -309,6 +322,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 else:
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
+                    if observations:
+                        job.result_meta["model_observations"] = observations
                     job.error_message = event.type
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,

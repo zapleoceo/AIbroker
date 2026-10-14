@@ -9,8 +9,11 @@ separate rollout gates; see `docs/subscription-tool-loop.md`.
 
 **Served-model evidence (additive).** A run records `model.observed` events
 (`model`, `kind`, `source`) for every model the CLI reports, and the job keeps the
-deduped list (max 10) as `model_observations`. `model_served` is the model of the
-strongest kind seen, with `model_served_kind` and `model_served_source`:
+deduped list (one entry per kind and model, max 10; a stronger kind replaces the weakest
+entry when full) as `model_observations`, kept on failed, cancelled and timed-out runs too.
+The poll `evidence` carries the strongest kind seen as `model_served`, `model_served_kind`
+and `model_served_source`, while the top-level `model_served` stays strict and is filled
+only by `response`-level evidence:
 `response` (read off an API response message: Claude `assistant.message.model`) beats
 `thread_config` (the model the CLI configured for the thread, Codex App Server
 `thread/start`; NOT proof of the backend of each response) beats `session_init`
@@ -26,7 +29,9 @@ models `ModelObservation` and `JobEvidence` (`routes/proxy.py`).
 `GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
 requested CLI pin and `model_served: null` when the actual served model is not
 independently attested.
-The same distinction applies to subscription results from `GET /v1/jobs/{id}`.
+The same distinction applies to subscription results from `GET /v1/jobs/{id}`: its top-level
+`model_served` is filled only by `response`-level evidence; `thread_config`, `session_init`
+and unknown leave it `null`, with the weaker evidence visible only inside `evidence`.
 Codex App Server `thread/start.model` and `turn/start.model` are requested
 settings; `turn/completed` does not report a general served-model identity.
 `model/rerouted` reports a reroute when one occurs; the App Server tool path

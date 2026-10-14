@@ -133,12 +133,15 @@ def test_served_model_meta_strongest_evidence_wins_and_all_are_kept():
         "resp-m", "response", "c")
     assert meta["model_observations"] == obs             # disagreement is kept, not overwritten
     only_init = served_model_meta(add_model_observation([], "init-m", "session_init", "a"))
-    assert only_init["model_served"] == "init-m" and only_init["model_served_kind"] == "session_init"
+    # strict top-level: weaker evidence is visible only as the labelled best observation
+    assert only_init["model_served"] is None and only_init["model_observed_best"] == "init-m"
+    assert only_init["model_served_kind"] == "session_init"
 
 
 def test_served_model_meta_nothing_observed_is_unknown_and_null():
     meta = served_model_meta([])
-    assert meta == {"model_served": None, "model_served_kind": "unknown",
+    assert meta == {"model_served": None, "model_observed_best": None,
+                    "model_served_kind": "unknown",
                     "model_served_source": "none", "model_observations": []}
 
 
@@ -191,3 +194,59 @@ async def test_unobserved_job_is_unknown_and_never_falls_back_to_requested():
 
 def test_plain_job_has_no_evidence():
     assert proxy._job_evidence({"model": "m", "provider": "gemini"}) is None
+
+
+def test_claude_parser_ignores_synthetic_messages():
+    p = ClaudeParser()
+    out = p.feed(_line(type="assistant", message={
+        "model": "<synthetic>", "content": [{"type": "text", "text": "x"}]}))
+    assert [e.type for e in out] == ["message.delta"]
+    assert p.feed(_line(type="system", subtype="init", session_id="s", model="<synthetic>")) == [
+        ev.SessionAssigned(session_id="s")]
+
+
+def test_cap_never_drops_the_best_observation():
+    obs = []
+    for i in range(10):
+        obs = add_model_observation(obs, f"init-{i}", "session_init", "s")
+    obs = add_model_observation(obs, "resp-last", "response", "r")     # 11th, strongest, last
+    assert len(obs) == 10
+    meta = served_model_meta(obs)
+    assert meta["model_served"] == "resp-last" and meta["model_served_kind"] == "response"
+    # a weaker kind never evicts anything once full
+    assert add_model_observation(obs, "late-init", "session_init", "s") == obs
+    # same (kind, model) from another source is not a second entry
+    assert len(add_model_observation([], "m", "response", "a") + []) == 1
+    assert len(add_model_observation(add_model_observation([], "m", "response", "a"),
+                                     "m", "response", "b")) == 1
+
+
+def test_codex_parser_key_logging_is_bounded(caplog):
+    p = CodexParser()
+    big = {f"k{i:03d}" + "x" * 80: 1 for i in range(60)}
+    with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
+        p.feed(json.dumps({"type": ["not", "a", "string"], **big}))
+    msg = caplog.records[-1].getMessage()
+    assert "type=<non-str>" in msg
+    assert "x" * 41 not in msg and "k059" not in msg      # names cut at 40, keys capped at 30
+
+
+async def test_thread_config_only_job_keeps_top_level_model_served_null():
+    rid = await _job(33)
+    await append_event(rid, ev.ModelObserved(model="gpt-6.1-sol", kind="thread_config",
+                                             source="codex.app_server.thread_start"))
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    result = proxy._job_response((await get_run(rid, 33))[1])
+    assert result.model_served is None
+    assert result.evidence.model_served == "gpt-6.1-sol"
+    assert result.evidence.model_served_kind == "thread_config"
+
+
+async def test_observations_survive_failed_cancelled_and_timed_out_runs():
+    for pid, terminal in ((34, ev.RunFailed(error_class="x", message="m")),
+                          (35, ev.RunCancelled()), (36, ev.RunTimedOut(limit="wall"))):
+        rid = await _job(pid)
+        await append_event(rid, ev.ModelObserved(model="m1", kind="response", source="r"))
+        await append_event(rid, terminal)
+        meta = (await get_run(rid, pid))[1].result_meta
+        assert meta["model_observations"] == [{"model": "m1", "kind": "response", "source": "r"}],             terminal.type

@@ -121,7 +121,8 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
-their poll response. `model_served` remains `null` without independent CLI evidence; this
+their poll response. `model_served` is filled only by response-level evidence (an API response message) and
+otherwise stays `null` (weaker evidence appears only in `evidence`); this
 does not prevent a functional result. `tokens_in`, `tokens_out`,
 `total_tokens`, `cache_read_tokens`, and `reasoning_tokens` contain only counts
 reported by the CLI, with `null` for unavailable counts. An unknown

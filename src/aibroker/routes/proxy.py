@@ -463,8 +463,10 @@ class JobEvidence(BaseModel):
     billing_mode: str | None = Field(None, description="from the run's billing type")
     model_requested: str | None = Field(None, description="the requested pin")
     model_served: str | None = Field(
-        None, description="strongest observed model; null when none was observed - never the "
-                          "requested model")
+        None, description="the best observed model, labelled by model_served_kind (it may be "
+                          "only a thread_config or session_init value); null when none was "
+                          "observed - never the requested model. The top-level poll "
+                          "`model_served` is stricter: response-level evidence only")
     model_served_kind: str = Field(
         "unknown", description="response (API response message) | thread_config (the CLI's "
         "thread configuration, not proof of each response's backend) | session_init | unknown")
@@ -486,8 +488,10 @@ class DeepJobResponse(BaseModel):
     requested_model: str | None = Field(None, description="requested model pin, if provided")
     model_served: str | None = Field(
         None,
-        description="independently reported served model, when available; null also means "
-                    "unknown for subscription CLI runs, never inferred from the requested pin",
+        description="independently reported served model, when available. For subscription "
+                    "runs only response-level evidence fills it (an API response message); "
+                    "thread_config / session_init / nothing leave it null (see `evidence`); "
+                    "never inferred from the requested pin",
     )
     tokens_in: int | None = None
     tokens_out: int | None = None
@@ -575,7 +579,7 @@ def _job_evidence(meta: dict[str, Any]) -> JobEvidence | None:
     return JobEvidence(
         provider=meta.get("provider"), account_id=meta.get("account_id"),
         billing_mode=meta.get("billing_type"), model_requested=meta.get("model"),
-        model_served=meta.get("model_served"),
+        model_served=meta.get("model_observed_best"),
         model_served_kind=meta.get("model_served_kind") or "unknown",
         model_served_source=meta.get("model_served_source") or "none",
         model_observations=[ModelObservation(**o) for o in meta.get("model_observations") or []],
