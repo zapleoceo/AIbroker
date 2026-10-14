@@ -265,17 +265,17 @@ async def test_observations_survive_failed_cancelled_and_timed_out_runs():
         assert meta["model_observations"] == [{"model": "m1", "kind": "response", "source": "r"}],             terminal.type
 
 
-async def _subscription_job(pid, *, tools=None):
+async def _subscription_job(pid, *, tools=None, capability="agent:codex", provider="codex-sub"):
     plain = generate_project_key()
     async with get_session() as session:
         session.add(ProjectRow(id=pid, name=f"ev-{pid}", project_key_hash=hash_project_key(plain),
                                project_key_prefix=plain[:12],
                                allowed_scopes=["llm:chat", "llm:agent"], is_active=True, notes=""))
     run_id, _ = await create_run(
-        project=SimpleNamespace(id=pid), capability="agent:codex", prompt="p", task_id="t",
+        project=SimpleNamespace(id=pid), capability=capability, prompt="p", task_id="t",
         account_id="owner", session_id=None, idempotency_key=None, wall_timeout_s=30,
         idle_timeout_s=30, allowed_tools=[], model="gpt-6.1-sol",
-        client_job={"provider": "codex-sub", "model": REQUESTED, "response_format": None,
+        client_job={"provider": provider, "model": REQUESTED, "response_format": None,
                     "tools": tools or []})
     return run_id
 
@@ -336,3 +336,27 @@ async def test_untruncated_single_response_still_fills_top_level():
     await append_event(rid, ev.RunCompleted(final_text="ok"))
     result = proxy._job_response((await get_run(rid, 49))[1])
     assert result.model_served == "only" and result.evidence.observations_complete is True
+
+
+async def test_a_completed_claude_run_with_tools_is_not_an_app_server_run():
+    """model_rerouted=false needs the Codex App Server path; tools alone (a Claude job) are not it."""
+    rid = await _subscription_job(48, tools=[{"type": "function"}], capability="agent:claude",
+                                  provider="claude-sub")
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    assert proxy._job_response((await get_run(rid, 48))[1]).evidence.model_rerouted is None
+
+
+async def test_terminal_outcomes_keep_files_tool_history_and_usage():
+    """The evidence fields are merged into result_meta, never replace it."""
+    for pid, terminal in ((49, ev.RunCompleted(final_text="ok", files=[ev.FileRef(path="a.txt", size=1)])),
+                          (50, ev.RunFailed(error_class="x", message="m"))):
+        rid = await _subscription_job(pid)
+        await append_event(rid, ev.Usage(total_tokens=7, reasoning_tokens=3))
+        await append_event(rid, ev.ModelObserved(model="m1", kind="response", source="r"))
+        await append_event(rid, terminal)
+        meta = (await get_run(rid, pid))[1].result_meta
+        assert meta["usage_observed"] == {"total_tokens": 7, "reasoning_tokens": 3}, terminal.type
+        assert "client_tool_history" in meta and meta["model_observations"], terminal.type
+        assert meta["provider"] == "codex-sub", terminal.type
+        if terminal.type == "run.completed":
+            assert [f["path"] for f in meta["files"]] == ["a.txt"]
