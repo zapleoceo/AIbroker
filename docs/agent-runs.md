@@ -706,6 +706,14 @@ content (UTF-8 text files; binary untouched). Masked with `[REDACTED]`: JWT-like
 (`eyJ..<dot>..<dot>..`), `refresh_token` / `access_token` / `id_token` values (JSON or `key=value`),
 `sk-...` keys and `sess-...` tokens. Pattern based and best effort: defence in depth, not the control.
 
+A structured-output job (`response_format` json_object / json_schema) is redacted structurally by
+`redact_final_text`: when the final text parses as JSON only the string values (and the values of
+token-named keys) are masked and the document is re-serialized, so a masked span can never eat a quote
+or brace. The `key=value` token mask only consumes a quote it opened itself. The run is then validated
+(`output_problem`) twice: on the model's answer and on the redacted body that will actually be returned;
+if redaction made a valid answer invalid (a `const` / `enum` value that held a secret) the run ends
+`run.failed` `invalid_json`, never `done`.
+
 **Codex acceptance run (canaries only).** `scripts/agent_codex_acceptance.sh` is for a SEPARATE test
 stack with no real login. The harness places a throwaway `CODEX_HOME` with a FAKE `auth.json`
 (`auth_mode: "chatgpt"`, `CANARY-...` tokens), a FAKE claude-state canary file and a fake parent process

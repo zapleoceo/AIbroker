@@ -21,7 +21,7 @@ from aibroker.agent.events import (
     RunWaitingQuota,
 )
 from aibroker.agent.lock import Lease, check_fence
-from aibroker.agent.redact import redact, redact_obj
+from aibroker.agent.redact import redact, redact_final_text, redact_obj
 from aibroker.agent.subscription_job import output_problem
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
@@ -203,8 +203,14 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             raise RunConflict(f"agent run {run_id} already finished ({run.outcome})")
         job = await s.get(DeepJobRow, run_id)
         client_job = (job.request or {}).get("client_job") if job is not None else None
+        response_format = client_job.get("response_format") if client_job else None
+        final_text = (redact_final_text(event.final_text, response_format)
+                      if event.type == "run.completed" else "")
         if event.type == "run.completed" and client_job:
-            problem = output_problem(event.final_text, client_job.get("response_format"))
+            # Gate the text BEFORE redaction (the model's answer) and the body we will actually
+            # return AFTER it: masking must never turn a valid answer into an invalid one.
+            problem = (output_problem(event.final_text, response_format)
+                       or output_problem(final_text, response_format))
             if problem:
                 from aibroker.agent.events import RunFailed
                 event = RunFailed(error_class="invalid_json", message=problem)
@@ -241,7 +247,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                               else "cancelled" if event.type == "run.cancelled" else "error")
                 job.completed_at = now
                 if event.type == "run.completed":
-                    job.result_text = redact(event.final_text)
+                    job.result_text = final_text
                     job.result_meta = {"files": [f.model_dump() for f in event.files],
                                        "client_tool_history": history,
                                        "usage_observed": usage_observed}
