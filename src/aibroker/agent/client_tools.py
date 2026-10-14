@@ -88,7 +88,7 @@ def schema_violation(tools: list[dict[str, Any]], name: str, arguments: Any) -> 
     for e in errors:
         path = _safe_path(schema, e.absolute_path)
         rule = e.validator if e.validator in _SHOWN_RULES else "schema"
-        sized = rule != "type" and isinstance(e.instance, (str, list, dict))
+        sized = rule != "type" and isinstance(e.instance, str | list | dict)
         got = f"len {len(e.instance)}" if sized else f"type {type(e.instance).__name__}"
         limit = "" if rule in ("required", "additionalProperties", "enum", "const", "pattern",
                                "schema") else f" {str(e.validator_value)[:20]}"
