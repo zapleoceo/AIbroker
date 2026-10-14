@@ -9,7 +9,8 @@ paid models; that refusal is stored and shown as the model's result, never bypas
 One question at a time per browser cookie AND per IP: a request is "active" while any of its
 models is not terminal (answer / error / refusal) and it is younger than ACTIVE_TIMEOUT_S, the
 safety net that frees a stuck user. State lives in the DB (no per-process memory), so it holds
-across restarts and workers.
+across restarts and workers. The check and the insert run in ONE transaction under Postgres
+advisory locks (per browser id and per IP), so two workers cannot both admit a second question.
 """
 from __future__ import annotations
 
@@ -21,12 +22,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException, Response
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db import get_session
 from aibroker.db.models import CompareRequestRow, CompareResultRow, ProjectRow
 from aibroker.providers import catalog
+from aibroker.providers.registry import model_spec, spec_or_default
 from aibroker.routing.chains import chain_for
+from aibroker.services.llm_service import cap_message
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +51,8 @@ TIMEOUT_MESSAGE = "таймаут: модель не ответила за 5 м�
 # First match wins; a model is shown only if it serves at least one of these lanes.
 CHAT_LANES = ("chat:fast", "chat:smart", "chat:code", "chat:sales", "chat:edit", "chat:deep")
 _COOKIE_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
-_submit_lock = asyncio.Lock()
+# SQLite fallback only (tests, single process). Postgres serialises with advisory locks instead.
+_sqlite_lock = asyncio.Lock()
 _trackers: set[asyncio.Task[None]] = set()
 
 
@@ -65,6 +70,13 @@ def lane_for(capabilities: list[str], provider: str) -> str | None:
                  if lane in capabilities and provider in chain_for(lane)), None)  # type: ignore[arg-type]
 
 
+def is_paid(model_id: str, provider: str) -> bool:
+    """Would a project with money cap 0 be refused? Same notion as the cost guard: a paid
+    provider's model that the registry does not mark free (`pricing == "free"`)."""
+    spec = model_spec(model_id)
+    return spec_or_default(provider).paid and not (spec is not None and spec.pricing == "free")
+
+
 def chat_models() -> list[dict[str, Any]]:
     """Chat models Broker's live catalog offers, as {id, name, provider, intelligence_index,
     capability}. The score comes from the catalog row itself (exact name+version, else None).
@@ -77,7 +89,8 @@ def chat_models() -> list[dict[str, Any]]:
         if lane is None or row["billing_type"] == "subscription":
             continue
         out.append({"id": row["id"], "name": row["name"], "provider": row["owned_by"],
-                    "intelligence_index": row.get("intelligence_index"), "capability": lane})
+                    "intelligence_index": row.get("intelligence_index"), "capability": lane,
+                    "paid": is_paid(row["id"], row["owned_by"])})
     return out
 
 
@@ -101,8 +114,8 @@ def set_browser_cookie(response: Response, browser_id: str, *, secure: bool) -> 
                         samesite="lax", secure=secure, path="/")
 
 
-async def active_request_id(browser_id: str, ip: str) -> int | None:
-    """Newest unfinished request of this browser OR this IP, else None."""
+async def active_request_id(s: AsyncSession, browser_id: str, ip: str) -> int | None:
+    """Newest unfinished request of this browser OR this IP, else None (uses session `s`)."""
     cutoff = _now() - timedelta(seconds=ACTIVE_TIMEOUT_S)
     who = CompareRequestRow.browser_id == browser_id
     if ip:
@@ -110,22 +123,37 @@ async def active_request_id(browser_id: str, ip: str) -> int | None:
     pending = (select(CompareResultRow.id)
                .where(CompareResultRow.request_id == CompareRequestRow.id,
                       CompareResultRow.status.not_in(TERMINAL)).exists())
-    async with get_session() as s:
-        return (await s.execute(
-            select(CompareRequestRow.id)
-            .where(who, CompareRequestRow.created_at > cutoff, pending)
-            .order_by(CompareRequestRow.id.desc()).limit(1))).scalar_one_or_none()
+    return (await s.execute(
+        select(CompareRequestRow.id)
+        .where(who, CompareRequestRow.created_at > cutoff, pending)
+        .order_by(CompareRequestRow.id.desc()).limit(1))).scalar_one_or_none()
+
+
+async def _lock_caller(s: AsyncSession, browser_id: str, ip: str) -> None:
+    """Serialise submits of one browser and of one IP across ALL workers: Postgres advisory
+    locks held until this transaction ends (always taken browser first, then IP: no deadlock).
+    SQLite has no such lock; there the in-process fallback lock is taken by the caller."""
+    await s.execute(text("SELECT pg_advisory_xact_lock(hashtext('cmp:b:' || :k))"),
+                    {"k": browser_id})
+    if ip:
+        await s.execute(text("SELECT pg_advisory_xact_lock(hashtext('cmp:i:' || :k))"),
+                        {"k": ip})
 
 
 async def create_request(prompt: str, browser_id: str, ip: str,
                          models: list[dict[str, Any]]) -> int:
-    """Guard + insert in one critical section. Raises HTTPException(429) while the caller
-    still has an unfinished request."""
-    async with _submit_lock:
-        if await active_request_id(browser_id, ip) is not None:
-            raise HTTPException(429, BUSY_MESSAGE)
-        now = _now()
-        async with get_session() as s:
+    """Guard + insert in ONE transaction, under per-browser and per-IP locks. Raises
+    HTTPException(429) while the caller still has an unfinished request."""
+    async with get_session() as s:
+        sqlite = s.bind.dialect.name == "sqlite"
+        if sqlite:
+            await _sqlite_lock.acquire()
+        try:
+            if not sqlite:
+                await _lock_caller(s, browser_id, ip)
+            if await active_request_id(s, browser_id, ip) is not None:
+                raise HTTPException(429, BUSY_MESSAGE)
+            now = _now()
             req = CompareRequestRow(prompt=prompt, browser_id=browser_id, client_ip=ip,
                                     created_at=now)
             s.add(req)
@@ -134,7 +162,12 @@ async def create_request(prompt: str, browser_id: str, ip: str,
                 s.add(CompareResultRow(
                     request_id=req.id, model_id=m["id"], capability=m["capability"],
                     intelligence_index=m["intelligence_index"], status="pending", created_at=now))
-            return req.id
+            request_id = req.id
+            await s.commit()        # inside the fallback lock: the next caller sees this row
+            return request_id
+        finally:
+            if sqlite:
+                _sqlite_lock.release()
 
 
 # ─── Broker job path (seams: tests replace submit_model / poll_job) ─────────
@@ -171,9 +204,21 @@ async def poll_job(project: ProjectRow, job_id: int) -> Any | None:
     return None if row is None else proxy._job_response(row)
 
 
-def _is_cap_error(text: str) -> bool:
-    low = text.lower()
-    return "cap" in low and ("budget" in low or "exceeded" in low or "reached" in low)
+async def cancel_model_job(project: ProjectRow, job_id: int) -> None:
+    """Cancel a still-unfinished Broker job with the standard cancel (same as POST
+    /v1/jobs/{id}/cancel). Best effort: a failure must not block closing the request."""
+    from aibroker.services.job_control import cancel_job
+
+    try:
+        await cancel_job(job_id, project.id, agent_allowed=False)
+    except Exception:  # noqa: BLE001
+        log.warning("compare: cancel of job %s failed", job_id, exc_info=True)
+
+
+def is_cap_error(message: str) -> bool:
+    """True for Broker's own budget-cap job error. The job row stores only the text (no error
+    code), so compare with the exact strings the dispatcher writes (`cap_message`), not a guess."""
+    return message in (cap_message("daily"), cap_message("monthly"))
 
 
 async def fan_out(request_id: int, project: ProjectRow, prompt: str) -> None:
@@ -222,10 +267,12 @@ async def sync_request(request_id: int, project: ProjectRow | None = None) -> No
         elif job is not None and job.status in ("error", "cancelled"):
             err = job.error or job.status
             values = ({"status": "refused", "error": f"отказ: лимит проекта ({err})"}
-                      if _is_cap_error(err) else {"status": "error", "error": err})
+                      if is_cap_error(err) else {"status": "error", "error": err})
             values["completed_at"] = _now()
         elif expired:
             values = {"status": "error", "error": TIMEOUT_MESSAGE, "completed_at": _now()}
+            if project is not None and r.job_id is not None:
+                await cancel_model_job(project, r.job_id)
         if values:
             async with get_session() as s:
                 await s.execute(update(CompareResultRow).where(

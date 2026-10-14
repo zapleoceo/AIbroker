@@ -81,11 +81,12 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 ### `/ask2many` — public compare page (2026-10-14)
 
 No login. The HTML shell is static; everything dynamic is rendered with `textContent`, so
-prompts and answers from strangers cannot inject markup. One prompt (1-4000 characters,
-after trimming) goes to 1-12 ticked chat models at once. Each model call is a Broker job
-submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project
+prompts and answers from strangers cannot inject markup. One prompt (up to 4000 characters;
+a whitespace-only prompt is `422`) goes to 1-12 ticked chat models at once. Each model call is a
+Broker job submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project
 `model-compare`. Its daily and monthly money caps are 0, so the cost guard refuses paid
-models and they show as `отказ: лимит проекта`; free models run. The project key is generated
+models: they end as `refused` with the reason shown (for example `отказ: лимит проекта`), while
+free models run. The project key is generated
 once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
 so it is never printed, stored in plaintext or sent to the browser.
 

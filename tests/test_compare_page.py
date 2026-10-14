@@ -4,6 +4,7 @@ fakes at two seams (services.compare.submit_model / poll_job); one test drives t
 submit path to prove the job lands under the dedicated project."""
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from aibroker.providers import catalog
 from aibroker.providers.model_scores import SCORES, Score, intelligence_index
 from aibroker.scripts.provision_compare import provision
 from aibroker.services import compare as svc
+from aibroker.services.llm_service import cap_message
 
 BASE = "http://testserver"
 
@@ -37,7 +39,12 @@ def _no_background(monkeypatch):
 @pytest.fixture
 def fakes(monkeypatch):
     """submit_model hands out sequential job ids; poll_job answers from `jobs[id]`."""
-    state = SimpleNamespace(jobs={}, refuse=set(), next=100, submitted=[])
+    state = SimpleNamespace(jobs={}, refuse=set(), next=100, submitted=[], cancelled=[])
+
+    async def cancel(project, job_id):
+        state.cancelled.append(job_id)
+
+    monkeypatch.setattr(svc, "cancel_model_job", cancel)
 
     async def submit(project, model_id, capability, prompt):
         if model_id in state.refuse:
@@ -97,7 +104,10 @@ async def test_models_endpoint_lists_live_chat_models_with_scores():
     for mid in rows:        # chat-capable, API-billed, and routable through some chat chain
         assert live[mid]["billing_type"] != "subscription"
         assert svc.lane_for(live[mid]["capabilities"], live[mid]["owned_by"]) is not None
-    assert all(set(m) == {"id", "name", "provider", "intelligence_index"} for m in rows.values())
+    assert all(set(m) == {"id", "name", "provider", "intelligence_index", "paid"}
+               for m in rows.values())
+    assert rows["anthropic/claude-sonnet-5"]["paid"] is True       # refused at cap 0: marked
+    assert rows["cerebras/gpt-oss-120b"]["paid"] is False          # free provider
     assert rows["anthropic/claude-sonnet-5"]["intelligence_index"] == 38.16
     assert rows["deepseek/deepseek-flash"]["intelligence_index"] is None   # no AA version match
     assert "whisper" not in " ".join(rows)                                  # not a chat model
@@ -235,7 +245,7 @@ async def test_cap_zero_refusal_is_shown_as_the_models_result(fakes):
     async with make_client() as c:
         rid = (await submit(c, "q", ids)).json()["id"]
         await svc.fan_out(rid, await svc.get_project(), "q")
-        fakes.jobs[101] = job("error", error="daily budget cap reached — retry after 00:00 UTC")
+        fakes.jobs[101] = job("error", error=cap_message("daily"))   # what the dispatcher writes
         fakes.jobs[102] = job("error", error="all providers failed")
         p = (await c.get(f"/ask2many/api/requests/{rid}")).json()
     first, second = p["results"]
@@ -296,6 +306,28 @@ async def test_allowed_again_after_every_model_reached_a_terminal_status(fakes):
         assert (await submit(c, "второй", ids)).status_code == 202
 
 
+async def test_concurrent_submits_admit_exactly_one(fakes):
+    await provision()
+    ids = await two_models()
+    async with make_client() as c:
+        rs = await asyncio.gather(*(submit(c, f"q{i}", ids) for i in range(4)))
+    assert sorted(r.status_code for r in rs) == [202, 429, 429, 429]
+    async with get_session() as s:
+        assert len((await s.execute(select(CompareRequestRow))).scalars().all()) == 1
+
+
+def test_cap_error_matches_only_the_dispatchers_exact_message():
+    assert svc.is_cap_error(cap_message("daily")) and svc.is_cap_error(cap_message("monthly"))
+    assert not svc.is_cap_error("provider said: cap exceeded, budget reached")
+
+
+async def test_page_says_history_is_public_and_marks_paid_in_the_model_list():
+    async with make_client() as c:
+        page = (await c.get("/ask2many")).text
+    assert "Вопросы и ответы видны всем в общей истории." in page
+    assert "платная: при лимите проекта 0 будет отказ" in page   # label rendered from m.paid
+
+
 async def test_another_browser_and_ip_is_allowed_but_same_ip_new_cookie_is_not(fakes):
     await provision()
     ids = await two_models()
@@ -333,6 +365,7 @@ async def test_timeout_safety_net_frees_a_stuck_user_and_closes_the_request(fake
     assert p["done"] is True
     assert {x["status"] for x in p["results"]} == {"error"}
     assert all(x["error"] == svc.TIMEOUT_MESSAGE for x in p["results"])
+    assert sorted(fakes.cancelled) == [101, 102]       # unfinished Broker jobs were cancelled
 
 
 # ─── history ────────────────────────────────────────────────────────────────

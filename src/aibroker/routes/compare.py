@@ -44,7 +44,7 @@ async def page(request: Request) -> HTMLResponse:
 
 @router.get("/ask2many/api/models")
 async def models() -> dict[str, object]:
-    return {"data": [{k: m[k] for k in ("id", "name", "provider", "intelligence_index")}
+    return {"data": [{k: m[k] for k in ("id", "name", "provider", "intelligence_index", "paid")}
                      for m in svc.chat_models()],
             "attribution": model_scores.ATTRIBUTION, "source": model_scores.SOURCE,
             "captured_on": model_scores.CAPTURED_ON,
@@ -122,6 +122,7 @@ footer{{margin:28px 0;font-size:13px;color:var(--muted)}}
 <p class="muted">Один вопрос уходит сразу во все отмеченные модели, ответы видно рядом. Платные модели могут
 отказать: у проекта задан лимит расходов, и отказ показывается как есть.</p>
 <textarea id="prompt" maxlength="{max_chars}" placeholder="Ваш вопрос"></textarea>
+<p class="muted" id="public-note">Вопросы и ответы видны всем в общей истории.</p>
 <div class="row"><span class="muted"><span id="cnt">0</span>/{max_chars}</span>
 <span class="muted">Моделей: <span id="sel">0</span> (максимум {max_models})</span>
 <button class="ghost" id="clear" type="button">Снять все</button></div>
@@ -179,7 +180,8 @@ fetch("/ask2many/api/models").then(function(r){{return r.json();}}).then(functio
  var names={{}}; d.data.forEach(function(m){{names[m.name]=(names[m.name]||0)+1;}});
  var box=$("models"); d.data.forEach(function(m){{var l=el("label"); var c=el("input"); c.type="checkbox"; c.value=m.id;
   c.onchange=function(){{if(checked().length>MAX){{c.checked=false;}} refresh();}};
-  l.appendChild(c); l.appendChild(el("span",null,m.name+(names[m.name]>1?" ("+m.provider+")":""))); l.appendChild(el("span","score",score(m.intelligence_index)));
+  var nm=el("span",null,m.name+(names[m.name]>1?" ("+m.provider+")":"")); if(m.paid){{nm.appendChild(el("small","muted"," \\u2014 платная: при лимите проекта 0 будет отказ"));}}
+  l.appendChild(c); l.appendChild(nm); l.appendChild(el("span","score",score(m.intelligence_index)));
   l.title=m.id; box.appendChild(l);}}); refresh();}});
 loadHistory(true); refresh();
 }})();
