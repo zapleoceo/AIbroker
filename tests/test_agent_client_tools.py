@@ -239,3 +239,30 @@ async def test_tool_call_deadline_follows_agent_tool_wait_s(monkeypatch, wait_s)
         deadline = datetime.fromisoformat(
             (await s.get(DeepJobRow, job_id)).result_meta["client_tool"]["deadline"])
     assert wait_s - 5 <= (deadline - before).total_seconds() <= wait_s + 5
+
+
+LANDING = [{"type": "function", "function": {"name": "final_result", "parameters": {
+    "type": "object", "additionalProperties": False, "required": ["css", "body", "concept_note"],
+    "properties": {"css": {"type": "string", "maxLength": 40000},
+                   "body": {"type": "string", "maxLength": 60000},
+                   "concept_note": {"type": "string", "maxLength": 400}}}}}]
+
+
+def test_schema_violation_names_the_rule_but_never_a_value():
+    from aibroker.agent.client_tools import schema_violation
+    secret = "SYNTHETIC-SECRET-VALUE " * 30                          # 690 chars, over 400
+    args = {"css": "a", "body": "b", "concept_note": secret, "extra_key": "v"}
+    detail = schema_violation(LANDING, "final_result", args)
+    assert "concept_note: maxLength 400 (got len 690)" in detail
+    assert "<root>: additionalProperties" in detail
+    assert "SYNTHETIC" not in detail and "extra_key" not in detail
+    assert "required" in schema_violation(LANDING, "final_result", {"css": "a", "body": "b"})
+    assert "type string (got type int)" in schema_violation(
+        LANDING, "final_result", {"css": 1, "body": "b", "concept_note": "c"})
+    assert schema_violation(LANDING, "nope", {}) == "undeclared tool 'nope'"
+
+
+async def test_publish_call_rejection_carries_the_schema_detail(monkeypatch):
+    job_id = await _job()
+    with pytest.raises(ClientToolConflict, match=r"outside the declared schema: id: type integer \(got type str\)"):
+        await publish_call(job_id, "c1", "lookup", {"id": "string"})

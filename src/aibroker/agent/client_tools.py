@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from aibroker.agent.lock import Lease, check_fence
@@ -41,6 +42,34 @@ def _digest(success: bool, content: str) -> str:
     return hashlib.sha256(json.dumps([success, content], ensure_ascii=False).encode()).hexdigest()
 
 
+_SHOWN_RULES = {"maxLength", "minLength", "maxItems", "minItems", "maximum", "minimum", "type",
+                "required", "additionalProperties", "enum", "const", "pattern", "format"}
+
+
+def schema_violation(tools: list[dict[str, Any]], name: str, arguments: Any) -> str:
+    """Which declared-schema rule a tool call broke, WITHOUT any argument value: JSON path, the
+    rule, its limit and the observed size/type (at most 3 errors). '' when it cannot be told."""
+    schema = next((t.get("function", {}).get("parameters") for t in tools
+                   if t.get("function", {}).get("name") == name), None)
+    if not isinstance(schema, dict):
+        return f"undeclared tool {name[:40]!r}" if isinstance(name, str) else ""
+    try:
+        errors = sorted(Draft202012Validator(schema).iter_errors(arguments),
+                        key=lambda e: [str(p) for p in e.absolute_path])[:3]
+    except Exception:  # noqa: BLE001 - diagnosis only; the call is rejected either way
+        return ""
+    parts = []
+    for e in errors:
+        path = "/".join(str(p) for p in e.absolute_path)[:80] or "<root>"
+        rule = e.validator if e.validator in _SHOWN_RULES else "schema"
+        sized = rule != "type" and isinstance(e.instance, (str, list, dict))
+        got = f"len {len(e.instance)}" if sized else f"type {type(e.instance).__name__}"
+        limit = "" if rule in ("required", "additionalProperties", "enum", "const", "pattern",
+                               "schema") else f" {str(e.validator_value)[:20]}"
+        parts.append(f"{path}: {rule}{limit} (got {got})")
+    return "; ".join(parts)
+
+
 async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
                        fences: tuple[Lease, ...] = ()) -> None:
     """Expose a validated App Server callback only on this running subscription job."""
@@ -65,7 +94,9 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
                 "function": {"name": name, "arguments": raw}}
         if validate_result("", {"finish_reason": "tool_calls", "tool_calls": [call]},
                            tools, client.get("tool_choice")):
-            raise ClientToolConflict("tool call is outside the declared schema")
+            detail = schema_violation(tools, name, arguments)
+            raise ClientToolConflict("tool call is outside the declared schema"
+                                     + (f": {detail}" if detail else ""))
         meta = dict(job.result_meta or {})
         history = list(meta.get("client_tool_history") or [])
         if meta.get("client_tool") or len(history) >= MAX_CALLS or any(

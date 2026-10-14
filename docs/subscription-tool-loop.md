@@ -67,6 +67,10 @@ poll stops advertising it and later result submits get 409. A result already
 accepted with 202 is kept. On a crash, the run's terminal write replaces
 `result_meta`, which withdraws the call. A hard worker death is bounded by the
 tool-call deadline (`AGENT_TOOL_WAIT_S`); the reaper then marks the run `worker_lost`.
+A call whose arguments break the declared schema fails the run with
+`tool call is outside the declared schema: <path>: <rule> <limit> (got len|type ...)`:
+`schema_violation` names up to three violated rules (JSON path, rule, limit, observed size or
+type) and never an argument value; the arguments themselves are not stored.
 `run_tool_turn` drives the App Server exchange; `publish_call`, `submit_result`,
 and `take_result` manage the durable handoff and raise `ClientToolConflict` for
 invalid state. `ClientToolCancelled` (a `ClientToolConflict` subclass) marks a
