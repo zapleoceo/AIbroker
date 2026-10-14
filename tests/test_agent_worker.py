@@ -21,7 +21,14 @@ from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.lock import session_lock
 from aibroker.agent.registry import clear_adapters, register_adapter
-from aibroker.agent.runs import RunConflict, append_event, cancel_run, create_run, get_run, list_events
+from aibroker.agent.runs import (
+    RunConflict,
+    append_event,
+    cancel_run,
+    create_run,
+    get_run,
+    list_events,
+)
 from aibroker.agent.workspace import collect_files, create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
