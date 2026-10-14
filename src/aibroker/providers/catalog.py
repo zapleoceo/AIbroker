@@ -152,6 +152,20 @@ def input_modalities(spec: ModelSpec) -> list[str] | None:
     return None
 
 
+def output_modalities(spec: ModelSpec) -> list[str] | None:
+    """Output types the Broker returns on this model's lanes: ["text", "image"] only for a Codex
+    model whose image generation was verified live (PNG in the job's `files`)."""
+    from aibroker.providers.subscriptions import subscription_image_output_verified
+
+    if spec.pricing == "subscription" and subscription_image_output_verified(spec.id):
+        return ["text", "image"]
+    if spec.pricing == "subscription" or "transcription" in spec.capabilities or any(
+        capability_family(cap) == "chat" for cap in spec.capabilities
+    ):
+        return ["text"]
+    return None
+
+
 def supports_tools(spec: ModelSpec) -> bool | None:
     """Native tools require both a Broker-enabled adapter and model support."""
     from aibroker.services.tool_contract import TOOL_PROVIDERS
@@ -189,6 +203,7 @@ def listing() -> list[dict[str, object]]:
             "supports_tools": tool_support,
             "job_request": job_request_contract(m, tool_support),
             "modalities": input_modalities(m),
+            "output_modalities": output_modalities(m),
             "also_served_by": also,
             "price": price_info(m),
             **({"available": subscription_model_verified(m.id) and

@@ -239,3 +239,68 @@ async def test_tool_call_deadline_follows_agent_tool_wait_s(monkeypatch, wait_s)
         deadline = datetime.fromisoformat(
             (await s.get(DeepJobRow, job_id)).result_meta["client_tool"]["deadline"])
     assert wait_s - 5 <= (deadline - before).total_seconds() <= wait_s + 5
+
+
+LANDING = [{"type": "function", "function": {"name": "final_result", "parameters": {
+    "type": "object", "additionalProperties": False, "required": ["css", "body", "concept_note"],
+    "properties": {"css": {"type": "string", "maxLength": 40000},
+                   "body": {"type": "string", "maxLength": 60000},
+                   "concept_note": {"type": "string", "maxLength": 400}}}}}]
+
+
+def test_schema_violation_names_the_rule_but_never_a_value():
+    from aibroker.agent.client_tools import schema_violation
+    secret = "SYNTHETIC-SECRET-VALUE " * 30                          # 690 chars, over 400
+    args = {"css": "a", "body": "b", "concept_note": secret, "extra_key": "v"}
+    detail = schema_violation(LANDING, "final_result", args)
+    assert "concept_note: maxLength 400 (got len 690)" in detail
+    assert "<root>: additionalProperties" in detail
+    assert "SYNTHETIC" not in detail and "extra_key" not in detail
+    assert "required" in schema_violation(LANDING, "final_result", {"css": "a", "body": "b"})
+    assert "type string (got type int)" in schema_violation(
+        LANDING, "final_result", {"css": 1, "body": "b", "concept_note": "c"})
+    assert schema_violation(LANDING, "nope", {}) == "undeclared tool 'nope'"
+
+
+async def test_publish_call_rejection_carries_the_schema_detail(monkeypatch):
+    job_id = await _job()
+    with pytest.raises(ClientToolConflict, match=r"outside the declared schema \[InvalidToolArguments\]: id: type integer \(got type str\)"):
+        await publish_call(job_id, "c1", "lookup", {"id": "string"})
+
+
+async def test_publish_call_rejection_logs_label_and_rule_without_values(caplog):
+    import logging
+    job_id = await _job()
+    with caplog.at_level(logging.WARNING, logger="aibroker.agent.client_tools"), \
+            pytest.raises(ClientToolConflict):
+        await publish_call(job_id, "c1", "lookup", {"id": "SYNTHETIC-SECRET-VALUE"})
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "label=InvalidToolArguments" in text and "id: type integer" in text
+    assert "SYNTHETIC" not in text
+
+
+def test_schema_violation_never_shows_a_model_chosen_key():
+    from aibroker.agent.client_tools import schema_violation
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "properties": {"m": {"type": "object",
+                                               "additionalProperties": {"type": "integer"}}},
+        "additionalProperties": {"type": "integer"},
+        "patternProperties": {"^LEAK": {"type": "integer"}}}}}]
+    args = {"LEAKED-KEY-sk-abc123": "x", "LEAK2": "y", "m": {"MODELKEY": "v"}}
+    detail = schema_violation(tools, "t", args)
+    assert "LEAK" not in detail and "MODELKEY" not in detail and "sk-" not in detail
+    assert "*: type integer (got type str)" in detail and "m/*: type integer" in detail
+
+
+def test_schema_violation_stops_after_three_errors_on_a_large_argument():
+    import time
+
+    from aibroker.agent.client_tools import schema_violation
+    tools = [{"type": "function", "function": {"name": "t", "parameters": {
+        "type": "object", "properties": {"a": {"type": "array", "items": {"type": "string"}}}}}}]
+    started = time.monotonic()
+    detail = schema_violation(tools, "t", {"a": list(range(30000))})
+    assert time.monotonic() - started < 0.5
+    assert detail.count("type string") == 3 and detail.startswith("a/0:")
+    no_params = [{"type": "function", "function": {"name": "t"}}]
+    assert schema_violation(no_params, "t", {}) == "tool has no parameters schema"
