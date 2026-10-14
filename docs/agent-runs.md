@@ -244,6 +244,12 @@ writes files into the workspace.
   with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
 - `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
   becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
+  The scan selects only `id`, `started_at` and `request->wall_timeout_s`, never whole rows.
+- Loop cadence: the claim runs every tick (1 s, or at once on a wake-up); every finished run
+  task sets the wake event, so its slot is refilled immediately. The housekeeping sweeps
+  (`fail_stale_agent_runs`, `expire_overdue_waiting`, `fail_unclaimed_runs`) run on startup and
+  then at most every `HOUSEKEEPING_EVERY_S` (30 s). `expire_overdue_waiting` also reads only
+  `request->deadline_s`.
 - `drain_agent_once` is the deterministic one-pass used by tests; `agent_worker_loop` is the
   forever loop.
 

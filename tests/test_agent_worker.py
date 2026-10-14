@@ -8,6 +8,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import insert, select
@@ -477,3 +478,97 @@ async def test_concurrent_claims_never_double_claim_a_run():
     rid = await _pending(pid, "agent:codex", "one")
     got = await asyncio.gather(*(worker.claim_agent_runs("agent:codex", 1) for _ in range(4)))
     assert sorted(i for ids in got for i in ids) == [rid]
+
+
+async def test_stale_scan_reads_only_the_deadline_columns_and_defaults_the_timeout():
+    """fail_stale_agent_runs selects id/started_at/wall_timeout_s, not whole rows with their
+    request JSON; a missing wall_timeout_s still means the 1800 s default."""
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import event as sa_event
+
+    from aibroker.agent.runs import _now
+    from aibroker.db import engine as engine_mod
+    pid = await _project()
+    started = _now() - timedelta(seconds=1800 + worker.STALE_GRACE_S + 5)
+    async with get_session() as s:
+        for jid, req, at in ((987001, {}, started),                         # default 1800 -> stale
+                             (987002, {"wall_timeout_s": 7200}, started),   # long timeout -> alive
+                             (987003, {}, _now())):                         # fresh -> alive
+            s.add(DeepJobRow(id=jid, project_id=pid, capability="agent:codex", status="running",
+                             request=req, started_at=at))
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, *a):
+        seen.append(statement)
+
+    sync_engine = engine_mod._engine.sync_engine
+    sa_event.listen(sync_engine, "before_cursor_execute", record)
+    try:
+        with patch.object(worker, "append_event", AsyncMock()) as append:
+            assert await worker.fail_stale_agent_runs() == 1
+    finally:
+        sa_event.remove(sync_engine, "before_cursor_execute", record)
+    assert [c.args[0] for c in append.await_args_list] == [987001]
+    scan = [q for q in seen if "FROM deep_jobs" in q]
+    import re
+    # the request column may appear only as a JSON path (JSON_EXTRACT(request, ?) / request -> $n)
+    select_lists = [re.sub(r"deep_jobs\.request(?=, \?| ->)", "", q.split("FROM")[0]) for q in scan]
+    assert scan and not any("deep_jobs.request" in sl or "result_meta" in sl for sl in select_lists)
+
+
+def _worker_loop_env(stack, claim, guarded, stale, expire, unclaimed):
+    for name, repl in (
+            ("worker_capabilities", lambda: ("agent:codex",)),
+            ("worker_image_problem", lambda **_: None),
+            ("register_real_adapters", lambda caps: None),
+            ("exec_config_from_settings", lambda: SimpleNamespace(workspace_root="/w")),
+            ("concurrency_for", lambda cap: 1),
+            ("get_settings", lambda: SimpleNamespace(AGENT_ACCOUNT_ID="a")),
+            ("claim_agent_runs", claim), ("_guarded", guarded),
+            ("fail_stale_agent_runs", stale), ("expire_overdue_waiting", expire),
+            ("fail_unclaimed_runs", unclaimed)):
+        stack.enter_context(patch.object(worker, name, repl))
+
+
+async def _run_worker_loop(*, cadence=None):
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock
+    stop, release = asyncio.Event(), asyncio.Event()
+    claims: list[int] = []
+
+    async def claim(cap, free):
+        claims.append(free)
+        return [len(claims)] if free > 0 else []
+
+    async def guarded(run_id, cfg):
+        await release.wait()
+        release.clear()
+
+    sweeps = [AsyncMock(return_value=0) for _ in range(3)]
+    with ExitStack() as stack:
+        _worker_loop_env(stack, claim, guarded, *sweeps)
+        if cadence is not None:
+            stack.enter_context(patch.object(worker, "HOUSEKEEPING_EVERY_S", cadence))
+        task = asyncio.create_task(worker.agent_worker_loop(stop))
+        await asyncio.sleep(0.2)
+        first_claims = list(claims)             # slot taken; loop parked on its 1 s wait
+        release.set()                           # the run finishes
+        await asyncio.sleep(0.3)                # < the 1 s tick: only the done-callback can wake it
+        stop.set()
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+    return first_claims, claims, sweeps
+
+
+async def test_worker_loop_refills_a_finished_runs_slot_at_once_and_sweeps_once_per_cadence():
+    first, claims, sweeps = await _run_worker_loop()
+    assert first == [1]
+    assert len(claims) >= 2, "a finished run waited for the next 1 s tick"
+    # two claim ticks, ONE housekeeping pass (startup): the three sweeps share the cadence
+    assert [m.await_count for m in sweeps] == [1, 1, 1]
+
+
+async def test_worker_loop_housekeeping_runs_every_tick_when_the_cadence_is_zero():
+    _, claims, sweeps = await _run_worker_loop(cadence=0.0)
+    assert len(claims) >= 2 and all(m.await_count >= 2 for m in sweeps)
