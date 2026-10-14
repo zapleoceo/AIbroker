@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from aibroker.config import get_settings
 from aibroker.providers.job_contract import job_request_contract
+from aibroker.providers.model_scores import intelligence_index
 from aibroker.providers.registry import (
     ModelSpec,
     all_models,
@@ -200,6 +201,8 @@ def listing() -> list[dict[str, object]]:
             "billing_type": ("subscription" if m.pricing == "subscription" else
                              "local" if m.pricing == "local" else "api"),
             "name": canonical_name(m.id),
+            # Artificial Analysis Intelligence Index: exact name+version match only, else null.
+            "intelligence_index": intelligence_index(canonical_name(m.id)),
             "capabilities": sorted(m.capabilities),
             "supports_tools": tool_support,
             "job_request": job_request_contract(m, tool_support),

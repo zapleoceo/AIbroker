@@ -72,6 +72,35 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `POST` | `/logout` | Clears session cookie, redirects to `/login` |
 | `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
 | `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
+| `GET` | `/ask2many` | Public compare page: one question to many models. Sets the `aib_compare` cookie. See below |
+| `GET` | `/ask2many/api/models` | Models offered on the page: `{data:[{id, name, provider, intelligence_index}], attribution, source, captured_on, limits}` |
+| `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
+| `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…]}`, one result per model. `404` for an unknown id |
+| `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt |
+
+### `/ask2many` — public compare page (2026-10-14)
+
+No login. The HTML shell is static; everything dynamic is rendered with `textContent`, so
+prompts and answers from strangers cannot inject markup. One prompt (1-4000 characters,
+after trimming) goes to 1-12 ticked chat models at once. Each model call is a Broker job
+submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project
+`model-compare`. Its daily and monthly money caps are 0, so the cost guard refuses paid
+models and they show as `отказ: лимит проекта`; free models run. The project key is generated
+once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
+so it is never printed, stored in plaintext or sent to the browser.
+
+**Guard.** One unfinished question at a time, per browser (`aib_compare`, httpOnly, 365 days)
+and per client IP, enforced on the server. A request is unfinished until every selected model
+is `done`, `error` or `refused`; a second submit meanwhile gets `429` with a Russian message.
+Safety net: after 300 s a request counts as finished, and its still-pending results become
+`error` with `таймаут: модель не ответила за 5 минут`. A background tracker saves answers even
+if the page is closed.
+
+Results carry `status` (`pending`, `done`, `error`, `refused`), `answer` or `error`,
+`model_served` (`"unknown"` when not known), `latency_ms` and the model's
+`intelligence_index` as it was at submit time. Every request and its results are stored in
+`compare_requests` and `compare_results` (migration 021, see [domain-model.md](domain-model.md)).
+No retention job covers them yet.
 
 ### `/v1/health` — content negotiation (2026-07-11)
 
@@ -117,7 +146,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
-| `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids (see [subscription-models.md](subscription-models.md)) |
+| `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
@@ -708,7 +737,7 @@ new registry entry shows up here with no other change.
 ```json
 {"object": "list", "data": [
   {"id": "cerebras/gpt-oss-120b", "object": "model", "owned_by": "cerebras",
-   "name": "gpt-oss-120b",
+   "name": "gpt-oss-120b", "intelligence_index": 11.6,
    "capabilities": ["chat:code", "chat:fast", "chat:smart", "structured"],
    "supports_tools": false, "modalities": ["text"],
    "job_request": {"max_tokens": {"default": 1024, "accepted": {"minimum": 1,
@@ -730,6 +759,14 @@ a bug the registry test catches). A subscription price has
 the subscription fee is outside this price. An unknown price has no invented zero.
 Entries are ordered the way a bare name resolves (free providers by rank,
 paid last). Free-tier keys bill $0 whatever the nominal price shows.
+
+`intelligence_index` is the Artificial Analysis Intelligence Index (v4.3) as a float, or `null`.
+It is looked up by the model's exact canonical name (`providers.catalog.canonical_name`: last
+path segment, lower-cased, version included) in the static table in `providers/model_scores.py`.
+That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`.
+There is no fuzzy or nearest-version matching: a model missing from the table is `null`, not a
+guess. Wherever a score is shown, the attribution `Benchmarks: Artificial Analysis` goes with it;
+the `/ask2many` page shows it.
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
