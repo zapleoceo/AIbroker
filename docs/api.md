@@ -145,6 +145,14 @@ complete). `response` comes from
 an API response message; `thread_config` is the model the CLI configured for the
 thread, not proof of each response's backend; `unknown` means nothing was observed,
 `model_served` is `null`, and it never falls back to the requested model.
+`model_rerouted: false` means only that no reroute notification arrived on the one route
+that can report one (a completed Codex app-server run); it is not an independent attestation
+of the backend that served each response.
+The top-level `model_served` is `null` only when the observations are truncated AND more than
+one distinct `response` model was stored; with several distinct `response` models and no
+truncation it returns the FIRST one. A consumer that aggregates (e.g. an exam) must therefore
+read `evidence.model_observations`, `run_status` and `observations_complete`: `model_served`
+alone is not enough.
 
 `account_id` (additive) names the login that serves a subscription job: `owner` for `codex-sub`, and for
 `claude-sub` the account chosen at submit (for example `claude-2`). It is `null` on other jobs. It does
