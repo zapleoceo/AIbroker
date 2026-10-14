@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import math
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -11,6 +9,7 @@ from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aibroker.providers.registry import REGISTRY
+from aibroker.strict_json import loads_strict
 
 TOOL_PROVIDERS = frozenset(name for name, spec in REGISTRY.items() if spec.native_tools)
 
@@ -113,33 +112,8 @@ def validate_result(
             arguments = call["function"]["arguments"]
             if not isinstance(arguments, str):
                 return "InvalidToolArguments"
-            parsed = json.loads(
-                arguments,
-                parse_constant=_invalid_constant,
-                parse_float=_finite_float,
-                object_pairs_hook=_unique_object,
-            )
+            parsed = loads_strict(arguments)
             Draft202012Validator(schemas[name]).validate(parsed)
         except Exception:  # fail closed for malformed output or unresolved schema references
             return "InvalidToolArguments"
     return None
-
-
-def _invalid_constant(value: str) -> None:
-    raise ValueError(f"invalid JSON constant: {value}")
-
-
-def _finite_float(value: str) -> float:
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError("nonfinite JSON number")
-    return number
-
-
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
