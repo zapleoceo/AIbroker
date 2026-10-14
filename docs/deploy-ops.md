@@ -831,7 +831,7 @@ connections. The documented threshold was "add PgBouncer when a second
 broker node appears or the worker count doubles"; the 2026-07-16 scale
 work (Redis shared state, NOTIFY dispatcher — the prep for a second node)
 crossed that line, so the pooler went in with it. The app-side SQLAlchemy
-pool is unchanged — its 30 per-process connections now terminate at
+pool is unchanged for the api (`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`, 10/20) — its 30 per-process connections now terminate at
 pgbouncer, which multiplexes them onto ~15 real backends. Session-level
 caveats that shaped the layout: no advisory locks or LISTEN on pooled
 connections (hence `DIRECT_DATABASE_URL`), `pool_pre_ping` stays on.
@@ -867,6 +867,7 @@ docker compose up -d
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the three agent-worker services, which use the DB lightly; read in `aibroker.db.engine.init_engine` |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
 

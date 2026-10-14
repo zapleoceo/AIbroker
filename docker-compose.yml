@@ -292,6 +292,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET}
@@ -347,6 +350,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
@@ -405,6 +411,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
@@ -458,6 +467,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
