@@ -34,10 +34,6 @@ class DateRange:
     tz: ZoneInfo = UTC_TZ
 
     @property
-    def is_all(self) -> bool:
-        return self.key == "all"
-
-    @property
     def chart_start(self) -> datetime:
         """Left edge for time series — 'all' is the retained window."""
         if self.start is not None:

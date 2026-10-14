@@ -22,7 +22,6 @@ _TYPES: dict[str, tuple[str, ...]] = {
     "image/png": (".png",), "image/jpeg": (".jpg", ".jpeg"),
     "image/webp": (".webp",), "image/gif": (".gif",),
 }
-ALLOWED_MEDIA_TYPES = tuple(_TYPES)
 
 
 def _magic_ok(media_type: str, data: bytes) -> bool:
