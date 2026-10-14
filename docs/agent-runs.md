@@ -19,6 +19,9 @@ strongest kind seen, with `model_served_kind` and `model_served_source`:
 observations of different kinds disagree, all remain in `model_observations`. A
 `model.observed` event never releases the Codex auth-refresh gate. Codex `exec`
 reports no known model field; the parser only logs event key names to find one.
+Code map: the `ModelObserved` event (`agent/events.py`), `add_model_observation` and
+`served_model_meta` (`agent/runs.py`, accumulate and pick the strongest), and the poll
+models `ModelObservation` and `JobEvidence` (`routes/proxy.py`).
 
 `GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
 requested CLI pin and `model_served: null` when the actual served model is not
