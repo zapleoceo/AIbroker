@@ -11,6 +11,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
+from aibroker.agent.constants import AGENT_CAPABILITIES
 from aibroker.agent.lock import Lease, check_fence
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -120,7 +121,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
             await check_fence(s, lease)
         job = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == run_id)
                                .with_for_update())).scalar_one_or_none()
-        if job is None or job.status != "running" or not job.capability == "agent:codex":
+        if job is None or job.status != "running" or job.capability not in AGENT_CAPABILITIES:
             raise ClientToolConflict("job is not running")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:
@@ -165,7 +166,7 @@ async def submit_result(run_id: int, project_id: int, call_id: str,
         ).with_for_update())).scalar_one_or_none()
         if job is None:
             raise LookupError("job not found")
-        if job.status != "running" or job.capability != "agent:codex":
+        if job.status != "running" or job.capability not in AGENT_CAPABILITIES:
             raise ClientToolConflict("job is not waiting for a client tool")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:

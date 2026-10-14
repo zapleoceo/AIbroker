@@ -26,6 +26,7 @@ from aibroker.providers.subscriptions import (
     subscription_model_verified,
     subscription_models,
     subscription_tool_model_verified,
+    subscription_tools_enabled,
 )
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
@@ -170,8 +171,8 @@ def supports_tools(spec: ModelSpec) -> bool | None:
     """Native tools require both a Broker-enabled adapter and model support."""
     from aibroker.services.tool_contract import TOOL_PROVIDERS
 
-    if spec.provider == "codex-sub":
-        return (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
+    if spec.provider in ("codex-sub", "claude-sub"):
+        return (subscription_tools_enabled(spec.provider)
                 and subscription_tool_model_verified(spec.id))
     if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
             or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):

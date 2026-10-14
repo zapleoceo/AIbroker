@@ -157,17 +157,18 @@ async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enq
     monkeypatch.setattr(proxy, "create_run", create)
     monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
     monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
-    for messages, tools in (
-        ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], None),
+    # image input stays Codex-only (400); Claude tools are refused while the switch is off (503)
+    for messages, tools, status in (
+        ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], None, 400),
         ([{"role": "user", "content": "hi"}], [{"type": "function", "function": {
-            "name": "f", "description": "d", "parameters": {"type": "object"}}}]),
+            "name": "f", "description": "d", "parameters": {"type": "object"}}}], 503),
     ):
         body = proxy.ChatRequest.model_validate({"messages": messages,
                                                   "model": "claude-sub/claude-sonnet-5-5",
                                                   **({"tools": tools} if tools else {})})
         with pytest.raises(HTTPException) as exc:
             await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == status
     create.assert_not_awaited()
 
 
@@ -266,3 +267,55 @@ def test_image_output_setting_fails_closed(monkeypatch):
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS", "default")
     assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is False   # default empty
     assert {r["id"]: r for r in listing()}["codex-sub/gpt-6.1-sol"]["output_modalities"] == ["text"]
+
+
+async def test_claude_tools_switch_and_verified_list_gate_catalog_and_submit(monkeypatch):
+    from aibroker.providers.subscriptions import (
+        subscription_tool_model_canary,
+        subscription_tool_model_verified,
+    )
+    settings = get_settings()
+    claude = "claude-sub/claude-sonnet-5-5"
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED", True)
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS",
+                        f'["{claude}"]')
+    assert {r["id"]: r for r in listing()}[claude]["supports_tools"] is True
+    assert subscription_tool_model_verified(claude)
+    # a Codex or unverified id in the Claude list empties it (fails closed)
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS",
+                        f'["{claude}","codex-sub/gpt-6.1-sol"]')
+    assert not subscription_tool_model_verified(claude)
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS",
+                        '["claude-sub/claude-opus-5-5"]')
+    assert not subscription_tool_model_verified("claude-sub/claude-opus-5-5")
+    # the canary: owner project 12 only, through the shared project switch
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS", f'["{claude}"]')
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS", "12")
+    assert subscription_tool_model_canary(claude, 12)
+    assert not subscription_tool_model_canary(claude, 11)
+    # submit: tools reach the job when switched on and verified, 503 when switched off
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS", f'["{claude}"]')
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    create = AsyncMock(return_value=(42, True))
+    monkeypatch.setattr(proxy, "create_run", create)
+    tool = {"type": "function", "function": {"name": "final_result", "description": "d",
+                                             "parameters": {"type": "object"}}}
+    body = proxy.ChatRequest.model_validate({
+        "model": claude, "tools": [tool], "tool_choice": "required",
+        "messages": [{"role": "user", "content": "hi"},
+                     {"role": "assistant", "content": None, "tool_calls": [{
+                         "id": "c1", "type": "function",
+                         "function": {"name": "final_result", "arguments": "{}"}}]},
+                     {"role": "tool", "tool_call_id": "c1", "content": "ok"}]})
+    await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
+    client_job = create.await_args.kwargs["client_job"]
+    assert client_job["provider"] == "claude-sub" and client_job["tools"][0]["function"][
+        "name"] == "final_result"
+    assert create.await_args.kwargs["capability"] == "agent:claude"
+    monkeypatch.setattr(settings, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED", False)
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
+    assert exc.value.status_code == 503
+    assert {r["id"]: r for r in listing()}[claude]["supports_tools"] is False

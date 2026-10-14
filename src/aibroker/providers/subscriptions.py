@@ -77,29 +77,44 @@ def subscription_model_verified(model: str) -> bool:
     return model in _catalog()[1]
 
 
-def _tool_model_ids(field: str) -> list[str]:
+_TOOL_SETTINGS = {"codex-sub": "CODEX", "claude-sub": "CLAUDE"}
+
+
+def _tool_model_ids(field: str, provider: str) -> list[str]:
     try:
         value = json.loads(getattr(get_settings(), field))
     except ValueError:
         return []
     if (not isinstance(value, list) or not all(isinstance(mid, str) for mid in value)
             or len(value) != len(set(value))
-            or not all(mid.startswith("codex-sub/") and subscription_model_verified(mid)
+            or not all(mid.startswith(f"{provider}/") and subscription_model_verified(mid)
                        for mid in value)):
         return []
     return value
 
 
+def subscription_tools_enabled(provider: str) -> bool:
+    """The per-provider client-tools switch (Codex App Server / Claude stream-json)."""
+    key = _TOOL_SETTINGS.get(provider)
+    return bool(key and getattr(get_settings(), f"AGENT_SUBSCRIPTION_{key}_TOOLS_ENABLED"))
+
+
 def subscription_tool_model_verified(model: str) -> bool:
-    """Advertise client tools only after a live callback for this exact Codex id."""
-    return model in _tool_model_ids("AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS")
+    """Advertise client tools only after a live callback for this exact subscription id."""
+    provider = model.partition("/")[0]
+    key = _TOOL_SETTINGS.get(provider)
+    return bool(key) and model in _tool_model_ids(
+        f"AGENT_SUBSCRIPTION_{key}_TOOLS_VERIFIED_MODELS", provider)
 
 
 def subscription_tool_model_canary(model: str, project_id: int) -> bool:
     """Allow the temporary exact-model canary only for owner project 12."""
-    return (project_id == 12
+    provider = model.partition("/")[0]
+    key = _TOOL_SETTINGS.get(provider)
+    return (bool(key) and project_id == 12
             and get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS == "12"
-            and model in _tool_model_ids("AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS"))
+            and model in _tool_model_ids(f"AGENT_SUBSCRIPTION_{key}_TOOLS_CANARY_MODELS",
+                                         provider))
 
 
 def subscription_model(model: str | None) -> ModelSpec | None:

@@ -234,6 +234,16 @@ class ClaudeCLI(SubprocessCLI):
     def stdin_payload(self, run: AgentRunSpec) -> str:
         return build_claude_prompt(run)
 
+    async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        """Caller-declared tools need the stream-json control channel (claude_tool_turn)."""
+        if run.client_tools:
+            from aibroker.agent.claude_tool_turn import run_tool_turn
+            stream = run_tool_turn(self, run)
+        else:
+            stream = super().start(run)
+        async for item in stream:
+            yield item
+
     def preflight(self, run: AgentRunSpec) -> tuple[str, str] | None:
         problem = settings_problem(self._env.get("CLAUDE_CONFIG_DIR"), run.workspace)
         return ("settings_refused", problem) if problem else None
