@@ -786,3 +786,18 @@ async def test_finished_job_wakes_dispatcher_to_refill_slot_at_once():
         stop.set()
         release.set()
         await asyncio.wait_for(task, timeout=5)
+
+
+async def test_stale_running_requeue_runs_at_startup_then_at_most_every_60s():
+    """Many ticks in a row must sweep stale running rows once (startup), not per tick."""
+    stop = asyncio.Event()
+    requeue = AsyncMock()
+    with patch.object(job_queue, "_dialect_name", AsyncMock(return_value="sqlite")), \
+         patch.object(job_queue, "_requeue_stale_running", requeue), \
+         patch.object(job_queue, "_POLL_INTERVAL_S", 0.01), \
+         patch.object(job_queue, "_claim_batch", AsyncMock(return_value=[])):
+        task = asyncio.create_task(job_queue.dispatcher_loop(stop))
+        await asyncio.sleep(0.3)           # ~30 ticks
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+    assert requeue.await_count == 1

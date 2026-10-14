@@ -278,7 +278,9 @@ broker finishes its fallback chain). See `docs/api.md`.
   whichever worker answers).
   *Slot refill:* every in-flight job task carries a done-callback that sets the
   dispatcher's wake event, so a finished job frees its slot and the next claim runs
-  at once instead of waiting for a NOTIFY or the idle poll.
+  at once instead of waiting for a NOTIFY or the idle poll. The stale-`running`
+  requeue sweep runs on startup and then at most every `_REQUEUE_STALE_EVERY_S`=60 s
+  (its window is 25 min), not on every tick.
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to
