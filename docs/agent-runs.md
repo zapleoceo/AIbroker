@@ -250,6 +250,10 @@ writes files into the workspace.
   (`fail_stale_agent_runs`, `expire_overdue_waiting`, `fail_unclaimed_runs`) run on startup and
   then at most every `HOUSEKEEPING_EVERY_S` (30 s). `expire_overdue_waiting` also reads only
   `request->deadline_s`.
+- `append_event` reads the queue row only for events that touch it: `message.delta`, `tool.*`
+  and the like load no job at all; `usage` loads it with `request` deferred; `model.observed`
+  and terminal events (which read `client_job` / attachments) load the full row. The fence
+  (`check_fence`) and `RunConflict` checks are unchanged.
 - `drain_agent_once` is the deterministic one-pass used by tests; `agent_worker_loop` is the
   forever loop.
 

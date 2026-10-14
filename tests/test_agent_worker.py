@@ -21,7 +21,7 @@ from aibroker.agent.executor import ExecConfig, execute_run
 from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.lock import session_lock
 from aibroker.agent.registry import clear_adapters, register_adapter
-from aibroker.agent.runs import append_event, cancel_run, create_run, get_run, list_events
+from aibroker.agent.runs import RunConflict, append_event, cancel_run, create_run, get_run, list_events
 from aibroker.agent.workspace import collect_files, create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
@@ -572,3 +572,39 @@ async def test_worker_loop_refills_a_finished_runs_slot_at_once_and_sweeps_once_
 async def test_worker_loop_housekeeping_runs_every_tick_when_the_cadence_is_zero():
     _, claims, sweeps = await _run_worker_loop(cadence=0.0)
     assert len(claims) >= 2 and all(m.await_count >= 2 for m in sweeps)
+
+
+async def _sql_of_append(run_id: int, event) -> list[str]:
+    from sqlalchemy import event as sa_event
+
+    from aibroker.db import engine as engine_mod
+    seen: list[str] = []
+
+    def record(conn, cursor, statement, *a):
+        seen.append(statement)
+
+    sync_engine = engine_mod._engine.sync_engine
+    sa_event.listen(sync_engine, "before_cursor_execute", record)
+    try:
+        await append_event(run_id, event)
+    finally:
+        sa_event.remove(sync_engine, "before_cursor_execute", record)
+    return [q.split("FROM")[0] for q in seen if q.startswith("SELECT") and "FROM deep_jobs" in q]
+
+
+async def test_append_event_loads_the_job_request_only_where_it_is_read():
+    """message.delta reads no job; usage reads the job but not `request`; model.observed and
+    terminal events (which read client_job / attachments) load it. The result is unchanged."""
+    rid = await _run()
+    assert await _sql_of_append(rid, ev.MessageDelta(text="hi")) == []
+    usage = await _sql_of_append(rid, ev.Usage(total_tokens=7, reasoning_tokens=2))
+    assert usage and not any("deep_jobs.request" in q for q in usage)
+    observed = await _sql_of_append(rid, ev.ModelObserved(model="m", kind="response", source="s"))
+    assert any("deep_jobs.request" in q for q in observed)
+    done = await _sql_of_append(rid, ev.RunCompleted(final_text="ok"))
+    assert any("deep_jobs.request" in q for q in done)
+    run, job = await _row(rid)
+    assert run.outcome == "completed" and job.status == "done" and job.result_text == "ok"
+    assert job.result_meta["usage_observed"] == {"total_tokens": 7, "reasoning_tokens": 2}
+    with pytest.raises(RunConflict):                      # fencing/conflict behaviour unchanged
+        await append_event(rid, ev.MessageDelta(text="late"))

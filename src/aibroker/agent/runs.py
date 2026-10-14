@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import defer
 
 from aibroker.agent.attachments import strip_attachment_data
 from aibroker.agent.events import (
@@ -252,8 +253,16 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             raise LookupError(f"agent run {run_id} not found")
         if run.outcome is not None:
             raise RunConflict(f"agent run {run_id} already finished ({run.outcome})")
-        job = await s.get(DeepJobRow, run_id)
-        client_job = (job.request or {}).get("client_job") if job is not None else None
+        # The queue row is only read for events that touch it: usage and model.observed fold
+        # into result_meta, terminal events close it. The ~99% hot-path events (message.delta,
+        # tool.*) load nothing, and `request` (client_job, attachments - can be ~80 KB) is
+        # loaded only where it is read: model.observed and terminal events.
+        needs_request = event.type == "model.observed" or event.type in TERMINAL_TYPES
+        job = (await s.get(DeepJobRow, run_id,
+                           options=[] if needs_request else [defer(DeepJobRow.request)])
+               if needs_request or event.type == "usage" else None)
+        client_job = ((job.request or {}).get("client_job")
+                      if job is not None and needs_request else None)
         response_format = client_job.get("response_format") if client_job else None
         final_text = (redact_final_text(event.final_text, response_format)
                       if event.type == "run.completed" else "")
