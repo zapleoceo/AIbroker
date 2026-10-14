@@ -255,7 +255,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             raise RunConflict(f"agent run {run_id} already finished ({run.outcome})")
         # The queue row is only read for events that touch it: usage and model.observed fold
         # into result_meta, terminal events close it. The ~99% hot-path events (message.delta,
-        # tool.*) load nothing, and `request` (client_job, attachments - can be ~80 KB) is
+        # tool calls/results) load nothing, and `request` (client_job, attachments - can be ~80 KB) is
         # loaded only where it is read: model.observed and terminal events.
         needs_request = event.type == "model.observed" or event.type in TERMINAL_TYPES
         job = (await s.get(DeepJobRow, run_id,
