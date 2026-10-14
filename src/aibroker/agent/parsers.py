@@ -7,6 +7,7 @@ and must be re-checked against real output before the route is called ready.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from aibroker.agent import events as ev
 from aibroker.agent.adapter import BillingMode, StreamEvent
 from aibroker.agent.billing import BILLING_REFUSED
 
+log = logging.getLogger(__name__)
 _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many requests|"
                     r"credit balance|exceeded your|"
                     # Documented Claude Code caps ("You've hit your weekly limit"); a bare
@@ -146,10 +148,19 @@ class ClaudeParser:
             if src not in (None, "none"):   # runtime double-check of the billing route
                 return [ev.RunFailed(error_class=BILLING_REFUSED,
                                      message=f"CLI reports apiKeySource={src!r}, not subscription")]
-            return [ev.SessionAssigned(session_id=str(data["session_id"]))] \
-                if data.get("session_id") else []
-        if kind == "assistant":
             out: list[StreamEvent] = []
+            if data.get("session_id"):
+                out.append(ev.SessionAssigned(session_id=str(data["session_id"])))
+            observed = _observed(data.get("model"), "session_init", "claude.system.init")
+            if observed:
+                out.append(observed)
+            return out
+        if kind == "assistant":
+            out = []
+            observed = _observed((data.get("message") or {}).get("model"), "response",
+                                 "claude.assistant.message")
+            if observed:
+                out.append(observed)
             for block in (data.get("message") or {}).get("content") or []:
                 if block.get("type") == "text" and block.get("text"):
                     out.append(ev.MessageDelta(text=str(block["text"])))
@@ -185,6 +196,13 @@ class ClaudeParser:
         msg = stderr_tail.strip() or f"claude exited {returncode} without a result"
         return ev.RunFailed(error_class=classify_failure(msg), message=msg[:2000],
                             reset_at=parse_reset_at(msg))
+
+
+def _observed(model: Any, kind: Any, source: str) -> ev.ModelObserved | None:
+    """A ModelObserved only for a real, non-empty string model; never fabricated."""
+    if not isinstance(model, str) or not model.strip():
+        return None
+    return ev.ModelObserved(model=model.strip()[:200], kind=kind, source=source)
 
 
 def _text(content: Any) -> str:
@@ -224,11 +242,26 @@ class CodexParser:
         self.turn_done = False
         self.error: str | None = None
         self._calls = 0
+        self._shapes: set[str] = set()
+
+    def _log_shape(self, data: dict[str, Any]) -> None:
+        """Diagnostics: log each distinct event shape once, KEY NAMES only (never values)."""
+        kind = data.get("type")
+        keys = sorted(str(k) for k in data)
+        item = data.get("item")
+        if isinstance(kind, str) and kind.startswith("item.") and isinstance(item, dict):
+            keys.append("item=" + ",".join(sorted(str(k) for k in item)))
+        shape = f"{str(kind)[:60]}|{keys}"
+        if shape in self._shapes:
+            return
+        self._shapes.add(shape)
+        log.info("codex exec event keys type=%s keys=%s", str(kind)[:60], keys)
 
     def feed(self, line: str) -> list[StreamEvent]:
         data = _json(line)
         if data is None:
             return []
+        self._log_shape(data)
         kind = data.get("type")
         if kind == "thread.started" and data.get("thread_id"):
             return [ev.SessionAssigned(session_id=str(data["thread_id"]))]

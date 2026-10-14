@@ -52,6 +52,16 @@ class ModelRerouted(_Event):
     source: Literal["codex_app_server"] = "codex_app_server"
 
 
+class ModelObserved(_Event):
+    """The model a run reports it was served by, with how strong that evidence is. `response` =
+    read off an API response message; `thread_config` = what the CLI configured for the thread
+    (NOT proof of each response's backend); `session_init` = the session's announced model."""
+    type: Literal["model.observed"] = "model.observed"
+    model: str = Field(min_length=1, max_length=200)
+    kind: Literal["response", "session_init", "thread_config"]
+    source: str = Field(min_length=1, max_length=64)
+
+
 class MessageDelta(_Event):
     type: Literal["message.delta"] = "message.delta"
     text: str
@@ -133,8 +143,8 @@ class RunTimedOut(_Event):
     limit: Literal["wall", "idle", "deadline"] = "wall"
 
 
-AnyEvent = (RunStarted | SessionAssigned | ModelRerouted | MessageDelta | ToolCall | ToolResult | FileChanged
-            | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota
+AnyEvent = (RunStarted | SessionAssigned | ModelRerouted | ModelObserved | MessageDelta | ToolCall | ToolResult
+            | FileChanged | Usage | RunCompleted | RunFailed | RunCancelled | RunTimedOut | RunWaitingQuota
             | BillingAttested)
 AgentEvent = Annotated[AnyEvent, Field(discriminator="type")]
 _ADAPTER: TypeAdapter[AgentEvent] = TypeAdapter(AgentEvent)

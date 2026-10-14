@@ -1,0 +1,193 @@
+"""M1: subscription jobs report the model that actually served them, with its evidence level.
+Synthetic events only - no real CLI. The requested model is never substituted."""
+from __future__ import annotations
+
+import json
+import logging
+from types import SimpleNamespace
+
+from aibroker.agent import events as ev
+from aibroker.agent.codex_app_server import run_tool_turn
+from aibroker.agent.parsers import ClaudeParser, CodexParser
+from aibroker.agent.runs import (
+    add_model_observation,
+    append_event,
+    create_run,
+    get_run,
+    served_model_meta,
+)
+from aibroker.auth import generate_project_key, hash_project_key
+from aibroker.db import get_session
+from aibroker.db.models import ProjectRow
+from aibroker.routes import proxy
+from tests.test_agent_codex_app_server import _Adapter, _Process, _run, _Writer
+
+REQUESTED = "codex-sub/gpt-6.1-sol"
+
+
+def _line(**kw):
+    return json.dumps(kw)
+
+
+# --- parsers -------------------------------------------------------------------------------
+
+
+def test_claude_parser_emits_init_and_response_observations():
+    p = ClaudeParser()
+    init = p.feed(_line(type="system", subtype="init", session_id="s1", model="claude-sonnet-5-5"))
+    assert [e.type for e in init] == ["session.assigned", "model.observed"]
+    assert (init[1].model, init[1].kind, init[1].source) == (
+        "claude-sonnet-5-5", "session_init", "claude.system.init")
+    out = p.feed(_line(type="assistant", message={
+        "model": "claude-sonnet-5-5-20260101", "content": [{"type": "text", "text": "hi"}]}))
+    assert [e.type for e in out] == ["model.observed", "message.delta"]
+    assert (out[0].kind, out[0].source) == ("response", "claude.assistant.message")
+
+
+def test_claude_parser_never_fabricates_a_model():
+    p = ClaudeParser()
+    assert [e.type for e in p.feed(_line(type="system", subtype="init", session_id="s"))] == [
+        "session.assigned"]
+    assert p.feed(_line(type="assistant", message={"model": "", "content": []})) == []
+    assert p.feed(_line(type="assistant", message={"model": 5, "content": []})) == []
+
+
+def test_codex_parser_logs_key_names_once_and_never_values(caplog):
+    secret = "sk-SECRET-looking-value-123"
+    p = CodexParser()
+    with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
+        p.feed(_line(type="thread.started", thread_id=secret, extra_key=secret))
+        p.feed(_line(type="thread.started", thread_id="other", extra_key="other"))   # same shape
+        p.feed(_line(type="item.completed", item={"type": "agent_message", "text": secret,
+                                                  "weird_field": secret}))
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert secret not in text
+    assert text.count("type=thread.started") == 1       # deduped per shape
+    assert "extra_key" in text and "weird_field" in text and "type=item.completed" in text
+    # no model is ever invented for the exec path, even if a "model" key shows up
+    out = p.feed(_line(type="thread.started", thread_id="x", model="m"))
+    assert "model.observed" not in [e.type for e in out]
+
+
+# --- app server ----------------------------------------------------------------------------
+
+
+class _ThreadWriter(_Writer):
+    thread_result: dict = {}
+
+    def write(self, data):
+        message = json.loads(data)
+        if message.get("method") == "thread/start":
+            self.sent.append(message)
+            self.reader.put({"id": 2, "result": self.thread_result})
+        else:
+            super().write(data)
+
+
+async def _app_server_events(monkeypatch, tmp_path, thread_result):
+    run, home = _run(tmp_path)
+    process = _Process()
+    writer = _ThreadWriter(process.stdout)
+    writer.thread_result = thread_result
+    process.stdin = writer
+
+    async def spawn(*_a, **_kw):
+        return process
+
+    async def publish(*_a):
+        return None
+
+    async def take(*_a):
+        return True, "{}"
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides", lambda _h: ["a=b"])
+    monkeypatch.setattr("aibroker.agent.codex_app_server.publish_call", publish)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
+    return [e async for e in run_tool_turn(_Adapter(home), run)]
+
+
+async def test_app_server_thread_start_model_is_a_thread_config_observation(monkeypatch, tmp_path):
+    events = await _app_server_events(monkeypatch, tmp_path, {
+        "thread": {"id": "thread-1"}, "model": "gpt-6.1-sol", "modelProvider": "openai"})
+    assert [e.type for e in events[:2]] == ["session.assigned", "model.observed"]
+    assert (events[1].model, events[1].kind, events[1].source) == (
+        "gpt-6.1-sol", "thread_config", "codex.app_server.thread_start")
+
+
+async def test_app_server_without_a_thread_model_observes_nothing(monkeypatch, tmp_path):
+    events = await _app_server_events(monkeypatch, tmp_path, {"thread": {"id": "thread-1"}})
+    assert "model.observed" not in [e.type for e in events]
+
+
+# --- aggregation ---------------------------------------------------------------------------
+
+
+def test_served_model_meta_strongest_evidence_wins_and_all_are_kept():
+    obs = []
+    for model, kind, src in (("init-m", "session_init", "a"), ("cfg-m", "thread_config", "b"),
+                             ("resp-m", "response", "c"), ("init-m", "session_init", "a")):
+        obs = add_model_observation(obs, model, kind, src)
+    assert len(obs) == 3                                 # deduped
+    meta = served_model_meta(obs)
+    assert (meta["model_served"], meta["model_served_kind"], meta["model_served_source"]) == (
+        "resp-m", "response", "c")
+    assert meta["model_observations"] == obs             # disagreement is kept, not overwritten
+    only_init = served_model_meta(add_model_observation([], "init-m", "session_init", "a"))
+    assert only_init["model_served"] == "init-m" and only_init["model_served_kind"] == "session_init"
+
+
+def test_served_model_meta_nothing_observed_is_unknown_and_null():
+    meta = served_model_meta([])
+    assert meta == {"model_served": None, "model_served_kind": "unknown",
+                    "model_served_source": "none", "model_observations": []}
+
+
+def test_observations_are_capped():
+    obs = []
+    for i in range(25):
+        obs = add_model_observation(obs, f"m{i}", "response", "s")
+    assert len(obs) == 10
+
+
+async def _job(pid):
+    plain = generate_project_key()
+    async with get_session() as session:
+        session.add(ProjectRow(id=pid, name=f"ev-{pid}", project_key_hash=hash_project_key(plain),
+                               project_key_prefix=plain[:12],
+                               allowed_scopes=["llm:chat", "llm:agent"], is_active=True, notes=""))
+    run_id, _ = await create_run(
+        project=SimpleNamespace(id=pid), capability="agent:codex", prompt="p", task_id="t",
+        account_id="owner", session_id=None, idempotency_key=None, wall_timeout_s=30,
+        idle_timeout_s=30, allowed_tools=[], model="gpt-6.1-sol",
+        client_job={"provider": "codex-sub", "model": REQUESTED, "response_format": None})
+    return run_id
+
+
+async def test_poll_reports_evidence_for_a_subscription_job():
+    rid = await _job(31)
+    await append_event(rid, ev.ModelObserved(model="gpt-6.1-sol", kind="thread_config",
+                                             source="codex.app_server.thread_start"))
+    await append_event(rid, ev.ModelObserved(model="claude-x-resp", kind="response", source="r"))
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    result = proxy._job_response((await get_run(rid, 31))[1])
+    assert result.model_served == "claude-x-resp"
+    e = result.evidence
+    assert e.model_requested == REQUESTED and e.model_served == "claude-x-resp"
+    assert e.model_served_kind == "response" and e.provider == "codex-sub"
+    assert e.account_id == "owner" and e.model_rerouted is False
+    assert [o.kind for o in e.model_observations] == ["thread_config", "response"]
+
+
+async def test_unobserved_job_is_unknown_and_never_falls_back_to_requested():
+    rid = await _job(32)
+    await append_event(rid, ev.RunCompleted(final_text="ok"))
+    result = proxy._job_response((await get_run(rid, 32))[1])
+    assert result.model_served is None
+    assert result.evidence.model_served is None and result.evidence.model_served_kind == "unknown"
+    assert result.evidence.model_served_source == "none"
+    assert result.evidence.model_requested == REQUESTED
+    assert result.evidence.model_served != result.evidence.model_requested
+
+
+def test_plain_job_has_no_evidence():
+    assert proxy._job_evidence({"model": "m", "provider": "gemini"}) is None

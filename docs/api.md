@@ -129,6 +129,16 @@ reported by the CLI, with `null` for unavailable counts. An unknown
 entry in that run's `/v1/agent/runs/{id}/events` stream and fails the tool
 turn; absence of that entry does not attest model identity.
 
+Subscription polls (`status: done`) also carry an `evidence` object (absent for plain
+deep jobs): `provider`, `account_id`, `billing_mode` (the run's billing type),
+`model_requested` (the pin), `model_served` (`str|null`), `model_served_kind`
+(`response` | `thread_config` | `session_init` | `unknown`), `model_served_source`,
+`model_observations` (`[{model, kind, source}]`, all observations, never overwritten)
+and `model_rerouted` (always `false`: a reroute fails the run). `response` comes from
+an API response message; `thread_config` is the model the CLI configured for the
+thread, not proof of each response's backend; `unknown` means nothing was observed,
+`model_served` is `null`, and it never falls back to the requested model.
+
 `account_id` (additive) names the login that serves a subscription job: `owner` for `codex-sub`, and for
 `claude-sub` the account chosen at submit (for example `claude-2`). It is `null` on other jobs. It does
 not change during the run.

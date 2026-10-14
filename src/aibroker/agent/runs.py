@@ -180,6 +180,32 @@ def _clip(value: Any) -> Any:
     return value
 
 
+_MAX_MODEL_OBSERVATIONS = 10
+_EVIDENCE_RANK = {"response": 3, "thread_config": 2, "session_init": 1}
+
+
+def add_model_observation(existing: Any, model: str, kind: str, source: str) -> list[dict[str, str]]:
+    """Append {model, kind, source} to the observation list, deduped, capped; never overwrites."""
+    items = [o for o in (existing or []) if isinstance(o, dict)]
+    entry = {"model": model, "kind": kind, "source": source}
+    if entry not in items and len(items) < _MAX_MODEL_OBSERVATIONS:
+        items.append(entry)
+    return items
+
+
+def served_model_meta(observations: Any) -> dict[str, Any]:
+    """result_meta fields for the served model: the strongest evidence wins (response >
+    thread_config > session_init, first seen within a kind); nothing observed -> null model with
+    kind "unknown". The requested model is never used as a fallback. All observations are kept."""
+    items = [o for o in (observations or []) if isinstance(o, dict) and o.get("kind") in _EVIDENCE_RANK]
+    best = max(items, key=lambda o: _EVIDENCE_RANK[o["kind"]], default=None)
+    if best is None:
+        return {"model_served": None, "model_served_kind": "unknown", "model_served_source": "none",
+                "model_observations": []}
+    return {"model_served": best["model"], "model_served_kind": best["kind"],
+            "model_served_source": best.get("source") or "none", "model_observations": items}
+
+
 async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                        *, only_if_pending: bool = False) -> int:
     """Store the next event of a run (single writer per run) -> its seq. Terminal
@@ -236,6 +262,11 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             if observed:
                 meta["usage_observed"] = observed
                 job.result_meta = meta
+        if event.type == "model.observed" and job is not None and client_job:
+            meta = dict(job.result_meta or {})
+            meta["model_observations"] = add_model_observation(
+                meta.get("model_observations"), event.model, event.kind, event.source)
+            job.result_meta = meta
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
         if event.type in TERMINAL_TYPES:
@@ -243,6 +274,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             if job is not None:
                 history = (job.result_meta or {}).get("client_tool_history") or []
                 usage_observed = (job.result_meta or {}).get("usage_observed") or {}
+                observations = (job.result_meta or {}).get("model_observations") or []
                 job.status = ("done" if event.type == "run.completed"
                               else "cancelled" if event.type == "run.cancelled" else "error")
                 job.completed_at = now
@@ -252,11 +284,11 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                                        "client_tool_history": history,
                                        "usage_observed": usage_observed}
                     if client_job:
+                        job.result_meta.update(served_model_meta(observations))
                         job.result_meta.update({
                             "account_id": run.account_id,
                             "provider": client_job["provider"],
                             "model": client_job["model"],
-                            "model_served": None,
                             "tokens_in": run.usage_input_tokens,
                             "tokens_out": run.usage_output_tokens,
                             "cache_read_tokens": run.usage_cache_read_tokens,
@@ -269,6 +301,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 elif event.type == "run.failed":
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
+                    if observations:
+                        job.result_meta["model_observations"] = observations
                     if client_job:
                         job.result_meta["account_id"] = run.account_id
                     job.error_message = redact(f"{event.error_class}: {event.message}")

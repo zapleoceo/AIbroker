@@ -110,11 +110,16 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         await send({"id": 2, "method": "thread/start", "params": {
             "model": run.model, "cwd": run.workspace, "approvalPolicy": "never",
             "permissions": "broker", "dynamicTools": _tool_specs(run)}})
-        thread = (await read_response(2)).get("thread") or {}
+        started = await read_response(2)
+        thread = started.get("thread") or {}
         thread_id = thread.get("id")
         if not isinstance(thread_id, str) or not thread_id:
             raise ClientToolConflict("App Server did not assign a thread")
         yield ev.SessionAssigned(session_id=thread_id)
+        configured = started.get("model")
+        if isinstance(configured, str) and configured.strip():
+            yield ev.ModelObserved(model=configured.strip()[:200], kind="thread_config",
+                                   source="codex.app_server.thread_start")
         await send({"id": 3, "method": "turn/start", "params": {
             "threadId": thread_id, "input": _input_items(run), "cwd": run.workspace,
             "approvalPolicy": "never", "model": run.model}})

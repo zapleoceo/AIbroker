@@ -7,6 +7,19 @@ live text and generated-PNG requests through the production Broker and
 Orchestra. Input vision and client-controlled subscription tools remain
 separate rollout gates; see `docs/subscription-tool-loop.md`.
 
+**Served-model evidence (additive).** A run records `model.observed` events
+(`model`, `kind`, `source`) for every model the CLI reports, and the job keeps the
+deduped list (max 10) as `model_observations`. `model_served` is the model of the
+strongest kind seen, with `model_served_kind` and `model_served_source`:
+`response` (read off an API response message: Claude `assistant.message.model`) beats
+`thread_config` (the model the CLI configured for the thread, Codex App Server
+`thread/start`; NOT proof of the backend of each response) beats `session_init`
+(Claude `system/init`). When nothing is observed `model_served` is `null`,
+`model_served_kind` is `unknown`, and the requested model is never substituted. When
+observations of different kinds disagree, all remain in `model_observations`. A
+`model.observed` event never releases the Codex auth-refresh gate. Codex `exec`
+reports no known model field; the parser only logs event key names to find one.
+
 `GET /v1/agent/runs/{id}` reports `model` and `requested_model` as the exact
 requested CLI pin and `model_served: null` when the actual served model is not
 independently attested.

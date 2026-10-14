@@ -450,6 +450,29 @@ class DeepSubmitResponse(BaseModel):
     poll_after_s: int = Field(description="suggested wait before the first poll")
 
 
+class ModelObservation(BaseModel):
+    model: str
+    kind: str = Field(description="response|thread_config|session_init")
+    source: str
+
+
+class JobEvidence(BaseModel):
+    """Subscription jobs only: what served the job and how well that is evidenced."""
+    provider: str | None = None
+    account_id: str | None = None
+    billing_mode: str | None = Field(None, description="from the run's billing type")
+    model_requested: str | None = Field(None, description="the requested pin")
+    model_served: str | None = Field(
+        None, description="strongest observed model; null when none was observed - never the "
+                          "requested model")
+    model_served_kind: str = Field(
+        "unknown", description="response (API response message) | thread_config (the CLI's "
+        "thread configuration, not proof of each response's backend) | session_init | unknown")
+    model_served_source: str = "none"
+    model_observations: list[ModelObservation] = Field(default_factory=list)
+    model_rerouted: bool = Field(False, description="a reroute fails the run, so always false here")
+
+
 class DeepJobResponse(BaseModel):
     job_id: int
     status: str = Field(description="pending|done|error|cancelled")
@@ -479,6 +502,8 @@ class DeepJobResponse(BaseModel):
     latency_ms: int | None = None
     key_label: str | None = None
     request_id: int | None = None
+    evidence: JobEvidence | None = Field(
+        None, description="subscription jobs only: served-model evidence (see docs/api.md)")
     error: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     finish_reason: str | None = None
@@ -543,6 +568,20 @@ async def deep_submit(
     )
 
 
+def _job_evidence(meta: dict[str, Any]) -> JobEvidence | None:
+    """Evidence for a finished subscription (client_job) run; None for a plain deep job."""
+    if not (meta.get("account_id") and meta.get("provider") and "model_served_kind" in meta):
+        return None
+    return JobEvidence(
+        provider=meta.get("provider"), account_id=meta.get("account_id"),
+        billing_mode=meta.get("billing_type"), model_requested=meta.get("model"),
+        model_served=meta.get("model_served"),
+        model_served_kind=meta.get("model_served_kind") or "unknown",
+        model_served_source=meta.get("model_served_source") or "none",
+        model_observations=[ModelObservation(**o) for o in meta.get("model_observations") or []],
+    )
+
+
 def _job_response(row: Any) -> DeepJobResponse:
     """Shape a deep_jobs row into the poll response — shared by /v1/deep and
     /v1/jobs.
@@ -587,6 +626,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         provider=meta.get("provider"), model=meta.get("model"),
         requested_model=requested_model,
         model_served=meta.get("model_served"),
+        evidence=_job_evidence(meta),
         tokens_in=meta.get("tokens_in"), tokens_out=meta.get("tokens_out"),
         total_tokens=meta.get("total_tokens"),
         cache_read_tokens=meta.get("cache_read_tokens"),
