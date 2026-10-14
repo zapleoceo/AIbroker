@@ -26,8 +26,9 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
-from sqlalchemy import select, text
+from sqlalchemy import null, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
@@ -168,11 +169,18 @@ async def _find_inflight_duplicate(
         return None
 
 
-async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Postgres-only (test_submit_job_fires_pg_notify)
-    async with get_session() as s:
-        if s.bind.dialect.name != "postgresql":
-            return
-        await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
+async def _notify_dispatcher(s: AsyncSession) -> None:
+    """Queue a NOTIFY on the enqueue's own session: Postgres delivers it when the INSERT
+    commits, so the dispatcher never wakes before the row is visible and no second
+    session/connection is spent. Best-effort — the SAVEPOINT confines a failure to the
+    NOTIFY, the enqueue still commits and the dispatcher's timed poll covers the wake-up."""
+    if s.bind.dialect.name != "postgresql":
+        return
+    try:
+        async with s.begin_nested():
+            await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
+    except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
+        log.debug("pg_notify(%s) failed: %s — poll fallback covers it", JOBS_CHANNEL, e)
 
 
 # The legacy dedup/insert paths are exercised by the Postgres-only tests in
@@ -257,6 +265,7 @@ async def submit_job_ex(
                 s.add(row)
                 await s.flush()
                 job_id = row.id
+                await _notify_dispatcher(s)      # delivered at this transaction's commit
         except IntegrityError:
             # Lost the (project_id, idempotency_key) race: the winner's job is the answer.
             winner = (await replayed_job_id(project.id, idempotency_key, phash)
@@ -279,15 +288,10 @@ async def submit_job_ex(
                 "VALUES (:p, :c, 'pending', :r, 0) RETURNING id"
             ), {"p": project.id, "c": capability,
                 "r": _json.dumps(request)})).scalar_one()
-    # After the enqueue COMMITS: wake the dispatcher instantly via NOTIFY so an
-    # interactive chat call doesn't eat up to a full poll interval of claim
-    # latency. Best-effort — the dispatcher's timed poll is the guaranteed
-    # fallback, so a failed NOTIFY can delay a job but never lose it.
-    try:
-        await _notify_dispatcher()
-    except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
-        log.debug("pg_notify(%s) failed: %s — poll fallback covers it",
-                  JOBS_CHANNEL, e)
+            await _notify_dispatcher(s)
+    # The wake-up NOTIFY (instant claim for an interactive call) was queued inside the
+    # INSERT transaction above and is delivered when it commits; best-effort, the
+    # dispatcher's timed poll is the guaranteed fallback.
     log.info("job %d enqueued: project=%s %s%s", job_id, project.id, capability,
              log_tag(trace_id, labels))
     return SubmitOutcome(job_id, False)
@@ -311,51 +315,98 @@ async def submit_deep_job(  # pragma: no cover
     )
 
 
+def _strip_audio_sql(dialect: str) -> str:
+    """SQL for the new `request`: the base64 audio nulled (the rest kept), or the
+    column untouched when there is no audio. Same truthiness the old Python check
+    had: a missing, null or empty `audio_b64` is left alone."""
+    if dialect == "postgresql":
+        has = f"COALESCE(request->>'{AUDIO_FIELD}', '') <> ''"
+        strip = f"jsonb_set(request, '{{{AUDIO_FIELD}}}', 'null'::jsonb)"
+    else:   # SQLite (tests)
+        has = f"COALESCE(json_extract(request, '$.{AUDIO_FIELD}'), '') <> ''"
+        strip = f"json_set(request, '$.{AUDIO_FIELD}', json('null'))"
+    return f"CASE WHEN {has} THEN {strip} ELSE request END"
+
+
 @retry_stale_statement
 @retry_terminal_write
-async def _finish(  # pragma: no cover — job execution is the dispatcher's (job_queue.py)
+async def _finish(
     job_id: int, *, status: str,
     result_text: str | None = None,
     result_meta: dict[str, Any] | None = None,
     error_message: str | None = None,
     expect_started_at: datetime | None = None,
 ) -> None:
+    """One UPDATE, no row load. Claim guard: if the caller passes the started_at it
+    claimed the job with and the row now holds a different value, the job was
+    re-queued (started_at→NULL) and re-claimed by another worker — this is a stale
+    worker returning late; the WHERE then matches nothing and the live claim's
+    result is not clobbered. A deleted row matches nothing either.
+
+    Async transcription carries the whole audio file base64'd in the request
+    payload. Once the job is terminal that blob is dead weight — nobody re-reads
+    it, and deep_jobs is already the biggest table we back up nightly. It is nulled
+    in the same statement (rest of the request kept for debugging), so audio lives
+    in the DB only while it's being worked on."""
+    stmt = update(DeepJobRow).where(DeepJobRow.id == job_id)
+    if expect_started_at is not None:
+        stmt = stmt.where(DeepJobRow.started_at == expect_started_at)
     async with get_session() as s:
-        row = await s.get(DeepJobRow, job_id)
-        if row is None:  # pragma: no cover — job row deleted underneath us
-            return
-        # Claim guard: if the caller passes the started_at it claimed the job
-        # with and the row now holds a different value, the job was re-queued
-        # (started_at→NULL) and re-claimed by another worker — this is a stale
-        # worker returning late; don't clobber the live claim's result.
-        if expect_started_at is not None and row.started_at != expect_started_at:
-            return
-        row.status = status
-        row.result_text = result_text
-        row.result_meta = result_meta
-        row.error_message = error_message
-        row.completed_at = datetime.now(UTC).replace(tzinfo=None)
-        # Async transcription carries the whole audio file base64'd in the
-        # request payload. Once the job is terminal that blob is dead weight —
-        # nobody re-reads it, and deep_jobs is already the biggest table we
-        # back up nightly. Drop it here (keep the rest of the request for
-        # debugging), so audio lives in the DB only while it's being worked on.
-        if isinstance(row.request, dict) and row.request.get(AUDIO_FIELD):
-            row.request = {**row.request, AUDIO_FIELD: None}
+        await s.execute(stmt.values(
+            status=status, result_text=result_text,
+            # SQL NULL, not JSON 'null', when there is no meta (as the ORM path wrote it)
+            result_meta=null() if result_meta is None else result_meta,
+            error_message=error_message,
+            completed_at=datetime.now(UTC).replace(tzinfo=None),
+            request=text(_strip_audio_sql(s.bind.dialect.name)),
+        ).execution_options(synchronize_session=False))
 
 
-async def get_job(job_id: int, project_id: int) -> DeepJobRow | None:
-    """Fetch a job, scoped to the caller's own project. Pure read — every
+class JobView(NamedTuple):
+    """The slice of a deep_jobs row the poll routes read. `request` holds ONLY the
+    keys they use (`model`, `account_id`, `client_job`) — never the prompt or the
+    base64 audio that make the full JSONB up to ~80 KB and more."""
+    id: int
+    project_id: int
+    capability: str
+    status: str
+    result_text: str | None
+    result_meta: dict[str, Any] | None
+    error_message: str | None
+    created_at: datetime
+    trace_id: str | None
+    labels: dict[str, str] | None
+    cancel_requested: bool
+    request: dict[str, Any]
+
+
+_POLL_REQUEST_KEYS = ("model", "account_id", "client_job")
+
+
+async def get_job(job_id: int, project_id: int) -> JobView | None:
+    """Fetch a job, scoped to the caller's own project, WITHOUT loading the
+    `request` JSONB: only the three JSON paths the poll needs are selected.
+    Pure read — every
     lifecycle transition (running → done/error, requeue, give-up after
     retries) is owned by the dispatcher (services/job_queue.py). It used to
     lazily flip a stale `pending` row to error, but that raced the dispatcher
     and prematurely failed jobs still legitimately retrying under backoff."""
     async with get_session() as s:
-        return (await s.execute(  # pragma: no cover
-            select(DeepJobRow).where(
-                DeepJobRow.id == job_id, DeepJobRow.project_id == project_id
-            )
-        )).scalar_one_or_none()
+        r = (await s.execute(
+            select(
+                DeepJobRow.id, DeepJobRow.project_id, DeepJobRow.capability,
+                DeepJobRow.status, DeepJobRow.result_text, DeepJobRow.result_meta,
+                DeepJobRow.error_message, DeepJobRow.created_at, DeepJobRow.trace_id,
+                DeepJobRow.labels, DeepJobRow.cancel_requested,
+                *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
+            ).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
+        )).one_or_none()
+    if r is None:
+        return None
+    # A missing key and a JSON null both read back as None; the callers treat
+    # them alike, so only non-null keys are rebuilt (`.get(k, default)` keeps working).
+    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[11:], strict=True) if v is not None}
+    return JobView(*r[:11], request=request)
 
 
 def next_poll_after_s(created_at: datetime) -> int:

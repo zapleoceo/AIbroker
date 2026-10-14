@@ -116,6 +116,9 @@ _CLAIMED: dict[int, datetime | None] = {}
 # table or blow up WAL — it simply takes several passes to catch up.
 _JOB_RETENTION_DAYS = int(os.environ.get("JOB_RETENTION_DAYS", "7"))
 _JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
+# Stale-running requeue cadence. Its window is _STALE_RUNNING_S (25 min), so
+# sweeping every ~1-5 s tick bought nothing but a write-lock round trip.
+_REQUEUE_STALE_EVERY_S = 60.0
 # Dispatcher ticks between retention sweeps. The tick fires as often as once a
 # second, and this is pure housekeeping — at the 5s idle poll this is roughly
 # every 25 minutes, and a busy loop only makes it more frequent, never less.
@@ -644,6 +647,7 @@ async def _dispatch(stop: asyncio.Event,
     # housekeeping and the tick fires up to once a second. Both workers running
     # it is harmless — the DELETE is idempotent and batched.
     ticks_until_purge = 0
+    last_requeue = float("-inf")   # first tick (startup) always sweeps
     if await _dialect_name() == "postgresql":
         listener = asyncio.create_task(_listen_for_jobs(wake, stop))
     idle_timeout = _IDLE_POLL_INTERVAL_S if listener is not None else _POLL_INTERVAL_S
@@ -657,7 +661,9 @@ async def _dispatch(stop: asyncio.Event,
         claimed = 0
         extra_wait = 0.0
         try:
-            await _requeue_stale_running()
+            if time.monotonic() - last_requeue >= _REQUEUE_STALE_EVERY_S:
+                await _requeue_stale_running()
+                last_requeue = time.monotonic()
             if listener is not None:          # Postgres-only (make_interval)
                 ticks_until_purge -= 1
                 if ticks_until_purge <= 0:
@@ -671,6 +677,9 @@ async def _dispatch(stop: asyncio.Event,
                     t = asyncio.create_task(_execute_guarded(row))
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
+                    # A finished job frees a slot: wake the loop now instead
+                    # of waiting for the next NOTIFY / idle poll.
+                    t.add_done_callback(lambda _t: wake.set())
             failures.ok()
         except Exception as e:  # noqa: BLE001 — a bad tick must not kill the loop
             extra_wait, full = failures.failed()

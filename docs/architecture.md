@@ -276,6 +276,20 @@ broker finishes its fallback chain). See `docs/api.md`.
   the SAME `run_chat` the sync path uses. On success → `done`; the client's
   next `GET /v1/jobs/{id}` poll reads the result row from Postgres (works on
   whichever worker answers).
+  *Slot refill:* every in-flight job task carries a done-callback that sets the
+  dispatcher's wake event, so a finished job frees its slot and the next claim runs
+  at once instead of waiting for a NOTIFY or the idle poll. The stale-`running`
+  requeue sweep runs on startup and then at most every `_REQUEUE_STALE_EVERY_S`=60 s
+  (its window is 25 min), not on every tick.
+  *Poll read:* `get_job` returns a `JobView` built from explicit columns plus the three
+  JSON paths the poll routes use (`request->model`, `account_id`, `client_job`), so a
+  poll never loads the multi-KB `request` JSONB (prompts, base64 audio); the poll
+  response is unchanged. *Terminal write:* `_finish` is one
+  `UPDATE … WHERE id=:id [AND started_at=:expected]` (no row load); the claim fence is the
+  `started_at` predicate and the transcription `audio_b64` is nulled in the same statement
+  (`jsonb_set` on Postgres, `json_set` on SQLite). *Submit NOTIFY:* `pg_notify` is queued
+  on the INSERT's own session (inside a SAVEPOINT, best-effort) and delivered at its
+  commit, not from a second session after it.
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,9 @@ from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow
 log = logging.getLogger(__name__)
 
 STALE_GRACE_S = 300.0
+# Housekeeping (stale / overdue-waiting / unclaimed sweeps) deals in minutes-to-hours
+# deadlines, so it runs on this cadence; only the claim runs on every tick.
+HOUSEKEEPING_EVERY_S = 30.0
 
 
 def _now() -> datetime:
@@ -96,12 +100,15 @@ async def fail_stale_agent_runs() -> int:
     has side effects. Deadline = started_at + its wall timeout + grace."""
     now = _now()
     async with get_session() as s:
+        # Only the columns the deadline needs: never the whole row with its request JSON.
         rows = (await s.execute(
-            select(DeepJobRow).where(DeepJobRow.status == "running",
-                                     DeepJobRow.capability.like("agent:%"))
-        )).scalars().all()
-        stale = [r.id for r in rows if r.started_at is not None and now > r.started_at
-                 + timedelta(seconds=float(r.request.get("wall_timeout_s", 1800)) + STALE_GRACE_S)]
+            select(DeepJobRow.id, DeepJobRow.started_at,
+                   DeepJobRow.request["wall_timeout_s"]).where(
+                DeepJobRow.status == "running", DeepJobRow.capability.like("agent:%"))
+        )).all()
+        stale = [run_id for run_id, started_at, wall in rows if started_at is not None
+                 and now > started_at + timedelta(
+                     seconds=float(1800 if wall is None else wall) + STALE_GRACE_S)]
     failed = 0
     for run_id in stale:
         try:
@@ -119,12 +126,13 @@ async def expire_overdue_waiting() -> int:
     now = _now()
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow).join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
+            select(DeepJobRow.id, DeepJobRow.created_at, DeepJobRow.request["deadline_s"])
+            .join(AgentRunRow, AgentRunRow.run_id == DeepJobRow.id).where(
                 DeepJobRow.status == "pending", AgentRunRow.quota_waits > 0,
                 AgentRunRow.outcome.is_(None))
-        )).scalars().all()
-        overdue = [r.id for r in rows if now >= r.created_at + timedelta(
-            seconds=float(r.request.get("deadline_s", 21600)))]
+        )).all()
+        overdue = [run_id for run_id, created_at, deadline in rows if now >= created_at
+                   + timedelta(seconds=float(21600 if deadline is None else deadline))]
     done = 0
     for run_id in overdue:
         with contextlib.suppress(RunConflict):
@@ -200,6 +208,20 @@ async def fail_unclaimed_runs() -> int:
     return done
 
 
+async def _wait_stop_or_wake(stop: asyncio.Event | None, wake: asyncio.Event,
+                             timeout: float) -> None:  # pragma: no cover — loop harness
+    """Sleep until a wake-up (RPC nudge or a finished run), shutdown, or the timeout."""
+    waiters = [asyncio.create_task(wake.wait())]
+    if stop is not None:
+        waiters.append(asyncio.create_task(stop.wait()))
+    try:
+        await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters:
+            w.cancel()
+        await asyncio.gather(*waiters, return_exceptions=True)
+
+
 async def agent_worker_loop(stop: asyncio.Event,
                             wake: asyncio.Event | None = None) -> None:  # pragma: no cover
     """Forever: keep up to concurrency_for(cap) runs in flight per capability."""
@@ -212,27 +234,29 @@ async def agent_worker_loop(stop: asyncio.Event,
     cfg = exec_config_from_settings()
     inflight: dict[str, set[asyncio.Task[None]]] = {c: set() for c in caps}
     log.info("agent worker started (workspace=%s)", cfg.workspace_root)
+    last_housekeeping = float("-inf")       # first tick (startup) always sweeps
+    refill = wake if wake is not None else asyncio.Event()
     while not stop.is_set():
-        if wake is not None:
-            wake.clear()
+        refill.clear()
         try:
-            await fail_stale_agent_runs()
-            await expire_overdue_waiting()
+            housekeeping_due = time.monotonic() - last_housekeeping >= HOUSEKEEPING_EVERY_S
+            if housekeeping_due:
+                await fail_stale_agent_runs()
+                await expire_overdue_waiting()
             for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
                 for run_id in await claim_agent_runs(cap, free):
                     t = asyncio.create_task(_guarded(run_id, cfg))
                     inflight[cap].add(t)
                     t.add_done_callback(inflight[cap].discard)
-            await fail_unclaimed_runs()     # after the claim: a free slot takes queued work first
+                    # a finished run frees its slot: refill it now, not at the next 1 s tick
+                    t.add_done_callback(lambda _t: refill.set())
+            if housekeeping_due:
+                await fail_unclaimed_runs()     # after the claim: a free slot takes queued work first
+                last_housekeeping = time.monotonic()
         except Exception:  # noqa: BLE001 - a bad tick must not kill the lane
             log.exception("agent worker tick failed")
-        if wake is None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=1.0)
-        else:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(wake.wait(), timeout=1.0)
+        await _wait_stop_or_wake(stop if wake is None else None, refill, 1.0)
     pending = [t for ts in inflight.values() for t in ts]
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
