@@ -15,6 +15,9 @@ Push to `master` → `.github/workflows/deploy.yml` runs **five jobs** (`docs`,
    service container (`aibroker_test` database, health-checked with
    `pg_isready`), so the Postgres-only paths that SQLite skips — selector,
    reserved lane, `SKIP LOCKED` job queue, cost guard — run for real.
+   It runs as 3 matrix legs (`pytest-split --splits 3 --group N`, by test count),
+   each with its own Postgres service, installed with uv; `deploy` waits for all
+   three. `ci.yml` runs the same split on every push and PR.
 4. **`quality` job** — strict static analysis on the diff:
    - **Ruff** with `E,F,W,I,B,UP,SIM,C4,RET` (simplify, comprehensions,
      unreachable-after-return). E501/E402 ignored (no formatter; tests
