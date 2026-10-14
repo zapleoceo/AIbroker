@@ -226,3 +226,39 @@ async def test_subscription_run_polls_through_normal_job_with_png_and_null_cost(
     assert result.provider == "codex-sub" and result.model == "codex-sub/gpt-6.1-sol"
     assert result.billing_type == "subscription" and result.cost_usd is None
     assert base64.b64decode(result.files[0]["content_b64"]) == png
+
+
+def test_output_modalities_declare_image_only_for_a_verified_image_codex_model(monkeypatch):
+    from aibroker.providers.subscriptions import subscription_image_output_verified
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol","gpt-6-luna"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol","gpt-6-luna"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS",
+                        '{"codex-sub":["gpt-6.1-sol"]}')
+    rows = {r["id"]: r for r in listing()}
+    sol = rows["codex-sub/gpt-6.1-sol"]
+    assert sol["output_modalities"] == ["text", "image"] and "chat:fast" in sol["capabilities"]
+    assert rows["codex-sub/gpt-6-luna"]["output_modalities"] == ["text"]
+    assert rows["claude-sub/claude-sonnet-5-5"]["output_modalities"] == ["text"]
+    assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is True
+    assert subscription_image_output_verified("codex-sub/gpt-6-luna") is False
+    # API chat models report text output
+    assert any(r["output_modalities"] == ["text"] for r in rows.values()
+               if r["billing_type"] == "api")
+
+
+def test_image_output_setting_fails_closed(monkeypatch):
+    from aibroker.providers.subscriptions import subscription_image_output_verified
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS",
+                        '{"codex-sub":["gpt-6.1-sol","gpt-6-luna"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"codex-sub":["gpt-6.1-sol"]}')
+    # an unverified model, a non-Codex provider or a malformed value refuses the catalog
+    for bad in ('{"codex-sub":["gpt-6-luna"]}', '{"claude-sub":["gpt-6.1-sol"]}', "broken"):
+        monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS", bad)
+        assert subscription_models() == [], bad
+        assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is False
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS", "default")
+    assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is False   # default empty
+    assert {r["id"]: r for r in listing()}["codex-sub/gpt-6.1-sol"]["output_modalities"] == ["text"]

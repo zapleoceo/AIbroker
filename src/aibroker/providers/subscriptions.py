@@ -35,12 +35,17 @@ def _catalog() -> tuple[list[ModelSpec], frozenset[str]]:
         data = _configured_ids("AGENT_SUBSCRIPTION_MODELS")
         verified = _configured_ids("AGENT_SUBSCRIPTION_VERIFIED_MODELS")
         vision = _configured_ids("AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS")
+        image_out = _configured_ids("AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS")
         if any(set(ids) - set(data.get(provider, [])) for provider, ids in verified.items()):
             raise ValueError("verified models must be catalog candidates")
         if set(vision) - {"codex-sub"} or any(
             set(ids) - set(verified.get(provider, [])) for provider, ids in vision.items()
         ):
             raise ValueError("input vision models must be verified Codex models")
+        if set(image_out) - {"codex-sub"} or any(
+            set(ids) - set(verified.get(provider, [])) for provider, ids in image_out.items()
+        ):
+            raise ValueError("image output models must be verified Codex models")
         models = []
         for provider, ids in data.items():
             for mid in ids:
@@ -54,6 +59,19 @@ def _catalog() -> tuple[list[ModelSpec], frozenset[str]]:
     except ValueError:
         log.error("Subscription model catalog or verification invalid: refusing subscription catalog")
         return [], frozenset()
+
+
+def subscription_image_output_verified(model: str) -> bool:
+    """Image generation (exported PNG) verified live for this exact, verified Codex model. An
+    invalid setting already refuses the whole catalog in _catalog(), so this fails closed too."""
+    if model not in _catalog()[1]:
+        return False
+    try:
+        ids = _configured_ids("AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS")
+    except ValueError:
+        return False
+    provider, _, mid = model.partition("/")
+    return provider == "codex-sub" and mid in ids.get("codex-sub", [])
 
 
 def subscription_models() -> list[ModelSpec]:
