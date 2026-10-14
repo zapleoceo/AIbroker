@@ -45,7 +45,7 @@ src/aibroker/
   routes/
     health.py          / + /healthz + /v1/health
     proxy.py           /v1/jobs + /v1/embed
-    jobs_control.py    /v1/jobs/{id}/cancel + /v1/jobs/cancel
+    jobs_control.py    GET /v1/jobs?label.k=v + /v1/jobs/{id}/cancel + /v1/jobs/cancel
     compare.py         /ask2many public compare page + /ask2many/api/* (no login)
     admin.py           /admin/* (X-Admin-Key)
     dashboard*.py      /login + /dashboard + /dashboard/* (split: dashboard.py + dashboard_assets/data/render/scopes.py)
