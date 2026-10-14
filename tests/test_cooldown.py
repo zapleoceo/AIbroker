@@ -241,15 +241,21 @@ async def test_cooldown_until_mistral_unauthorized_goes_to_next_month():
     assert _is_provider_monthly("openai", "Unauthorized") is False
 
 
-async def test_cooldown_until_daily_goes_to_midnight():
-    """Daily-quota error with no hint → cool until UTC midnight (not 60s)."""
-    from aibroker.routing.cooldown import cooldown_until
-    until = await cooldown_until(1, "cerebras",
-                                 "CerebrasException - Tokens per day limit exceeded")
-    # Next UTC midnight + a small anti-herd jitter (0-90s), far more than 60s
-    offset = (until - next_utc_midnight()).total_seconds()
+@pytest.mark.parametrize("now", [
+    datetime(2026, 6, 29, 12, 0, tzinfo=UTC),        # mid-day: hours away from the reset
+    datetime(2026, 6, 29, 23, 58, 59, tzinfo=UTC),   # the CI run that failed with a real clock
+])
+async def test_cooldown_until_daily_goes_to_midnight(monkeypatch, now):
+    """Daily-quota error with no hint → cool until UTC midnight (not 60s). The clock is fixed:
+    a real one made this fail whenever the suite ran within ~2 min of midnight."""
+    from aibroker.routing import cooldown
+    monkeypatch.setattr(cooldown, "next_utc_midnight", lambda at=None: next_utc_midnight(at or now))
+    until = await cooldown.cooldown_until(1, "cerebras",
+                                          "CerebrasException - Tokens per day limit exceeded")
+    # Next UTC midnight + a small anti-herd jitter (0-90s), never the 60 s default from `now`
+    offset = (until - datetime(2026, 6, 30, tzinfo=UTC)).total_seconds()
     assert 0 <= offset <= 90
-    assert (until - datetime.now(UTC)).total_seconds() > 120
+    assert until - now >= (datetime(2026, 6, 30, tzinfo=UTC) - now)
 
 
 # ─── per-hour request cap (2026-07-01: cerebras "Requests per hour") ──────────

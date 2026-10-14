@@ -483,8 +483,10 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
         # Released only now: a waiting run must not start while this CLI is still in its TERM->KILL window.
-        # (A second cancellation of the whole task during _stop_adapter - worker shutdown only - can
-        # still leave here early; _drive's finally then releases the gate. Accepted: rare, logged.)
+        # Nothing cancels a run task: SIGTERM/SIGINT only set the worker's stop event and the loop
+        # gathers in-flight runs without cancelling them (run_worker.py, agent_worker_loop). A hard
+        # kill of the container runs no finally at all and takes the CLI with it; the lease then
+        # expires by its TTL. So an early exit from here mid-stop is not reachable in production.
         if gate is not None:
             await gate.close()
         if lease_lost:
