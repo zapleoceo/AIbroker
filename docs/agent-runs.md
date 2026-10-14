@@ -23,7 +23,9 @@ only by `response`-level evidence:
 `model_served_kind` is `unknown`, and the requested model is never substituted. When
 observations of different kinds disagree, all remain in `model_observations`. A
 `model.observed` event never releases the Codex auth-refresh gate. Codex `exec`
-reports no known model field; the parser only logs event key names to find one.
+reports no known model field; the parser only logs event key names to find one, from a fixed
+allowlist of structural names (plus candidate model fields); any other key is logged only as the
+constant `<key>` with a count, never its own text.
 Code map: the `ModelObserved` event (`agent/events.py`), `add_model_observation` and
 `served_model_meta` (`agent/runs.py`, accumulate and pick the strongest), and the poll
 models `ModelObservation` and `JobEvidence` (`routes/proxy.py`).

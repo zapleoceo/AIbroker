@@ -63,7 +63,8 @@ def test_codex_parser_logs_key_names_once_and_never_values(caplog):
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in text
     assert text.count("type=thread.started") == 1       # deduped per shape
-    assert "extra_key" in text and "weird_field" in text and "type=item.completed" in text
+    assert "extra_key" not in text and "weird_field" not in text and "type=item.completed" in text
+    assert "thread_id" in text and "<key>x1" in text       # known names kept, unknown only counted
     # no model is ever invented for the exec path, even if a "model" key shows up
     out = p.feed(_line(type="thread.started", thread_id="x", model="m"))
     assert "model.observed" not in [e.type for e in out]
@@ -226,22 +227,22 @@ def test_codex_parser_logs_only_allowlisted_types_and_safe_keys(caplog):
     p = CodexParser()
     token = "sk-tok_ABCDEF0123456789"
     with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
-        p.feed(json.dumps({"type": token, token: 1, "bad key!": 2, "x" * 80: 3, "ok_key": 4}))
+        p.feed(json.dumps({"type": token, token: 1, "bad key!": 2, "x" * 80: 3, "usage": 4}))
         p.feed(json.dumps({"type": ["not", "a", "string"]}))
     text = chr(10).join(r.getMessage() for r in caplog.records)
     assert token not in text and "bad key" not in text and "x" * 41 not in text
-    assert "type=<other>" in text and "ok_key" in text and "<unsafe-key>x3" in text
+    assert "type=<other>" in text and "usage" in text and "<key>x3" in text
 
 
 def test_codex_parser_caps_logged_shapes(caplog):
     p = CodexParser()
     with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
-        for i in range(1000):
-            p.feed(json.dumps({"type": "item.completed", f"k{i}": 1}))
+        for i in range(1000):        # 50 distinct shapes (unknown-key counts 1..50), cycling
+            p.feed(json.dumps({"type": "item.completed", **{f"k{j}": 1 for j in range(i % 50 + 1)}}))
         p.finish(0)
     lines = [r.getMessage() for r in caplog.records]
-    assert len(lines) <= 21
-    assert lines[-1] == "codex exec event shapes capped at 20 (dropped 980)"
+    assert len(lines) == 21
+    assert lines[-1] == "codex exec event shapes capped at 20 (dropped 600)"
 
 
 async def test_thread_config_only_job_keeps_top_level_model_served_null():
@@ -360,3 +361,18 @@ async def test_terminal_outcomes_keep_files_tool_history_and_usage():
         assert meta["provider"] == "codex-sub", terminal.type
         if terminal.type == "run.completed":
             assert [f["path"] for f in meta["files"]] == ["a.txt"]
+
+
+def test_codex_parser_never_logs_token_like_key_names(caplog):
+    """Identifier-shaped secrets used as key names (no dash, so any name regex would pass them)
+    must not reach the log, at the top level or inside `item`: only allowlisted names are echoed."""
+    names = ["AIzaSYNTHETICPRIVATE0123456789", "Bearer_SYNTHETICPRIVATE", "ghp_SYNTHETICPRIVATE01"]
+    p = CodexParser()
+    with caplog.at_level(logging.INFO, logger="aibroker.agent.parsers"):
+        p.feed(json.dumps({"type": "thread.started", "thread_id": "t", **dict.fromkeys(names, 1)}))
+        p.feed(json.dumps({"type": "item.completed",
+                           "item": {"type": "agent_message", "text": "x", **dict.fromkeys(names, 1)}}))
+    text = chr(10).join(r.getMessage() for r in caplog.records)
+    for n in names:
+        assert n not in text and "SYNTHETICPRIVATE" not in text
+    assert "<key>x3" in text and "thread_id" in text and "item=" in text

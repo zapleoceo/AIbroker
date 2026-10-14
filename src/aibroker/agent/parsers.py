@@ -21,7 +21,16 @@ from aibroker.agent.billing import BILLING_REFUSED
 log = logging.getLogger(__name__)
 _EXEC_EVENT_TYPES = frozenset({"thread.started", "turn.started", "turn.completed", "turn.failed",
                                "item.started", "item.updated", "item.completed", "error"})
-_SAFE_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
+# Fixed allowlist of structural key names of `codex exec --json` events (top level and `item`):
+# the keys CodexParser reads, plus candidate model fields this diagnostic exists to discover. Any
+# other key is logged only as the constant "<key>" with a count - never its own text.
+_EXEC_KNOWN_KEYS = frozenset({
+    "type", "thread_id", "turn_id", "usage", "error", "message", "item", "id", "status", "text",
+    "command", "aggregated_output", "exit_code", "changes", "path", "kind", "server", "tool",
+    "arguments", "result", "input_tokens", "output_tokens", "total_tokens", "cached_input_tokens",
+    "reasoning_output_tokens", "model", "model_provider", "modelProvider", "model_name", "model_slug",
+    "reasoning_effort", "service_tier",
+})
 _MAX_LOGGED_SHAPES = 20
 _QUOTA = re.compile(r"usage limit|quota|limit reached|rate.?limit|too many requests|"
                     r"credit balance|exceeded your|"
@@ -253,11 +262,10 @@ class CodexParser:
 
     @staticmethod
     def _safe_keys(names: Any) -> list[str]:
-        """Key names that look like identifiers (sorted, max 30); anything else is only counted."""
-        keys = [k for k in names if isinstance(k, str) and _SAFE_KEY.fullmatch(k)]
-        unsafe = sum(1 for k in names if not (isinstance(k, str) and _SAFE_KEY.fullmatch(k)))
-        out = sorted(keys)[:30]
-        return out + [f"<unsafe-key>x{unsafe}"] if unsafe else out
+        """Allowlisted key names (sorted); every other key is only counted as "<key>"."""
+        keys = sorted({k for k in names if isinstance(k, str) and k in _EXEC_KNOWN_KEYS})
+        other = sum(1 for k in names if not (isinstance(k, str) and k in _EXEC_KNOWN_KEYS))
+        return keys + [f"<key>x{other}"] if other else keys
 
     def _log_shape(self, data: dict[str, Any]) -> None:
         """Diagnostics: log each distinct event shape once, KEY NAMES only (never values)."""
