@@ -26,6 +26,7 @@ src/aibroker/
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
     job_control.py     cancel one job / bulk cancel by trace_id or labels
+    job_list.py        read-only list of a project's jobs by one label (keyset + watermark)
     job_meta.py        trace_id / labels / Idempotency-Key validation
     response_cache.py  exact-match LRU+TTL for translate/prefilter
   providers/
