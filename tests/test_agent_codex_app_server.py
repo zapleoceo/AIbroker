@@ -570,8 +570,10 @@ async def test_a_non_schema_conflict_still_fails_closed_without_a_retry(monkeypa
     assert not _replies(sent)
 
 
+@pytest.mark.parametrize("tool_choice", [
+    "required", {"type": "function", "function": {"name": "lookup"}}])
 async def test_required_tool_not_called_sends_one_reminder_turn_then_completes(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, tool_choice):
     published = []
 
     async def publish(_run, call_id, *_rest):
@@ -586,7 +588,7 @@ async def test_required_tool_not_called_sends_one_reminder_turn_then_completes(
         if m.get("id") == 9:
             return _done("turn-2")
         return []
-    events, sent = await _dyn(monkeypatch, tmp_path, react, publish)
+    events, sent = await _dyn(monkeypatch, tmp_path, react, publish, tool_choice=tool_choice)
     assert events[-1].type == "run.completed", events[-1]
     starts = [m for m in sent if m.get("method") == "turn/start"]
     assert [m["id"] for m in starts] == [3, 4]
