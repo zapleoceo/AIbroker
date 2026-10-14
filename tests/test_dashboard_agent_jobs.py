@@ -94,7 +94,7 @@ def test_project_page_renders_agent_totals_models_and_runs():
     assert "Agent runs" in body and "codex-sub" in body and "claude-sub" in body
     assert "gpt-6.1-sol" in body and "subscription" in body
     assert "ex-1" in body and "ex-2" in body        # labels shown
-    assert "other-model" not in body and "ex-other" not in body and ">other<" not in body
+    assert "other-model" not in body and ">other<" not in body   # project 2's model and label
     models = ds.get(client, "/dashboard/projects/1", params={"range": "all", "tab": "models"}).text
     assert "gpt-6.1-sol" in models and "gpt-6.1-sol-2026" in models
 
@@ -181,3 +181,57 @@ def test_agent_job_drawer_opens():
     r = client.get("/dashboard/requests/job-101", cookies=ds.cookies(),
                    headers={"hx-request": "true"})
     assert r.status_code == 200 and "job-101" in r.text
+
+
+def test_agent_rows_survive_the_top_models_cut_with_many_paid_api_models():
+    ds.seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
+    ds.seed(*[ds.usage(i, minutes_ago=30 + i, model=f"paid/m{i:02d}", cost=1.0 + i)
+              for i in range(1, 15)])
+    ds.seed(*_agent(500, model="gpt-6.1-sol"), *_agent(501, cap="agent:claude",
+                                                        model="claude-opus-5"))
+    d = _bd()
+    names = [r["k"] for r in d["by_model"]]
+    assert "gpt-6.1-sol" in names and "claude-opus-5" in names
+    assert sum(1 for n in names if n.startswith("paid/")) == 12
+    assert {"codex-sub", "claude-sub"} <= {r["k"] for r in d["by_provider"]}
+    body = ds.get(client, "/dashboard/projects/1", params={"range": "all", "tab": "models"}).text
+    assert "gpt-6.1-sol" in body and "claude-opus-5" in body
+
+
+def test_cache_hit_is_normalised_per_agent_and_never_above_100():
+    ds.seed(ds.project(1, "stepan"))
+    # claude CLI: input_tokens EXCLUDES cache reads -> hit = 50000 / (10 + 50000)
+    # codex: cached_input_tokens is a SUBSET of input_tokens -> hit = 800 / 1000
+    ds.seed(*_agent(1, cap="agent:claude", model="claude-opus-5", tin=10, tout=5, cache=50_000),
+            *_agent(2, cap="agent:codex", model="gpt-6.1-sol", tin=1000, tout=5, cache=800))
+    d = _bd()
+    m = {r["k"]: r for r in d["by_model"]}
+    assert m["claude-opus-5"]["cdenom"] == 50_010 and m["gpt-6.1-sol"]["cdenom"] == 1000
+    hit = d["totals"]["cache_hit"]
+    assert abs(hit - 50_800 * 100.0 / 51_010) < 1e-6 and hit <= 100
+    body = ds.get(client, "/dashboard/projects/1", params={"range": "all", "tab": "models"}).text
+    assert "500000%" not in body and "100%" in body and "80%" in body
+
+
+def test_latency_sort_orders_agent_rows_by_the_duration_shown():
+    ds.seed(ds.project(1, "stepan"))
+    ds.seed(*_agent(1, dur_s=10), *_agent(2, dur_s=300), *_agent(3, dur_s=60))
+    rows = ds.run(rq.query_requests(rq.RequestFilter(project_id=1, sort="latency")))[0]
+    assert [r["duration_ms"] for r in rows] == [300_000, 60_000, 10_000]
+    rows = ds.run(rq.query_requests(rq.RequestFilter(project_id=1, sort="latency", desc=False)))[0]
+    assert [r["duration_ms"] for r in rows] == [10_000, 60_000, 300_000]
+
+
+def test_agent_breakdown_skips_a_job_that_also_has_usage_rows():
+    ds.seed(ds.project(1, "stepan"), ds.key(1, "gemini", "k1"))
+    ds.seed(*_agent(5), *_agent(6))
+    ds.seed(ds.usage(1, request_id="job-5", capability="agent:codex"))   # artificial overlap
+    d = _bd()
+    assert d["totals"]["agent"]["n"] == 1 and d["totals"]["api_calls"] == 1
+    assert d["totals"]["calls"] == 2
+
+
+def test_project_page_agent_table_cells_carry_ru_labels():
+    _seed_project_one()
+    body = ds.get(client, "/dashboard/projects/1", params={"range": "all"}).text
+    assert 'data-label="Duration" data-ru-label="Длительность"' in body

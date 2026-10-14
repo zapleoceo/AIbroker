@@ -141,14 +141,14 @@
     <tbody>
       {% for r in d.agent_recent %}
       <tr class="clickable">
-        <td data-label="When" class="nowrap"><button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.ref }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" aria-haspopup="dialog">{{ r.created_at|time_tag("mdhms") }}</button></td>
-        <td data-label="Provider · model" class="cell-trunc full">{{ m.req_outcome(r) }}</td>
-        <td data-label="Capability"><span class="pill">{{ r.capability or "—" }}</span></td>
-        <td data-label="Labels">{{ m.req_labels(r) }}</td>
-        <td data-label="Tokens" class="num mono">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}{% if r.cache_read_tokens %}<br><span class="dim">{{ r.cache_read_tokens|num }} {{ t("cache", "кэш") }}</span>{% endif %}</td>
-        <td data-label="Duration" class="num mono">{% if r.duration_ms is not none %}{{ r.duration_ms|ms_t }}{% else %}—{% endif %}</td>
-        <td data-label="Billing">{{ t("subscription", "подписка") }}</td>
-        <td data-label="Status">{{ m.req_status(r) }}</td>
+        <td data-label="When" data-ru-label="Когда" class="nowrap"><button type="button" class="linklike" hx-get="/dashboard/requests/{{ r.ref }}" hx-target="#drawer-body" hx-trigger="click from:closest tr" aria-haspopup="dialog">{{ r.created_at|time_tag("mdhms") }}</button></td>
+        <td data-label="Provider · model" data-ru-label="Провайдер · модель" class="cell-trunc full">{{ m.req_outcome(r) }}</td>
+        <td data-label="Capability" data-ru-label="Способность"><span class="pill">{{ r.capability or "—" }}</span></td>
+        <td data-label="Labels" data-ru-label="Метки">{{ m.req_labels(r) }}</td>
+        <td data-label="Tokens" data-ru-label="Токены" class="num mono">{{ r.tokens_in|num }}<span class="dim"> / </span>{{ r.tokens_out|num }}{% if r.cache_read_tokens %}<br><span class="dim">{{ r.cache_read_tokens|num }} {{ t("cache", "кэш") }}</span>{% endif %}</td>
+        <td data-label="Duration" data-ru-label="Длительность" class="num mono">{% if r.duration_ms is not none %}{{ r.duration_ms|ms_t }}{% else %}—{% endif %}</td>
+        <td data-label="Billing" data-ru-label="Оплата">{{ t("subscription", "подписка") }}</td>
+        <td data-label="Status" data-ru-label="Статус">{{ m.req_status(r) }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -168,7 +168,7 @@
         <td data-label="Model" class="cell-trunc full" title="{{ r.k }}"><a href="/dashboard/requests?project={{ project.id }}&amp;model={{ r.k|urlencode }}&amp;{{ rng.qs }}">{{ r.k }}</a>{% if r.served %}<span class="dim"> → {{ r.served|join(", ") }}</span>{% endif %}</td>
         <td data-label="Calls" class="num">{{ r.n|num }}</td>
         <td data-label="Success" class="num">{{ ((r.ok_n / r.n * 100)|pct(0)) if r.n else "—" }}</td>
-        <td data-label="Cache hit" class="num">{{ ((r.cache_r / r.tin * 100)|pct(0)) if r.tin and r.cache_r else "—" }}</td>
+        <td data-label="Cache hit" class="num">{{ ([r.cache_r / r.cdenom * 100, 100]|min|pct(0)) if r.cdenom and r.cache_r else "—" }}</td>
         <td data-label="Spend" class="num mono">{{ r.spend|money(4) }}</td>
       </tr>
       {% endfor %}

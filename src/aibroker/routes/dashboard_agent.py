@@ -26,6 +26,11 @@ AGENT_RECENT_LIMIT = 50
 # Shown when the run did not report its own provider (result_meta.provider).
 _PROVIDER_BY_CAP = {"agent:codex": "codex-sub", "agent:claude": "claude-sub"}
 _NO_MODEL = "(none)"
+# Cache-hit denominator. The Claude CLI reports input_tokens EXCLUDING cache reads
+# (agent/parsers.py: usage.input_tokens vs cache_read_input_tokens), so its
+# denominator is input + cache reads. Codex `cached_input_tokens` / app-server
+# `cachedInputTokens` are a SUBSET of the input count, so its denominator is input.
+_CACHE_EXCLUDED_FROM_INPUT = frozenset({"agent:claude"})
 
 
 def agent_provider(capability: str, reported: str | None) -> str:
@@ -35,7 +40,12 @@ def agent_provider(capability: str, reported: str | None) -> str:
 
 
 def _bucket_row() -> dict[str, Any]:
-    return {"n": 0, "spend": 0.0, "tin": 0, "tout": 0, "cache_r": 0, "ok_n": 0}
+    return {"n": 0, "spend": 0.0, "tin": 0, "tout": 0, "cache_r": 0, "ok_n": 0, "cdenom": 0}
+
+
+def cache_denominator(capability: str, tin: int, cache_r: int) -> int:
+    """Input tokens a cache hit is measured against (see the rule above)."""
+    return tin + (cache_r if capability in _CACHE_EXCLUDED_FROM_INPUT else 0)
 
 
 def _add(into: dict[str, dict[str, Any]], key: str, r: Any) -> None:
@@ -44,6 +54,7 @@ def _add(into: dict[str, dict[str, Any]], key: str, r: Any) -> None:
     b["tin"] += int(r.tin)
     b["tout"] += int(r.tout)
     b["cache_r"] += int(r.cache_r)
+    b["cdenom"] += cache_denominator(r.a_cap, int(r.tin), int(r.cache_r))
     if r.a_status == "done":
         b["ok_n"] += int(r.n)
 
@@ -57,7 +68,10 @@ async def agent_breakdown(project_id: int, start: datetime | None, end: datetime
     """Agent-job aggregates of one project in [start, end): totals, per
     provider / model / capability and a per-bucket calls series."""
     conds, p = q._win(start, end, "j.created_at", {"pid": project_id})
-    conds = ["j.project_id = :pid", *conds, "j.capability LIKE 'agent:%'"]
+    # Self-enforcing no-double-count rule: a job with usage_log rows is counted there.
+    conds = ["j.project_id = :pid", *conds, "j.capability LIKE 'agent:%'",
+             "NOT EXISTS (SELECT 1 FROM usage_log x WHERE x.request_id = "
+             "'job-' || CAST(j.id AS VARCHAR(20)))"]
     w = q._where(conds)
     bexpr = q._bucket_sql(bucket, await q._dialect(), "j.created_at")
     async with get_session() as s:
@@ -79,7 +93,7 @@ async def agent_breakdown(project_id: int, start: datetime | None, end: datetime
     cap: dict[str, dict[str, Any]] = {}
     served: dict[str, set[str]] = {}
     status: dict[str, int] = {}
-    tot = {"tin": 0, "tout": 0, "cache_r": 0}
+    tot = {"tin": 0, "tout": 0, "cache_r": 0, "cdenom": 0}
     for r in rows:
         _add(prov, agent_provider(r.a_cap, r.a_prov), r)
         pin = r.a_model or _NO_MODEL
@@ -91,6 +105,7 @@ async def agent_breakdown(project_id: int, start: datetime | None, end: datetime
         tot["tin"] += int(r.tin)
         tot["tout"] += int(r.tout)
         tot["cache_r"] += int(r.cache_r)
+        tot["cdenom"] += cache_denominator(r.a_cap, int(r.tin), int(r.cache_r))
     cs, ce = q._edges(start, end)
     buckets = q.bucket_starts(cs, ce, bucket)
     index = {b: i for i, b in enumerate(buckets)}
@@ -135,18 +150,23 @@ async def _usage_by_bucket(project_id: int, start: datetime | None, end: datetim
 
 def _merge_groups(api: list[dict[str, Any]], agent: list[dict[str, Any]],
                   limit: int = 0) -> list[dict[str, Any]]:
-    by_k = {r["k"]: dict(r) for r in api}
+    """API groups (cut to `limit` by spend) + agent groups. Agent rows cost 0, so
+    they are appended after the cut instead of competing for it."""
+    by_k = {r["k"]: {**r, "cdenom": int(r["tin"])} for r in api}
+    agent_only: list[dict[str, Any]] = []
     for a in agent:
         cur = by_k.get(a["k"])
         if cur is None:
-            by_k[a["k"]] = dict(a)
+            agent_only.append(dict(a))
             continue
-        for f in ("n", "tin", "cache_r", "ok_n"):
+        for f in ("n", "tin", "cache_r", "ok_n", "cdenom"):
             cur[f] = int(cur[f]) + a[f]
         if a.get("served"):
             cur["served"] = a["served"]
     out = sorted(by_k.values(), key=lambda r: (-float(r["spend"]), -int(r["n"]), str(r["k"])))
-    return out[:limit] if limit else out
+    if limit:
+        out = out[:limit]
+    return out + sorted(agent_only, key=lambda r: (-int(r["n"]), str(r["k"])))
 
 
 def merge_agent(d: dict[str, Any], a: dict[str, Any], api_daily: list[int]) -> dict[str, Any]:
@@ -161,7 +181,8 @@ def merge_agent(d: dict[str, Any], a: dict[str, Any], api_daily: list[int]) -> d
     t["cache_read"] += a["cache_r"]
     done = t["ok_n"] + t["err_n"]
     t["success"] = (t["ok_n"] * 100.0 / done) if done else None
-    t["cache_hit"] = (t["cache_read"] * 100.0 / t["tin"]) if t["tin"] else None
+    denom = (t["tin"] - a["tin"]) + a["cdenom"]          # API input + agent denominator
+    t["cache_hit"] = min(100.0, t["cache_read"] * 100.0 / denom) if denom else None
     t["agent"] = {k: a[k] for k in ("n", "done", "error", "cancelled", "active", "tin",
                                     "tout", "cache_r")}
     d["by_provider"] = _merge_groups(d["by_provider"], a["by_provider"])

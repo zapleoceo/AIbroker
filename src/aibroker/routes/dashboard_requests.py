@@ -24,6 +24,7 @@ from sqlalchemy import text
 
 from aibroker.db import get_session
 from aibroker.routes.dashboard_queries import (
+    _dialect,
     _opt_int,
     _opt_str,
     _row,
@@ -61,6 +62,12 @@ _AGENT_PROVIDER = (
     "COALESCE(j.result_meta ->> 'provider', CASE j.capability "
     "WHEN 'agent:codex' THEN 'codex-sub' WHEN 'agent:claude' THEN 'claude-sub' END)")
 _LABEL_KEYS = ("exam_run_id", "run_id")
+# Agent run duration in ms, the one dialect switch here: the latency sort must order
+# agent rows by the duration the row shows (their latency_ms is not an attempt sum).
+_DURATION_SQL = {
+    "postgresql": "CAST(EXTRACT(EPOCH FROM (j.completed_at - j.started_at)) * 1000 AS BIGINT)",
+    "sqlite": "CAST((julianday(j.completed_at) - julianday(j.started_at)) * 86400000 AS INTEGER)",
+}
 _SEARCH_RE = re.compile(r"(?:(job|u)-)?(\d+)")
 
 # Whitelisted ORDER BY (alias-prefixed at use) — user input only selects a key.
@@ -285,7 +292,8 @@ class RequestFilter:
             p["lbl"] = lab[1]
         return conds, p
 
-    def sql(self, since: datetime | None = None) -> tuple[str, dict[str, Any]]:
+    def sql(self, since: datetime | None = None,
+            dialect: str = "postgresql") -> tuple[str, dict[str, Any]]:
         """The CTE chain up to (and including) the filtered, ordered page
         window `pg`; `take` / `offset` are bound by the caller. `since` keeps
         only requests that started at or after it (see _SLICES)."""
@@ -312,7 +320,8 @@ class RequestFilter:
                 f" UNION ALL SELECT {_JOB_GK}, NULL, NULL, NULL, 0, NULL, j.project_id, "
                 "j.capability, NULL, 0.0, COALESCE(ar.usage_input_tokens, 0), "
                 "COALESCE(ar.usage_output_tokens, 0), COALESCE(ar.usage_cache_read_tokens, 0), "
-                f"0, 0{hit_col}, {_JOB_COLS}, {_AGENT_COLS} "
+                f"0, CASE WHEN {_AGENT_LIKE} THEN COALESCE({_DURATION_SQL.get(dialect, '0')}, 0) "
+                f"ELSE 0 END{hit_col}, {_JOB_COLS}, {_AGENT_COLS} "
                 f"FROM deep_jobs j LEFT JOIN agent_runs ar ON ar.run_id = j.id {_where(conds)}"
             )
         oc, op = self._outer_conditions(since)
@@ -364,7 +373,7 @@ def _shape(r: Any, now: datetime) -> dict[str, Any]:
 
 async def _fetch(f: RequestFilter, since: datetime | None, take: int, offset: int
                  ) -> list[dict[str, Any]]:
-    head, p = f.sql(since)
+    head, p = f.sql(since, await _dialect())
     p.update(take=take, offset=offset)
     async with get_session() as s:
         rows = (await s.execute(text(

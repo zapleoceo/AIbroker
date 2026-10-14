@@ -65,7 +65,14 @@ capability, the Models tab (pinned model, plus `result_meta.model_served` when p
 `agent_runs.model` (the pinned CLI model); tokens in/out/cache come from `agent_runs.usage_*`;
 cost is always 0 (billing = subscription, no invented price); duration = `completed_at -
 started_at`. **No double counting:** a plain job's attempts are counted only through `usage_log`,
-an agent job only through `deep_jobs`/`agent_runs`.
+an agent job only through `deep_jobs`/`agent_runs` (`agent_breakdown` also skips any job that has `usage_log` rows, the same
+NOT EXISTS rule as the journal). The project-page "Top models" cut keeps agent rows: they cost 0, so
+they are appended after the top-12 API models instead of competing for the cut.
+
+**Cache hit for agents** (`cache_denominator`, capped at 100%): the Claude CLI reports
+`input_tokens` excluding cache reads, so `agent:claude` is measured against input + cache reads;
+Codex `cached_input_tokens` / `cachedInputTokens` are a subset of its input, so `agent:codex` is
+measured against input. The journal's latency sort orders agent rows by their run duration.
 
 The Requests journal reuses the existing `job-<id>` machinery: agent jobs are rows of the
 "job without attempts" branch, now LEFT JOINed to `agent_runs`, so they show provider, pinned
