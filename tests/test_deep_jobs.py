@@ -317,3 +317,58 @@ def test_strip_audio_sql_has_a_postgres_and_a_sqlite_branch():
     pg, lite = deep_jobs._strip_audio_sql("postgresql"), deep_jobs._strip_audio_sql("sqlite")
     assert "jsonb_set(request, '{audio_b64}', 'null'::jsonb)" in pg and "->>" in pg
     assert "json_set(request, '$.audio_b64', json('null'))" in lite and "json_extract" in lite
+
+
+async def test_submit_queues_the_notify_on_the_insert_session_before_commit():
+    """The NOTIFY rides the INSERT's own transaction (Postgres delivers it at commit): it is
+    called once, with the session that holds the flushed row, not from a second session."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    pid = 984300
+    await _ensure_project(pid)
+    async with get_session() as s:
+        project = await s.get(ProjectRow, pid)
+    seen: list[tuple[AsyncSession, bool, bool]] = []
+
+    async def spy(session):
+        seen.append((session, session.in_transaction(),
+                     any(isinstance(o, DeepJobRow) for o in session.identity_map.values())))
+
+    with patch.object(deep_jobs, "_notify_dispatcher", spy):
+        outcome = await deep_jobs.submit_job_ex(
+            project=project, capability="chat:fast",
+            messages=[{"role": "user", "content": "notify-in-txn"}], model=None,
+            max_tokens=64, temperature=0.7, response_format=None, workflow="t")
+    assert len(seen) == 1 and isinstance(seen[0][0], AsyncSession)
+    assert seen[0][1] and seen[0][2]
+    async with get_session() as s:
+        assert (await s.get(DeepJobRow, outcome.job_id)).status == "pending"
+
+
+async def test_notify_failure_is_confined_to_a_savepoint_and_swallowed():
+    from types import SimpleNamespace
+
+    class _Sp:
+        entered = exited_with = None
+
+        async def __aenter__(self):
+            _Sp.entered = True
+
+        async def __aexit__(self, et, *_):
+            _Sp.exited_with = et
+            return False
+
+    class _Session:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        def begin_nested(self):
+            return _Sp()
+
+        async def execute(self, stmt):
+            assert "pg_notify" in str(stmt)
+            raise RuntimeError("boom")
+
+    await deep_jobs._notify_dispatcher(_Session())            # must not raise
+    assert _Sp.entered and _Sp.exited_with is RuntimeError
+    sqlite_like = SimpleNamespace(bind=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
+    await deep_jobs._notify_dispatcher(sqlite_like)           # no-op off Postgres

@@ -287,7 +287,9 @@ broker finishes its fallback chain). See `docs/api.md`.
   response is unchanged. *Terminal write:* `_finish` is one
   `UPDATE … WHERE id=:id [AND started_at=:expected]` (no row load); the claim fence is the
   `started_at` predicate and the transcription `audio_b64` is nulled in the same statement
-  (`jsonb_set` on Postgres, `json_set` on SQLite).
+  (`jsonb_set` on Postgres, `json_set` on SQLite). *Submit NOTIFY:* `pg_notify` is queued
+  on the INSERT's own session (inside a SAVEPOINT, best-effort) and delivered at its
+  commit, not from a second session after it.
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to

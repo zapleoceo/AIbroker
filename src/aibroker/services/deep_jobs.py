@@ -28,6 +28,7 @@ from typing import Any, NamedTuple
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
@@ -168,11 +169,18 @@ async def _find_inflight_duplicate(
         return None
 
 
-async def _notify_dispatcher() -> None:  # pragma: no cover — pg_notify is Postgres-only (test_submit_job_fires_pg_notify)
-    async with get_session() as s:
-        if s.bind.dialect.name != "postgresql":
-            return
-        await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
+async def _notify_dispatcher(s: AsyncSession) -> None:
+    """Queue a NOTIFY on the enqueue's own session: Postgres delivers it when the INSERT
+    commits, so the dispatcher never wakes before the row is visible and no second
+    session/connection is spent. Best-effort — the SAVEPOINT confines a failure to the
+    NOTIFY, the enqueue still commits and the dispatcher's timed poll covers the wake-up."""
+    if s.bind.dialect.name != "postgresql":
+        return
+    try:
+        async with s.begin_nested():
+            await s.execute(text(f"SELECT pg_notify('{JOBS_CHANNEL}', '')"))
+    except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
+        log.debug("pg_notify(%s) failed: %s — poll fallback covers it", JOBS_CHANNEL, e)
 
 
 # The legacy dedup/insert paths are exercised by the Postgres-only tests in
@@ -257,6 +265,7 @@ async def submit_job_ex(
                 s.add(row)
                 await s.flush()
                 job_id = row.id
+                await _notify_dispatcher(s)      # delivered at this transaction's commit
         except IntegrityError:
             # Lost the (project_id, idempotency_key) race: the winner's job is the answer.
             winner = (await replayed_job_id(project.id, idempotency_key, phash)
@@ -279,15 +288,10 @@ async def submit_job_ex(
                 "VALUES (:p, :c, 'pending', :r, 0) RETURNING id"
             ), {"p": project.id, "c": capability,
                 "r": _json.dumps(request)})).scalar_one()
-    # After the enqueue COMMITS: wake the dispatcher instantly via NOTIFY so an
-    # interactive chat call doesn't eat up to a full poll interval of claim
-    # latency. Best-effort — the dispatcher's timed poll is the guaranteed
-    # fallback, so a failed NOTIFY can delay a job but never lose it.
-    try:
-        await _notify_dispatcher()
-    except Exception as e:  # noqa: BLE001 — never fail a durable enqueue over a wake-up hint
-        log.debug("pg_notify(%s) failed: %s — poll fallback covers it",
-                  JOBS_CHANNEL, e)
+            await _notify_dispatcher(s)
+    # The wake-up NOTIFY (instant claim for an interactive call) was queued inside the
+    # INSERT transaction above and is delivered when it commits; best-effort, the
+    # dispatcher's timed poll is the guaranteed fallback.
     log.info("job %d enqueued: project=%s %s%s", job_id, project.id, capability,
              log_tag(trace_id, labels))
     return SubmitOutcome(job_id, False)
