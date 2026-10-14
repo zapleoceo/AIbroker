@@ -429,6 +429,49 @@ budget. `chat:deep` is **async-only** (nemotron runs minutes);
 `GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
 endpoints.
 
+### List jobs by label — `GET /v1/jobs?label.<key>=<value>`
+
+Read-only list of **your project's** jobs carrying one label pair, for a client that tags every job
+(e.g. `labels.exam_run_id`) and wants to see what the broker holds under that tag. Same key, scope and
+project isolation as the poll `GET /v1/jobs/{job_id}`; an `agent:*` job is listed only when a poll of it
+would be allowed (`llm:agent` scope, allowlist, policy) - otherwise it is silently absent.
+
+| Query | Meaning |
+|---|---|
+| `label.<key>=<value>` | **required, exactly one pair**; key and value follow the label rules (1-128 chars of `[A-Za-z0-9._:-]`). Zero or two pairs, a bad key/value, or an unknown query parameter is `422` |
+| `trace_id` | optional exact match |
+| `status` | optional: `pending` \| `running` \| `done` \| `error` \| `cancelled` |
+| `limit` | 1..200, default 100 |
+| `cursor` | opaque token from `next_cursor`; a malformed or tampered one is `422` |
+
+Items hold metadata only: `job_id`, `status`, `capability`, `created_at`, `started_at`, `completed_at`,
+`labels`, `trace_id`, `idempotency_key`, `retry_count`, `cancel_requested`. Never the request, prompts,
+result text, error text or secrets - poll the job for those. Ordered by `job_id` ascending.
+
+Response: `{jobs, next_cursor, pagination_complete, no_nonterminal_in_filter, high_watermark,
+retention_days, as_of}`.
+
+- `pagination_complete` - there is no further page within the watermark (`next_cursor` is `null`).
+- `no_nonterminal_in_filter` - computed by a separate query over the **whole** label/`trace_id`-filtered
+  set up to the watermark (the `status` filter is ignored, so `status=done` cannot claim that nothing is
+  in flight): no job of that set is `pending` or `running`. It is independent of paging: the last page can
+  hold only `done` jobs while an earlier page had a `running` one.
+- `high_watermark` - the highest `job_id` of your project when the first page was served; the cursor
+  carries it, and every later page is bounded by `id <= high_watermark`.
+- `retention_days` - `JOB_RETENTION_DAYS`; finished jobs older than this are purged.
+- `as_of` - server time of this page.
+
+**What a listing does not prove.**
+
+- The snapshot is **not atomic across pages**: the *set* of ids is fixed by the watermark, but a listed
+  job's `status` can change between pages.
+- A job created after the first page (`job_id` above `high_watermark`) is not in this walk; start a new
+  walk (no cursor) to see it.
+- Finished jobs older than `retention_days` are deleted, so the list cannot prove that a job never
+  existed. A client must reconcile against the job ids it submitted itself (poll the missing ones).
+- A row id can become visible slightly out of order under concurrent inserts, so a job committed in the
+  instant of the first page may fall on either side of the watermark.
+
 ### `/v1/embed?provider=<p>` (default `voyage`)
 
 The broker retries **up to 5 keys of the same provider** on failure
