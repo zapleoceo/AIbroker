@@ -750,7 +750,7 @@ subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
 routes, `null` otherwise.
-The catalog builds the fields with `input_modalities()`, `output_modalities()` and `supports_tools()`. The image flag comes from `subscription_image_output_verified()`, which fails closed (`False`) on an invalid setting.
+The catalog builds the fields with `input_modalities()`, `output_modalities()` and `supports_tools()`. The image flag comes from `subscription_image_output_verified()`, which fails closed (`False`) on an invalid setting without touching the catalog or routing; it lists only verified `codex-sub` models.
 `job_request` describes the Broker's validation of `POST /v1/jobs` for each
 model. It is `null` for routes served by other endpoints, such as embedding or
 multipart transcription. `accepted.const` means the field may be omitted (the

@@ -249,16 +249,20 @@ def test_output_modalities_declare_image_only_for_a_verified_image_codex_model(m
 
 
 def test_image_output_setting_fails_closed(monkeypatch):
-    from aibroker.providers.subscriptions import subscription_image_output_verified
+    from aibroker.providers.subscriptions import (
+        subscription_image_output_verified,
+        subscription_model_verified,
+    )
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS",
                         '{"codex-sub":["gpt-6.1-sol","gpt-6-luna"]}')
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
                         '{"codex-sub":["gpt-6.1-sol"]}')
-    # an unverified model, a non-Codex provider or a malformed value refuses the catalog
+    # a listing-only flag: a bad value turns the flag off but never refuses the catalog
     for bad in ('{"codex-sub":["gpt-6-luna"]}', '{"claude-sub":["gpt-6.1-sol"]}', "broken"):
         monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS", bad)
-        assert subscription_models() == [], bad
+        assert subscription_model_verified("codex-sub/gpt-6.1-sol"), bad
         assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is False
+        assert subscription_image_output_verified("codex-sub/gpt-6-luna") is False
     monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS", "default")
     assert subscription_image_output_verified("codex-sub/gpt-6.1-sol") is False   # default empty
     assert {r["id"]: r for r in listing()}["codex-sub/gpt-6.1-sol"]["output_modalities"] == ["text"]
