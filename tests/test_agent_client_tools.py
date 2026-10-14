@@ -224,3 +224,18 @@ async def test_lease_loss_still_raises_when_withdrawing_the_call_fails(monkeypat
         await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
     assert any("could not withdraw the pending client tool" in r.message and r.exc_info
                for r in caplog.records)
+
+
+@pytest.mark.parametrize("wait_s", [90, 300])
+async def test_tool_call_deadline_follows_agent_tool_wait_s(monkeypatch, wait_s):
+    from datetime import UTC, datetime
+
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "AGENT_TOOL_WAIT_S", wait_s)
+    job_id = await _job()
+    before = datetime.now(UTC).replace(tzinfo=None)
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    async with get_session() as s:
+        deadline = datetime.fromisoformat(
+            (await s.get(DeepJobRow, job_id)).result_meta["client_tool"]["deadline"])
+    assert wait_s - 5 <= (deadline - before).total_seconds() <= wait_s + 5

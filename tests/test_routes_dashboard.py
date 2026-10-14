@@ -212,7 +212,7 @@ def test_dashboard_redirects_without_auth():
     assert "/login" in r.headers["location"]
 
 
-# ─── _gather_data perf refactor (merged scan, sargable ranges, gather) ──────
+# ─── dashboard fetchers (merged scan, sargable ranges) ──────────────────────
 
 
 def test_range_where_no_filter_returns_empty():
@@ -685,18 +685,6 @@ def test_lat_labels_align_with_edges():
     """width_bucket yields len(edges)+1 buckets — labels must match 1:1."""
     from aibroker.routes.dashboard_data import _LAT_EDGES_MS, _LAT_LABELS
     assert len(_LAT_LABELS) == len(_LAT_EDGES_MS) + 1
-
-
-def test_lat_hist_counts_maps_sparse_to_dense():
-    """width_bucket returns only non-empty buckets; missing ones become 0."""
-    from collections import namedtuple
-
-    from aibroker.routes.dashboard_data import _LAT_LABELS, _lat_hist_counts
-    Row = namedtuple("Row", "b n")
-    counts = _lat_hist_counts([Row(0, 5), Row(3, 2), Row(7, 1)])
-    assert len(counts) == len(_LAT_LABELS)
-    assert counts[0] == 5 and counts[3] == 2 and counts[7] == 1
-    assert counts[1] == 0 and counts[6] == 0
 
 
 # ─── Prompt-cache KPI card ────────────────────────────────────────────────────

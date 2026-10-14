@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -99,14 +99,34 @@ _SECURITY_HEADERS = {
 }
 
 
-@app.middleware("http")
-async def _security_headers(
-    request: Request, call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
-    response = await call_next(request)
-    for name, value in _SECURITY_HEADERS.items():
-        response.headers.setdefault(name, value)   # never override a route's own
-    return response
+_SECURITY_HEADERS_RAW = tuple(
+    (name.lower().encode("latin-1"), value.encode("latin-1"))
+    for name, value in _SECURITY_HEADERS.items()
+)
+
+
+class _SecurityHeadersMiddleware:
+    """Pure-ASGI (no BaseHTTPMiddleware task hop, streaming bodies pass untouched):
+    add the security headers to every response start. A header a route already set
+    is kept."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                present = {k.lower() for k, _ in headers}
+                headers.extend(h for h in _SECURITY_HEADERS_RAW if h[0] not in present)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class _RequestIdMiddleware:
@@ -138,6 +158,7 @@ class _RequestIdMiddleware:
             await self.app(scope, receive, send_with_id)
 
 
+app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_RequestIdMiddleware)
 
 

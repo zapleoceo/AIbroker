@@ -18,7 +18,6 @@ from aibroker.providers.registry import (
     model_for,
     paid_providers,
     providers_with_json,
-    spec_or_default,
 )
 
 Capability = Literal[
@@ -181,8 +180,3 @@ def deprioritize_deepseek_for_savings(chain: list[str], *, should_defer: bool) -
         return chain  # no free provider follows deepseek — nothing to gain
     paid_after = [p for p in suffix if p in paid]
     return [*prefix, *free_after, "deepseek", *paid_after]
-
-
-def provider_rank(provider: str) -> int:
-    """Fixed provider order for tie-breaking (ProviderSpec.rank)."""
-    return spec_or_default(provider).rank

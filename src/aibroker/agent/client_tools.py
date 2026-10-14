@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 
 from aibroker.agent.lock import Lease, check_fence
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow
 from aibroker.services.tool_contract import validate_result
@@ -16,7 +17,6 @@ from aibroker.services.tool_contract import validate_result
 MAX_CALLS = 16
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 64 * 1024
-TOOL_WAIT_S = 300
 
 
 class ClientToolConflict(Exception):
@@ -73,7 +73,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
         ):
             raise ClientToolConflict("tool call already pending or limit reached")
         meta["client_tool"] = {"call_id": call_id, "name": name, "arguments": raw,
-                               "deadline": (_now() + timedelta(seconds=TOOL_WAIT_S)).isoformat(),
+                               "deadline": (_now() + timedelta(seconds=get_settings().AGENT_TOOL_WAIT_S)).isoformat(),
                                "state": "waiting"}
         job.result_meta = meta
 

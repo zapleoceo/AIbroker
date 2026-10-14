@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # session pinned to a real server backend). Empty = no pooler in front,
     # fall back to DATABASE_URL — single-node setups set nothing.
     DIRECT_DATABASE_URL: str = ""
+    # SQLAlchemy pool per process. Defaults suit the api; monitor and the agent
+    # workers touch the DB lightly and set a small pool in docker-compose.yml so
+    # they do not each hold up to 30 pgbouncer client connections.
+    DB_POOL_SIZE: int = Field(10, ge=1)
+    DB_MAX_OVERFLOW: int = Field(20, ge=0)
 
     @property
     def direct_database_url(self) -> str:
@@ -122,6 +127,9 @@ class Settings(BaseSettings):
     AGENT_WORKER_ENABLED: bool = False
     AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
     AGENT_CONCURRENCY_CLAUDE: int = 1
+    # How long a subscription run waits for the caller's tool result before the call expires (and
+    # its worker slot is freed). The run keeps its slot while it waits.
+    AGENT_TOOL_WAIT_S: int = Field(300, ge=10, le=1800)
     AGENT_WORKSPACE_ROOT: str = "/var/lib/aibroker/agent-workspaces"
     # The owner has checked in the Claude account settings that usage credits / extra usage are
     # OFF (a missing API key does NOT prove that). Until true, autonomous/exam agent runs are

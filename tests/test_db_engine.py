@@ -76,3 +76,41 @@ def test_compose_pins_pgbouncer_max_prepared_statements():
         "docker-compose.yml no longer sets MAX_PREPARED_STATEMENTS on "
         "pgbouncer — asyncpg + transaction pooling is unsafe without it"
     )
+
+
+async def test_init_engine_applies_pool_settings(monkeypatch):
+    """pool_size / max_overflow come from settings, not literals."""
+    from aibroker.config import get_settings
+
+    await close_engine()
+    seen: dict = {}
+
+    def fake_create(url, **kw):
+        seen.update(kw)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(engine_mod, "create_async_engine", fake_create)
+    monkeypatch.setattr(
+        engine_mod, "get_settings",
+        lambda: get_settings().model_copy(update={"DB_POOL_SIZE": 2, "DB_MAX_OVERFLOW": 3}),
+    )
+    with pytest.raises(RuntimeError, match="stop"):
+        await init_engine()
+    assert (seen["pool_size"], seen["max_overflow"]) == (2, 3)
+    assert seen["pool_pre_ping"] is True
+
+
+def test_pool_defaults_unchanged_and_compose_overrides():
+    import re
+    from pathlib import Path
+
+    from aibroker.config import get_settings
+
+    s = get_settings()
+    assert (s.DB_POOL_SIZE, s.DB_MAX_OVERFLOW) == (10, 20)
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    assert len(re.findall(r'DB_POOL_SIZE: "2"', compose)) == 3          # monitor + 2 claude workers
+    assert len(re.findall(r'DB_MAX_OVERFLOW: "3"', compose)) == 3
+    # the codex worker runs AGENT_CONCURRENCY_CODEX (6-7) runs in parallel: a larger pool
+    assert len(re.findall(r'DB_POOL_SIZE: "4"', compose)) == 1
+    assert len(re.findall(r'DB_MAX_OVERFLOW: "6"', compose)) == 1

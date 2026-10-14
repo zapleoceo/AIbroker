@@ -64,38 +64,6 @@ command="/usr/local/bin/aibroker-deploy",no-port-forwarding,no-X11-forwarding,no
 If this key leaks, the worst an attacker can do is re-run our deploy
 script. No shell, no scp, no port-forward.
 
-## One-shot: import legacy usage from Vera + Stepan
-
-Before the broker existed both projects logged token usage in their own
-`usage_log` tables. To consolidate that history into the broker
-dashboard's per-project drill-down:
-
-```bash
-ssh hetzner-root
-cd /var/www/aibroker
-./infra/migrate_legacy_usage.sh dry-run   # show source counts + sums
-./infra/migrate_legacy_usage.sh apply     # COPY into broker.usage_log
-```
-
-What it does:
-- Resolves `projects.id` in the broker by name (`vera`, `stepan`).
-- `DELETE` any prior `legacy:%`-tagged rows for that project — reruns
-  don't double-count.
-- COPYs from `<source>-postgres` directly into `aibroker-postgres` via
-  a stdout pipe (no intermediate file).
-- Imported rows are tagged `workflow = 'legacy:vera[:original_workflow]'`
-  so they're distinguishable from live broker traffic in the drill-down's
-  capability/workflow breakdown.
-- `api_key_id` is NULL (legacy ids don't map to broker `api_keys`; FK is
-  `ON DELETE SET NULL`).
-- `lease_id` and `http_status` are NULL (legacy schemas lack them).
-- `success` (bool) becomes `status` (`'ok'` / `'error'`).
-- `error_kind` is copied when the source has the column (Vera does;
-  Stepan does not).
-
-Rerun whenever you want a fresh snapshot — old `legacy:%` rows are
-wiped and re-imported, live broker rows are never touched.
-
 ## Job retention (2026-07-26)
 
 `deep_jobs` had no retention and had grown to **1.6 GB / 103k rows** — every row
@@ -339,10 +307,12 @@ relaxation is required.
 | service | cpus | mem_limit | pids_limit | workspaces tmpfs |
 |---|---|---|---|---|
 | `agent-worker` (Claude) | 1 | 1g | 256 | unchanged |
-| `agent-worker-codex` | 2 | 2g | 512 | 1024m (was 512m) |
+| `agent-worker-codex` | 3 | 3g | 768 | 1024m (was 512m) |
 
-`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `2`)
-sets parallel Codex runs per container. The Codex limits above are sized for 2 (measured 2026-10-13: one run peaks at about
+`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `7`)
+sets parallel Codex runs per container. The Codex limits above are sized for 7 (measured 2026-10-14 at 4 parallel: peak 174% CPU,
+665 MiB, 184 pids, i.e. ~0.45 core and ~46 pids per run on average; CPU is the limit, so 3 of the
+host's 4 cores go to Codex and ~1 stays for api/postgres/neighbours. Earlier, one run peaked at about
 +140 MiB RSS over a 187 MiB idle worker, about 50 pids, about one core; the host has 4 vCPU and
 ~3.2 GB available). Raise it only
 after reading the auth-refresh guard in `agent-runs.md`: when `last_refresh` in the Codex
@@ -831,7 +801,7 @@ connections. The documented threshold was "add PgBouncer when a second
 broker node appears or the worker count doubles"; the 2026-07-16 scale
 work (Redis shared state, NOTIFY dispatcher — the prep for a second node)
 crossed that line, so the pooler went in with it. The app-side SQLAlchemy
-pool is unchanged — its 30 per-process connections now terminate at
+pool is unchanged for the api (`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`, 10/20) — its 30 per-process connections now terminate at
 pgbouncer, which multiplexes them onto ~15 real backends. Session-level
 caveats that shaped the layout: no advisory locks or LISTEN on pooled
 connections (hence `DIRECT_DATABASE_URL`), `pool_pre_ping` stays on.
@@ -867,6 +837,7 @@ docker compose up -d
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the two Claude agent workers, which use the DB lightly, and 4 / 6 for `agent-worker-codex`, which runs `AGENT_CONCURRENCY_CODEX` (6-7) runs at once (each run: event writes, 1 s cancel poll, lease/auth-gate heartbeats, client-tool poll); read in `aibroker.db.engine.init_engine` |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
 

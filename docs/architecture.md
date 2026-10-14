@@ -109,7 +109,7 @@ errors (IntegrityError…) surface immediately — they're bugs, not blips. Befo
 this, a Postgres restart at the wrong instant produced a billed-but-unrecorded
 call and a client 500 for a response the broker had already paid for.
 
-`litellm` is PINNED (==1.92.0, pyproject + Dockerfile): the provider-error
+`litellm` is PINNED (==1.103.2, in pyproject and `requirements.lock`, which the Dockerfile installs): the provider-error
 classification (`classify_provider_error` + cooldown sign tables) is calibrated
 against version-specific litellm behaviour — e.g. cohere quota-429 arriving as
 `APIConnectionError`. A silent minor bump can reshuffle exception classes and
@@ -276,6 +276,20 @@ broker finishes its fallback chain). See `docs/api.md`.
   the SAME `run_chat` the sync path uses. On success → `done`; the client's
   next `GET /v1/jobs/{id}` poll reads the result row from Postgres (works on
   whichever worker answers).
+  *Slot refill:* every in-flight job task carries a done-callback that sets the
+  dispatcher's wake event, so a finished job frees its slot and the next claim runs
+  at once instead of waiting for a NOTIFY or the idle poll. The stale-`running`
+  requeue sweep runs on startup and then at most every `_REQUEUE_STALE_EVERY_S`=60 s
+  (its window is 25 min), not on every tick.
+  *Poll read:* `get_job` returns a `JobView` built from explicit columns plus the three
+  JSON paths the poll routes use (`request->model`, `account_id`, `client_job`), so a
+  poll never loads the multi-KB `request` JSONB (prompts, base64 audio); the poll
+  response is unchanged. *Terminal write:* `_finish` is one
+  `UPDATE … WHERE id=:id [AND started_at=:expected]` (no row load); the claim fence is the
+  `started_at` predicate and the transcription `audio_b64` is nulled in the same statement
+  (`jsonb_set` on Postgres, `json_set` on SQLite). *Submit NOTIFY:* `pg_notify` is queued
+  on the INSERT's own session (inside a SAVEPOINT, best-effort) and delivered at its
+  commit, not from a second session after it.
 - **Resilience (why a queue, not fire-and-forget).**
   - *Survives a deploy.* On a graceful SIGTERM the dispatcher waits `JOB_SHUTDOWN_GRACE_S`
     (default 5 s, max 8 s) for in-flight calls, then returns the jobs it still holds to
@@ -380,7 +394,7 @@ floor on master.
   Each cell uses `data-sort` for the canonical comparable value, so
   monetary or status text doesn't break ordering.
 
-**`_gather_data` performance (2026-07-01).** The all-time default load (no
+**Dashboard overview load performance (2026-07-01).** The all-time default load (no
 date filter) was taking up to ~30s once `usage_log` passed ~450k rows:
 `range_stats` and `proj_spend` each did a separate full-table `SUM`, and
 `created_at::date = ...` casts made the "calls last 1h" / "tokens today"
@@ -418,15 +432,13 @@ busiest bucket). The workflow half attributes cost/calls to each caller task
 query.
 
 Each capability/workflow **row** also carries a mini ok/error histogram
-(`_sparkline_svg`, 2026-07-10): `_SPARK_BUCKETS` (24) thin stacked bars —
+(`_sparkline_svg`, 2026-07-10): 24 thin stacked bars —
 blue=ok, red=error — spanning the selected range, so an error burst on one
 specific capability (e.g. `chat:smart` timing out) is visible per-row without
 switching to the latency histogram, which isn't filtered by capability/
-workflow. `dashboard_data._fetch_type_sparklines(project_id, hours, column)`
-buckets `usage_log` via `width_bucket(extract(epoch from created_at), …)`
-into N equal-width time slices and counts ok/error per slice — one query for
-capability, one for workflow (both small: buckets × distinct values, not raw
-rows). Each row's bars scale to that row's OWN busiest bucket, not the
+workflow. The per-row series come from the `spark_for` helper in
+`dashboard_queries` (one query for capability, one for workflow — both small:
+buckets × distinct values, not raw rows). Each row's bars scale to that row's OWN busiest bucket, not the
 busiest across all rows, so a quiet workflow stays visible next to a loud one.
 The svg is sized by CSS, not by attributes (2026-07-30): it carries only a
 `viewBox` plus `preserveAspectRatio="none"`, and `.brk-card td.sp` gives the
@@ -435,11 +447,6 @@ column has no minimum content width, so on a narrow viewport it yields space
 to the label/cost columns instead of pushing the chart past the card's right
 edge — which is exactly what a hard-coded `width="96"` used to do. Bucket
 count is therefore constant at any width; only bar thickness changes.
-`_fetch_type_sparklines` is `# pragma: no cover` like the other Postgres-only
-fetchers in `dashboard_data.py` (`_fetch_calls_1h`, `_fetch_provider_summary`)
-— `now()`/`width_bucket`/`extract(epoch)` have no SQLite equivalent, so
-diff-cover's SQLite run can't reach it; it's exercised by the Postgres-only
-`test_fetch_type_sparklines_splits_ok_and_error_by_bucket`.
 **Every aggregate is scoped to the selected range** — only the "recent 50
 calls" table ignores it. The histogram surfaces a slow tail that a single
 average hides (e.g. an avg of 6 s that is really fast calls plus a fat `>30s`
@@ -623,7 +630,6 @@ symbols are documented):
 - **Registry** (`providers/registry.py`): `spec_or_default`, `get_spec`, `provider_names`,
   `all_models`, `model_spec`, `provider_of_model_id`, `max_keys_for`, `cooldown_base_for`,
   `cache_sticky_providers`, `providers_with_json` — views over the `ProviderSpec` table.
-  `routing/chains.provider_rank` exposes `ProviderSpec.rank`.
 - **Catalog** (`providers/catalog.py`): `PinTarget`, `canonical_name`, `capability_family`,
   `pinnable_models`, `price_info`, `listing` (rows of `GET /v1/models`, served by
   `routes/proxy.list_models` with the `ModelsResponse` schema).
