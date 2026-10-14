@@ -221,6 +221,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Explicit tag: monitor reuses this image (one build, not two) and the agent workers
+    # build FROM it. Same name compose derived implicitly for the aibroker project.
+    image: aibroker-api:latest
     container_name: aibroker-api
     depends_on:
       postgres:
@@ -277,9 +280,7 @@ services:
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
   monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: aibroker-api:latest   # same Dockerfile as api: built once by the api service
     container_name: aibroker-monitor
     depends_on:
       api:
