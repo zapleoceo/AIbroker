@@ -38,9 +38,6 @@ def forbidden_env_present(capability: str, env: Mapping[str, str]) -> list[str]:
             if name in FORBIDDEN_ENV.get(capability, ()) or name.startswith(prefixes)]
 
 
-RUN_MODES = ("manual", "autonomous", "exam")
-
-
 def paid_continuation_refusal(run_mode: str, risk_ack: bool, verified_off: bool) -> RunFailed | None:
     """Absence of API env does not prove no paid continuation (usage credits / extra usage on
     the account can spend after wrap-up). Until the owner verified it OFF, only a manual run

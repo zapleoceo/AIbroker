@@ -13,7 +13,6 @@ version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
-    { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -47,7 +46,6 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'dev'", specifier = ">=0.20" },
     { name = "asyncpg", specifier = ">=0.30" },
-    { name = "click", specifier = ">=8.1" },
     { name = "cryptography", specifier = ">=43" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },

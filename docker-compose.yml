@@ -221,6 +221,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Explicit tag: monitor reuses this image (one build, not two) and the agent workers
+    # build FROM it. Same name compose derived implicitly for the aibroker project.
+    image: aibroker-api:latest
     container_name: aibroker-api
     depends_on:
       postgres:
@@ -277,9 +280,7 @@ services:
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
   monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: aibroker-api:latest   # same Dockerfile as api: built once by the api service
     container_name: aibroker-monitor
     depends_on:
       api:
@@ -292,6 +293,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       DIRECT_DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@postgres:5432/aibroker
       REDIS_URL: redis://redis:6379/0
       TOKEN_SECRET: ${TOKEN_SECRET}
@@ -347,6 +351,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
@@ -405,6 +412,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # Light DB use: a small pool (api keeps the 10/20 default).
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "3"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret
@@ -458,6 +468,9 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://aibroker:${POSTGRES_PASSWORD}@pgbouncer:6432/aibroker
+      # 6-7 parallel Codex runs (AGENT_CONCURRENCY_CODEX): a larger pool than the other workers.
+      DB_POOL_SIZE: "4"
+      DB_MAX_OVERFLOW: "6"
       # The settings model requires these three, but the agent lane uses none of them: inert
       # placeholders, NOT the broker secrets (the CLI could otherwise read them via /proc).
       TOKEN_SECRET: agent-worker-placeholder-token-secret

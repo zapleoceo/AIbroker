@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # session pinned to a real server backend). Empty = no pooler in front,
     # fall back to DATABASE_URL — single-node setups set nothing.
     DIRECT_DATABASE_URL: str = ""
+    # SQLAlchemy pool per process. Defaults suit the api; monitor and the agent
+    # workers touch the DB lightly and set a small pool in docker-compose.yml so
+    # they do not each hold up to 30 pgbouncer client connections.
+    DB_POOL_SIZE: int = Field(10, ge=1)
+    DB_MAX_OVERFLOW: int = Field(20, ge=0)
 
     @property
     def direct_database_url(self) -> str:
