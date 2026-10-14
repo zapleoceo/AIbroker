@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from aibroker.main import _security_headers, app
+from aibroker.main import _SecurityHeadersMiddleware, app
 
 client = TestClient(app)
 
@@ -37,14 +37,58 @@ def test_hsts_has_no_include_subdomains_or_preload():
 
 
 async def test_security_headers_do_not_override_a_route_header():
-    from starlette.responses import Response
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"X-Frame-Options", b"SAMEORIGIN")]})
+        await send({"type": "http.response.body", "body": b"x"})
 
-    async def call_next(_request):
-        return Response("x", headers={"X-Frame-Options": "SAMEORIGIN"})
+    sent = []
 
-    resp = await _security_headers(None, call_next)
-    assert resp.headers["x-frame-options"] == "SAMEORIGIN"
-    assert resp.headers["x-content-type-options"] == "nosniff"
+    async def send(message):
+        sent.append(message)
+
+    await _SecurityHeadersMiddleware(inner)(
+        {"type": "http", "headers": []}, None, send)
+    headers = dict(sent[0]["headers"])
+    assert headers[b"X-Frame-Options"] == b"SAMEORIGIN"
+    assert b"x-frame-options" not in headers
+    assert headers[b"x-content-type-options"] == b"nosniff"
+    assert sent[1]["body"] == b"x"
+
+
+def test_security_headers_on_streaming_and_error_responses():
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import StreamingResponse
+
+    probe = FastAPI()
+
+    @probe.get("/stream")
+    async def stream():
+        async def gen():
+            yield b"a"
+            yield b"b"
+        return StreamingResponse(gen())
+
+    @probe.get("/teapot")
+    async def teapot():
+        raise HTTPException(status_code=418)
+
+    @probe.get("/boom")
+    async def boom():
+        raise RuntimeError("boom")
+
+    probe.add_middleware(_SecurityHeadersMiddleware)
+    c = TestClient(probe, raise_server_exceptions=False)
+    r = c.get("/stream")
+    assert r.content == b"ab"
+    for path in ("/stream", "/teapot", "/nope"):
+        r = c.get(path)
+        for name, value in _EXPECTED.items():
+            assert r.headers.get(name) == value, (path, name)
+    # An unhandled exception is answered by Starlette's outermost
+    # ServerErrorMiddleware, which sits outside every user middleware: the
+    # same as the old BaseHTTPMiddleware, so no headers on that 500.
+    assert c.get("/boom").status_code == 500
 
 
 def test_openapi_json_is_public_but_hides_owner_only_routes():
