@@ -6,12 +6,13 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from aibroker.main import app
+from aibroker.routes import dashboard_range
 from aibroker.routes import dashboard_requests as rq
 from tests import dash_seed as ds
 
@@ -229,9 +230,14 @@ def test_one_attempt_shows_no_tries_prefix():
     assert "tries" not in body and 'data-ru="1 попытка"' not in body
 
 
-def test_pagination_offers_load_more_then_stops():
+def test_pagination_offers_load_more_then_stops(monkeypatch):
+    # Fixed clock: with the real one, 53 rows minutes_ago 0..52 crossed midnight when the suite ran
+    # just after 00:00 UTC and "today" held only some of them.
+    day = date(2026, 6, 29)
+    monkeypatch.setattr(dashboard_range, "today_in", lambda tz: day)
+    noon = datetime(2026, 6, 29, 12, 0)              # naive UTC, like ds.now() and the DateTime column
     ds.seed(ds.project(1), ds.key(1))
-    ds.seed(*[ds.usage(100 + i, minutes_ago=i) for i in range(53)])
+    ds.seed(*[ds.usage(100 + i, at=noon - timedelta(minutes=i)) for i in range(53)])
     first = _get("/dashboard/requests", params={"range": "today"}).text
     assert first.count('class="clickable"') == 50
     assert 'hx-select-oob="#req-more"' in first and "page=1" in first

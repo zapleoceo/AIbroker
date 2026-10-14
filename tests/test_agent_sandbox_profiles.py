@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import insert
 
 from aibroker.agent import events as ev
-from aibroker.agent.adapter import AgentRunSpec
+from aibroker.agent.adapter import AgentRunSpec, AuthAttestation
 from aibroker.agent.codex_cli import CodexCLI, build_codex_prompt
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.executor import ExecConfig, execute_run
@@ -26,7 +27,7 @@ from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.images import GENERATED_DIR, export_generated_pngs, snapshot_generated_paths
 from aibroker.agent.real_cli import SubprocessCLI
 from aibroker.agent.registry import clear_adapters, register_adapter
-from aibroker.agent.runs import create_run, list_events
+from aibroker.agent.runs import append_event, create_run, list_events
 from aibroker.agent.workspace import create_workspace
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
@@ -439,9 +440,91 @@ class _ImageFake(FakeAgentCLI):
                                      session_id=THREAD)
 
 
-async def test_two_codex_runs_sharing_a_home_cannot_execute_concurrently(tmp_path):
+async def test_two_codex_runs_execute_concurrently(tmp_path, serialized_db):
     _, first = await _project(9310)
     _, second = await _project(9311)
+    begun: list[int] = []
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Blocking(FakeAgentCLI):
+        async def start(self, run):
+            begun.append(run.run_id)
+            if len(begun) == 2:
+                both_started.set()
+            await release.wait()          # neither run finishes before both have started
+            yield ev.RunCompleted(final_text="ok")
+
+    register_adapter("agent:codex", lambda: Blocking([]))
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={},
+                     codex_paid_continuation_verified_off=True)
+    tasks = [asyncio.create_task(execute_run(rid, cfg)) for rid in (first, second)]
+    await asyncio.wait_for(both_started.wait(), 5)
+    assert sorted(begun) == sorted([first, second]) and not any(t.done() for t in tasks)
+    release.set()
+    assert await asyncio.wait_for(asyncio.gather(*tasks), 5) == ["completed", "completed"]
+    async with get_session() as s:
+        for rid in (first, second):
+            assert (await s.get(DeepJobRow, rid)).retry_count == 0      # never requeued
+
+
+class _ThreadCodex(CodexCLI):
+    """The REAL CodexCLI (baseline, thread binding, exporter) with the subprocess stubbed out."""
+
+    async def billing_mode(self):
+        return "subscription"
+
+    def attestation(self):
+        return AuthAttestation("chatgpt", "firstParty")
+
+    async def list_models(self):
+        return None
+
+
+async def test_codex_image_export_isolated_per_thread(tmp_path, monkeypatch, serialized_db):
+    _, first = await _project(9312)
+    _, second = await _project(9313)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    # a fresh login: no auth-refresh start-up lease, so both runs really are in flight together
+    (home / "auth.json").write_text(json.dumps({"last_refresh": datetime.now(UTC).isoformat()}),
+                                    encoding="utf-8")
+    threads = {first: THREAD, second: OTHER_THREAD}
+    pngs = {first: _png(4, 4, (1, 1, 1)), second: _png(6, 6, (2, 2, 2))}
+    written: list[int] = []
+    both_written = asyncio.Event()
+
+    async def fake_start(self, run):
+        yield ev.SessionAssigned(session_id=threads[run.run_id])
+        d = home / GENERATED_DIR / threads[run.run_id]
+        d.mkdir(parents=True)
+        (d / "call.png").write_bytes(pngs[run.run_id])
+        written.append(run.run_id)
+        if len(written) == 2:
+            both_written.set()
+        await both_written.wait()          # both runs have fresh PNGs on disk at the same time
+        yield ev.RunCompleted(final_text="drawn")
+
+    monkeypatch.setattr(SubprocessCLI, "start", fake_start)
+    register_adapter("agent:codex", lambda: _ThreadCodex(env={"CODEX_HOME": str(home)}))
+    cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={}, codex_paid_continuation_verified_off=True)
+    task1 = asyncio.create_task(execute_run(first, cfg))
+    while first not in written:           # staggered start: the in-memory test DB has one connection
+        await asyncio.sleep(0.01)
+    task2 = asyncio.create_task(execute_run(second, cfg))
+    assert await asyncio.wait_for(asyncio.gather(task1, task2), 10) == ["completed", "completed"]
+    async with get_session() as s:
+        for rid in (first, second):
+            files = (await s.get(DeepJobRow, rid)).result_meta["files"]
+            assert [base64.b64decode(f["content_b64"]) for f in files] == [pngs[rid]], rid
+
+
+async def test_codex_resume_same_session_still_exclusive(tmp_path, serialized_db):
+    _, origin = await _project(9314)
+    await append_event(origin, ev.SessionAssigned(session_id=THREAD))
+    await append_event(origin, ev.RunCompleted())
+    first_id = await _resume_codex_run(9314, THREAD, "one")
+    second_id = await _resume_codex_run(9314, THREAD, "two")
     started = asyncio.Event()
     release = asyncio.Event()
     begun: list[int] = []
@@ -449,27 +532,32 @@ async def test_two_codex_runs_sharing_a_home_cannot_execute_concurrently(tmp_pat
     class Blocking(FakeAgentCLI):
         async def start(self, run):
             begun.append(run.run_id)
-            if run.run_id == first:
-                started.set()
-                await release.wait()
+            started.set()
+            await release.wait()
             yield ev.RunCompleted(final_text="ok")
 
     register_adapter("agent:codex", lambda: Blocking([]))
     cfg = ExecConfig(workspace_root=str(tmp_path / "w"), env={},
                      codex_paid_continuation_verified_off=True)
-    first_task = asyncio.create_task(execute_run(first, cfg))
+    first_task = asyncio.create_task(execute_run(first_id, cfg))
     await asyncio.wait_for(started.wait(), 5)
-    assert await execute_run(second, cfg) is None
-    assert begun == [first]
+    assert await execute_run(second_id, cfg) is None             # same (account, session): requeued
+    assert begun == [first_id]
     async with get_session() as s:
-        queued = await s.get(DeepJobRow, second)
+        queued = await s.get(DeepJobRow, second_id)
         assert queued.status == "pending" and queued.retry_count == 1
     release.set()
     assert await asyncio.wait_for(first_task, 5) == "completed"
+
+
+async def _resume_codex_run(pid, session_id, prompt):
+    rid, _ = await create_run(
+        project=SimpleNamespace(id=pid), capability="agent:codex", prompt=prompt, task_id="t",
+        account_id="a", session_id=session_id, idempotency_key=None, wall_timeout_s=30,
+        idle_timeout_s=30, allowed_tools=[])
     async with get_session() as s:
-        (await s.get(DeepJobRow, second)).status = "running"
-    assert await execute_run(second, cfg) == "completed"
-    assert begun == [first, second]
+        (await s.get(DeepJobRow, rid)).status = "running"
+    return rid
 
 
 async def test_a_run_returns_the_generated_png_with_sha256_and_dimensions(tmp_path):

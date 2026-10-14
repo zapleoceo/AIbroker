@@ -85,7 +85,7 @@ def _adapters(monkeypatch):
 
 
 HARDENING = ("read_only: true", "init: true", "cap_drop: [ALL]", "no-new-privileges:true",
-             "networks: [agent_db]", "cpus: 1", "mem_limit: 1g", "pids_limit: 256",
+             "networks: [agent_db]",
              'profiles: ["agent"]', 'restart: "no"')
 
 
@@ -99,6 +99,10 @@ def test_all_workers_share_the_same_hardening(name):
                    "ANTHROPIC_", "OPENAI_", "CODEX_API"):
         assert banned not in svc, (name, banned)
     assert "DIRECT_DATABASE_URL" not in svc and "@pgbouncer:6432/" in svc
+    limits = ("cpus: 2", "mem_limit: 2g", "pids_limit: 512") if name == "agent-worker-codex" else (
+        "cpus: 1", "mem_limit: 1g", "pids_limit: 256")
+    for line in limits:      # codex is sized for 2 parallel runs (AGENT_CONCURRENCY_CODEX)
+        assert re.search(rf"^    {line}$", svc, re.M), (name, line)
 
 
 def test_claude_container_claims_only_claude_and_never_mounts_the_codex_volume():

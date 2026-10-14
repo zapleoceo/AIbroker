@@ -334,6 +334,23 @@ uid 10001 with directory mode `0700` and socket mode `0600`. Do not mount CLI
 auth volumes into API. No new Docker network, host port, capability, or sandbox
 relaxation is required.
 
+## Agent worker sizing (2026-10-13)
+
+| service | cpus | mem_limit | pids_limit | workspaces tmpfs |
+|---|---|---|---|---|
+| `agent-worker` (Claude) | 1 | 1g | 256 | unchanged |
+| `agent-worker-codex` | 2 | 2g | 512 | 1024m (was 512m) |
+
+`AGENT_CONCURRENCY_CODEX` (`.env`; code default and compose default `1`, production plan `2`)
+sets parallel Codex runs per container. The Codex limits above are sized for 2 (measured 2026-10-13: one run peaks at about
++140 MiB RSS over a 187 MiB idle worker, about 50 pids, about one core; the host has 4 vCPU and
+~3.2 GB available). Raise it only
+after reading the auth-refresh guard in `agent-runs.md`: when `last_refresh` in the Codex
+`auth.json` is older than 4 days (or unreadable), Codex start-ups are serialized by a short
+`__codex_auth__` lease, held until the first completed model event, so that two processes should not
+rotate the refresh token at once (the exact refresh timing inside Codex is UNVERIFIED); otherwise
+runs are fully parallel. A two-run live canary is still worth doing as a smoke test.
+
 ## Redis container (2026-07-16)
 
 `docker-compose.yml` now includes `aibroker-redis` (`redis:7-alpine`) —
