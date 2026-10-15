@@ -184,7 +184,10 @@ async def submit_model(project: ProjectRow, model_id: str, capability: str, prom
     from aibroker.routes import proxy
     from aibroker.services.request_cap import RequestCapExhausted
 
-    if is_paid(model_id, model_id.split("/", 1)[0]):
+    # Only a zero money cap makes a paid model pointless to dispatch; once the owner raises
+    # the project cap in the dashboard, Broker's cost guard decides as for any project.
+    zero_cap = 0 in (project.daily_cost_cap_usd, project.monthly_cost_cap_usd)
+    if zero_cap and is_paid(model_id, model_id.split("/", 1)[0]):
         raise Refused("отказ: платная модель недоступна при лимите проекта 0")
 
     ctx = ProjectCtx(project=project, actor=f"project:{project.name}")

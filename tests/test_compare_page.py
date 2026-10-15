@@ -166,14 +166,26 @@ async def test_provision_creates_cap_zero_project_idempotently_without_printing_
 async def test_real_submit_path_enqueues_job_under_the_compare_project():
     await provision()
     project = await svc.get_project()
-    entry = next(m for m in svc.chat_models() if m["id"] == "anthropic/claude-sonnet-5")
+    entry = next(m for m in svc.chat_models() if not m["paid"])
     job_id = await svc.submit_model(project, entry["id"], entry["capability"], "привет")
     async with get_session() as s:
         row = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == job_id))).scalar_one()
     assert row.project_id == project.id and row.status == "pending"
-    assert row.request["model"] == "anthropic/claude-sonnet-5"
+    assert row.request["model"] == entry["id"]
     with pytest.raises(svc.Refused, match="отказ"):
         await svc.submit_model(project, "no/such-model", "chat:smart", "x")
+
+
+async def test_paid_model_refused_only_while_project_cap_is_zero():
+    await provision()
+    project = await svc.get_project()
+    paid = next(m for m in svc.chat_models() if m["paid"])
+    with pytest.raises(svc.Refused, match="лимите проекта 0"):
+        await svc.submit_model(project, paid["id"], paid["capability"], "x")
+    # Raising the cap hands the decision back to Broker's cost guard: no pre-dispatch refusal.
+    project.daily_cost_cap_usd = project.monthly_cost_cap_usd = 5.0
+    job_id = await svc.submit_model(project, paid["id"], paid["capability"], "x")
+    assert job_id
 
 
 # ─── validation ─────────────────────────────────────────────────────────────
