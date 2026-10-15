@@ -23,6 +23,7 @@ from aibroker.agent.events import FileRef
 GENERATED_DIR = "generated_images"      # fixed, relative to CODEX_HOME
 OUT_DIR = "out"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _MAX_DEPTH = 3
 _MAX_PIXELS = 50_000_000
 _SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -126,7 +127,10 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
         out_dir.mkdir(mode=0o700, exist_ok=True)
         name = f"generated-{len(refs) + 1}-{digest[:12]}.png"
         (out_dir / name).write_bytes(data)
+        call_id = path.stem if path.parent == root and _CALL_ID.fullmatch(path.stem) else None
         refs.append(FileRef(
             path=f"{OUT_DIR}/{name}", size=len(data), sha256=digest, width=dims[0], height=dims[1],
-            content_b64=base64.b64encode(data).decode(), expires_at=expires))
+            content_b64=base64.b64encode(data).decode(), expires_at=expires,
+            image_call_id=call_id,
+            image_provenance="artifact_filename" if call_id else None))
     return refs
