@@ -81,6 +81,21 @@ def subscription_lane(capabilities: list[str]) -> str | None:
     return next((lane for lane in CHAT_LANES if lane in capabilities), None)
 
 
+# Owner's shortlist (2026-10-15): every Claude/Codex subscription model plus one strongest
+# text model each of Gemini, DeepSeek and GLM that Broker can route. Other catalog models are
+# not offered on the page; the catalog itself is unchanged.
+PAGE_EXTRA_MODELS = frozenset({
+    "gemini/gemini-3.6-flash",
+    "sambanova/DeepSeek-V3.2",
+    "zai/glm-4.7-flash",
+})
+
+
+def on_page(model: dict[str, Any]) -> bool:
+    """Is this chat model (a chat_models() row) on the owner's shortlist for /ask2many?"""
+    return model["subscription"] or model["id"] in PAGE_EXTRA_MODELS
+
+
 def chat_models() -> list[dict[str, Any]]:
     """Chat models Broker's live catalog offers, as {id, name, provider, intelligence_index,
     capability}, best score first (no score last, then by name). The score comes from the

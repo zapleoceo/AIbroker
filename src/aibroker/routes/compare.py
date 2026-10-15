@@ -47,7 +47,7 @@ async def page(request: Request) -> HTMLResponse:
 @router.get("/ask2many/api/models")
 async def models() -> dict[str, object]:
     keys = ("id", "name", "provider", "intelligence_index", "subscription")
-    return {"data": [{k: m[k] for k in keys} for m in svc.chat_models()],
+    return {"data": [{k: m[k] for k in keys} for m in svc.chat_models() if svc.on_page(m)],
             "attribution": model_scores.ATTRIBUTION, "source": model_scores.SOURCE,
             "captured_on": model_scores.CAPTURED_ON,
             "limits": {"max_prompt_chars": svc.MAX_PROMPT_CHARS, "max_models": svc.MAX_MODELS}}
@@ -176,7 +176,7 @@ var BUSY=__BUSY__;
 var $=function(i){return document.getElementById(i);};
 var names={}, active=false, page=1, hq="", debounce=null;
 function el(tag,cls,text){var e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e;}
-function score(v){return v==null?"\\u2014":String(v);}
+function score(v){return v==null?"нет оценки":String(v);}
 function showMsg(t){var m=$("msg"); m.textContent=t||""; m.style.display=t?"block":"none";}
 function boxes(){return Array.prototype.slice.call(document.querySelectorAll("#models input"));}
 function checked(){return boxes().filter(function(i){return i.checked;}).map(function(i){return i.value;});}
@@ -217,7 +217,7 @@ fetch("/ask2many/api/models").then(function(r){return r.json();}).then(function(
  var box=$("models"); d.data.forEach(function(m){var label=m.name+(dup[m.name]>1?" ("+m.provider+")":""); names[m.id]=label;
   var l=el("label","chip"); var c=el("input"); c.type="checkbox"; c.value=m.id;
   c.onchange=function(){if(checked().length>MAX){c.checked=false;} refresh();};
-  var b=el("span","chip-body"); b.appendChild(el("span",null,label)); b.appendChild(el("small",null,score(m.intelligence_index)));
+  var b=el("span","chip-body"); b.appendChild(el("span",null,label+" \\u2014 "+score(m.intelligence_index)));
   if(m.subscription)b.appendChild(el("em",null,"подписка"));
   l.title=m.id; l.appendChild(c); l.appendChild(b); box.appendChild(l);}); refresh(); loadHistory(true);});
 refresh();

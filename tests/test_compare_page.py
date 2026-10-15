@@ -113,8 +113,9 @@ async def test_models_endpoint_lists_live_chat_models_with_scores():
     assert scores[:len(scored)] == scored and not any(s is not None for s in scores[len(scored):])
     assert all(set(m) == {"id", "name", "provider", "intelligence_index", "subscription"}
                for m in rows.values())
-    assert rows["anthropic/claude-sonnet-5"]["intelligence_index"] == 38.16
-    assert rows["deepseek/deepseek-flash"]["intelligence_index"] is None   # no AA version match
+    assert rows["gemini/gemini-3.6-flash"]["intelligence_index"] == 33.98
+    assert "anthropic/claude-sonnet-5" not in rows                 # not on the owner's shortlist
+    assert rows["sambanova/DeepSeek-V3.2"]["intelligence_index"] is None   # no AA version match
     assert "whisper" not in " ".join(rows)                                  # not a chat model
 
 
