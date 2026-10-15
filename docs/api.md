@@ -73,7 +73,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
 | `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
 | `GET` | `/ask2many` | Public compare page: one question to many models. Sets the `aib_compare` cookie. See below |
-| `GET` | `/ask2many/api/models` | Models offered on the page: `{data:[{id, name, provider, intelligence_index}], attribution, source, captured_on, limits}` |
+| `GET` | `/ask2many/api/models` | Models offered on the page: `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
 | `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
 | `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…]}`, one result per model. `404` for an unknown id |
 | `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt |
@@ -89,6 +89,21 @@ every ticked model is dispatched and Broker's cost guard decides by the project 
 dashboard; a refusal ends as `refused` with the reason shown. The project key is generated
 once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
 so it is never printed, stored in plaintext or sent to the browser.
+
+**Subscription models.** Claude and Codex subscription models (`claude-sub/*`, `codex-sub/*`) are offered too
+when the Broker catalog does not mark them `available: false`. `codex-sub` is enabled by the owner's decision of
+15.10: the agent runs in the separate container `aibroker-agent-worker-codex`, and the shell of `codex exec` stays
+(sandbox `workspace-write`, approval never); the owner accepted that. Subscription rows carry `subscription: true` and the page
+shows them with a thin «подписка» label. They are sent exactly like any client sends them: the `POST /v1/jobs`
+logic with capability `chat:smart` and the pinned model id, so Broker runs them as `agent:claude` / `agent:codex`.
+Text only, no tools. The lane is chosen by `subscription_lane`. Answer, error and timeout show like any other model.
+They need `llm:agent` on the project and the deploy-time allowlist and policy
+([deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)). Until those are set,
+a subscription model ends `refused` with `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)`
+or `отказ: политика проекта (<code>)`; other models are unaffected.
+
+Models are listed by `intelligence_index`, highest first; models without a score come last, ties by name.
+The page is one centred column with inline CSS and no external assets; light and dark follow `prefers-color-scheme`.
 
 **Guard.** One unfinished question at a time, per browser (`aib_compare`, httpOnly, 365 days)
 and per client IP, enforced on the server. A request is unfinished until every selected model
