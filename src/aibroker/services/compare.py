@@ -2,9 +2,9 @@
 
 The page has no login. Every model call goes through Broker's own job path
 (`routes.proxy.jobs_submit` / `jobs_poll` logic) AS the dedicated `model-compare` project, in
-process: no HTTP client to itself and no project key anywhere near the browser. The project's
-daily money cap is 0 (scripts/provision_compare.py), so Broker's existing cost guard refuses
-paid models; that refusal is stored and shown as the model's result, never bypassed.
+process: no HTTP client to itself and no project key anywhere near the browser. The page itself
+does not check prices: limits are Broker's project caps (dashboard), and whatever Broker's cost
+guard decides is stored and shown as the model's result, never bypassed.
 
 One question at a time per browser cookie AND per IP: a request is "active" while any of its
 models is not terminal (answer / error / refusal) and it is younger than ACTIVE_TIMEOUT_S, the
@@ -28,7 +28,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aibroker.db import get_session
 from aibroker.db.models import CompareRequestRow, CompareResultRow, ProjectRow
 from aibroker.providers import catalog
-from aibroker.providers.registry import model_spec, spec_or_default
 from aibroker.routing.chains import chain_for
 from aibroker.services.llm_service import cap_message
 
@@ -70,13 +69,6 @@ def lane_for(capabilities: list[str], provider: str) -> str | None:
                  if lane in capabilities and provider in chain_for(lane)), None)  # type: ignore[arg-type]
 
 
-def is_paid(model_id: str, provider: str) -> bool:
-    """Would a project with money cap 0 be refused? Same notion as the cost guard: a paid
-    provider's model that the registry does not mark free (`pricing == "free"`)."""
-    spec = model_spec(model_id)
-    return spec_or_default(provider).paid and not (spec is not None and spec.pricing == "free")
-
-
 def chat_models() -> list[dict[str, Any]]:
     """Chat models Broker's live catalog offers, as {id, name, provider, intelligence_index,
     capability}. The score comes from the catalog row itself (exact name+version, else None).
@@ -89,8 +81,7 @@ def chat_models() -> list[dict[str, Any]]:
         if lane is None or row["billing_type"] == "subscription":
             continue
         out.append({"id": row["id"], "name": row["name"], "provider": row["owned_by"],
-                    "intelligence_index": row.get("intelligence_index"), "capability": lane,
-                    "paid": is_paid(row["id"], row["owned_by"])})
+                    "intelligence_index": row.get("intelligence_index"), "capability": lane})
     return out
 
 
@@ -183,12 +174,6 @@ async def submit_model(project: ProjectRow, model_id: str, capability: str, prom
     from aibroker.auth import ProjectCtx
     from aibroker.routes import proxy
     from aibroker.services.request_cap import RequestCapExhausted
-
-    # Only a zero money cap makes a paid model pointless to dispatch; once the owner raises
-    # the project cap in the dashboard, Broker's cost guard decides as for any project.
-    zero_cap = 0 in (project.daily_cost_cap_usd, project.monthly_cost_cap_usd)
-    if zero_cap and is_paid(model_id, model_id.split("/", 1)[0]):
-        raise Refused("отказ: платная модель недоступна при лимите проекта 0")
 
     ctx = ProjectCtx(project=project, actor=f"project:{project.name}")
     try:

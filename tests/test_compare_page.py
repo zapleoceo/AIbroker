@@ -104,10 +104,8 @@ async def test_models_endpoint_lists_live_chat_models_with_scores():
     for mid in rows:        # chat-capable, API-billed, and routable through some chat chain
         assert live[mid]["billing_type"] != "subscription"
         assert svc.lane_for(live[mid]["capabilities"], live[mid]["owned_by"]) is not None
-    assert all(set(m) == {"id", "name", "provider", "intelligence_index", "paid"}
+    assert all(set(m) == {"id", "name", "provider", "intelligence_index"}
                for m in rows.values())
-    assert rows["anthropic/claude-sonnet-5"]["paid"] is True       # refused at cap 0: marked
-    assert rows["cerebras/gpt-oss-120b"]["paid"] is False          # free provider
     assert rows["anthropic/claude-sonnet-5"]["intelligence_index"] == 38.16
     assert rows["deepseek/deepseek-flash"]["intelligence_index"] is None   # no AA version match
     assert "whisper" not in " ".join(rows)                                  # not a chat model
@@ -166,26 +164,14 @@ async def test_provision_creates_cap_zero_project_idempotently_without_printing_
 async def test_real_submit_path_enqueues_job_under_the_compare_project():
     await provision()
     project = await svc.get_project()
-    entry = next(m for m in svc.chat_models() if not m["paid"])
+    entry = next(m for m in svc.chat_models() if m["id"] == "anthropic/claude-sonnet-5")
     job_id = await svc.submit_model(project, entry["id"], entry["capability"], "привет")
     async with get_session() as s:
         row = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == job_id))).scalar_one()
     assert row.project_id == project.id and row.status == "pending"
-    assert row.request["model"] == entry["id"]
+    assert row.request["model"] == "anthropic/claude-sonnet-5"   # paid model: no page-side check
     with pytest.raises(svc.Refused, match="отказ"):
         await svc.submit_model(project, "no/such-model", "chat:smart", "x")
-
-
-async def test_paid_model_refused_only_while_project_cap_is_zero():
-    await provision()
-    project = await svc.get_project()
-    paid = next(m for m in svc.chat_models() if m["paid"])
-    with pytest.raises(svc.Refused, match="лимите проекта 0"):
-        await svc.submit_model(project, paid["id"], paid["capability"], "x")
-    # Raising the cap hands the decision back to Broker's cost guard: no pre-dispatch refusal.
-    project.daily_cost_cap_usd = project.monthly_cost_cap_usd = 5.0
-    job_id = await svc.submit_model(project, paid["id"], paid["capability"], "x")
-    assert job_id
 
 
 # ─── validation ─────────────────────────────────────────────────────────────
@@ -333,11 +319,10 @@ def test_cap_error_matches_only_the_dispatchers_exact_message():
     assert not svc.is_cap_error("provider said: cap exceeded, budget reached")
 
 
-async def test_page_says_history_is_public_and_marks_paid_in_the_model_list():
+async def test_page_says_history_is_public():
     async with make_client() as c:
         page = (await c.get("/ask2many")).text
     assert "Вопросы и ответы видны всем в общей истории." in page
-    assert "платная: при лимите проекта 0 будет отказ" in page   # label rendered from m.paid
 
 
 async def test_another_browser_and_ip_is_allowed_but_same_ip_new_cookie_is_not(fakes):

@@ -84,10 +84,9 @@ No login. The HTML shell is static; everything dynamic is rendered with `textCon
 prompts and answers from strangers cannot inject markup. One prompt (up to 4000 characters;
 a whitespace-only prompt is `422`) goes to 1-12 ticked chat models at once. Each model call is a
 Broker job submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project
-`model-compare`. Its daily and monthly money caps are 0. While a zero money cap is set, the compare
-route explicitly refuses paid models before dispatch, including models with unknown price, and
-they end as `refused` with the reason shown; free models run. Once the owner raises the cap, paid
-models are dispatched and the cost guard decides. The project key is generated
+`model-compare`. Its daily and monthly money caps are 0. The page does no price checks of its own:
+every ticked model is dispatched and Broker's cost guard decides by the project caps set in the
+dashboard; a refusal ends as `refused` with the reason shown. The project key is generated
 once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
 so it is never printed, stored in plaintext or sent to the browser.
 

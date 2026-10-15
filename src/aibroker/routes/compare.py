@@ -44,7 +44,7 @@ async def page(request: Request) -> HTMLResponse:
 
 @router.get("/ask2many/api/models")
 async def models() -> dict[str, object]:
-    return {"data": [{k: m[k] for k in ("id", "name", "provider", "intelligence_index", "paid")}
+    return {"data": [{k: m[k] for k in ("id", "name", "provider", "intelligence_index")}
                      for m in svc.chat_models()],
             "attribution": model_scores.ATTRIBUTION, "source": model_scores.SOURCE,
             "captured_on": model_scores.CAPTURED_ON,
@@ -180,8 +180,7 @@ fetch("/ask2many/api/models").then(function(r){{return r.json();}}).then(functio
  var names={{}}; d.data.forEach(function(m){{names[m.name]=(names[m.name]||0)+1;}});
  var box=$("models"); d.data.forEach(function(m){{var l=el("label"); var c=el("input"); c.type="checkbox"; c.value=m.id;
   c.onchange=function(){{if(checked().length>MAX){{c.checked=false;}} refresh();}};
-  var nm=el("span",null,m.name+(names[m.name]>1?" ("+m.provider+")":"")); if(m.paid){{nm.appendChild(el("small","muted"," \\u2014 платная: при лимите проекта 0 будет отказ"));}}
-  l.appendChild(c); l.appendChild(nm); l.appendChild(el("span","score",score(m.intelligence_index)));
+  var nm=el("span",null,m.name+(names[m.name]>1?" ("+m.provider+")":""));  l.appendChild(c); l.appendChild(nm); l.appendChild(el("span","score",score(m.intelligence_index)));
   l.title=m.id; box.appendChild(l);}}); refresh();}});
 loadHistory(true); refresh();
 }})();
