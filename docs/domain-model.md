@@ -184,6 +184,30 @@ row of project `model-compare`, which has a zero money cap.
 Neither table has a retention job yet. Indexes: `created_at DESC`, `(browser_id, created_at DESC)`
 and `(client_ip, created_at DESC)` on `compare_requests`; `request_id` on `compare_results`.
 
+### `/ask2many` compare path: public names
+
+Code reference for the compare page. Service and route modules are in `src/aibroker/services/compare.py` and `src/aibroker/routes/compare.py`.
+
+- `CompareRequestRow`, `CompareResultRow`: ORM rows for `compare_requests` and `compare_results` (`src/aibroker/db/models.py`).
+- `SubmitIn`: request body of the submit route, a prompt of 1 to `MAX_PROMPT_CHARS` characters and 1 to `MAX_MODELS` models (`src/aibroker/routes/compare.py`).
+- `Refused`: exception raised when Broker refuses a submit before it runs; `str()` is the user-facing reason (`src/aibroker/services/compare.py`).
+- `Score`: `NamedTuple` of an Artificial Analysis entry (`value`, `aa_slug`, `aa_name`). `SCORES` maps a catalog id to it (`src/aibroker/providers/model_scores.py`).
+- `browser_id_from`: returns the `aib_compare` cookie value when well formed, otherwise a fresh random id (`src/aibroker/services/compare.py`).
+- `set_browser_cookie`: sets the httpOnly `aib_compare` cookie, `SameSite=Lax`, with `secure` taken from the request (`src/aibroker/services/compare.py`).
+- `active_request_id`: newest unfinished request of this browser or this IP, or `None` (`src/aibroker/services/compare.py`).
+- `create_request`: runs the one-question-at-a-time guard and inserts the request with its `pending` result rows in one transaction; raises HTTP 429 while busy (`src/aibroker/services/compare.py`).
+- `chat_models`: the chat-routable catalog models offered on the page, without subscription models (`src/aibroker/services/compare.py`).
+- `lane_for`: the first chat lane a model is wired for whose provider chain includes its provider, or `None` (`src/aibroker/services/compare.py`).
+- `get_project`: the active `model-compare` project row, or `None` (`src/aibroker/services/compare.py`).
+- `spawn_tracker`: runs `fan_out` and `sync_request` in a background task (`src/aibroker/services/compare.py`).
+- `fan_out`: submits one job per result row concurrently; a `Refused` submit is stored as `refused`, other errors as `error` (`src/aibroker/services/compare.py`).
+- `submit_model`: enqueues one chat job through Broker's `/v1/jobs` logic as the compare project; returns the job id or raises `Refused` (`src/aibroker/services/compare.py`).
+- `poll_job`: reads a Broker job's current response for a project, or `None` (`src/aibroker/services/compare.py`).
+- `is_cap_error`: `True` when a job error is one of Broker's budget-cap messages (`src/aibroker/services/compare.py`).
+- `cancel_model_job`: best-effort cancel of a still-unfinished job; a failure is logged, not raised (`src/aibroker/services/compare.py`).
+- `sync_request`: copies terminal job states into the result rows and times out rows still pending after `ACTIVE_TIMEOUT_S`. Idempotent (`src/aibroker/services/compare.py`).
+- `search_history`: newest-first page of requests, with an optional case-insensitive substring match on the prompt (`src/aibroker/services/compare.py`).
+
 ## Migrations
 
 Hand-applied idempotent `psql` files in `infra/sql/migrations/` — there is
