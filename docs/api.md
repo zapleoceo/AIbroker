@@ -826,6 +826,15 @@ The catalog builds this field through `job_request_contract`. Subscription
 submission uses `subscription_request_problem` and
 `subscription_prompt_problem` to enforce the stated acceptance rules before
 enqueue.
+For subscription pins, `supports_tools` reports an exact-model callback
+attestation. `job_request.tools` and `job_request.tool_history` report whether
+Broker currently accepts those fields for this caller: the provider tools
+switch must be on and the pin must be verified or enabled for the existing
+project-12 tools route. Thus an authorized project-12 pin can show
+`supports_tools: false` and `job_request.tools: true` until a real job proves
+its callback. Acceptance is not a promise of upstream success; failed jobs
+return their terminal error through `GET /v1/jobs/{job_id}`. The POST route
+still enforces its project, account, model and tools policy independently.
 
 ### Cache affinity (2026-10-03)
 

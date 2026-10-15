@@ -26,6 +26,7 @@ from aibroker.providers.subscriptions import (
     subscription_model,
     subscription_model_verified,
     subscription_models,
+    subscription_tool_model_canary,
     subscription_tool_model_canary_advertised,
     subscription_tool_model_verified,
     subscription_tools_enabled,
@@ -195,6 +196,12 @@ def listing(project_id: int | None = None,
     rows = []
     for m in pinnable_models():
         tool_support = supports_tools(m, project_id)
+        request_tools = tool_support
+        if m.pricing == "subscription":
+            request_tools = (subscription_tools_enabled(m.provider)
+                             and (subscription_tool_model_verified(m.id)
+                                  or (project_id is not None
+                                      and subscription_tool_model_canary(m.id, project_id))))
         also = [o.id for o in pinnable_models()
                 if o.id != m.id and canonical_name(o.id) == canonical_name(m.id)]
         rows.append({
@@ -209,7 +216,7 @@ def listing(project_id: int | None = None,
             "intelligence_index": intelligence_index(canonical_name(m.id)),
             "capabilities": sorted(m.capabilities),
             "supports_tools": tool_support,
-            "job_request": job_request_contract(m, tool_support),
+            "job_request": job_request_contract(m, request_tools),
             "modalities": input_modalities(m),
             "output_modalities": output_modalities(m),
             "also_served_by": also,
