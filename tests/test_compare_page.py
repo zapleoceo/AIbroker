@@ -212,7 +212,7 @@ async def test_subscription_refusals_are_shown_as_refusals_not_crashes(subscript
 
 def test_exact_name_gets_the_score_and_other_versions_get_none():
     assert intelligence_index("claude-sonnet-5") == SCORES["claude-sonnet-5"].value == 38.16
-    for other in ("claude-sonnet-5.5", "claude-sonnet-5-5", "claude-sonnet-4", "claude-sonnet",
+    for other in ("claude-sonnet-5.5", "gpt-6-sol", "gpt-5.6-luna", "claude-sonnet-4", "claude-sonnet",
                   "claude-sonnet-5-latest", "gpt-5-nano", "gemini-2.5-flash"):
         assert intelligence_index(other) is None
 
