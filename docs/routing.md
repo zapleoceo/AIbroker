@@ -1508,7 +1508,7 @@ over-counted (safe direction for the cost guard, but not the real bill).
 `usage_log.cache_read_tokens`/`cache_write_tokens` (migration 006) persist
 the activity; the project drill-down shows it as a **Prompt cache** card.
 
-**Free-tier keys always bill $0** (`services/llm_service.py:_billed_cost`).
+**Free-tier keys bill $0** (`services/attempt.py:_billed_cost`), except paid OpenRouter routes (see the 2026-10-15 note below).
 `estimate_llm_cost` prices by MODEL — it has no idea whether the specific key
 that served the call is on a free plan. A free cerebras/gemini/mistral key
 calling e.g. `gemini-2.5-flash` gets the same nominal per-token price LiteLLM
@@ -1522,6 +1522,8 @@ free-tier keys show non-zero "spend" for the first time — $5.26 accrued
 across 51 free keys in a few hours before this landed. One-time prod cleanup:
 zeroed `usage_log.cost_usd` and reset `daily_cost_used_usd` /
 `monthly_cost_used_usd` / `total_cost_usd` for tier='free' keys.)
+
+**2026-10-15 — OpenRouter override routes are not free.** A registry model with `provider="openrouter"` and `pricing="override"` and a positive `input_usd_per_mtok` or `output_usd_per_mtok` is billed at its registry rate even on a `tier="free"` key, because such a key can serve a paid route and debit prepaid credits. `_billed_cost(key, meta, model=...)` keeps `meta["cost_usd"]` for these. Zero-rate override models (e.g. `:free`) still bill $0 on free keys. A missing LiteLLM price does not zero a registry-priced route: `estimate_llm_cost` falls back to the registry rate when LiteLLM raises, and uses the larger of the LiteLLM and registry cost when both exist. `_prefer_reported_cost` replaces a reported `usage.cost` of 0 with that estimate.
 
 > **Voyage is the one exception to "free tier bills $0" (2026-07-07).**
 > Confirmed live via Voyage's own dashboard (Usage → Free Token tab): the

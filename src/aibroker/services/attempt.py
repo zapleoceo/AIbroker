@@ -27,6 +27,7 @@ from aibroker.crypto import decrypt
 from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.context_limits import is_too_large_error
+from aibroker.providers.cost import bills_on_free_key
 from aibroker.providers.observations import record_too_large
 from aibroker.providers.provider_errors import (
     classify_provider_error,
@@ -81,15 +82,18 @@ def _scrub_secrets(text: str) -> str:
     return text
 
 
-def _billed_cost(key: ApiKeyRow, meta: dict[str, Any]) -> float:
+def _billed_cost(key: ApiKeyRow, meta: dict[str, Any], *, model: str | None = None) -> float:
     """What we actually owe the provider for this call.
 
-    Pricing is by MODEL and knows nothing about plans, so a free-tier key calling
-    a priced model would book the nominal price although the free plan absorbs it.
-    Free-tier keys always bill $0; the `tier` column is the source of truth. (If a
-    free account ever exhausts its free allocation, flip that key to tier='paid'.)
+    Free-tier keys normally bill $0 because their plan absorbs usage. OpenRouter
+    is the exception: its keys marked free can still route registry-priced paid
+    models, which must count against the project's money cap.
     """
-    return 0.0 if key.tier == "free" else meta["cost_usd"]
+    model_id = model or meta.get("model")
+    charged_openrouter = bills_on_free_key(model_id if isinstance(model_id, str) else None)
+    # An OpenRouter key marked `free` can still serve a paid model and debit
+    # prepaid credits. The model's confirmed price must count against caps.
+    return 0.0 if key.tier == "free" and not charged_openrouter else meta["cost_usd"]
 
 
 # Strong references to in-flight usage writes: the event loop keeps only weak
@@ -331,7 +335,7 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         # must release the reservation like any other attempt failure.
         plain = decrypt(a.key.token_encrypted)
         payload, meta = await a.call(plain)
-        meta["cost_usd"] = _billed_cost(a.key, meta)
+        meta["cost_usd"] = _billed_cost(a.key, meta, model=a.model)
     except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
         # The attempt is over however it ends — fully release the reservation so
         # an answerless call (incl. a paid timeout) consumes NO admission budget.

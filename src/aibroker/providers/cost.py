@@ -52,6 +52,14 @@ register_price_overrides()
 _pricing_warned: set[str] = set()
 
 
+def bills_on_free_key(model: str | None) -> bool:
+    """A nominally free OpenRouter key may debit credits for a paid route."""
+    spec = model_spec(model) if model else None
+    return bool(spec and spec.provider == "openrouter" and spec.pricing == "override"
+                and ((spec.input_usd_per_mtok or 0) > 0
+                     or (spec.output_usd_per_mtok or 0) > 0))
+
+
 def estimate_llm_cost(
     model: str, tokens_in: int, tokens_out: int, *,
     at: datetime | None = None,
@@ -81,6 +89,16 @@ def estimate_llm_cost(
     failure mode as the two stale-pricing incidents (2026-06-01, 2026-06-11).
     Rates are read from litellm's map (never hardcoded), so they stay correct
     when the vendor's prices change."""
+    # OpenRouter's paid catalog entries are maintained in our registry. LiteLLM
+    # can report an unknown model (or a zero price) for newly added routes;
+    # neither case may turn a paid call into a zero-cost cap reservation.
+    spec = model_spec(model)
+    override_cost = None
+    if spec and spec.provider == "openrouter" and spec.pricing == "override":
+        override_cost = (
+            (tokens_in or 0) * (spec.input_usd_per_mtok or 0.0)
+            + (tokens_out or 0) * (spec.output_usd_per_mtok or 0.0)
+        ) / 1_000_000
     try:
         p_cost, c_cost = litellm.cost_per_token(
             model=model, prompt_tokens=tokens_in, completion_tokens=tokens_out,
@@ -90,10 +108,14 @@ def estimate_llm_cost(
         base = float(p_cost + c_cost) + _extended_ttl_write_premium(
             model, cache_write_tokens) + audio_surcharge(model, audio_input_tokens)
     except Exception as e:
+        if override_cost is not None:
+            return override_cost * peak_multiplier(model.split("/", 1)[0], at)
         if model not in _pricing_warned:
             _pricing_warned.add(model)
             log.warning("no LiteLLM pricing for %s (%s) — cost recorded as 0", model, e)
         return 0.0
+    if override_cost is not None:
+        base = max(base, override_cost)
     return base * peak_multiplier(model.split("/", 1)[0], at)
 
 

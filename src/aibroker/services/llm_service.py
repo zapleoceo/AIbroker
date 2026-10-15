@@ -27,7 +27,7 @@ from aibroker.providers.context_limits import (
     estimate_prompt_tokens,
     fits_context,
 )
-from aibroker.providers.cost import estimate_llm_cost, estimate_transcription_cost
+from aibroker.providers.cost import bills_on_free_key, estimate_llm_cost, estimate_transcription_cost
 from aibroker.providers.decisions import (
     DECISION_FALLBACK_MODEL,
     JEV_INPUT_USD_PER_TOKEN,
@@ -515,8 +515,9 @@ async def run_chat(
                 key=key, project=project, provider=provider, model=use_model,
                 capability=capability, workflow=workflow, est_tokens=est_tokens,
                 # Worst-case cost (full max_tokens generated) reserved BEFORE the
-                # call; free-tier keys never estimate/reserve.
-                estimated_cost=(0.0 if key.tier == "free"
+                # call; free-tier keys skip reservation except for paid
+                # OpenRouter routes that can debit their prepaid balance.
+                estimated_cost=(0.0 if key.tier == "free" and not bills_on_free_key(use_model)
                                 else estimate_llm_cost(use_model, est_tokens, max_tokens)),
                 call=_chat_call(
                     provider=provider, key=key, model=use_model, messages=messages,
