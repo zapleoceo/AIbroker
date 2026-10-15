@@ -27,7 +27,11 @@ from aibroker.providers.context_limits import (
     estimate_prompt_tokens,
     fits_context,
 )
-from aibroker.providers.cost import bills_on_free_key, estimate_llm_cost, estimate_transcription_cost
+from aibroker.providers.cost import (
+    bills_on_free_key,
+    estimate_llm_cost,
+    estimate_transcription_cost,
+)
 from aibroker.providers.decisions import (
     DECISION_FALLBACK_MODEL,
     JEV_INPUT_USD_PER_TOKEN,
