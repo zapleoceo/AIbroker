@@ -184,6 +184,9 @@ async def submit_model(project: ProjectRow, model_id: str, capability: str, prom
     from aibroker.routes import proxy
     from aibroker.services.request_cap import RequestCapExhausted
 
+    if is_paid(model_id, model_id.split("/", 1)[0]):
+        raise Refused("отказ: платная модель недоступна при лимите проекта 0")
+
     ctx = ProjectCtx(project=project, actor=f"project:{project.name}")
     try:
         body = proxy.ChatRequest(messages=[{"role": "user", "content": prompt}], model=model_id,
