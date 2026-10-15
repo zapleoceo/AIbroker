@@ -169,6 +169,11 @@ button{font:inherit;color:inherit}
 @keyframes p{50%{opacity:.35}}
 .ans{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px}
 .error .ans,.refused .ans{color:var(--bad)}
+.note{margin-top:var(--s2);font-size:13px;color:var(--warn)}
+.truncated .dot{background:var(--warn)}
+.tot{grid-column:1/-1;font-size:13px;color:var(--muted);padding:var(--s2) var(--s1)}
+.info{cursor:help;color:var(--muted);margin-left:var(--s1)}
+.caption{margin:0;padding:var(--s2) var(--s3);border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .card-meta{margin-top:var(--s2);font-size:13px;color:var(--muted);overflow-wrap:anywhere}
 details.h{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin:var(--s2) 0;padding:0 var(--s4)}
 details.h summary{cursor:pointer;min-height:44px;padding:var(--s2) 0;list-style-position:inside}
@@ -196,9 +201,10 @@ footer{margin-top:var(--s6);font-size:13px;color:var(--muted)}
  <aside class="mp" aria-label="Список моделей"><div class="mp-in">
   <div class="mp-h"><input type="search" id="mf" placeholder="Найти модель по имени" autocomplete="off" aria-label="Фильтр моделей"></div>
   <div class="list" id="models" role="group" aria-label="Модели, самые сильные сверху">
-   <div class="lh" aria-hidden="true"><span>Модель</span><span>Балл</span><span></span></div>
+   <div class="lh"><span>Модель</span><span>Балл <span class="info" tabindex="0" role="img" title="Artificial Analysis Intelligence Index — сводный балл интеллекта по бенчмаркам, чем выше, тем умнее" aria-label="Artificial Analysis Intelligence Index — сводный балл интеллекта по бенчмаркам, чем выше, тем умнее">ⓘ</span></span><span></span></div>
    <div class="none" id="mload">Загружаем модели…</div>
   </div>
+  <p class="caption" id="score-note">Балл — Artificial Analysis Intelligence Index: сводный балл интеллекта по бенчмаркам, чем выше, тем умнее.</p>
  </div></aside>
 </div>
 
@@ -228,7 +234,7 @@ function syncSel(){
  Array.prototype.forEach.call(document.querySelectorAll("#models .mr"),function(r){r.setAttribute("aria-pressed",sel.indexOf(r.getAttribute("data-id"))>=0?"true":"false");});
  var box=$("selected"); box.textContent="";
  if(!sel.length)box.appendChild(el("p","empty muted small","Выберите модели в таблице: клик по строке добавляет модель."));
- sel.forEach(function(id){var m=byId[id]; var c=el("div","chip"); c.appendChild(el("span",null,nameOf(id)+" — "+score(m?m.intelligence_index:null)));
+ sel.forEach(function(id){var m=byId[id]; var c=el("div","chip"); c.appendChild(el("span",null,nameOf(id)));
   var x=el("button",null,"×"); x.type="button"; x.setAttribute("aria-label","Убрать "+nameOf(id)); x.onclick=function(){toggle(id);}; c.appendChild(x); box.appendChild(c);});
  refresh();}
 function toggle(id){var i=sel.indexOf(id); showMsg("");
@@ -236,15 +242,27 @@ function toggle(id){var i=sel.indexOf(id); showMsg("");
  else if(sel.length>=MAX){showMsg("Можно выбрать не больше "+MAX+" моделей. Уберите одну из выбранных.");return;}
  else sel.push(id);
  syncSel();}
-var LABEL={pending:"ждём",done:"готово",error:"ошибка",refused:"отказ"};
+var LABEL={pending:"ждём",done:"готово",truncated:"обрезано",error:"ошибка",refused:"отказ"};
+function tok(v){return v==null?"неизвестно":String(v);}
+function money(v){return v==null?"неизвестно":"$"+v.toFixed(v>0&&v<0.01?6:4);}
+function cost(r){return r.subscription?"по подписке":money(r.cost_usd);}
+function usageLine(r){return "Токены: вход "+tok(r.tokens_in)+" · выход "+tok(r.tokens_out)+" · стоимость: "+cost(r);}
+function totals(u){var t="Итого: токены вход "+u.tokens_in+" · выход "+u.tokens_out+" · стоимость "+money(u.cost_usd);
+ if(u.cost_unknown)t+=" (у моделей без известной цены: "+u.cost_unknown+")";
+ if(u.tokens_unknown)t+=" (токены неизвестны у моделей: "+u.tokens_unknown+")";
+ if(u.subscription)t+=" · по подписке: "+u.subscription; return t;}
 function card(r){var c=el("div","card "+r.status); var h=el("div","card-h");
  h.appendChild(el("h3",null,nameOf(r.model_id)));
  var st=el("span","st"); st.appendChild(el("span","dot"));
- st.appendChild(el("span",null,r.latency_ms!=null?(r.latency_ms/1000).toFixed(1)+" с":(LABEL[r.status]||r.status)));
+ var tm=r.latency_ms!=null?(r.latency_ms/1000).toFixed(1)+" с":null;
+ st.appendChild(el("span",null,r.status==="done"&&tm?tm:(LABEL[r.status]||r.status)+(tm?" · "+tm:"")));
  h.appendChild(st); c.appendChild(h);
- var body=r.status==="done"?r.answer:(r.status==="pending"?"":(r.error||"")); if(body)c.appendChild(el("div","ans",body));
- c.appendChild(el("div","card-meta","Балл: "+score(r.intelligence_index)+" · отвечала: "+r.model_served)); return c;}
-function render(target,data){target.textContent=""; data.results.forEach(function(r){target.appendChild(card(r));});}
+ if(r.status==="done"||r.status==="truncated"){if(r.answer)c.appendChild(el("div","ans",r.answer));}
+ else if(r.status!=="pending"&&r.error)c.appendChild(el("div","ans",r.error));
+ if(r.status==="truncated")c.appendChild(el("div","note",r.error||"обрезано: модель упёрлась в лимит длины ответа"));
+ if(r.status!=="pending")c.appendChild(el("div","card-meta",usageLine(r)+" · отвечала: "+r.model_served)); return c;}
+function render(target,data){target.textContent=""; data.results.forEach(function(r){target.appendChild(card(r));});
+ if(data.usage&&data.done)target.appendChild(el("div","tot",totals(data.usage)));}
 function poll(id){fetch("/ask2many/api/requests/"+id).then(function(r){return r.json();}).then(function(d){
  render($("out"),d); if(d.done){active=false; refresh(); loadHistory(true);}
  else setTimeout(function(){poll(id);},2000);}).catch(function(){setTimeout(function(){poll(id);},4000);});}

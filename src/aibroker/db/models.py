@@ -357,6 +357,12 @@ class CompareResultRow(Base):
     error: Mapped[str | None] = mapped_column(Text)
     model_served: Mapped[str | None] = mapped_column(String(200))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    # Usage from the job's result_meta (migration 022); NULL = Broker reported nothing.
+    tokens_in: Mapped[int | None] = mapped_column(Integer)
+    tokens_out: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    finish_reason: Mapped[str | None] = mapped_column(String(32))
+    billing_type: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
