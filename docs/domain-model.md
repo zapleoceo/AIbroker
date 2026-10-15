@@ -162,6 +162,28 @@ constants are only seeds, overridden once reality is observed.
 | `learned_at` | When last updated |
 | `sample_count` | How many observations back the learned value |
 
+### `compare_requests` and `compare_results` (migration 021)
+
+The public `/ask2many` page (see [api.md](api.md#ask2many--public-compare-page-2026-10-14)).
+One row per submitted question, one row per model answer. Each answer's job is a `deep_jobs`
+row of project `model-compare`, which has a zero money cap.
+
+| Table / column | Notes |
+|---|---|
+| `compare_requests.prompt` | The question, TEXT. History search matches it case-insensitively |
+| `compare_requests.browser_id` | Anonymous id from the httpOnly cookie `aib_compare`. Part of the one-question-at-a-time guard |
+| `compare_requests.client_ip` | Same guard, per IP. `''` when unknown |
+| `compare_results.request_id` | FK, CASCADE: deleting a request removes its results |
+| `compare_results.model_id` | The exact catalog id that was pinned |
+| `compare_results.capability` | The chat lane the model was submitted on |
+| `compare_results.intelligence_index` | Artificial Analysis score at submit time; NULL = unknown |
+| `compare_results.job_id` | `deep_jobs.id`; NULL when the submit was refused |
+| `compare_results.status` | `pending` / `done` / `error` / `refused`. A request is finished when all its results are terminal |
+| `compare_results.answer`, `error`, `model_served`, `latency_ms` | Filled on `done` or failure. `model_served` NULL = unknown |
+
+Neither table has a retention job yet. Indexes: `created_at DESC`, `(browser_id, created_at DESC)`
+and `(client_ip, created_at DESC)` on `compare_requests`; `request_id` on `compare_results`.
+
 ## Migrations
 
 Hand-applied idempotent `psql` files in `infra/sql/migrations/` — there is

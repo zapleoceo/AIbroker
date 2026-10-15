@@ -236,6 +236,35 @@ recorded from the first request. The index line should be run separately with
 `CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
 `AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
 
+### Compare page: migration 021 and project provisioning (2026-10-14)
+
+Migration 021 (`021_compare_page.sql`) adds `compare_requests` and `compare_results` for the
+public `/ask2many` page. It is additive: no existing table is touched, and only the `/ask2many`
+routes read the new tables. Apply it BEFORE deploying the code that reads them:
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/021_compare_page.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL. After the deploy, provision the dedicated project once,
+inside the API container, the same way as `bootstrap`:
+
+```
+docker exec -it aibroker-api python -m aibroker.scripts.provision_compare
+```
+
+It prints `project 'model-compare': created` (or `updated`, with the caps at 0). The script is
+idempotent: it creates the project on the first run and then re-asserts the chat scopes and the
+two money caps, without rotating anything. Until it has run, `POST /ask2many/api/requests`
+returns `503`.
+
+The project's daily and monthly caps are 0. The cost guard then refuses paid models and free
+models run. To raise the limit, change the caps on the `model-compare` project in the dashboard
+(Projects) or in SQL. Do not raise it by re-running the script: each run sets both caps back to
+0. The project key is generated, hashed and discarded by the script. Nobody can read it
+afterwards, and it is never printed or sent to a browser.
+
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
 Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)

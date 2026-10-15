@@ -19,7 +19,17 @@ from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
 from aibroker.logging_setup import configure_logging
-from aibroker.routes import admin, agent, dashboard, health, jobs_control, landing, proxy, signup
+from aibroker.routes import (
+    admin,
+    agent,
+    compare,
+    dashboard,
+    health,
+    jobs_control,
+    landing,
+    proxy,
+    signup,
+)
 from aibroker.services.job_queue import dispatcher_loop
 from aibroker.services.request_cap import RequestCapExhausted
 from aibroker.telemetry.request_context import new_request_id, request_scope, sanitize_request_id
@@ -187,6 +197,7 @@ async def _request_cap_exhausted(_: Request, exc: RequestCapExhausted) -> JSONRe
 
 
 app.include_router(landing.router)
+app.include_router(compare.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
 app.include_router(jobs_control.router, prefix="/v1")

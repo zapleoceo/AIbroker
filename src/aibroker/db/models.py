@@ -328,3 +328,36 @@ class AgentRunEventRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class CompareRequestRow(Base):
+    """One prompt submitted on the public /compare page (migration 021)."""
+    __tablename__ = "compare_requests"
+
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    browser_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_ip: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class CompareResultRow(Base):
+    """One model's answer to a compare request (migration 021)."""
+    __tablename__ = "compare_results"
+
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
+    request_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("compare_requests.id", ondelete="CASCADE"), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    capability: Mapped[str] = mapped_column(String(30), nullable=False)
+    intelligence_index: Mapped[float | None] = mapped_column(Float)
+    job_id: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    model_served: Mapped[str | None] = mapped_column(String(200))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    __table_args__ = (Index("ix_compare_results_request", "request_id"),)

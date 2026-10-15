@@ -106,6 +106,7 @@ AIbroker/
 │   │   ├── proxy.py            # /v1/jobs, /v1/embed, /v1/transcribe, /v1/deep, /v1/decisions, /v1/chat (410)
 │   │   ├── admin.py            # /admin/projects, /admin/keys
 │   │   ├── health.py           # /healthz, /v1/health
+│   │   ├── compare.py          # /ask2many public compare page (no login)
 │   │   ├── dashboard.py        # /dashboard (routes)
 │   │   ├── dashboard_assets.py # dashboard CSS/JS assets
 │   │   ├── dashboard_data.py   # dashboard data queries
@@ -120,7 +121,8 @@ AIbroker/
 │   │   └── audit.py            # audit_log writer
 │   ├── services/               # llm_service, job_queue, deep_jobs, …
 │   └── scripts/
-│       └── bootstrap.py        # create admin project
+│       ├── bootstrap.py        # create admin project
+│       └── provision_compare.py # create project model-compare (caps 0), after migration 021
 ├── migrations/README.md        # how schema changes are applied
 ├── tests/
 │   ├── conftest.py
