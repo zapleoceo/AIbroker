@@ -36,7 +36,8 @@ from aibroker.services.llm_service import cap_message
 log = logging.getLogger(__name__)
 
 COMPARE_PROJECT = "model-compare"
-COMPARE_SCOPES = ["llm:chat", "llm:edit", "llm:deep", AGENT_SCOPE]
+UNSAFE_SUBSCRIPTION_PROVIDERS = frozenset({"codex-sub"})   # shell stays on; see chat_models()
+COMPARE_SCOPES =["llm:chat", "llm:edit", "llm:deep", AGENT_SCOPE]
 MAX_PROMPT_CHARS = 4000
 MAX_MODELS = 12
 PAGE_SIZE = 20
@@ -84,15 +85,21 @@ def subscription_lane(capabilities: list[str]) -> str | None:
 def chat_models() -> list[dict[str, Any]]:
     """Chat models Broker's live catalog offers, as {id, name, provider, intelligence_index,
     capability}, best score first (no score last, then by name). The score comes from the
-    catalog row itself (exact name+version, else None). Subscription models (claude-sub/*,
-    codex-sub/*) are included when the catalog marks them available; they run as agent jobs and
+    catalog row itself (exact name+version, else None). Claude subscription models
+    (claude-sub/*; NOT codex-sub/*, see below) are included when the catalog marks them
+    available; they run as agent jobs and
     need the `llm:agent` scope plus the deploy-time agent allowlist/policy for this project.
     A model no chat chain can route to is left out rather than shown as a button that can only
     be refused."""
     out = []
     for row in catalog.listing():
         if row["billing_type"] == "subscription":
-            if row.get("available") is False:
+            # SECURITY: never offer codex-sub/*. `codex exec` runs with sandbox workspace-write +
+            # approval never and has no tool allow-list (agent/codex_cli.py, module docstring:
+            # `allowed_tools` must be empty, yet the shell stays on), so an anonymous public
+            # prompt could read container files / other runs' workspaces and the answer would
+            # land in the public history. Claude runs with `--tools ""` (agent/real_cli.py).
+            if row["owned_by"] in UNSAFE_SUBSCRIPTION_PROVIDERS or row.get("available") is False:
                 continue
             lane = subscription_lane(row["capabilities"])
         else:

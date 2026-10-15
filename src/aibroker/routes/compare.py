@@ -6,6 +6,7 @@ shell (inline CSS/JS, no external assets). Logic lives in services/compare.py.
 """
 from __future__ import annotations
 
+import json
 from html import escape
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -34,6 +35,7 @@ async def page(request: Request) -> HTMLResponse:
     html = (_HTML.replace("__FAVICON__", FAVICON_LINKS)
             .replace("__MAX_CHARS__", str(svc.MAX_PROMPT_CHARS))
             .replace("__MAX_MODELS__", str(svc.MAX_MODELS))
+            .replace("__BUSY__", json.dumps(svc.BUSY_MESSAGE, ensure_ascii=False))
             .replace("__ATTRIBUTION__", escape(model_scores.ATTRIBUTION))
             .replace("__CAPTURED__", escape(model_scores.CAPTURED_ON)))
     resp = HTMLResponse(html)
@@ -58,6 +60,8 @@ async def submit(body: SubmitIn, request: Request, response: Response) -> dict[s
         raise HTTPException(422, "пустой вопрос")
     catalog = {m["id"]: m for m in svc.chat_models()}
     wanted = list(dict.fromkeys(body.models))
+    if any(m.startswith(tuple(f"{p}/" for p in svc.UNSAFE_SUBSCRIPTION_PROVIDERS)) for m in wanted):
+        raise HTTPException(422, "эта модель недоступна на публичной странице")
     unknown = [m for m in wanted if m not in catalog]
     if unknown:
         raise HTTPException(422, f"неизвестные модели: {', '.join(unknown)[:200]}")
@@ -170,7 +174,7 @@ footer{margin-top:40px;font-size:13px;color:var(--muted)}
 <script>
 (function(){
 var MAX=__MAX_MODELS__;
-var BUSY="Извините, пока идёт ваш предыдущий вопрос, новый отправить нельзя. Дождитесь ответов всех выбранных моделей — так мы защищаем сервис от перегрузки.";
+var BUSY=__BUSY__;
 var $=function(i){return document.getElementById(i);};
 var names={}, active=false, page=1, hq="", debounce=null;
 function el(tag,cls,text){var e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e;}

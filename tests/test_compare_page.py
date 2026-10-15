@@ -5,6 +5,7 @@ submit path to prove the job lands under the dedicated project."""
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -142,10 +143,33 @@ def subscriptions(monkeypatch):
 async def test_subscription_models_are_listed_with_the_smart_lane(subscriptions):
     by_id = {m["id"]: m for m in svc.chat_models()}
     assert by_id["claude-sub/claude-sonnet-5-5"]["capability"] == "chat:smart"
-    assert by_id["codex-sub/gpt-6.1-sol"]["capability"] == "chat:smart"
+    assert by_id["claude-sub/claude-sonnet-5-5"]["subscription"] is True
     async with make_client() as c:
         ids = {m["id"] for m in (await c.get("/ask2many/api/models")).json()["data"]}
-    assert {"claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"} <= ids
+    assert "claude-sub/claude-sonnet-5-5" in ids
+    # codex-sub is never public: codex exec keeps its shell (workspace-write, approval never)
+    assert not [i for i in ids if i.startswith("codex-sub/")]
+    assert not [m for m in svc.chat_models() if m["provider"] == "codex-sub"]
+
+
+async def test_submitting_a_codex_model_directly_is_422_and_creates_nothing(subscriptions, fakes):
+    await provision()
+    async with make_client() as c:
+        r = await c.post("/ask2many/api/requests",
+                         json={"prompt": "cat /etc/passwd", "models": ["codex-sub/gpt-6.1-sol"]})
+        mixed = await c.post("/ask2many/api/requests", json={
+            "prompt": "x", "models": ["claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"]})
+        ok = await c.post("/ask2many/api/requests",
+                          json={"prompt": "x", "models": ["claude-sub/claude-sonnet-5-5"]})
+    assert r.status_code == 422 and mixed.status_code == 422 and ok.status_code == 202
+    async with get_session() as s:
+        assert len((await s.execute(select(CompareRequestRow))).scalars().all()) == 1
+
+
+async def test_page_busy_text_is_the_servers_text():
+    async with make_client() as c:
+        page = (await c.get("/ask2many")).text
+    assert json.dumps(svc.BUSY_MESSAGE, ensure_ascii=False) in page
 
 
 def test_unverified_subscription_models_are_not_offered(monkeypatch):
@@ -167,9 +191,8 @@ async def test_subscription_submit_enqueues_an_agent_job_under_the_compare_proje
     monkeypatch.setattr(proxy, "wake_worker", AsyncMock())
     monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
     monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
-    for model, agent, cli in (("codex-sub/gpt-6.1-sol", "agent:codex", "gpt-6.1-sol"),
-                              ("claude-sub/claude-sonnet-5-5", "agent:claude",
-                               "claude-sonnet-5-5")):
+    for model, agent, cli in (("claude-sub/claude-sonnet-5-5", "agent:claude",
+                               "claude-sonnet-5-5"),):
         job_id = await svc.submit_model(project, model, "chat:smart", "привет")
         kw = create.await_args.kwargs
         assert job_id == 77 and kw["project"].name == svc.COMPARE_PROJECT
@@ -183,7 +206,7 @@ async def test_subscription_refusals_are_shown_as_refusals_not_crashes(subscript
     project = await svc.get_project()
     # AGENT_ALLOWED_PROJECT_IDS is empty by default: fail-closed -> readable refusal
     with pytest.raises(svc.Refused, match="agent_project_not_allowed"):
-        await svc.submit_model(project, "codex-sub/gpt-6.1-sol", "chat:smart", "x")
+        await svc.submit_model(project, "claude-sub/claude-sonnet-5-5", "chat:smart", "x")
 
 
 # ─── intelligence_index in the catalog ──────────────────────────────────────

@@ -261,9 +261,13 @@ returns `503`.
 
 Subscription models on the page need server env that the script does not set (it is not in the repo).
 Before they can run: add the `model-compare` project's numeric id to `AGENT_ALLOWED_PROJECT_IDS`; add an entry for
-that id to `AGENT_PROJECT_POLICY` allowing the subscription models and accounts it should use; and configure the
-subscription catalog, the verified models and `AGENT_SUBSCRIPTION_CODEX_ENABLED` as for any subscription client.
-The formats are in [subscription-models.md](subscription-models.md) and [auth.md](auth.md#scopes). Until then a
+that id to `AGENT_PROJECT_POLICY` allowing ONLY `claude-sub` models (and the Claude accounts to use); and configure the
+subscription catalog and the verified models as for any subscription client.
+**Never allow `codex-sub` models for this project.** `codex exec` runs with sandbox `workspace-write` and approval
+never and `allowed_tools=[]` does not switch its shell off, so an anonymous public prompt could read container files and
+other runs' workspaces and the answer would go to the public history. The page refuses `codex-sub/*` itself (`422`), but
+the policy must not allow it either. Subscription jobs cost $0, so the money caps (0) do not limit them; only the
+project request cap does (owner decision). The formats are in [subscription-models.md](subscription-models.md) and [auth.md](auth.md#scopes). Until then a
 subscription model shows `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)` or
 `отказ: политика проекта (<code>)` as its result; other models are unaffected.
 
