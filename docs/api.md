@@ -797,7 +797,11 @@ one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
 when the enabled model's support is unknown. Subscription routes report
-`supports_tools: false`; no client tool-call handoff is verified. Only exact
+`supports_tools: false` unless the caller's project is in the Claude tools canary
+(project 12) and the exact pin has a live tool-callback attestation (today only
+`claude-sub/claude-sonnet-5-5`); the rows of `GET /v1/models` are built per caller
+project (`catalog.listing(ctx.project.id)`). Codex subscription rows keep the global
+verified list. Only exact
 Codex IDs separately verified for input vision list image input on the
 `vision` lane, limited to embedded data URLs. The input-vision verified list
 defaults to empty. Any `image_url` block on `/v1/jobs` or `/v1/deep` requires `llm:vision`, not only

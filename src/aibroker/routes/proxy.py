@@ -988,4 +988,4 @@ async def list_models(ctx: ProjectCtx = Depends(require_project)) -> ModelsRespo
     `id` (`gemini/gemini-2.5-flash`) or a bare `name` (`gpt-oss-120b`); a name
     served by several providers resolves deterministically (free-tier keys first,
     then fixed provider rank)."""
-    return ModelsResponse(data=catalog.listing())
+    return ModelsResponse(data=catalog.listing(ctx.project.id))
