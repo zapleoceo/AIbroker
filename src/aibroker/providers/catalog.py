@@ -26,6 +26,7 @@ from aibroker.providers.subscriptions import (
     subscription_model,
     subscription_model_verified,
     subscription_models,
+    subscription_tool_model_canary_advertised,
     subscription_tool_model_verified,
     subscription_tools_enabled,
 )
@@ -168,13 +169,15 @@ def output_modalities(spec: ModelSpec) -> list[str] | None:
     return None
 
 
-def supports_tools(spec: ModelSpec) -> bool | None:
+def supports_tools(spec: ModelSpec, project_id: int | None = None) -> bool | None:
     """Native tools require both a Broker-enabled adapter and model support."""
     from aibroker.services.tool_contract import TOOL_PROVIDERS
 
     if spec.provider in ("codex-sub", "claude-sub"):
         return (subscription_tools_enabled(spec.provider)
-                and subscription_tool_model_verified(spec.id))
+                and (subscription_tool_model_verified(spec.id)
+                     or (project_id is not None
+                         and subscription_tool_model_canary_advertised(spec.id, project_id))))
     if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
             or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):
         return False
@@ -186,11 +189,11 @@ def supports_tools(spec: ModelSpec) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def listing() -> list[dict[str, object]]:
+def listing(project_id: int | None = None) -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
     for m in pinnable_models():
-        tool_support = supports_tools(m)
+        tool_support = supports_tools(m, project_id)
         also = [o.id for o in pinnable_models()
                 if o.id != m.id and canonical_name(o.id) == canonical_name(m.id)]
         rows.append({

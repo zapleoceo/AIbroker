@@ -161,7 +161,14 @@ part of this design. Claude uses the same durable callback contract over its
 own transport, below.
 
 `subscription_tool_model_canary` evaluates the temporary exact project/model
-gate. `ModelRerouted` records an explicit App Server reroute notification in
+gate. `subscription_tool_model_canary_advertised` (used by `catalog.supports_tools`
+with the caller's project id) advertises a Claude pin that is in the canary list
+only when that exact pin also has a live tool-callback attestation in
+`_CATALOG_CANARY_TOOL_ATTESTATIONS` and `subscription_tools_enabled` is on. Each
+Claude pin needs its own attestation before it is advertised; a pin without one
+stays `supports_tools: false` even when it is in the canary list. Today the only
+attested pin is `claude-sub/claude-sonnet-5-5` (job 557226, 2026-10-14). The POST
+job canary gate is unchanged. `ModelRerouted` records an explicit App Server reroute notification in
 the run event stream before the tool turn fails; no notification is not proof
 of the serving model.
 

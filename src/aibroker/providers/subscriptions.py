@@ -79,6 +79,11 @@ def subscription_model_verified(model: str) -> bool:
 
 _TOOL_SETTINGS = {"codex-sub": "CODEX", "claude-sub": "CLAUDE"}
 
+# Project-12 canary pins with an exact-model, completed client-tool callback.
+# Sonnet: job 557226, lookup_probe call_claude_557226_1, result ok=true,
+# run.completed, billing_type=subscription (2026-10-14).
+_CATALOG_CANARY_TOOL_ATTESTATIONS = frozenset({"claude-sub/claude-sonnet-5-5"})
+
 
 def _tool_model_ids(field: str, provider: str) -> list[str]:
     try:
@@ -115,6 +120,13 @@ def subscription_tool_model_canary(model: str, project_id: int) -> bool:
             and get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS == "12"
             and model in _tool_model_ids(f"AGENT_SUBSCRIPTION_{key}_TOOLS_CANARY_MODELS",
                                          provider))
+
+
+def subscription_tool_model_canary_advertised(model: str, project_id: int) -> bool:
+    """Advertise an existing canary only after an exact-pin live callback."""
+    return (model in _CATALOG_CANARY_TOOL_ATTESTATIONS
+            and subscription_tools_enabled(model.partition("/")[0])
+            and subscription_tool_model_canary(model, project_id))
 
 
 def subscription_model(model: str | None) -> ModelSpec | None:
