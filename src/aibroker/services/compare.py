@@ -88,6 +88,11 @@ PAGE_EXTRA_MODELS = frozenset({
     "gemini/gemini-3.6-flash",
     "sambanova/DeepSeek-V3.2",
     "zai/glm-4.7-flash",
+    "openrouter/meta/muse-wonder",
+    "openrouter/x-ai/grok-4.7",
+    "openrouter/xiaomi/mimo-v2.6-pro",
+    "openrouter/qwen/qwen3.8-max-0902",
+    "openrouter/moonshotai/kimi-k3",
 })
 
 

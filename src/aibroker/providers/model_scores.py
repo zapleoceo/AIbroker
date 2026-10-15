@@ -30,6 +30,13 @@ class Score(NamedTuple):
 
 # Broker canonical model name -> AA row (exact name + version).
 SCORES: dict[str, Score] = {
+    # Added 2026-10-15 from the live leaderboard (SOURCE) for the owner's /ask2many shortlist;
+    # the AA variant is in aa_name.
+    "muse-wonder": Score(56.0, "muse-wonder", "Meta Muse Wonder Full (max)"),
+    "grok-4.7": Score(46.0, "grok-4-7", "Grok 4.7 (xhigh)"),
+    "mimo-v2.6-pro": Score(46.0, "mimo-v2-6-pro", "Xiaomi MiMo-V2.6-Pro"),
+    "qwen3.8-max-0902": Score(45.0, "qwen3-8-max", "Qwen3.8 Max"),
+    "kimi-k3": Score(44.0, "kimi-k3", "Kimi K3 (max)"),
     "claude-sonnet-5": Score(38.16, "claude-sonnet-5",
                              "Claude Sonnet 5 (Adaptive Reasoning, Max Effort)"),
     "gpt-5": Score(22.98, "gpt-5", "GPT-5 (High)"),

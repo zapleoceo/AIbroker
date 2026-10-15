@@ -31,6 +31,19 @@ SPEC = build_provider(
         # OpenRouter public catalog: prompt/completion 0 (checked 2026-10-11).
         "openrouter/google/gemma-4-31b-it:free": {"pricing": "free"},
         # Confirmed 2026-10-10: .../models/inception/mercury-decide:free/endpoints → prompt 0, completion 0.
+        # Owner's /ask2many shortlist (2026-10-15). List prices per Mtok from OpenRouter's public
+        # /api/v1/models (checked 2026-10-15). Paid: a project with a 0 money cap is refused.
+        # Lane chat:code: the only chat lane whose chain includes openrouter.
+        "openrouter/meta/muse-wonder": {"pricing": "override", "capabilities": ("chat:code",),
+                                        "input_usd_per_mtok": 4.0, "output_usd_per_mtok": 20.0},
+        "openrouter/x-ai/grok-4.7": {"pricing": "override", "capabilities": ("chat:code",),
+                                     "input_usd_per_mtok": 2.0, "output_usd_per_mtok": 6.0},
+        "openrouter/xiaomi/mimo-v2.6-pro": {"pricing": "override", "capabilities": ("chat:code",),
+                                            "input_usd_per_mtok": 0.435, "output_usd_per_mtok": 0.87},
+        "openrouter/qwen/qwen3.8-max-0902": {"pricing": "override", "capabilities": ("chat:code",),
+                                             "input_usd_per_mtok": 2.0, "output_usd_per_mtok": 6.0},
+        "openrouter/moonshotai/kimi-k3": {"pricing": "override", "capabilities": ("chat:code",),
+                                          "input_usd_per_mtok": 0.45, "output_usd_per_mtok": 15.0},
         "openrouter/inception/mercury-decide:free": {
             "transport": "openrouter_decisions", "pricing": "free",
             "capabilities": ("decision",)},
