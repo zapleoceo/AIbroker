@@ -635,7 +635,7 @@ symbols are documented):
   `routes/proxy.list_models` with the `ModelsResponse` schema).
 - **Compare page** (`routes/compare.py` + `services/compare.py`): public `/ask2many`; fans one
   prompt out as in-process jobs of project `model-compare`; one-question guard under Postgres
-  advisory locks; also offers Claude/Codex subscription models (text only, run as `agent:*` jobs);
+  advisory locks; offers the top 20 models by score, one per name (`page_models`), Claude/Codex subscription models included (text only, run as `agent:*` jobs);
   `providers/model_scores.py` holds the static AA scores read by `listing`.
 - **Transports** (`providers/transport.py`): `transport_for`; implementations
   `LiteLLMTransport`, `LiteLLMChatAudioTransport` (`litellm_client.py`, with the functions

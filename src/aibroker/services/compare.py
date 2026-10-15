@@ -30,13 +30,14 @@ from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.db import get_session
 from aibroker.db.models import CompareRequestRow, CompareResultRow, ProjectRow
 from aibroker.providers import catalog
+from aibroker.providers.registry import spec_or_default
 from aibroker.routing.chains import chain_for
 from aibroker.services.llm_service import cap_message
 
 log = logging.getLogger(__name__)
 
 COMPARE_PROJECT = "model-compare"
-COMPARE_SCOPES =["llm:chat", "llm:edit", "llm:deep", AGENT_SCOPE]
+COMPARE_SCOPES = ["llm:chat", "llm:edit", "llm:deep", AGENT_SCOPE]
 MAX_PROMPT_CHARS = 4000
 MAX_MODELS = 12
 PAGE_SIZE = 20
@@ -79,6 +80,27 @@ def subscription_lane(capabilities: list[str]) -> str | None:
     if "chat:smart" in capabilities:
         return "chat:smart"
     return next((lane for lane in CHAT_LANES if lane in capabilities), None)
+
+
+TOP_MODELS = 20
+
+
+def page_models() -> list[dict[str, Any]]:
+    """The models the page offers AND the only ones submit accepts: top TOP_MODELS by
+    intelligence index, one per name (owner rule 2026-10-15; replaces the shortlist).
+    Same-named models (one model served by several providers / routes) collapse to one, chosen
+    deterministically: a subscription route first, then a free-provider route, then the first id.
+    Order: score descending, unscored last, then name."""
+    best: dict[str, dict[str, Any]] = {}
+    for m in chat_models():
+        rank = (not m["subscription"], spec_or_default(m["provider"]).paid, m["id"])
+        cur = best.get(m["name"])
+        if cur is None or rank < cur[0]:
+            best[m["name"]] = (rank, m)
+    uniq = [m for _rank, m in best.values()]
+    uniq.sort(key=lambda m: (m["intelligence_index"] is None,
+                             -(m["intelligence_index"] or 0.0), m["name"], m["id"]))
+    return uniq[:TOP_MODELS]
 
 
 def chat_models() -> list[dict[str, Any]]:

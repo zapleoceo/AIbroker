@@ -73,7 +73,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
 | `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
 | `GET` | `/ask2many` | Public compare page: one question to many models. Sets the `aib_compare` cookie. See below |
-| `GET` | `/ask2many/api/models` | Models offered on the page: `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
+| `GET` | `/ask2many/api/models` | Models offered on the page (`page_models`: top 20, one per name): `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
 | `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
 | `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…]}`, one result per model. `404` for an unknown id |
 | `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt |
@@ -102,8 +102,8 @@ They need `llm:agent` on the project and the deploy-time allowlist and policy
 a subscription model ends `refused` with `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)`
 or `отказ: политика проекта (<code>)`; other models are unaffected.
 
-Models are listed by `intelligence_index`, highest first; models without a score come last, ties by name.
-The page is one centred column with inline CSS and no external assets; light and dark follow `prefers-color-scheme`.
+The page offers the top 20 models by `intelligence_index` (`page_models`), one per model name (a subscription route first, then a free-provider route), unscored last, ties by name.
+On desktop (>=1024px) the page has two columns: the question, the selected-model chips with a counter and the Ask button on the left, and a scrolling, filterable model table (model, score, «подписка» tag; click a row to select or deselect; Enter/Space on a row; Ctrl+Enter submits) on the right, with answers and history below; it is one column on phones, with a dark theme that follows `prefers-color-scheme` and no external assets.
 
 **Guard.** One unfinished question at a time, per browser (`aib_compare`, httpOnly, 365 days)
 and per client IP, enforced on the server. A request is unfinished until every selected model

@@ -30,6 +30,24 @@ class Score(NamedTuple):
 
 # Broker canonical model name -> AA row (exact name + version).
 SCORES: dict[str, Score] = {
+    # Added 2026-10-15 from the live leaderboard (SOURCE) for the owner's /ask2many shortlist;
+    # the AA variant is in aa_name.
+    "muse-wonder": Score(56.0, "muse-wonder", "Meta Muse Wonder Full (max)"),
+    "grok-4.7": Score(46.0, "grok-4-7", "Grok 4.7 (xhigh)"),
+    "mimo-v2.6-pro": Score(46.0, "mimo-v2-6-pro", "Xiaomi MiMo-V2.6-Pro"),
+    "qwen3.8-max-0902": Score(45.0, "qwen3-8-max", "Qwen3.8 Max"),
+    "kimi-k3": Score(44.0, "kimi-k3", "Kimi K3 (max)"),
+    # Subscription models (Claude/Codex): the same models' API rows on the live leaderboard,
+    # max variant, added 2026-10-15 at the owner's request. GPT-6 Sol has no published index
+    # ("--"); GPT-5.6 Sol / Luna have no row: unscored.
+    "claude-opus-5-5": Score(58.0, "claude-opus-5-5", "Claude Opus 5.5 (max with fallback)"),
+    "claude-sonnet-5-5": Score(56.0, "claude-sonnet-5-5", "Claude Sonnet 5.5 (max with fallback)"),
+    "claude-fable-5-1": Score(53.0, "claude-fable-5-1", "Claude Fable 5.1 (max with fallback)"),
+    "claude-haiku-5-5": Score(43.0, "claude-haiku-5-5", "Claude Haiku 5.5 (max)"),
+    "gpt-6-astra": Score(53.0, "gpt-6-astra", "GPT-6 Astra (max)"),
+    "gpt-6.1-sol": Score(52.0, "gpt-6-1-sol", "GPT-6.1 Sol (max)"),
+    "gpt-5.6-terra": Score(42.0, "gpt-5-6-terra", "GPT-5.6 Terra (max)"),
+    "gpt-6-luna": Score(38.0, "gpt-6-luna", "GPT-6 Luna (max)"),
     "claude-sonnet-5": Score(38.16, "claude-sonnet-5",
                              "Claude Sonnet 5 (Adaptive Reasoning, Max Effort)"),
     "gpt-5": Score(22.98, "gpt-5", "GPT-5 (High)"),
