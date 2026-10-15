@@ -64,7 +64,10 @@ def fakes(monkeypatch):
 
 def job(status, **kw):
     return SimpleNamespace(status=status, text=kw.get("text"), error=kw.get("error"),
-                           model_served=kw.get("served"), latency_ms=kw.get("latency"))
+                           model_served=kw.get("served"), latency_ms=kw.get("latency"),
+                           tokens_in=kw.get("tin"), tokens_out=kw.get("tout"),
+                           cost_usd=kw.get("cost"), finish_reason=kw.get("finish"),
+                           billing_type=kw.get("billing"))
 
 
 async def two_models() -> list[str]:

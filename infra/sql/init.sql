@@ -221,6 +221,11 @@ CREATE TABLE IF NOT EXISTS compare_results (
   error TEXT,
   model_served VARCHAR(200),                      -- NULL = unknown
   latency_ms INTEGER,
+  tokens_in INTEGER,                              -- 022: from the job's result_meta, NULL = unknown
+  tokens_out INTEGER,
+  cost_usd DOUBLE PRECISION,
+  finish_reason VARCHAR(32),                      -- 'length' = cut off (status 'truncated')
+  billing_type VARCHAR(20),
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   completed_at TIMESTAMP
 );

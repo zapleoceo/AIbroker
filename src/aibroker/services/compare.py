@@ -30,6 +30,7 @@ from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.db import get_session
 from aibroker.db.models import CompareRequestRow, CompareResultRow, ProjectRow
 from aibroker.providers import catalog
+from aibroker.providers.job_contract import JOB_MAX_TOKENS_MAX
 from aibroker.providers.registry import spec_or_default
 from aibroker.routing.chains import chain_for
 from aibroker.services.llm_service import cap_message
@@ -45,7 +46,10 @@ ACTIVE_TIMEOUT_S = 300          # safety net: a request older than this counts a
 POLL_INTERVAL_S = 2.0
 COOKIE_NAME = "aib_compare"
 COOKIE_MAX_AGE = 365 * 24 * 3600
-TERMINAL = frozenset({"done", "error", "refused"})
+TERMINAL = frozenset({"done", "truncated", "error", "refused"})
+TRUNCATED_NOTE = "обрезано: модель упёрлась в лимит длины ответа"
+TRUNCATED_EMPTY_NOTE = "пусто — всё ушло на рассуждение"
+SUBSCRIPTION_PREFIXES = ("claude-sub/", "codex-sub/")
 BUSY_MESSAGE = ("Извините, пока идёт ваш предыдущий вопрос, новый отправить нельзя. "
                 "Дождитесь ответов всех выбранных моделей — так мы защищаем сервис от перегрузки.")
 TIMEOUT_MESSAGE = "таймаут: модель не ответила за 5 минут"
@@ -215,6 +219,10 @@ class Refused(Exception):
     """Broker refused the call before it ran; str() is the user-facing reason."""
 
 
+def is_subscription(model_id: str) -> bool:
+    return model_id.startswith(SUBSCRIPTION_PREFIXES)
+
+
 async def submit_model(project: ProjectRow, model_id: str, capability: str, prompt: str) -> int:
     """Enqueue one chat job for `model_id` through Broker's own /v1/jobs logic, as the compare
     project. Returns the job id or raises Refused."""
@@ -223,9 +231,14 @@ async def submit_model(project: ProjectRow, model_id: str, capability: str, prom
     from aibroker.services.request_cap import RequestCapExhausted
 
     ctx = ProjectCtx(project=project, actor=f"project:{project.name}")
+    # Without max_tokens Broker defaults to 1024, which reasoning models burn on thinking (empty
+    # answers, finish_reason=length). API models get the largest value Broker accepts.
+    # Subscription routes reject any max_tokens other than the default (job_contract), so they
+    # are sent without one.
+    extra = {} if is_subscription(model_id) else {"max_tokens": JOB_MAX_TOKENS_MAX}
     try:
         body = proxy.ChatRequest(messages=[{"role": "user", "content": prompt}], model=model_id,
-                                 labels={"page": "compare"})
+                                 labels={"page": "compare"}, **extra)
         out = await proxy.jobs_submit(body, Response(), capability, None, None, ctx)
     except HTTPException as exc:
         raise Refused(f"отказ: {exc.detail}") from exc
@@ -307,7 +320,16 @@ async def sync_request(request_id: int, project: ProjectRow | None = None) -> No
                if project is not None and r.job_id is not None else None)
         if job is not None and job.status == "done":
             values = {"status": "done", "answer": job.text, "model_served": job.model_served,
-                      "latency_ms": job.latency_ms, "completed_at": _now()}
+                      "latency_ms": job.latency_ms, "completed_at": _now(),
+                      "tokens_in": getattr(job, "tokens_in", None),
+                      "tokens_out": getattr(job, "tokens_out", None),
+                      "cost_usd": getattr(job, "cost_usd", None),
+                      "billing_type": getattr(job, "billing_type", None),
+                      "finish_reason": getattr(job, "finish_reason", None)}
+            if values["finish_reason"] == "length":      # cut off by the length limit: not "done"
+                values["status"] = "truncated"
+                values["error"] = (TRUNCATED_NOTE if (job.text or "").strip()
+                                   else f"{TRUNCATED_NOTE}; {TRUNCATED_EMPTY_NOTE}")
         elif job is not None and job.status in ("error", "cancelled"):
             err = job.error or job.status
             values = ({"status": "refused", "error": f"отказ: лимит проекта ({err})"}
@@ -358,16 +380,39 @@ def spawn_tracker(request_id: int, project: ProjectRow, prompt: str) -> None:
 
 
 def _result_dict(r: CompareResultRow) -> dict[str, Any]:
+    """Usage fields are None when Broker reported nothing ("unknown", never 0); `subscription`
+    tells the page to show "по подписке" instead of a price."""
     return {"model_id": r.model_id, "intelligence_index": r.intelligence_index,
             "status": r.status, "answer": r.answer, "error": r.error,
             "model_served": r.model_served or "unknown", "latency_ms": r.latency_ms,
+            "tokens_in": r.tokens_in, "tokens_out": r.tokens_out, "cost_usd": r.cost_usd,
+            "finish_reason": r.finish_reason,
+            "subscription": r.billing_type == "subscription" or is_subscription(r.model_id),
             "completed_at": r.completed_at.isoformat() if r.completed_at else None}
 
 
+def usage_totals(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum tokens and cost over the models that reported them; count the unknown ones.
+    Subscription models have no per-request price and are counted separately, never priced."""
+    def known(key: str, rows: list[dict[str, Any]]) -> tuple[float, int]:
+        vals = [x[key] for x in rows if x[key] is not None]
+        return sum(vals), len(rows) - len(vals)
+
+    finished = [x for x in results if x["status"] in ("done", "truncated")]
+    priced = [x for x in finished if not x["subscription"]]
+    tin, tin_unknown = known("tokens_in", finished)
+    tout, tout_unknown = known("tokens_out", finished)
+    cost, cost_unknown = known("cost_usd", priced)
+    return {"tokens_in": int(tin), "tokens_out": int(tout), "cost_usd": cost,
+            "tokens_unknown": max(tin_unknown, tout_unknown), "cost_unknown": cost_unknown,
+            "subscription": len(finished) - len(priced)}
+
+
 def _request_dict(req: CompareRequestRow, results: list[CompareResultRow]) -> dict[str, Any]:
+    rows = [_result_dict(r) for r in sorted(results, key=lambda x: x.id)]
     return {"id": req.id, "prompt": req.prompt, "created_at": req.created_at.isoformat(),
-            "done": all(r.status in TERMINAL for r in results),
-            "results": [_result_dict(r) for r in sorted(results, key=lambda x: x.id)]}
+            "done": all(r.status in TERMINAL for r in results), "results": rows,
+            "usage": usage_totals(rows)}
 
 
 async def get_request(request_id: int) -> dict[str, Any] | None:

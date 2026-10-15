@@ -276,6 +276,20 @@ models run. To raise the limit, change the caps on the `model-compare` project i
 0. The project key is generated, hashed and discarded by the script. Nobody can read it
 afterwards, and it is never printed or sent to a browser.
 
+### Compare page: migration 022 (usage columns, 2026-10-15)
+
+Migration 022 (`022_compare_usage.sql`) adds nullable columns `tokens_in`, `tokens_out`, `cost_usd`,
+`finish_reason` and `billing_type` to `compare_results`. It is additive and does not rewrite the table. Apply it
+BEFORE deploying the code that writes them: the ORM model names these columns, so the code fails against a
+database without them (see the pgbouncer rule below):
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/022_compare_usage.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL. Existing rows stay NULL (shown as «неизвестно»); nothing is backfilled.
+
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
 Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)

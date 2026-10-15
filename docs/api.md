@@ -75,8 +75,8 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `GET` | `/ask2many` | Public compare page: one question to many models. Sets the `aib_compare` cookie. See below |
 | `GET` | `/ask2many/api/models` | Models offered on the page (`page_models`: top 20, one per name): `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
 | `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
-| `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…]}`, one result per model. `404` for an unknown id |
-| `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt |
+| `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…], usage:{…}}`, one result per model. `404` for an unknown id |
+| `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt. Items have the poll shape, with `usage` |
 
 ### `/ask2many` — public compare page (2026-10-14)
 
@@ -90,12 +90,14 @@ dashboard; a refusal ends as `refused` with the reason shown. The project key is
 once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
 so it is never printed, stored in plaintext or sent to the browser.
 
+**Output limit.** API models are sent with `max_tokens` = 16384 (`JOB_MAX_TOKENS_MAX`). The Broker default of 1024 was spent on reasoning, which gave empty or cut-off answers. Subscription models are sent without `max_tokens` (see below).
+
 **Subscription models.** Claude and Codex subscription models (`claude-sub/*`, `codex-sub/*`) are offered too
 when the Broker catalog does not mark them `available: false`. `codex-sub` is enabled by the owner's decision of
 15.10: the agent runs in the separate container `aibroker-agent-worker-codex`, and the shell of `codex exec` stays
 (sandbox `workspace-write`, approval never); the owner accepted that. Subscription rows carry `subscription: true` and the page
-shows them with a thin «подписка» label. They are sent exactly like any client sends them: the `POST /v1/jobs`
-logic with capability `chat:smart` and the pinned model id, so Broker runs them as `agent:claude` / `agent:codex`.
+shows them with a thin «подписка» label. They are sent like any client sends them: the `POST /v1/jobs`
+logic with capability `chat:smart` and the pinned model id, without `max_tokens` (the subscription contract rejects any value other than the default), so Broker runs them as `agent:claude` / `agent:codex`.
 Text only, no tools. The lane is chosen by `subscription_lane`. Answer, error and timeout show like any other model.
 They need `llm:agent` on the project and the deploy-time allowlist and policy
 ([deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)). Until those are set,
@@ -103,20 +105,24 @@ a subscription model ends `refused` with `отказ: проект не допу
 or `отказ: политика проекта (<code>)`; other models are unaffected.
 
 The page offers the top 20 models by `intelligence_index` (`page_models`), one per model name (a subscription route first, then a free-provider route), unscored last, ties by name.
-On desktop (>=1024px) the page has two columns: the question, the selected-model chips with a counter and the Ask button on the left, and a scrolling, filterable model table (model, score, «подписка» tag; click a row to select or deselect; Enter/Space on a row; Ctrl+Enter submits) on the right, with answers and history below; it is one column on phones, with a dark theme that follows `prefers-color-scheme` and no external assets.
+On desktop (>=1024px) the page has two columns: the question, the selected-model chips with a counter and the Ask button on the left, and a scrolling, filterable model table (model, score, «подписка» tag; click a row to select or deselect; Enter/Space on a row; Ctrl+Enter submits) on the right, with answers and history below; it is one column on phones, with a dark theme that follows `prefers-color-scheme` and no external assets. The score column has an ⓘ tooltip and a caption: Artificial Analysis Intelligence Index, a combined intelligence score across benchmarks, higher is smarter. The score is shown only in that table, not on the chips or the answer cards. Each answer card shows its input and output tokens and the request cost («по подписке» for subscription models).
 
 **Guard.** One unfinished question at a time, per browser (`aib_compare`, httpOnly, 365 days)
 and per client IP, enforced on the server. A request is unfinished until every selected model
-is `done`, `error` or `refused`; a second submit meanwhile gets `429` with a Russian message.
+is `done`, `truncated`, `error` or `refused`; a second submit meanwhile gets `429` with a Russian message.
 Safety net: after 300 s a request counts as finished, and its still-pending results become
 `error` with `таймаут: модель не ответила за 5 минут`. A background tracker saves answers even
 if the page is closed.
 
-Results carry `status` (`pending`, `done`, `error`, `refused`), `answer` or `error`,
+Results carry `status` (`pending`, `done`, `truncated`, `error`, `refused`), `answer` or `error`,
 `model_served` (`"unknown"` when not known), `latency_ms` and the model's
-`intelligence_index` as it was at submit time. Every request and its results are stored in
-`compare_requests` and `compare_results` (migration 021, see [domain-model.md](domain-model.md)).
-No retention job covers them yet.
+`intelligence_index` as it was at submit time. `truncated` is a job that finished with `finish_reason` `length`: it is terminal and counts as finished for the guard. The page shows it as «обрезано: модель упёрлась в лимит длины ответа» with the partial text, or «пусто — всё ушло на рассуждение» when the text is empty. It is not shown as done.
+
+Each result also has `tokens_in`, `tokens_out`, `cost_usd` and `finish_reason`, all taken from `result_meta` of the job. `null` means Broker reported nothing and the page shows «неизвестно»; it is never 0, and a real `0.0` stays `0`. `subscription` is `true` for `claude-sub/*` and `codex-sub/*`: the page shows «по подписке» instead of a price, and no API price is invented.
+
+The request carries `usage`: `{tokens_in, tokens_out, cost_usd, tokens_unknown, cost_unknown, subscription}`. It is computed by `usage_totals` over the finished (`done` and `truncated`) models that reported values. Subscription models are never priced; they are counted in `subscription`. `tokens_unknown` and `cost_unknown` count the finished models that reported nothing. The page shows the sums as «Итого: …», with a note for the unknown ones.
+
+Every request and its results are stored in `compare_requests` and `compare_results` (migrations 021 and 022, see [domain-model.md](domain-model.md)). No retention job covers them yet.
 
 ### `/v1/health` — content negotiation (2026-07-11)
 
