@@ -37,6 +37,9 @@ MCP_PROTOCOL = "2025-06-18"
 # 64-char API tool-name limit minus the 13-char "mcp__broker__" prefix
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,51}$")
 _INIT = "broker-init-1"
+_INTERRUPT = "broker-interrupt-1"
+# After a terminal client result the turn must be confirmed stopped (its `result`) within this.
+TERMINAL_STOP_S = 30.0
 
 
 def _mcp_tools(run: AgentRunSpec) -> list[dict[str, Any]]:
@@ -122,12 +125,31 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
     rejected = calls = seq = 0
     broker_uses: set[str] = set()
     answered: set[str] = set()
+    terminal = False
     usage = ev.Usage(turns=0, source="claude_stream_json")
     try:
         await send({"type": "control_request", "request_id": _INIT,
                     "request": {"subtype": "initialize", "hooks": None}})
         await send(_user(build_claude_prompt(run)))
-        async for raw in proc.stdout:
+        loop = asyncio.get_running_loop()
+        stop_deadline: float | None = None     # set once a terminal result was acknowledged
+        interrupt_confirmed = False
+        while True:
+            if stop_deadline is None:
+                raw = await proc.stdout.readline()
+            else:
+                remaining = stop_deadline - loop.time()
+                if remaining <= 0:
+                    raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
+                                             "after the terminal result")
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(),
+                                                 remaining)
+                except TimeoutError:
+                    raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
+                                             "after the terminal result") from None
+            if not raw:
+                break
             line = raw.decode(errors="replace").strip()
             try:
                 data = json.loads(line) if line.startswith("{") else None
@@ -136,8 +158,14 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
             kind = data.get("type") if isinstance(data, dict) else None
             if kind == "control_response":
                 response = data.get("response") or {}
-                if response.get("request_id") != _INIT or response.get("subtype") != "success":
-                    raise ClientToolConflict("Claude refused the control initialize")
+                expected = (_INIT, _INTERRUPT) if stop_deadline is not None else (_INIT,)
+                if (response.get("request_id") not in expected
+                        or response.get("subtype") != "success"):
+                    raise ClientToolConflict("Claude refused the control initialize or interrupt")
+                if response.get("request_id") == _INTERRUPT:
+                    if interrupt_confirmed:
+                        raise ClientToolConflict("duplicate Claude interrupt confirmation")
+                    interrupt_confirmed = True
                 continue
             if kind == "control_cancel_request" and data.get("request_id") in answered:
                 continue                      # the CLI gave up on a call we already answered
@@ -164,6 +192,9 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                 elif method == "tools/list":
                     reply["result"] = {"tools": tools}
                 elif method == "tools/call":
+                    if stop_deadline is not None:
+                        raise ClientToolConflict("model requested another tool after terminal "
+                                                 "output")
                     seq += 1
                     call_id = f"call_claude_{run.run_id}_{seq}"
                     name, arguments = params.get("name"), params.get("arguments")
@@ -193,7 +224,8 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                             except TimeoutError:
                                 continue
                             raise ClientToolConflict("Claude stopped while waiting for client tool")
-                        success, content = result
+                        success, content, *rest = result
+                        terminal = bool(rest and rest[0])
                         reply["result"] = _tool_text(content, not success)
                         yield ev.ToolResult(call_id=call_id, ok=success,
                                             output="[client tool result withheld]")
@@ -204,6 +236,12 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                     "subtype": "success", "request_id": data.get("request_id"),
                     "response": {"mcp_response": reply}}})
                 answered.add(str(data.get("request_id")))
+                if terminal and stop_deadline is None:
+                    # terminal output tool: acknowledged above; stop the turn instead of
+                    # letting the model write another answer
+                    await send({"type": "control_request", "request_id": _INTERRUPT,
+                                "request": {"subtype": "interrupt"}})
+                    stop_deadline = loop.time() + TERMINAL_STOP_S
                 continue
             for item in parser.feed(line):
                 if isinstance(item, ev.ToolCall) and item.name.startswith(PREFIX):
@@ -217,6 +255,29 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                         output_tokens=_sum(usage.output_tokens, item.output_tokens),
                         cache_read_tokens=_sum(usage.cache_read_tokens, item.cache_read_tokens),
                         turns=_sum(usage.turns, item.turns), source="claude_stream_json")
+                    continue
+                if stop_deadline is not None and item.type in ev.TERMINAL_TYPES:
+                    if _counted(usage):
+                        yield usage
+                    if isinstance(item, ev.RunFailed):
+                        # An interrupted Claude turn can report is_error=True. The CLI
+                        # identifies that cancellation separately from execution/API
+                        # errors via terminal_reason; never treat a generic failure as
+                        # confirmation of the output tool's successful result.
+                        cancelled = (kind == "result" and isinstance(data, dict)
+                                     and data.get("terminal_reason") in
+                                     ("aborted_streaming", "aborted_tools")
+                                     and not data.get("result") and not data.get("errors")
+                                     and data.get("api_error_status") is None)
+                        if not (interrupt_confirmed and cancelled):
+                            yield item
+                            return
+                    if not interrupt_confirmed:
+                        raise ClientToolConflict("terminal_stop_unconfirmed: Claude did not "
+                                                 "confirm the interrupt")
+                    yield ev.RunCompleted(final_text="")
+                    return
+                if stop_deadline is not None and isinstance(item, ev.MessageDelta):
                     continue
                 if isinstance(item, ev.RunCompleted):
                     if calls == 0 and (run.tool_choice == "required"
