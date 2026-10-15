@@ -68,7 +68,7 @@ def job(status, **kw):
 
 
 async def two_models() -> list[str]:
-    ids = [m["id"] for m in svc.chat_models()]
+    ids = [m["id"] for m in svc.page_models()]
     assert len(ids) >= 2
     return ids[:2]
 
@@ -113,15 +113,65 @@ async def test_models_endpoint_lists_live_chat_models_with_scores():
     assert scores[:len(scored)] == scored and not any(s is not None for s in scores[len(scored):])
     assert all(set(m) == {"id", "name", "provider", "intelligence_index", "subscription"}
                for m in rows.values())
-    assert rows["gemini/gemini-3.6-flash"]["intelligence_index"] == 33.98
-    assert "anthropic/claude-sonnet-5" not in rows                 # not on the owner's shortlist
-    assert rows["sambanova/DeepSeek-V3.2"]["intelligence_index"] is None   # no AA version match
-    assert "whisper" not in " ".join(rows)                                  # not a chat model
+    names = [m["name"] for m in body["data"]]
+    assert len(names) == len(set(names)) and len(names) <= svc.TOP_MODELS   # deduped, top 20
+    assert [m["id"] for m in body["data"]] == [m["id"] for m in svc.page_models()]
+    assert "whisper" not in " ".join(rows)                                # not a chat model
 
 
 def row(mid, name, score, *, billing="api", caps=("chat:fast",), owner="groq", **extra):
     return {"id": mid, "name": name, "owned_by": owner, "capabilities": list(caps),
             "billing_type": billing, "intelligence_index": score, **extra}
+
+
+def fake_rows(monkeypatch, rows):
+    monkeypatch.setattr(svc.catalog, "listing", lambda: rows)
+
+
+def test_page_models_dedupes_same_names_with_subscription_then_free_then_id(monkeypatch):
+    fake_rows(monkeypatch, [
+        row("groq/x", "gpt-oss-120b", 11.6), row("cerebras/gpt-oss-120b", "gpt-oss-120b", 11.6,
+                                                     owner="cerebras"),
+        row("anthropic/dup", "dup", 5.0, owner="anthropic", caps=("chat:smart",)),
+        row("claude-sub/dup", "dup", 5.0, billing="subscription", caps=("chat:smart",),
+            owner="claude-sub", available=True),
+        row("anthropic/solo", "solo", 1.0, owner="anthropic", caps=("chat:smart",)),
+    ])
+    by_name = {m["name"]: m["id"] for m in svc.page_models()}
+    assert by_name["dup"] == "claude-sub/dup"                    # subscription route wins
+    assert by_name["gpt-oss-120b"] == "cerebras/gpt-oss-120b"    # both free: first by id
+    assert len(svc.page_models()) == 3                            # one entry per name
+
+
+def test_page_models_paid_provider_loses_to_free_with_the_same_name(monkeypatch):
+    fake_rows(monkeypatch, [row("anthropic/m", "m", 3.0, owner="anthropic", caps=("chat:smart",)),
+                            row("groq/m", "m", 3.0, owner="groq")])
+    assert [m["id"] for m in svc.page_models()] == ["groq/m"]
+
+
+def test_page_models_keeps_only_the_top_20_best_first_unscored_last(monkeypatch):
+    rows = [row(f"groq/m{i}", f"m{i:02d}", float(i)) for i in range(1, 26)]
+    rows += [row("groq/zz", "zz", None), row("groq/aa", "aa", None)]
+    fake_rows(monkeypatch, rows)
+    got = svc.page_models()
+    assert len(got) == svc.TOP_MODELS == 20
+    assert [m["intelligence_index"] for m in got] == [float(i) for i in range(25, 5, -1)]
+    # unscored models only fill the tail when there are fewer than 20 scored ones
+    fake_rows(monkeypatch, rows[:3] + rows[-2:])
+    assert [m["name"] for m in svc.page_models()] == ["m03", "m02", "m01", "aa", "zz"]
+
+
+async def test_model_outside_the_top_20_is_422_on_submit_and_not_listed(monkeypatch, fakes):
+    await provision()
+    rows = [row(f"groq/m{i}", f"m{i:02d}", float(i)) for i in range(1, 26)]
+    fake_rows(monkeypatch, rows)
+    async with make_client() as c:
+        listed = (await c.get("/ask2many/api/models")).json()["data"]
+        assert len(listed) == 20 and "groq/m01" not in {m["id"] for m in listed}
+        low = await c.post("/ask2many/api/requests", json={"prompt": "x", "models": ["groq/m01"]})
+        top = await c.post("/ask2many/api/requests", json={"prompt": "x", "models": ["groq/m25"]})
+    assert low.status_code == 422 and "groq/m01" in low.json()["detail"]
+    assert top.status_code == 202
 
 
 def test_models_sorted_by_score_desc_unscored_last_then_by_name(monkeypatch):
@@ -432,7 +482,13 @@ async def test_page_has_the_key_elements_and_no_external_assets():
     for needle in ('id="prompt"', 'id="go"', "Спросить", "Ждём ответы", 'id="models"',
                    'id="all"', 'id="clear"', "выбрать все", "снять все", 'id="out"',
                    'id="q"', 'id="hist"', "подписка", "prefers-color-scheme:dark",
-                   "max-width:900px", "Benchmarks: Artificial Analysis"):
+                   "Benchmarks: Artificial Analysis",
+                   # two-column layout, model table with filter, selected chips, counter
+                   "grid-template-columns:3fr 2fr", 'id="mf"', "Фильтр моделей", "Модель", "Балл",
+                   "position:sticky", 'id="selected"', "Выбранные модели", 'id="sel"',
+                   "из __MAX_MODELS__".replace("__MAX_MODELS__", "12"), 'setAttribute("role","button")',
+                   "aria-pressed", "Ctrl+Enter", "Показать ещё", 'id="more"',
+                   "нет оценки", "Ничего не найдено", "min-height:44px", "@media (max-width:767px)"):
         assert needle in page, needle
     assert "__MAX_" not in page and "__ATTRIBUTION__" not in page   # placeholders filled
     for external in ("http://cdn", "https://cdn", "googleapis", "<link rel=\"stylesheet\"",
