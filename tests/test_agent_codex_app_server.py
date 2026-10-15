@@ -7,6 +7,7 @@ import logging
 
 import pytest
 
+from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentRunSpec
 from aibroker.agent.client_tools import ClientToolConflict
 from aibroker.agent.codex_app_server import _is_response, run_tool_turn
@@ -464,7 +465,7 @@ def _done(turn):
 
 
 async def _dyn(monkeypatch, tmp_path, react, publish, *, arg_retries=2, reminders=1,
-               tool_choice="required"):
+               tool_choice="required", taken=(True, "{}")):
     from dataclasses import replace
 
     from aibroker.config import get_settings
@@ -477,7 +478,7 @@ async def _dyn(monkeypatch, tmp_path, react, publish, *, arg_retries=2, reminder
         return process
 
     async def take(*_a):
-        return True, "{}"
+        return taken
     settings = get_settings()
     monkeypatch.setattr(settings, "AGENT_TOOL_ARG_RETRIES", arg_retries)
     monkeypatch.setattr(settings, "AGENT_TOOL_REQUIRED_REMINDERS", reminders)
@@ -626,3 +627,87 @@ async def test_old_turn_response_replayed_after_a_reminder_fails_closed(monkeypa
         return []
     events, _ = await _dyn(monkeypatch, tmp_path, react, _bad_then_good([]))
     assert events[-1].type == "run.failed" and "duplicate turn response" in events[-1].message
+
+
+def _usage(turn, out):
+    return {"method": "thread/tokenUsage/updated", "params": {
+        "threadId": "thread-1", "turnId": turn, "tokenUsage": {"total": {
+            "inputTokens": 40, "outputTokens": out, "totalTokens": 40 + out,
+            "cachedInputTokens": 8, "reasoningOutputTokens": 2}}}}
+
+
+async def _ok_publish(*_a):
+    return None
+
+
+async def test_terminal_result_acks_then_interrupts_and_completes_with_empty_text(
+        monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _usage("turn-1", 12), _call(7, "c-final", {"id": 1})]
+        if m.get("method") == "turn/interrupt":
+            return [{"id": 1000, "result": {}},
+                    {"method": "item/completed", "params": {"threadId": "thread-1",
+                     "turnId": "turn-1", "item": {"type": "agentMessage", "text": "echo"}}},
+                    {"method": "turn/completed", "params": {"threadId": "thread-1",
+                     "turn": {"id": "turn-1", "status": "interrupted"}}}]
+        return []
+    events, sent = await _dyn(monkeypatch, tmp_path, react, _ok_publish,
+                              taken=(True, "ack", True))
+    ack = next(m for m in sent if m.get("id") == 7)
+    assert ack["result"]["success"] is True
+    interrupt = next(m for m in sent if m.get("method") == "turn/interrupt")
+    assert interrupt["id"] == 1000
+    assert interrupt["params"] == {"threadId": "thread-1", "turnId": "turn-1"}
+    assert sent.index(ack) < sent.index(interrupt)
+    assert events[-1] == ev.RunCompleted(final_text="")
+    usage = next(e for e in events if e.type == "usage")
+    assert (usage.input_tokens, usage.output_tokens, usage.cache_read_tokens) == (40, 12, 8)
+
+
+async def test_terminal_without_usage_reports_no_usage_not_zero(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c-final", {"id": 1})]
+        if m.get("method") == "turn/interrupt":
+            return [{"id": 1000, "result": {}}, {"method": "turn/completed", "params": {
+                "threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}}]
+        return []
+    events, _ = await _dyn(monkeypatch, tmp_path, react, _ok_publish, taken=(True, "ack", True))
+    assert events[-1] == ev.RunCompleted(final_text="")
+    assert not [e for e in events if e.type == "usage"]
+
+
+async def test_terminal_stop_not_confirmed_fails_instead_of_done(monkeypatch, tmp_path):
+    monkeypatch.setattr("aibroker.agent.codex_app_server.TERMINAL_STOP_S", 0.05)
+
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c-final", {"id": 1})]
+        return []                                   # the interrupt is never confirmed
+    events, _ = await _dyn(monkeypatch, tmp_path, react, _ok_publish, taken=(True, "ack", True))
+    assert events[-1].type == "run.failed"
+    assert "terminal_stop_unconfirmed" in events[-1].message
+
+
+async def test_another_tool_call_after_a_terminal_result_fails_closed(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c-final", {"id": 1})]
+        if m.get("method") == "turn/interrupt":
+            return [_call(8, "c-more", {"id": 2})]
+        return []
+    events, _ = await _dyn(monkeypatch, tmp_path, react, _ok_publish, taken=(True, "ack", True))
+    assert events[-1].type == "run.failed"
+    assert "another tool after terminal output" in events[-1].message
+
+
+async def test_a_refused_interrupt_fails_closed(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("method") == "turn/start":
+            return [_TURN_OK, _call(7, "c-final", {"id": 1})]
+        if m.get("method") == "turn/interrupt":
+            return [{"id": 1000, "error": {"code": -1, "message": "no"}}]
+        return []
+    events, _ = await _dyn(monkeypatch, tmp_path, react, _ok_publish, taken=(True, "ack", True))
+    assert events[-1].type == "run.failed" and "interrupt" in events[-1].message

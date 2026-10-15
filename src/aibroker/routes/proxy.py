@@ -148,6 +148,9 @@ class ChatRequest(BaseModel):
     workflow: str | None = None
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
     tool_choice: str | dict[str, Any] | None = None
+    # Subscription client tools only: output tools whose caller result may end the job
+    # (POST /tool-results with `terminal: true`) instead of starting another model turn.
+    terminal_tools: list[str] | None = Field(None, min_length=1, max_length=32)
     stream: bool | None = None
     # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
@@ -175,6 +178,12 @@ class ChatRequest(BaseModel):
                             self.tool_choice)
         elif self.tool_choice is not None:
             raise ValueError("tool_choice requires tools")
+        if self.terminal_tools is not None:
+            names = {tool.function.name for tool in self.tools or []}
+            if (not self.tools or subscription_model(self.model) is None
+                    or len(set(self.terminal_tools)) != len(self.terminal_tools)
+                    or not set(self.terminal_tools) <= names):
+                raise ValueError("terminal_tools must name declared tools of a subscription job")
         pending: set[str] = set()
         seen: set[str] = set()
         for message in self.messages:
@@ -733,7 +742,10 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
         max_tokens=body.max_tokens, temperature=body.temperature,
         response_format=body.response_format, workflow=body.workflow,
         extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
-                "tool_choice": body.tool_choice} if body.tools else None))
+                "tool_choice": body.tool_choice,
+                # only when set, so payload hashes of older clients do not change
+                **({"terminal_tools": body.terminal_tools} if body.terminal_tools else {})}
+               if body.tools else None))
 
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
@@ -834,7 +846,8 @@ async def jobs_submit(
                             "model": subscription.id, "response_format": body.response_format,
                             "workflow": body.workflow,
                             "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
-                            "tool_choice": body.tool_choice},
+                            "tool_choice": body.tool_choice,
+                            "terminal_tools": body.terminal_tools or []},
                 job_idempotency_key=idempotency_key, job_payload_hash=client_hash,
                 trace_id=trace_id, labels=body.labels,
             )
@@ -934,6 +947,9 @@ class ClientToolResultIn(BaseModel):
     call_id: str = Field(min_length=1, max_length=128)
     success: bool
     content: str = Field(max_length=MAX_RESULT_BYTES)
+    # true: this is the result of a declared terminal output tool; the worker acknowledges it,
+    # stops the model turn and finishes the job with empty text instead of another turn
+    terminal: bool = False
 
 
 @router.post("/jobs/{job_id}/tool-results", status_code=status.HTTP_202_ACCEPTED)
@@ -954,7 +970,7 @@ async def jobs_tool_result(
         raise AgentPolicyViolation(violation)
     try:
         accepted = await submit_result(job_id, ctx.project.id, body.call_id,
-                                       body.success, body.content)
+                                       body.success, body.content, terminal=body.terminal)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

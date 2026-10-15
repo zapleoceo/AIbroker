@@ -58,9 +58,35 @@ or same `callId`), fails the run closed; a repeated `thread/start` reply is igno
    the worker, even when the worker's poll lands after the deadline: `take_result`
    returns a ready result past the deadline.
    The worker sends the bounded result as `DynamicToolCallResponse` and
-   continues the same turn. Repeating the identical result is idempotent.
+   continues the same turn. Repeating the identical result is idempotent while the
+   job remains running; once terminal, `GET` reports its outcome and result POSTs
+   return `409`.
    After the final model answer, the existing `GET /v1/jobs/{id}` returns
    `status: done` and `finish_reason: stop`.
+5. Terminal output tool (optional, backward compatible). A job may declare
+   `terminal_tools` (names of its own declared tools, e.g. PydanticAI's
+   `final_result`; subscription jobs only; part of the payload hash only when set).
+   A successful result posted with `"terminal": true` is accepted only for the pending
+   call of such a tool (`submit_result`; a failed result or any other mismatch gets `409`
+   and the call stays waiting).
+   The flag is part of the result digest, so an identical replay is idempotent and the
+   same body without the flag conflicts. The worker (`take_result` returns
+   `(success, content, terminal)`) acknowledges the call to the model as usual, then
+   stops the turn instead of letting the model write another answer: Codex
+   `turn/interrupt {threadId, turnId}`, its successful response, and
+   `turn/completed` with status
+   `interrupted` (or `completed`); Claude a successful control `interrupt`
+   response and a turn `result` line. Claude may mark an interrupted result
+   `is_error: true`; that counts as a stop only when `terminal_reason` is
+   `aborted_streaming` or `aborted_tools`, with no result text, errors, or API error
+   status. Other Claude failures, including quota or execution failures, fail the
+   job. Only a confirmed
+   successful stop finishes the job: `done`, text `""`,
+   `finish_reason: stop`, no `tool_calls`, usage as reported up to the stop (absent
+   fields stay `null`, never 0), `cost_usd: null`. No confirmation within
+   `TERMINAL_STOP_S` (30 s), or another tool call after the terminal result, fails the
+   run (`client_tool_protocol`, `terminal_stop_unconfirmed`) instead of reporting done.
+   `client_tool_history` marks the call `terminal: true`.
 
 The pending call and result use `deep_jobs.result_meta` under row locks. The
 worker checks its lease fence before publishing or consuming a callback and

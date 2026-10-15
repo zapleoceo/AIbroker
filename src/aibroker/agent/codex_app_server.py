@@ -23,6 +23,10 @@ from aibroker.config import get_settings
 
 log = logging.getLogger(__name__)
 
+# After a terminal client result the turn must be confirmed stopped (turn/completed) within this.
+TERMINAL_STOP_S = 30.0
+_INTERRUPT = 1000          # our turn/interrupt request id: above every turn/start id (3..6)
+
 
 _KNOWN_METHODS = frozenset({
     "item/tool/call", "model/rerouted", "thread/tokenUsage/updated", "item/started",
@@ -157,9 +161,35 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         seen_requests: set[Any] = set()
         seen_calls: set[str] = set()
         thread_usage: dict[str, Any] | None = None
-        async for raw in proc.stdout:
+        loop = asyncio.get_running_loop()
+        stop_deadline: float | None = None     # set once a terminal result was acknowledged
+        interrupt_confirmed = False
+        while True:
+            if stop_deadline is None:
+                raw = await proc.stdout.readline()
+            else:
+                remaining = stop_deadline - loop.time()
+                if remaining <= 0:
+                    raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
+                                             "after the terminal result")
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(),
+                                                 remaining)
+                except TimeoutError:
+                    raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
+                                             "after the terminal result") from None
+            if not raw:
+                break
             message = json.loads(raw)
             _log_message(message)
+            if _is_response(message, _INTERRUPT):
+                if (stop_deadline is None or "result" not in message
+                        or "error" in message):
+                    raise ClientToolConflict("App Server refused the turn interrupt")
+                if interrupt_confirmed:
+                    raise ClientToolConflict("duplicate App Server interrupt confirmation")
+                interrupt_confirmed = True
+                continue
             if any(_is_response(message, old) for old in old_turn_requests):
                 raise ClientToolConflict("duplicate turn response")
             if _is_response(message, turn_request):
@@ -174,6 +204,8 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
             method = message.get("method")
             params = message.get("params") or {}
             if method == "item/tool/call":
+                if stop_deadline is not None:
+                    raise ClientToolConflict("model requested another tool after terminal output")
                 if ("id" not in message or params.get("threadId") != thread_id
                         or params.get("turnId") != turn_id or params.get("namespace") is not None):
                     raise ClientToolConflict("invalid dynamic tool request identity")
@@ -214,12 +246,18 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                     except TimeoutError:
                         continue
                     raise ClientToolConflict("App Server stopped while waiting for client tool")
-                success, content = result
+                success, content, *rest = result
                 await send({"id": message["id"], "result": {
                     "contentItems": [{"type": "inputText", "text": content}],
                     "success": success}})
                 yield ev.ToolResult(call_id=call_id, ok=success,
                                     output="[client tool result withheld]")
+                if rest and rest[0]:
+                    # terminal output tool: acknowledged above; stop the turn instead of
+                    # letting the model write another answer
+                    await send({"id": _INTERRUPT, "method": "turn/interrupt",
+                                "params": {"threadId": thread_id, "turnId": turn_id}})
+                    stop_deadline = loop.time() + TERMINAL_STOP_S
             elif "id" in message and method:
                 raise ClientToolConflict("App Server requested an unapproved operation")
             elif method == "model/rerouted":
@@ -241,16 +279,23 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                         or params.get("turnId") not in (None, turn_id)):
                     raise ClientToolConflict("item notification has wrong turn identity")
                 item = params.get("item") or {}
-                if item.get("type") == "agentMessage":
+                if item.get("type") == "agentMessage" and stop_deadline is None:
                     final_text = str(item.get("text") or "")
             elif method == "turn/completed":
                 if (params.get("threadId") not in (None, thread_id)
                         or (params.get("turn") or {}).get("id") != turn_id):
                     raise ClientToolConflict("completion has wrong turn identity")
                 turn = params.get("turn") or {}
-                if turn.get("status") != "completed":
+                stopped = stop_deadline is not None
+                if turn.get("status") not in (("completed", "interrupted") if stopped
+                                              else ("completed",)):
                     raise ClientToolConflict("App Server turn did not complete")
-                if calls == 0 and (run.tool_choice == "required"
+                if stopped:
+                    if not interrupt_confirmed:
+                        raise ClientToolConflict("terminal_stop_unconfirmed: App Server did "
+                                                 "not confirm the interrupt")
+                    final_text = ""      # the terminal tool result IS the answer
+                elif calls == 0 and (run.tool_choice == "required"
                                    or isinstance(run.tool_choice, dict)):
                     if reminders_left <= 0:
                         raise ClientToolConflict("required client tool was not called")

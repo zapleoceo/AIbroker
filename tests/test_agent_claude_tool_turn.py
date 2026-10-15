@@ -21,14 +21,10 @@ class _Reader:
     def __init__(self):
         self.queue = asyncio.Queue()
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
+    async def readline(self):
         value = await self.queue.get()
         if not value:
             self.on_eof()                 # the CLI closed stdout: its process exits too
-            raise StopAsyncIteration
         return value
 
     def put(self, value):
@@ -145,8 +141,8 @@ async def _drive(monkeypatch, tmp_path, react, *, publish=None, results=(("ok", 
     pending = list(results)
 
     async def take(*_a):
-        content, ok = pending.pop(0)
-        return ok, content
+        content, ok, *terminal = pending.pop(0)
+        return (ok, content, *terminal)
     settings = get_settings()
     monkeypatch.setattr(settings, "AGENT_TOOL_ARG_RETRIES", arg_retries)
     monkeypatch.setattr(settings, "AGENT_TOOL_REQUIRED_REMINDERS", reminders)
@@ -491,3 +487,86 @@ async def test_worker_runs_a_claude_tool_job_only_when_switched_on_and_verified(
         assert ran.started is not None and ran.started.client_tools == [TOOL]
     finally:
         clear_adapters()
+
+
+def _interrupt_sent(sent):
+    return [m for m in sent if m.get("type") == "control_request"
+            and m["request"].get("subtype") == "interrupt"]
+
+
+async def test_terminal_result_acks_then_interrupts_and_completes_with_empty_text(
+        monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        if m.get("type") == "control_request" and m["request"].get("subtype") == "interrupt":
+            return [{"type": "control_response", "response": {
+                        "subtype": "success", "request_id": m["request_id"], "response": {}}},
+                    {"type": "assistant", "message": {"model": "claude-sonnet-5-5", "content": [
+                        {"type": "text", "text": "echo of the answer"}]}},
+                    {**_result("", is_error=True, out=9), "subtype": "error_during_execution",
+                     "terminal_reason": "aborted_streaming"}]
+        return []
+    events, sent, published, _ = await _drive(monkeypatch, tmp_path, react,
+                                               results=[("ack", True, True)])
+    assert published and _reply(sent, "c1")["result"]["isError"] is False
+    interrupts = _interrupt_sent(sent)
+    assert len(interrupts) == 1
+    ack_at = next(i for i, m in enumerate(sent) if m.get("type") == "control_response")
+    assert ack_at < sent.index(interrupts[0])
+    assert events[-1] == ev.RunCompleted(final_text="")
+    assert not [e for e in events if e.type == "message.delta"]
+    usage = next(e for e in events if e.type == "usage")
+    assert usage.output_tokens == 9
+
+
+async def test_terminal_result_does_not_hide_claude_execution_failure(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        if m.get("type") == "control_request" and m["request"].get("subtype") == "interrupt":
+            return [{"type": "control_response", "response": {
+                        "subtype": "success", "request_id": m["request_id"], "response": {}}},
+                    {**_result("rate limit", is_error=True),
+                     "subtype": "error_during_execution", "api_error_status": 429,
+                     "terminal_reason": "aborted_streaming"}]
+        return []
+
+    events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
+    assert events[-1].type == "run.failed"
+
+
+async def test_terminal_stop_not_confirmed_fails_instead_of_done(monkeypatch, tmp_path):
+    monkeypatch.setattr("aibroker.agent.claude_tool_turn.TERMINAL_STOP_S", 0.05)
+
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
+    assert events[-1].type == "run.failed"
+    assert "terminal_stop_unconfirmed" in events[-1].message
+
+
+async def test_another_tool_call_after_a_terminal_result_fails_closed(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        if m.get("type") == "control_request" and m["request"].get("subtype") == "interrupt":
+            return [_mcp("c2", "tools/call", {"name": "lookup", "arguments": {"id": 8}})]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
+    assert events[-1].type == "run.failed"
+    assert "another tool after terminal output" in events[-1].message
+
+
+async def test_a_refused_interrupt_fails_closed(monkeypatch, tmp_path):
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        if m.get("type") == "control_request" and m["request"].get("subtype") == "interrupt":
+            return [{"type": "control_response", "response": {
+                "subtype": "error", "request_id": m["request_id"], "error": "no"}}]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
+    assert events[-1].type == "run.failed" and "interrupt" in events[-1].message

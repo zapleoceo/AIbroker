@@ -68,7 +68,7 @@ async def test_client_tool_result_is_owned_and_idempotent(monkeypatch):
     assert await submit_result(job_id, 91, "c1", True, "ok") is False
     with pytest.raises(ClientToolConflict, match="different"):
         await submit_result(job_id, 91, "c1", True, "changed")
-    assert await take_result(job_id, "c1") == (True, "ok")
+    assert await take_result(job_id, "c1") == (True, "ok", False)
     assert await submit_result(job_id, 91, "c1", True, "ok") is False
     with pytest.raises(ClientToolConflict, match="already pending"):
         await publish_call(job_id, "c1", "lookup", {"id": 3})
@@ -124,7 +124,7 @@ async def test_take_result_returns_ready_result_after_deadline():
     await publish_call(job_id, "c1", "lookup", {"id": 3})
     assert await submit_result(job_id, 91, "c1", True, "ok") is True
     await _expire(job_id)       # the worker's ~1s poll lands after the deadline
-    assert await take_result(job_id, "c1") == (True, "ok")
+    assert await take_result(job_id, "c1") == (True, "ok", False)
 
 
 async def test_poll_hides_expired_pending_call():
@@ -205,7 +205,7 @@ async def test_lease_loss_keeps_accepted_ready_result():
     with pytest.raises(StaleLease):
         await _stream(job_id, _Idle(), spec, {}, 60.0, 60.0, exec_config_from_settings(), lease)
     assert await submit_result(job_id, 91, "c1", True, "ok") is False   # idempotent retry
-    assert await take_result(job_id, "c1") == (True, "ok")
+    assert await take_result(job_id, "c1") == (True, "ok", False)
 
 
 async def test_lease_loss_still_raises_when_withdrawing_the_call_fails(monkeypatch, caplog):
@@ -326,3 +326,89 @@ def test_schema_violation_stops_after_three_errors_on_a_large_argument():
     assert detail.count("type string") == 3 and detail.startswith("a/0:")
     no_params = [{"type": "function", "function": {"name": "t"}}]
     assert schema_violation(no_params, "t", {}) == "tool has no parameters schema"
+
+
+async def _terminal_job(terminal_tools: list[str]) -> int:
+    job_id = await _job()
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, job_id)
+        job.request = {**job.request, "client_job": {**job.request["client_job"],
+                                                     "terminal_tools": terminal_tools}}
+    return job_id
+
+
+async def test_terminal_is_refused_for_a_tool_not_declared_terminal():
+    plain = await _job()
+    await publish_call(plain, "c1", "lookup", {"id": 3})
+    with pytest.raises(ClientToolConflict, match="declared terminal output tool"):
+        await submit_result(plain, 91, "c1", True, "ok", terminal=True)
+    assert await take_result(plain, "c1") is None          # the refusal left the call waiting
+
+
+async def test_terminal_result_for_a_declared_terminal_tool_is_idempotent():
+    job_id = await _terminal_job(["lookup"])
+    await publish_call(job_id, "t1", "lookup", {"id": 3})
+    with pytest.raises(ClientToolConflict, match="call id"):
+        await submit_result(job_id, 91, "other", True, "ack", terminal=True)
+    assert await submit_result(job_id, 91, "t1", True, "ack", terminal=True) is True
+    assert await submit_result(job_id, 91, "t1", True, "ack", terminal=True) is False
+    with pytest.raises(ClientToolConflict, match="different"):
+        await submit_result(job_id, 91, "t1", True, "ack")          # same body, flag dropped
+    assert await take_result(job_id, "t1") == (True, "ack", True)
+    assert await submit_result(job_id, 91, "t1", True, "ack", terminal=True) is False
+    async with get_session() as s:
+        history = (await s.get(DeepJobRow, job_id)).result_meta["client_tool_history"]
+    assert history[-1]["call_id"] == "t1" and history[-1]["terminal"] is True
+
+
+async def test_a_non_terminal_result_on_a_terminal_tool_still_works_as_before():
+    job_id = await _terminal_job(["lookup"])
+    await publish_call(job_id, "c1", "lookup", {"id": 3})
+    assert await submit_result(job_id, 91, "c1", True, "ok") is True
+    assert await take_result(job_id, "c1") == (True, "ok", False)
+    async with get_session() as s:
+        history = (await s.get(DeepJobRow, job_id)).result_meta["client_tool_history"]
+    assert "terminal" not in history[-1]
+
+
+async def test_tool_results_endpoint_passes_terminal_and_refuses_it_on_a_plain_tool(monkeypatch):
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    ctx = SimpleNamespace(project=SimpleNamespace(id=91), has_scope=lambda _: True)
+    job_id = await _terminal_job(["lookup"])
+    await publish_call(job_id, "t1", "lookup", {"id": 3})
+    body = proxy.ClientToolResultIn(call_id="t1", success=True, content="ack", terminal=True)
+    assert await proxy.jobs_tool_result(job_id, body, ctx=ctx) == {"accepted": True}
+    assert await take_result(job_id, "t1") == (True, "ack", True)
+    assert proxy.ClientToolResultIn(call_id="x", success=True, content="").terminal is False
+
+
+def test_terminal_tools_must_name_declared_tools_of_a_subscription_job():
+    from pydantic import ValidationError
+    tool = {"type": "function", "function": {"name": "final_result", "description": "d",
+                                             "parameters": {"type": "object"}}}
+    base = {"messages": [{"role": "user", "content": "hi"}], "tools": [tool],
+            "tool_choice": "required"}
+    ok = proxy.ChatRequest.model_validate(
+        {**base, "model": "codex-sub/gpt-6.1-sol", "terminal_tools": ["final_result"]})
+    assert ok.terminal_tools == ["final_result"]
+    for bad in ({"model": "codex-sub/gpt-6.1-sol", "terminal_tools": ["other"]},
+                {"model": "codex-sub/gpt-6.1-sol", "terminal_tools": ["final_result"] * 2},
+                {"model": "gemini/gemini-2.5-flash", "terminal_tools": ["final_result"]}):
+        with pytest.raises(ValidationError, match="terminal_tools"):
+            proxy.ChatRequest.model_validate({**base, **bad})
+    with pytest.raises(ValidationError, match="terminal_tools"):
+        proxy.ChatRequest.model_validate({"model": "codex-sub/gpt-6.1-sol",
+                                          "messages": base["messages"],
+                                          "terminal_tools": ["final_result"]})
+
+
+def test_terminal_tools_join_the_payload_hash_only_when_set():
+    tool = {"type": "function", "function": {"name": "final_result", "description": "d",
+                                             "parameters": {"type": "object"}}}
+    base = {"model": "codex-sub/gpt-6.1-sol", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [tool], "tool_choice": "required"}
+    plain = proxy._client_request(proxy.ChatRequest.model_validate(base))
+    marked = proxy._client_request(proxy.ChatRequest.model_validate(
+        {**base, "terminal_tools": ["final_result"]}))
+    assert "terminal_tools" not in plain and marked["terminal_tools"] == ["final_result"]
