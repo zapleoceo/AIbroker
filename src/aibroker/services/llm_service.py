@@ -552,9 +552,9 @@ async def run_chat(
                 if step.tier is not None:
                     # Pinned walk: the free pass already ran before the paid one.
                     return _exhausted_for(res.error)
-                # A project/global COST cap blocks only PAID keys — $0 free keys are
-                # exempt — so a cap-block must NOT abort the walk: downgrade to
-                # free-only for the rest of it and retry THIS provider free-only
+                # A project/global COST cap normally blocks paid keys; free keys
+                # serving paid OpenRouter routes can also be capped. A cap-block
+                # must not abort a mixed-provider walk: retry THIS provider free-only
                 # (gemini is MIXED: 1 paid + 7 free keys; the same loop is bounded by
                 # _max_keys and pick_and_reserve now filters to free).
                 if require_tier != "free":
