@@ -90,13 +90,12 @@ dashboard; a refusal ends as `refused` with the reason shown. The project key is
 once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
 so it is never printed, stored in plaintext or sent to the browser.
 
-**Subscription models.** Claude subscription models (`claude-sub/*`) are offered too
-when the Broker catalog does not mark them `available: false`. `codex-sub/*` is never offered and a submit naming
-one is `422`: `codex exec` keeps a shell (sandbox `workspace-write`, approval never), so an anonymous prompt could
-read container files and the answer would go to the public history. Claude runs with `--tools ""`.
-Subscription rows carry `subscription: true` and the page
+**Subscription models.** Claude and Codex subscription models (`claude-sub/*`, `codex-sub/*`) are offered too
+when the Broker catalog does not mark them `available: false`. `codex-sub` is enabled by the owner's decision of
+15.10: the agent runs in the separate container `aibroker-agent-worker-codex`, and the shell of `codex exec` stays
+(sandbox `workspace-write`, approval never); the owner accepted that. Subscription rows carry `subscription: true` and the page
 shows them with a thin «подписка» label. They are sent exactly like any client sends them: the `POST /v1/jobs`
-logic with capability `chat:smart` and the pinned model id, so Broker runs them as `agent:claude`.
+logic with capability `chat:smart` and the pinned model id, so Broker runs them as `agent:claude` / `agent:codex`.
 Text only, no tools. The lane is chosen by `subscription_lane`. Answer, error and timeout show like any other model.
 They need `llm:agent` on the project and the deploy-time allowlist and policy
 ([deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)). Until those are set,

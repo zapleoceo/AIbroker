@@ -196,9 +196,9 @@ Code reference for the compare page. Service and route modules are in `src/aibro
 - `set_browser_cookie`: sets the httpOnly `aib_compare` cookie, `SameSite=Lax`, with `secure` taken from the request (`src/aibroker/services/compare.py`).
 - `active_request_id`: newest unfinished request of this browser or this IP, or `None` (`src/aibroker/services/compare.py`).
 - `create_request`: runs the one-question-at-a-time guard and inserts the request with its `pending` result rows in one transaction; raises HTTP 429 while busy (`src/aibroker/services/compare.py`).
-- `chat_models`: the catalog models offered on the page: chat-routable API models (lane from `lane_for`) and available Claude subscription models (`subscription: true`; `codex-sub/*` is never offered). Sorted by `intelligence_index` descending, unscored last, then by name (`src/aibroker/services/compare.py`).
+- `chat_models`: the catalog models offered on the page: chat-routable API models (lane from `lane_for`) and available Claude/Codex subscription models (`subscription: true`). Sorted by `intelligence_index` descending, unscored last, then by name (`src/aibroker/services/compare.py`).
 - `lane_for`: the first chat lane a model is wired for whose provider chain includes its provider, or `None` (`src/aibroker/services/compare.py`).
-- `subscription_lane`: the lane for a Claude subscription model: `chat:smart` if offered, else the first chat lane, or `None` (`src/aibroker/services/compare.py`).
+- `subscription_lane`: the lane for a Claude/Codex subscription model: `chat:smart` if offered, else the first chat lane, or `None` (`src/aibroker/services/compare.py`).
 - `get_project`: the active `model-compare` project row, or `None` (`src/aibroker/services/compare.py`).
 - `spawn_tracker`: runs `fan_out` and `sync_request` in a background task (`src/aibroker/services/compare.py`).
 - `fan_out`: submits one job per result row concurrently; a `Refused` submit is stored as `refused`, other errors as `error` (`src/aibroker/services/compare.py`).

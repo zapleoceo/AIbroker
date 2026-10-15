@@ -60,8 +60,6 @@ async def submit(body: SubmitIn, request: Request, response: Response) -> dict[s
         raise HTTPException(422, "пустой вопрос")
     catalog = {m["id"]: m for m in svc.chat_models()}
     wanted = list(dict.fromkeys(body.models))
-    if any(m.startswith(tuple(f"{p}/" for p in svc.UNSAFE_SUBSCRIPTION_PROVIDERS)) for m in wanted):
-        raise HTTPException(422, "эта модель недоступна на публичной странице")
     unknown = [m for m in wanted if m not in catalog]
     if unknown:
         raise HTTPException(422, f"неизвестные модели: {', '.join(unknown)[:200]}")

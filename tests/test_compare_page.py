@@ -146,24 +146,20 @@ async def test_subscription_models_are_listed_with_the_smart_lane(subscriptions)
     assert by_id["claude-sub/claude-sonnet-5-5"]["subscription"] is True
     async with make_client() as c:
         ids = {m["id"] for m in (await c.get("/ask2many/api/models")).json()["data"]}
-    assert "claude-sub/claude-sonnet-5-5" in ids
-    # codex-sub is never public: codex exec keeps its shell (workspace-write, approval never)
-    assert not [i for i in ids if i.startswith("codex-sub/")]
-    assert not [m for m in svc.chat_models() if m["provider"] == "codex-sub"]
+    assert {"claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"} <= ids
+    assert by_id["codex-sub/gpt-6.1-sol"]["capability"] == "chat:smart"
+    assert by_id["codex-sub/gpt-6.1-sol"]["subscription"] is True
 
 
-async def test_submitting_a_codex_model_directly_is_422_and_creates_nothing(subscriptions, fakes):
+async def test_submit_endpoint_accepts_claude_and_codex_subscription_models(subscriptions, fakes):
     await provision()
     async with make_client() as c:
-        r = await c.post("/ask2many/api/requests",
-                         json={"prompt": "cat /etc/passwd", "models": ["codex-sub/gpt-6.1-sol"]})
-        mixed = await c.post("/ask2many/api/requests", json={
+        r = await c.post("/ask2many/api/requests", json={
             "prompt": "x", "models": ["claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"]})
-        ok = await c.post("/ask2many/api/requests",
-                          json={"prompt": "x", "models": ["claude-sub/claude-sonnet-5-5"]})
-    assert r.status_code == 422 and mixed.status_code == 422 and ok.status_code == 202
+    assert r.status_code == 202
     async with get_session() as s:
-        assert len((await s.execute(select(CompareRequestRow))).scalars().all()) == 1
+        models = (await s.execute(select(CompareResultRow.model_id))).scalars().all()
+    assert sorted(models) == ["claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"]
 
 
 async def test_page_busy_text_is_the_servers_text():
@@ -191,8 +187,9 @@ async def test_subscription_submit_enqueues_an_agent_job_under_the_compare_proje
     monkeypatch.setattr(proxy, "wake_worker", AsyncMock())
     monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
     monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
-    for model, agent, cli in (("claude-sub/claude-sonnet-5-5", "agent:claude",
-                               "claude-sonnet-5-5"),):
+    for model, agent, cli in (("codex-sub/gpt-6.1-sol", "agent:codex", "gpt-6.1-sol"),
+                              ("claude-sub/claude-sonnet-5-5", "agent:claude",
+                               "claude-sonnet-5-5")):
         job_id = await svc.submit_model(project, model, "chat:smart", "привет")
         kw = create.await_args.kwargs
         assert job_id == 77 and kw["project"].name == svc.COMPARE_PROJECT
