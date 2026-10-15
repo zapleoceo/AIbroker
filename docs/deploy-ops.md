@@ -255,9 +255,17 @@ docker exec -it aibroker-api python -m aibroker.scripts.provision_compare
 ```
 
 It prints `project 'model-compare': created` (or `updated`, with the caps at 0). The script is
-idempotent: it creates the project on the first run and then re-asserts the chat scopes and the
-two money caps, without rotating anything. Until it has run, `POST /ask2many/api/requests`
+idempotent: it creates the project on the first run and then re-asserts the scopes (`llm:chat`, `llm:edit`,
+`llm:deep`, `llm:agent`) and the two money caps, without rotating anything. Until it has run, `POST /ask2many/api/requests`
 returns `503`.
+
+Subscription models on the page need server env that the script does not set (it is not in the repo).
+Before they can run: add the `model-compare` project's numeric id to `AGENT_ALLOWED_PROJECT_IDS`; add an entry for
+that id to `AGENT_PROJECT_POLICY` allowing the subscription models and accounts it should use; and configure the
+subscription catalog, the verified models and `AGENT_SUBSCRIPTION_CODEX_ENABLED` as for any subscription client.
+The formats are in [subscription-models.md](subscription-models.md) and [auth.md](auth.md#scopes). Until then a
+subscription model shows `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)` or
+`отказ: политика проекта (<code>)` as its result; other models are unaffected.
 
 The project's daily and monthly caps are 0. The cost guard then refuses paid models and free
 models run. To raise the limit, change the caps on the `model-compare` project in the dashboard

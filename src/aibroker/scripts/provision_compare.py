@@ -3,7 +3,9 @@
 Usage at deploy, after migration 021 (inside the container, like bootstrap):
     python -m aibroker.scripts.provision_compare
 
-Creates project `model-compare` with chat scopes and daily + monthly money caps of 0 (Broker's
+Creates project `model-compare` with chat scopes plus `llm:agent` (Claude/Codex subscription
+models; they additionally need the project id in AGENT_ALLOWED_PROJECT_IDS and an
+AGENT_PROJECT_POLICY entry, which are server env and not set here) and daily + monthly money caps of 0 (Broker's
 cost guard then refuses every paid model; free ones still run). Re-running only re-asserts those
 settings; it never rotates anything. The page backend calls Broker's job path in process as this
 project, so the project key is generated, hashed and DISCARDED here: it is never printed, logged,

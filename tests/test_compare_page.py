@@ -101,14 +101,89 @@ async def test_models_endpoint_lists_live_chat_models_with_scores():
     rows = {m["id"]: m for m in body["data"]}
     live = {row["id"]: row for row in catalog.listing()}
     assert rows and set(rows) <= set(live)
-    for mid in rows:        # chat-capable, API-billed, and routable through some chat chain
-        assert live[mid]["billing_type"] != "subscription"
-        assert svc.lane_for(live[mid]["capabilities"], live[mid]["owned_by"]) is not None
-    assert all(set(m) == {"id", "name", "provider", "intelligence_index"}
+    for mid in rows:        # chat-capable and routable (subscription routes: marked available)
+        if live[mid]["billing_type"] == "subscription":
+            assert live[mid].get("available") is not False
+        else:
+            assert svc.lane_for(live[mid]["capabilities"], live[mid]["owned_by"]) is not None
+    scores = [m["intelligence_index"] for m in body["data"]]
+    scored = [s for s in scores if s is not None]
+    assert scored == sorted(scored, reverse=True)                  # best first
+    assert scores[:len(scored)] == scored and not any(s is not None for s in scores[len(scored):])
+    assert all(set(m) == {"id", "name", "provider", "intelligence_index", "subscription"}
                for m in rows.values())
     assert rows["anthropic/claude-sonnet-5"]["intelligence_index"] == 38.16
     assert rows["deepseek/deepseek-flash"]["intelligence_index"] is None   # no AA version match
     assert "whisper" not in " ".join(rows)                                  # not a chat model
+
+
+def row(mid, name, score, *, billing="api", caps=("chat:fast",), owner="groq", **extra):
+    return {"id": mid, "name": name, "owned_by": owner, "capabilities": list(caps),
+            "billing_type": billing, "intelligence_index": score, **extra}
+
+
+def test_models_sorted_by_score_desc_unscored_last_then_by_name(monkeypatch):
+    rows = [row("groq/b", "b", 10.0), row("groq/zz", "zz", None), row("groq/a", "a", 10.0),
+            row("groq/top", "top", 40.5), row("groq/aa", "aa", None), row("groq/mid", "mid", 22.0)]
+    monkeypatch.setattr(svc.catalog, "listing", lambda: rows)
+    assert [m["name"] for m in svc.chat_models()] == ["top", "mid", "a", "b", "aa", "zz"]
+
+
+@pytest.fixture
+def subscriptions(monkeypatch):
+    """Claude + Codex subscription routes verified and enabled, as in test_subscription_jobs."""
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5"],"codex-sub":["gpt-6.1-sol"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
+
+
+async def test_subscription_models_are_listed_with_the_smart_lane(subscriptions):
+    by_id = {m["id"]: m for m in svc.chat_models()}
+    assert by_id["claude-sub/claude-sonnet-5-5"]["capability"] == "chat:smart"
+    assert by_id["codex-sub/gpt-6.1-sol"]["capability"] == "chat:smart"
+    async with make_client() as c:
+        ids = {m["id"] for m in (await c.get("/ask2many/api/models")).json()["data"]}
+    assert {"claude-sub/claude-sonnet-5-5", "codex-sub/gpt-6.1-sol"} <= ids
+
+
+def test_unverified_subscription_models_are_not_offered(monkeypatch):
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS", "{}")
+    assert not [m for m in svc.chat_models() if m["id"].startswith(("claude-sub/", "codex-sub/"))]
+
+
+async def test_subscription_submit_enqueues_an_agent_job_under_the_compare_project(
+        subscriptions, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aibroker.routes import proxy
+    await provision()
+    project = await svc.get_project()
+    create = AsyncMock(return_value=(77, True))
+    monkeypatch.setattr(proxy, "create_run", create)
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    monkeypatch.setattr(proxy, "wake_worker", AsyncMock())
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    for model, agent, cli in (("codex-sub/gpt-6.1-sol", "agent:codex", "gpt-6.1-sol"),
+                              ("claude-sub/claude-sonnet-5-5", "agent:claude",
+                               "claude-sonnet-5-5")):
+        job_id = await svc.submit_model(project, model, "chat:smart", "привет")
+        kw = create.await_args.kwargs
+        assert job_id == 77 and kw["project"].name == svc.COMPARE_PROJECT
+        assert kw["capability"] == agent and kw["model"] == cli
+        assert kw["client_job"]["capability"] == "chat:smart" and kw["client_job"]["model"] == model
+        assert kw["allowed_tools"] == [] and not kw["client_job"]["tools"]   # text only
+
+
+async def test_subscription_refusals_are_shown_as_refusals_not_crashes(subscriptions):
+    await provision()
+    project = await svc.get_project()
+    # AGENT_ALLOWED_PROJECT_IDS is empty by default: fail-closed -> readable refusal
+    with pytest.raises(svc.Refused, match="agent_project_not_allowed"):
+        await svc.submit_model(project, "codex-sub/gpt-6.1-sol", "chat:smart", "x")
 
 
 # ─── intelligence_index in the catalog ──────────────────────────────────────
@@ -157,6 +232,15 @@ async def test_provision_creates_cap_zero_project_idempotently_without_printing_
     p = rows[0]
     assert p.daily_cost_cap_usd == 0.0 and p.monthly_cost_cap_usd == 0.0 and p.is_active
     assert "llm:chat" in p.allowed_scopes and "admin:read" not in p.allowed_scopes
+    assert "llm:agent" in p.allowed_scopes          # subscription (agent) models
+    async with get_session() as s:                  # re-run re-asserts scopes, caps stay 0
+        await s.execute(update(ProjectRow).where(ProjectRow.id == p.id)
+                        .values(allowed_scopes=["llm:chat"], daily_cost_cap_usd=5.0))
+    assert await provision() == "updated"
+    async with get_session() as s:
+        p = (await s.execute(select(ProjectRow).where(ProjectRow.id == p.id))).scalar_one()
+    assert "llm:agent" in p.allowed_scopes
+    assert p.daily_cost_cap_usd == 0.0 and p.monthly_cost_cap_usd == 0.0
     out = capsys.readouterr()
     assert "aib_prj_" not in out.out + out.err
 
@@ -319,10 +403,21 @@ def test_cap_error_matches_only_the_dispatchers_exact_message():
     assert not svc.is_cap_error("provider said: cap exceeded, budget reached")
 
 
-async def test_page_says_history_is_public():
+async def test_page_has_the_key_elements_and_no_external_assets():
     async with make_client() as c:
         page = (await c.get("/ask2many")).text
+    assert "<h1>Ask2many — один вопрос, много моделей</h1>" in page
     assert "Вопросы и ответы видны всем в общей истории." in page
+    for needle in ('id="prompt"', 'id="go"', "Спросить", "Ждём ответы", 'id="models"',
+                   'id="all"', 'id="clear"', "выбрать все", "снять все", 'id="out"',
+                   'id="q"', 'id="hist"', "подписка", "prefers-color-scheme:dark",
+                   "max-width:900px", "Benchmarks: Artificial Analysis"):
+        assert needle in page, needle
+    assert "__MAX_" not in page and "__ATTRIBUTION__" not in page   # placeholders filled
+    for external in ("http://cdn", "https://cdn", "googleapis", "<link rel=\"stylesheet\"",
+                     "<script src"):
+        assert external not in page
+    assert "textContent" in page and "innerHTML" not in page
 
 
 async def test_another_browser_and_ip_is_allowed_but_same_ip_new_cookie_is_not(fakes):

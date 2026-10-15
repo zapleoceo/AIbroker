@@ -25,6 +25,8 @@ from fastapi import HTTPException, Response
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed
+from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.db import get_session
 from aibroker.db.models import CompareRequestRow, CompareResultRow, ProjectRow
 from aibroker.providers import catalog
@@ -34,7 +36,7 @@ from aibroker.services.llm_service import cap_message
 log = logging.getLogger(__name__)
 
 COMPARE_PROJECT = "model-compare"
-COMPARE_SCOPES = ["llm:chat", "llm:edit", "llm:deep"]
+COMPARE_SCOPES = ["llm:chat", "llm:edit", "llm:deep", AGENT_SCOPE]
 MAX_PROMPT_CHARS = 4000
 MAX_MODELS = 12
 PAGE_SIZE = 20
@@ -69,19 +71,39 @@ def lane_for(capabilities: list[str], provider: str) -> str | None:
                  if lane in capabilities and provider in chain_for(lane)), None)  # type: ignore[arg-type]
 
 
+def subscription_lane(capabilities: list[str]) -> str | None:
+    """Lane for a Claude/Codex subscription model. Clients (Orchestra) send these as
+    `chat:smart` with the pinned `claude-sub/*` / `codex-sub/*` id; Broker then runs the job
+    as agent:claude / agent:codex. The provider is added to the lane's chain by jobs_submit
+    itself, so no chain check here."""
+    if "chat:smart" in capabilities:
+        return "chat:smart"
+    return next((lane for lane in CHAT_LANES if lane in capabilities), None)
+
+
 def chat_models() -> list[dict[str, Any]]:
     """Chat models Broker's live catalog offers, as {id, name, provider, intelligence_index,
-    capability}. The score comes from the catalog row itself (exact name+version, else None).
-    Subscription (agent) models are not offered: the compare project has no agent scope.
-    A model no chat chain can route to (e.g. listed but in no lane's provider chain) is left
-    out rather than shown as a button that can only be refused."""
+    capability}, best score first (no score last, then by name). The score comes from the
+    catalog row itself (exact name+version, else None). Subscription models (claude-sub/*,
+    codex-sub/*) are included when the catalog marks them available; they run as agent jobs and
+    need the `llm:agent` scope plus the deploy-time agent allowlist/policy for this project.
+    A model no chat chain can route to is left out rather than shown as a button that can only
+    be refused."""
     out = []
     for row in catalog.listing():
-        lane = lane_for(row["capabilities"], row["owned_by"])
-        if lane is None or row["billing_type"] == "subscription":
+        if row["billing_type"] == "subscription":
+            if row.get("available") is False:
+                continue
+            lane = subscription_lane(row["capabilities"])
+        else:
+            lane = lane_for(row["capabilities"], row["owned_by"])
+        if lane is None:
             continue
         out.append({"id": row["id"], "name": row["name"], "provider": row["owned_by"],
-                    "intelligence_index": row.get("intelligence_index"), "capability": lane})
+                    "intelligence_index": row.get("intelligence_index"), "capability": lane,
+                    "subscription": row["billing_type"] == "subscription"})
+    out.sort(key=lambda m: (m["intelligence_index"] is None,
+                            -(m["intelligence_index"] or 0.0), m["name"], m["id"]))
     return out
 
 
@@ -184,6 +206,11 @@ async def submit_model(project: ProjectRow, model_id: str, capability: str, prom
         raise Refused(f"отказ: {exc.detail}") from exc
     except RequestCapExhausted as exc:
         raise Refused(f"отказ: лимит запросов проекта ({exc})") from exc
+    except AgentProjectNotAllowed as exc:   # subscription route: project not on the agent allowlist
+        raise Refused("отказ: проект не допущен к подписочным моделям "
+                      "(agent_project_not_allowed)") from exc
+    except AgentPolicyViolation as exc:     # subscription route: model/account outside the policy
+        raise Refused(f"отказ: политика проекта ({exc.error})") from exc
     return int(out.job_id)  # type: ignore[union-attr]
 
 
@@ -201,7 +228,8 @@ async def cancel_model_job(project: ProjectRow, job_id: int) -> None:
     from aibroker.services.job_control import cancel_job
 
     try:
-        await cancel_job(job_id, project.id, agent_allowed=False)
+        await cancel_job(job_id, project.id,
+                         agent_allowed=AGENT_SCOPE in (project.allowed_scopes or []))
     except Exception:  # noqa: BLE001
         log.warning("compare: cancel of job %s failed", job_id, exc_info=True)
 
