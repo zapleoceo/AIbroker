@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aibroker.agent.accounts import pick_account
+from aibroker.agent.auth_health import codex_auth_available
 from aibroker.agent.client_tools import (
     MAX_RESULT_BYTES,
     ClientToolConflict,
@@ -988,4 +989,7 @@ async def list_models(ctx: ProjectCtx = Depends(require_project)) -> ModelsRespo
     `id` (`gemini/gemini-2.5-flash`) or a bare `name` (`gpt-oss-120b`); a name
     served by several providers resolves deterministically (free-tier keys first,
     then fixed provider rank)."""
-    return ModelsResponse(data=catalog.listing(ctx.project.id))
+    auth_available = (await codex_auth_available()
+                      if get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED else False)
+    return ModelsResponse(data=catalog.listing(
+        ctx.project.id, codex_auth_available=auth_available))

@@ -189,7 +189,8 @@ def supports_tools(spec: ModelSpec, project_id: int | None = None) -> bool | Non
     return value if isinstance(value, bool) else None
 
 
-def listing(project_id: int | None = None) -> list[dict[str, object]]:
+def listing(project_id: int | None = None,
+            codex_auth_available: bool = True) -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
     for m in pinnable_models():
@@ -214,7 +215,8 @@ def listing(project_id: int | None = None) -> list[dict[str, object]]:
             "also_served_by": also,
             "price": price_info(m),
             **({"available": subscription_model_verified(m.id) and
-               (m.provider != "codex-sub" or get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED)}
+               (m.provider != "codex-sub" or
+                (get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED and codex_auth_available))}
                if m.pricing == "subscription" else {}),
         })
     return rows

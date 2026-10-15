@@ -689,6 +689,45 @@ ChatGPT-plan run requires a separate owner check. Codex uses
 `AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF` (default false), never Claude's
 `AGENT_PAID_CONTINUATION_VERIFIED_OFF`.
 
+**Codex catalog health (`agent/auth_health.py`).** `GET /v1/models` marks every `codex-sub/*` row
+`available: false` while the owner's Codex login is known to be broken. `codex_auth_available()`
+(async, returns `bool`) decides this from terminal run metadata only:
+
+- it selects owner runs (`account_id` `owner`, capability `agent:codex`, `outcome` `completed` or
+  `failed`) and joins exactly the terminal event of each run: the event whose `seq` equals the run's
+  `last_seq`, with type `run.completed` or `run.failed`;
+- it orders by `last_event_at` desc, then `run_id` desc, and reads at most 128 rows, newest first;
+- the first `run.completed` makes it available (`true`);
+- the first `run.failed` with `error_class` `cli_error` and a message containing
+  `workspace routing discovery unauthorized (401)` (case-insensitive) makes it unavailable (`false`);
+- any other failure is skipped; with no match in the window it returns `true`.
+
+The answer is cached per process for 30 seconds, so a new run can take up to 30 s to show in
+`GET /v1/models`.
+
+**Fail-closed on DB errors.** If the lookup raises `SQLAlchemyError` or `OSError`, it logs a
+warning and returns `false` (cached for the same 30 s). Only the `codex-sub` rows are affected;
+the rest of `GET /v1/models` is unchanged. Other exceptions are not caught and propagate.
+
+Only `GET /v1/models` uses the result (`list_models` in `routes/proxy.py`). The check runs only
+when `AGENT_SUBSCRIPTION_CODEX_ENABLED` is on; otherwise it is not called and `false` is passed.
+The result goes to `catalog.listing(project_id, codex_auth_available=...)` (`providers/catalog.py`),
+where a `codex-sub` row is `available` only when the model is verified and both the owner flag and
+this check allow it.
+
+**`POST /v1/jobs` is not blocked** by this check, so the owner can verify recovery after re-login
+with a direct Broker job. Its `run.completed` flips the listing back to `available: true` (after
+the cache TTL). Only a `cli_error` 401 failure flips it to `false`; other failures do not.
+
+**Recovery:** the owner re-logs in with the Codex login handoff above (device-code `codex login`,
+then `codex login ... status` must show a ChatGPT login), then sends one direct job. The query has
+no project filter, so a recovery run from any project counts. Only a subsequent successful direct
+Broker run re-enables the catalog; if it fails, investigate the new error.
+
+Public names: `codex_auth_available` (function, `agent/auth_health.py`) and the keyword parameter
+`codex_auth_available` of `catalog.listing`. Module constants `_AUTH_401` and `_CACHE_SECONDS` are
+private.
+
 ## Codex: container split, read isolation, redaction (independent review fixes)
 
 **One container per CLI.** Per-run containers would need `docker.sock`, which is forbidden. Instead
