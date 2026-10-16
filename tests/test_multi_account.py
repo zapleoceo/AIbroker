@@ -256,10 +256,32 @@ async def test_all_paused_picks_the_earliest_reset():
     assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
 
 
+async def _finish(rid: int) -> None:
+    from aibroker.db import get_session
+    from aibroker.db.models import DeepJobRow
+    async with get_session() as s:
+        (await s.get(DeepJobRow, rid)).status = "done"
+
+
 async def test_an_expired_pause_no_longer_counts():
     pid, _ = await _project()
-    await park_for_quota(await _run(pid, "owner"), _now() - timedelta(minutes=1))
+    rid = await _run(pid, "owner")
+    await park_for_quota(rid, _now() - timedelta(minutes=1))
+    await _finish(rid)
     assert await pick_account(("owner", "claude-2"), CAP) == "owner"
+
+
+async def test_new_runs_go_to_the_least_loaded_free_account():
+    pid, _ = await _project()
+    first = await _run(pid, "owner", "a")                       # owner busy with one run
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
+    await _run(pid, "claude-2", "b")                            # 1 : 1 -> policy order
+    assert await pick_account(("owner", "claude-2"), CAP) == "owner"
+    await _finish(first)                                        # finished runs do not count
+    assert await pick_account(("owner", "claude-2"), CAP) == "owner"
+    await park_for_quota(await _run(pid, "owner", "c"), _now() + timedelta(hours=1))
+    await _run(pid, "claude-2", "d")                            # parked owner is never picked
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
 
 
 async def test_account_stays_paused_until_the_latest_future_reset():
