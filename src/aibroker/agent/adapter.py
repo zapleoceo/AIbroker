@@ -40,6 +40,9 @@ class AgentRunSpec:
     client_tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = None
     fence_leases: tuple[Lease, ...] = ()
+    # Plain answer only: the CLI runs with every command/browser/app tool disabled (the public
+    # /ask2many page, whose prompts come from anyone with a Telegram login).
+    no_shell: bool = False
 
 
 @dataclass(frozen=True)

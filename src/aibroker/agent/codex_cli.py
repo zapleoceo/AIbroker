@@ -43,6 +43,11 @@ CONFIG_OVERRIDES = (
     'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
 )
 PERMISSION_PROFILE = "broker"
+# `--disable` features for a no_shell run (codex-cli 0.162.1 `codex features list`). Verified live
+# 2026-10-16: with these off, "Run: id" is answered "command execution is disabled" and the JSON
+# stream has no command_execution item. image_generation stays on (no shell involved).
+NO_SHELL_FEATURES = ("shell_tool", "unified_exec", "code_mode_host", "browser_use",
+                     "browser_use_external", "computer_use", "in_app_browser", "apps")
 _ABS_PATH = re.compile(r"^/[A-Za-z0-9_./-]+\Z")
 
 
@@ -159,6 +164,8 @@ def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
         argv.append(f"--model={run.model}")
     for override in (*CONFIG_OVERRIDES, *permission_overrides(codex_home)):
         argv += ["-c", override]
+    if run.no_shell:
+        argv += [f"--disable={feature}" for feature in NO_SHELL_FEATURES]
     argv += ["--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-"]
     return argv
 

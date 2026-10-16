@@ -82,6 +82,12 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 
 ### `/ask2many` — compare page (2026-10-14)
 
+Codex runs from this page have no command tools (2026-10-16): the page labels its jobs
+`page=compare`, the worker sets `AgentRunSpec.no_shell`, and `build_codex_argv` adds
+`--disable` for every `NO_SHELL_FEATURES` entry (shell, unified exec, code mode, browser, computer
+use, apps). Reason: on 2026-10-16 anonymous prompts made Codex run `id`, `uname`, `ls` and `which`
+in the worker sandbox (no secrets or network were reachable).
+
 Login (2026-10-16): any Telegram user, through the same bot and signature check
 (`verify_telegram_widget`) as the dashboard. The session is its own HMAC cookie `aib_ask`
 (`ask_user` / `require_ask_user`); every `/ask2many/api/*` call without it is `401`. It grants
