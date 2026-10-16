@@ -360,7 +360,10 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             attachments=attached,
             client_tools=list((req.get("client_job") or {}).get("tools") or []),
             tool_choice=(req.get("client_job") or {}).get("tool_choice"),
-            fence_leases=(lease,) if lease is not None else ())
+            fence_leases=(lease,) if lease is not None else (),
+            # the /ask2many page labels its jobs page=compare (services/compare.submit_model);
+            # the label can only take tools away, never add them
+            no_shell=(job.labels or {}).get("page") == "compare")
         if isinstance(adapter, CodexCLI):
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
