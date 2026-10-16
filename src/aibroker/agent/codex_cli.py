@@ -178,7 +178,7 @@ class CodexCLI(SubprocessCLI):
                  sandbox_probe: SandboxProbe | None = None) -> None:
         super().__init__(binary, probe, kill_grace_s, env)
         self._sandbox_probe = sandbox_probe or _run_sandbox_probe
-        self.image_max_bytes = 2 * 1024 * 1024        # set by the executor from ExecConfig
+        self.image_max_bytes = 8 * 1024 * 1024        # set by the executor from ExecConfig
         self.image_max_count = 4
         self.image_ttl_s = 3600
         self._image_baseline: set[str] | None = None

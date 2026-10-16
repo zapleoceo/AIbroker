@@ -58,7 +58,7 @@ class ExecConfig:
     files_total_bytes: int = 1024 * 1024
     files_max_count: int = 20
     files_ttl_s: int = 3600
-    image_max_bytes: int = 2 * 1024 * 1024
+    image_max_bytes: int = 8 * 1024 * 1024
     image_max_count: int = 4
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60

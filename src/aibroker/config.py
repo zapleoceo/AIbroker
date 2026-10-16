@@ -196,7 +196,8 @@ class Settings(BaseSettings):
     AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
     AGENT_FILES_TOTAL_BYTES: int = 1024 * 1024
     AGENT_FILES_MAX_COUNT: int = 20
-    AGENT_IMAGE_MAX_BYTES: int = 2 * 1024 * 1024   # per exported generated image
+    # per exported generated image; Codex gpt-image PNGs run 1.7-2.1 MB, so 2 MiB dropped some
+    AGENT_IMAGE_MAX_BYTES: int = 8 * 1024 * 1024
     AGENT_IMAGES_MAX_COUNT: int = 4
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
 

@@ -291,10 +291,16 @@ def test_undecodable_oversized_and_excess_files_are_skipped(tmp_path):
     (gen / "fake.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"not really an image")
     (gen / "text.png").write_bytes(b"hello")
     (gen / "empty.png").write_bytes(b"")
-    (gen / "huge.png").write_bytes(_png(300, 300))
+    huge = _png(300, 300)
+    (gen / "huge.png").write_bytes(huge)
     (gen / "zz-ok.png").write_bytes(good)
     refs = _export(home, ws, max_bytes=len(good) + 10)
-    assert [(r.width, r.height) for r in refs] == [(4, 4)]
+    assert [(r.width, r.height) for r in refs if not r.skipped] == [(4, 4)]
+    # an over-cap image is reported, not dropped silently: size only, no content, no host path
+    big = [r for r in refs if r.skipped]
+    assert [(r.skipped, r.size, r.content_b64) for r in big] == [("too_large", len(huge), None)]
+    assert big[0].path.startswith("out/") and str(home) not in big[0].path
+    assert not (ws / "out" / "huge.png").exists()
 
 
 def test_count_cap_and_duplicate_content(tmp_path):
