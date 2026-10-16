@@ -220,6 +220,13 @@ catalog, the submit route and the worker. A model is listed in the verified list
 only after a live round-trip (call -> caller result -> final answer) on that
 exact id.
 
+
+Interrupted-turn check (`interrupt_was_clean`, 2026-10-17): after a terminal result the CLI's
+`result` carries `terminal_reason` `aborted_tools`/`aborted_streaming` and, in Claude Code 2.1.x,
+an `errors` entry starting with `[ede_diagnostic]` that only describes the interrupt. Such
+entries are not errors; any other entry, an `api_error_status` or answer text still fails the
+run. The stop is logged with field names and sizes only (`_result_shape`).
+
 ## Input image canary
 
 Input vision is separate from PNG generation. The deployed universal jobs

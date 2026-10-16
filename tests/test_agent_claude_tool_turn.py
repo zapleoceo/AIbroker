@@ -570,3 +570,31 @@ async def test_a_refused_interrupt_fails_closed(monkeypatch, tmp_path):
         return []
     events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
     assert events[-1].type == "run.failed" and "interrupt" in events[-1].message
+
+
+@pytest.mark.parametrize("errors, done", [
+    # the exact shape Claude Code 2.1.286 returns after our interrupt (reproduced 2026-10-17)
+    (["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"], True),
+    (["[ede_diagnostic] a", "[ede_diagnostic] b"], True),
+    (["[ede_diagnostic] a", "API Error: 529 overloaded"], False),
+    (["boom"], False),
+])
+async def test_terminal_stop_accepts_only_the_clis_own_interrupt_diagnostics(
+        monkeypatch, tmp_path, caplog, errors, done):
+    import logging
+    caplog.set_level(logging.INFO, logger="aibroker.agent.claude_tool_turn")
+
+    def react(m):
+        if m.get("type") == "user":
+            return [_INIT, _mcp("c1", "tools/call", {"name": "lookup", "arguments": {"id": 7}})]
+        if m.get("type") == "control_request" and m["request"].get("subtype") == "interrupt":
+            return [{"type": "control_response", "response": {
+                        "subtype": "success", "request_id": m["request_id"], "response": {}}},
+                    {**_result("", is_error=True, out=3), "subtype": "error_during_execution",
+                     "terminal_reason": "aborted_tools", "stop_reason": "tool_use",
+                     "errors": errors}]
+        return []
+    events, *_ = await _drive(monkeypatch, tmp_path, react, results=[("ack", True, True)])
+    assert (events[-1] == ev.RunCompleted(final_text="")) is done
+    assert "terminal_reason=aborted_tools" in caplog.text
+    assert "overloaded" not in caplog.text and "ede_diagnostic" not in caplog.text
