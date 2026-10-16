@@ -72,15 +72,20 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `POST` | `/logout` | Clears session cookie, redirects to `/login` |
 | `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
 | `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
-| `GET` | `/ask2many` | Public compare page: one question to many models. Sets the `aib_compare` cookie. See below |
+| `GET` | `/ask2many` | Compare page: one question to many models. Without a login it shows the Telegram login widget; with one it sets the `aib_compare` cookie. See below |
+| `GET` | `/ask2many/auth/tg` | Telegram Login Widget callback (`tg_callback`): a valid signature from ANY Telegram user sets the `aib_ask` cookie (30 days, path `/ask2many`) and redirects to `/ask2many`; a bad signature is `401` with the login page |
+| `POST` | `/ask2many/logout` | Drops the `aib_ask` cookie |
 | `GET` | `/ask2many/api/models` | Models offered on the page (`page_models`: top 20, one per name): `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
 | `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
 | `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…], usage:{…}}`, one result per model. `404` for an unknown id |
 | `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt. Items have the poll shape, with `usage` |
 
-### `/ask2many` — public compare page (2026-10-14)
+### `/ask2many` — compare page (2026-10-14)
 
-No login. The HTML shell is static; everything dynamic is rendered with `textContent`, so
+Login (2026-10-16): any Telegram user, through the same bot and signature check
+(`verify_telegram_widget`) as the dashboard. The session is its own HMAC cookie `aib_ask`
+(`ask_user` / `require_ask_user`); every `/ask2many/api/*` call without it is `401`. It grants
+nothing on the dashboard, which still admits only `OWNER_TELEGRAM_ID`. The HTML shell is static; everything dynamic is rendered with `textContent`, so
 prompts and answers from strangers cannot inject markup. One prompt (up to 4000 characters;
 a whitespace-only prompt is `422`) goes to 1-12 ticked chat models at once. Each model call is a
 Broker job submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project

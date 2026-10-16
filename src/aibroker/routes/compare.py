@@ -1,4 +1,8 @@
-"""Public "ask many models" page: GET /ask2many + JSON under /ask2many/api/*. No login.
+"""The "ask many models" page: GET /ask2many + JSON under /ask2many/api/*.
+
+Login: any Telegram user (Telegram Login Widget, same bot and signature check as the dashboard),
+kept in its own HMAC cookie `aib_ask`. The dashboard still admits only OWNER_TELEGRAM_ID, so
+this cookie grants nothing there.
 
 Everything dynamic is rendered client-side with textContent (never innerHTML), so model
 answers and prompts typed by strangers cannot inject markup; the server sends only a static
@@ -9,14 +13,21 @@ from __future__ import annotations
 import json
 from html import escape
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from aibroker.auth import client_ip
+from aibroker.auth_session import (
+    issue_session_cookie,
+    verify_session_cookie,
+    verify_telegram_widget,
+)
+from aibroker.config import get_settings
 from aibroker.providers import model_scores
 from aibroker.routes.landing import FAVICON_LINKS
 from aibroker.services import compare as svc
+from aibroker.telemetry import audit
 
 router = APIRouter(tags=["ask2many"])
 
@@ -30,8 +41,54 @@ def _secure(request: Request) -> bool:
     return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
 
 
+ASK_COOKIE = "aib_ask"
+
+
+def ask_user(request: Request) -> int | None:
+    """Telegram user id of a valid `aib_ask` cookie, else None."""
+    return verify_session_cookie(request.cookies.get(ASK_COOKIE))
+
+
+def require_ask_user(request: Request) -> int:
+    uid = ask_user(request)
+    if uid is None:
+        raise HTTPException(401, "нужен вход через Telegram")
+    return uid
+
+
+def _login_page(error: str | None = None) -> HTMLResponse:
+    s = get_settings()
+    note = f'<p class="err">{escape(error)}</p>' if error else ""
+    html = (_LOGIN_HTML.replace("__FAVICON__", FAVICON_LINKS).replace("__ERROR__", note)
+            .replace("__BOT__", escape(s.TELEGRAM_BOT_USERNAME or "telegram"))
+            .replace("__AUTH_URL__", escape(f"https://{s.PUBLIC_HOST}/ask2many/auth/tg")))
+    return HTMLResponse(html, status_code=401 if error else 200)
+
+
+@router.get("/ask2many/auth/tg")
+async def tg_callback(request: Request) -> Response:
+    uid = verify_telegram_widget(dict(request.query_params))
+    if uid is None:
+        return _login_page("Не удалось проверить вход через Telegram. Попробуйте ещё раз.")
+    cookie, ttl = issue_session_cookie(uid)
+    resp = RedirectResponse("/ask2many", status_code=303)
+    resp.set_cookie(ASK_COOKIE, cookie, max_age=ttl, httponly=True, samesite="lax",
+                    secure=_secure(request), path="/ask2many")
+    await audit(actor=f"tg:{uid}", action="ask2many.login", ip=client_ip(request))
+    return resp
+
+
+@router.post("/ask2many/logout")
+async def logout() -> RedirectResponse:
+    resp = RedirectResponse("/ask2many", status_code=303)
+    resp.delete_cookie(ASK_COOKIE, path="/ask2many")
+    return resp
+
+
 @router.api_route("/ask2many", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def page(request: Request) -> HTMLResponse:
+    if ask_user(request) is None:
+        return _login_page()
     html = (_HTML.replace("__FAVICON__", FAVICON_LINKS)
             .replace("__MAX_CHARS__", str(svc.MAX_PROMPT_CHARS))
             .replace("__MAX_MODELS__", str(svc.MAX_MODELS))
@@ -44,7 +101,7 @@ async def page(request: Request) -> HTMLResponse:
     return resp
 
 
-@router.get("/ask2many/api/models")
+@router.get("/ask2many/api/models", dependencies=[Depends(require_ask_user)])
 async def models() -> dict[str, object]:
     keys = ("id", "name", "provider", "intelligence_index", "subscription")
     return {"data": [{k: m[k] for k in keys} for m in svc.page_models()],
@@ -53,7 +110,8 @@ async def models() -> dict[str, object]:
             "limits": {"max_prompt_chars": svc.MAX_PROMPT_CHARS, "max_models": svc.MAX_MODELS}}
 
 
-@router.post("/ask2many/api/requests", status_code=202)
+@router.post("/ask2many/api/requests", status_code=202,
+             dependencies=[Depends(require_ask_user)])
 async def submit(body: SubmitIn, request: Request, response: Response) -> dict[str, object]:
     prompt = body.prompt.strip()
     if not prompt:
@@ -74,7 +132,7 @@ async def submit(body: SubmitIn, request: Request, response: Response) -> dict[s
     return {"id": request_id}
 
 
-@router.get("/ask2many/api/requests/{request_id}")
+@router.get("/ask2many/api/requests/{request_id}", dependencies=[Depends(require_ask_user)])
 async def poll(request_id: int) -> dict[str, object]:
     await svc.sync_request(request_id)
     out = await svc.get_request(request_id)
@@ -83,10 +141,32 @@ async def poll(request_id: int) -> dict[str, object]:
     return out
 
 
-@router.get("/ask2many/api/history")
+@router.get("/ask2many/api/history", dependencies=[Depends(require_ask_user)])
 async def history(q: str = Query("", max_length=200), page: int = Query(1, ge=1, le=10_000)
                   ) -> dict[str, object]:
     return await svc.search_history(q.strip(), page)
+
+
+_LOGIN_HTML = """<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ask2many — вход</title>
+__FAVICON__
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f8;--panel:#fff;--text:#1a1c20;--muted:#6b7280;--line:#e3e5e9;--bad:#b4474b}
+@media (prefers-color-scheme:dark){:root{--bg:#121316;--panel:#1a1c21;--text:#e8e9ec;--muted:#8d93a0;--line:#2a2d34;--bad:#e07a7e}}
+html,body{margin:0;background:var(--bg);color:var(--text);
+ font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+.box{max-width:420px;margin:12vh auto 0;padding:32px 24px;background:var(--panel);border:1px solid var(--line);
+ border-radius:12px;text-align:center}
+h1{font-size:22px;margin:0 0 8px} p{margin:0 0 24px;color:var(--muted)} .err{color:var(--bad)}
+</style></head><body>
+<div class="box"><h1>Ask2many</h1><p>Один вопрос — много моделей. Войдите через Telegram.</p>
+__ERROR__
+<script async src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="__BOT__"
+ data-size="large" data-radius="8" data-auth-url="__AUTH_URL__" data-request-access="write"></script>
+</div></body></html>
+"""
 
 
 # Static shell. Placeholders (__X__) instead of str.format so CSS/JS braces stay readable.

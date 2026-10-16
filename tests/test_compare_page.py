@@ -26,9 +26,13 @@ from aibroker.services.llm_service import cap_message
 BASE = "http://testserver"
 
 
-def make_client(ip: str = "10.0.0.1") -> httpx.AsyncClient:
+def make_client(ip: str = "10.0.0.1", *, logged_in: bool = True) -> httpx.AsyncClient:
+    """A browser on the page; logged in through Telegram (the `aib_ask` cookie) by default."""
+    from aibroker.auth_session import issue_session_cookie
+    from aibroker.routes.compare import ASK_COOKIE
+    cookies = {ASK_COOKIE: issue_session_cookie(424242)[0]} if logged_in else None
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE,
-                             headers={"x-forwarded-for": ip})
+                             headers={"x-forwarded-for": ip}, cookies=cookies)
 
 
 @pytest.fixture(autouse=True)
@@ -602,3 +606,54 @@ async def test_script_in_prompt_and_answer_stays_inert_data(fakes):
         assert resp.headers["content-type"].startswith("application/json")  # never rendered as HTML
     assert r.json()["prompt"] == evil and r.json()["results"][0]["answer"] == evil
     assert evil not in page.text and "<script>alert" not in page.text    # shell has no user text
+
+
+
+async def test_page_and_api_require_a_telegram_login():
+    async with make_client(logged_in=False) as c:
+        page = await c.get("/ask2many")
+        assert page.status_code == 200
+        assert "telegram-widget.js" in page.text and "/ask2many/auth/tg" in page.text
+        assert "Ask2many" in page.text and "api/requests" not in page.text
+        for method, url in (("GET", "/ask2many/api/models"), ("GET", "/ask2many/api/history"),
+                            ("GET", "/ask2many/api/requests/1"),
+                            ("POST", "/ask2many/api/requests")):
+            r = await c.request(method, url, json={"prompt": "x", "models": ["a"]}
+                                if method == "POST" else None)
+            assert r.status_code == 401, url
+    async with make_client(logged_in=False) as c:
+        c.cookies.set("aib_ask", "424242.9999999999.forged")
+        assert (await c.get("/ask2many/api/models")).status_code == 401
+
+
+async def test_any_telegram_user_logs_in_and_the_cookie_grants_no_dashboard(monkeypatch):
+    import hashlib
+    import hmac
+    import time
+
+    from aibroker.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "123:test-bot-token")
+    data = {"id": "555000111", "first_name": "Guest", "auth_date": str(int(time.time()))}
+    check = chr(10).join(f"{k}={v}" for k, v in sorted(data.items()))
+    key = hashlib.sha256(b"123:test-bot-token").digest()
+    data["hash"] = hmac.new(key, check.encode(), hashlib.sha256).hexdigest()
+    async with make_client(logged_in=False) as c:
+        r = await c.get("/ask2many/auth/tg", params=data)
+        assert r.status_code == 303 and r.headers["location"] == "/ask2many"
+        cookie = r.cookies.get("aib_ask")
+        assert cookie and cookie.startswith("555000111.")
+        assert (await c.get("/ask2many/api/models")).status_code == 200
+        assert "telegram-widget.js" not in (await c.get("/ask2many")).text
+        # the ask cookie is not the owner session: the dashboard still refuses
+        c.cookies.set("aib_session", cookie)
+        assert (await c.get("/dashboard", follow_redirects=False)).status_code in (303, 307, 401)
+        bad = dict(data, hash="0" * 64)
+        r = await c.get("/ask2many/auth/tg", params=bad)
+        assert r.status_code == 401 and "telegram-widget.js" in r.text
+
+
+async def test_logout_drops_the_ask_cookie():
+    async with make_client() as c:
+        r = await c.post("/ask2many/logout")
+        assert r.status_code == 303
+        assert 'aib_ask=""' in r.headers["set-cookie"] or "Max-Age=0" in r.headers["set-cookie"]
