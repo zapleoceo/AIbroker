@@ -896,7 +896,7 @@ Codex runs execute in parallel up to `AGENT_CONCURRENCY_CODEX` per worker; only 
 CLI session is exclusive (per-session lease on account_id + session id). Generated images stay
 isolated because export reads only the run's own thread UUID directory (`images.py`), against a
 per-thread baseline. Each image is at most
-`AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
+`AGENT_IMAGE_MAX_BYTES` (8 MiB since 2026-10-16; Codex PNGs run 1.7-2.1 MB, the old 2 MiB dropped some; passed to agent-worker-codex in compose) each - a larger image is listed in `files` with `skipped: "too_large"` and its `size`, no content and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
 de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
 `width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
 metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though

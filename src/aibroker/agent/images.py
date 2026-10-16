@@ -78,13 +78,23 @@ def snapshot_generated_paths(codex_home: str | None) -> set[str] | None:
         return None
 
 
+def _too_large(path: Path, root: Path, size: int) -> FileRef:
+    """An over-cap generated image: named by its Codex call id only (never a host path)."""
+    call_id = path.stem if path.parent == root and _CALL_ID.fullmatch(path.stem) else None
+    return FileRef(path=f"{OUT_DIR}/{call_id or 'generated'}.png", size=size,
+                   skipped="too_large", image_call_id=call_id,
+                   image_provenance="artifact_filename" if call_id else None)
+
+
 def export_generated_pngs(codex_home: str | None, workspace: str, since: float, *,
                           max_bytes: int, max_count: int, ttl_s: int,
                           baseline: set[str] | None = None,
                           session_id: str | None = None) -> list[FileRef]:
     """Copy PNGs from this new Codex thread's directory into <workspace>/out.
     `since` is the run's start (epoch seconds): older files are excluded. Anything unsafe,
-    oversized, undecodable or over the count is skipped silently (never partially copied)."""
+    undecodable or over the count is skipped silently (never partially copied). An image over
+    `max_bytes` is reported as a FileRef with `skipped="too_large"` and its size (no content),
+    so the caller sees why the picture is missing instead of an empty `files`."""
     if not codex_home or not session_id or not _SESSION_ID.fullmatch(session_id):
         return []
     root = Path(codex_home) / GENERATED_DIR
@@ -107,8 +117,11 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
             continue
         try:
             st = os.lstat(path)
-            if (not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes or st.st_size == 0
-                    or st.st_mtime < since):
+            if not stat.S_ISREG(st.st_mode) or st.st_size == 0 or st.st_mtime < since:
+                continue
+            if st.st_size > max_bytes:
+                if real_root in path.resolve().parents:
+                    refs.append(_too_large(path, root, st.st_size))
                 continue
             if real_root not in path.resolve().parents:         # traversal / symlinked parent
                 continue
@@ -117,7 +130,8 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
                 data = fh.read(max_bytes + 1)
         except OSError:
             continue
-        if len(data) > max_bytes:
+        if len(data) > max_bytes:          # grew between lstat and read
+            refs.append(_too_large(path, root, len(data)))
             continue
         dims = _decode_png(data)
         digest = hashlib.sha256(data).hexdigest()
