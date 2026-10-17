@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -30,6 +31,8 @@ from aibroker.agent.parsers import ClaudeParser
 from aibroker.agent.real_cli import ATTACHMENT_READ, build_claude_prompt
 from aibroker.agent.tools import disallowed_tools, tool_names
 from aibroker.config import get_settings
+
+log = logging.getLogger(__name__)
 
 SERVER = "broker"
 PREFIX = f"mcp__{SERVER}__"
@@ -80,6 +83,32 @@ def _user(text: str) -> dict[str, Any]:
 
 def _tool_text(text: str, is_error: bool) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+_ABORTED = ("aborted_streaming", "aborted_tools")
+# Claude Code 2.1.x puts a diagnostic line into `errors` of every interrupted turn's result
+# ("[ede_diagnostic] result_type=user ... stop_reason=tool_use", reproduced live 2026-10-17); it
+# describes the interrupt itself, not an execution or API error.
+_DIAGNOSTIC = "[ede_diagnostic]"
+
+
+def interrupt_was_clean(result: dict[str, Any]) -> bool:
+    """The `result` of a turn WE interrupted: an abort reason, no API error, no answer text, and
+    no error other than the CLI's own interrupt diagnostics."""
+    errors = result.get("errors") or []
+    return (result.get("terminal_reason") in _ABORTED and result.get("api_error_status") is None
+            and not result.get("result")
+            and all(isinstance(e, str) and e.startswith(_DIAGNOSTIC) for e in errors))
+
+
+def _result_shape(result: dict[str, Any]) -> str:
+    """Log-safe description of a CLI result: reason fields and sizes, never text."""
+    errors = result.get("errors") or []
+    return (f"subtype={result.get('subtype')} terminal_reason={result.get('terminal_reason')} "
+            f"api_error_status={result.get('api_error_status')} is_error={result.get('is_error')} "
+            f"errors={len(errors)} diagnostic_only="
+            f"{all(isinstance(e, str) and e.startswith(_DIAGNOSTIC) for e in errors)} "
+            f"result_len={len(str(result.get('result') or ''))}")
 
 
 def _counted(usage: ev.Usage) -> bool:
@@ -265,10 +294,10 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
                         # errors via terminal_reason; never treat a generic failure as
                         # confirmation of the output tool's successful result.
                         cancelled = (kind == "result" and isinstance(data, dict)
-                                     and data.get("terminal_reason") in
-                                     ("aborted_streaming", "aborted_tools")
-                                     and not data.get("result") and not data.get("errors")
-                                     and data.get("api_error_status") is None)
+                                     and interrupt_was_clean(data))
+                        log.info("claude terminal stop: run=%s interrupt_confirmed=%s %s",
+                                 run.run_id, interrupt_confirmed,
+                                 _result_shape(data) if isinstance(data, dict) else "no-result")
                         if not (interrupt_confirmed and cancelled):
                             yield item
                             return
