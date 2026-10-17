@@ -914,3 +914,7 @@ Orchestra's authenticated end-to-end image request and the Claude critic's
 receipt of decodable PNG bytes remain. Account-aware CLI catalog discovery
 remains later work. Multi-account is done as one worker container per login (see
 [Multiple Claude subscription accounts](#multiple-claude-subscription-accounts)).
+
+### Abandoned Claude OAuth refresh lock (2026-10-17)
+
+Claude Code serialises OAuth refresh with an mkdir lock `.oauth_refresh.lock` in its config dir. A CLI killed mid-refresh leaves it behind, and every later run fails with "Failed to refresh OAuth token: another Claude Code process is refreshing it". `ClaudeCLI.preflight` calls `clear_stale_oauth_lock`: it removes only an EMPTY lock directory older than `OAUTH_LOCK_STALE_S` (120 s) and never touches credentials. The `claude auth status` probe is now killed on its 20 s timeout instead of being left holding the lock.
