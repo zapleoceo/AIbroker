@@ -1,19 +1,22 @@
 """Account selection for NEW subscription runs submitted through /v1/jobs.
 
 Several logins (accounts) can serve one provider, each behind its own worker container
-(AGENT_ACCOUNT_ID). A new run goes to the first account the project policy lists that is not
-parked on a usage limit; when every candidate is parked, to the one that resets first (the job
-then waits honestly). The choice is made ONCE at creation: a started run never changes account
+(AGENT_ACCOUNT_ID). A new run goes to the least-loaded account the project policy lists that is
+not parked on a usage limit (fewest unfinished runs; ties keep the policy order), so a second
+login shares the work instead of idling as a cold spare; when every candidate is parked, to the
+one that resets first (the job then waits honestly). The choice is made ONCE at creation: a started run never changes account
 (executor._wait_for_quota retries on the same one)."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from aibroker.db import get_session
-from aibroker.db.models import AgentRunEventRow, AgentRunRow
+from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow
+
+_UNFINISHED = ("pending", "queued", "running")
 
 # Bounds the scan of the event log. A session limit resets within hours, but a WEEKLY limit
 # (run.failed quota_exhausted / run.waiting_quota with its reset days ahead) must still pause
@@ -69,16 +72,30 @@ async def quota_resets(accounts: list[str], capability: str,
     return paused
 
 
+async def unfinished_runs(accounts: list[str], capability: str) -> dict[str, int]:
+    """{account: runs of this capability not finished yet (pending, queued or running)}."""
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(AgentRunRow.account_id, func.count())
+            .join(DeepJobRow, DeepJobRow.id == AgentRunRow.run_id)
+            .where(AgentRunRow.account_id.in_(accounts), AgentRunRow.capability == capability,
+                   DeepJobRow.status.in_(_UNFINISHED))
+            .group_by(AgentRunRow.account_id))).all()
+    return {account: int(n) for account, n in rows}
+
+
 async def pick_account(candidates: tuple[str, ...], capability: str,
                        now: datetime | None = None) -> str | None:
-    """The account for a NEW run: first candidate (policy order) without an active quota pause,
-    else the candidate whose pause ends first. None when there are no candidates."""
+    """The account for a NEW run: among candidates without an active quota pause, the one with
+    the fewest unfinished runs (ties: policy order); else the candidate whose pause ends first.
+    None when there are no candidates."""
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
     paused = await quota_resets(list(candidates), capability, now)
-    for account in candidates:
-        if account not in paused:
-            return account
+    free = [a for a in candidates if a not in paused]
+    if free:
+        load = await unfinished_runs(free, capability)
+        return min(free, key=lambda a: (load.get(a, 0), candidates.index(a)))
     return min(candidates, key=lambda a: (paused[a], candidates.index(a)))

@@ -532,7 +532,9 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
 - `agent-worker-claude2` has no RPC socket volume and no RPC wake: it finds new runs by its 1 s database poll.
 - **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
   `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
-  listed order, and picks the first one without an active quota pause. A pause is the latest
+  listed order, and among those without an active quota pause picks the one with the fewest
+  unfinished runs (`unfinished_runs`: pending, queued or running; ties keep the listed order, 2026-10-17).
+  A pause is the latest
   `run.waiting_quota` / `run.failed quota_exhausted` signal whose stored reset time is still in the future
   (every such signal counts; lookback 8 days, so a weekly limit that resets days ahead still pauses the
   account; a deadline-expired wait keeps its reset in `reset_at`). If every
