@@ -272,7 +272,7 @@ def test_collect_files_caps_unsafe_paths_and_symlinks(tmp_path):
     assert got["a"].content_b64 and got["b"].content_b64
     assert got["c"].skipped == "cap_reached" or got["c"].content_b64   # total 150: 60+60+10
     assert got["../secret.txt"].skipped == "unsafe_path_or_missing"
-    assert got["/etc/passwd"].skipped == "unsafe_path_or_missing"
+    assert "/etc/passwd" not in got       # absolute and outside the workspace: dropped, not listed
     assert got["nope"].skipped == "unsafe_path_or_missing"
     if has_link:
         assert got["link.txt"].skipped == "unsafe_path_or_missing"
