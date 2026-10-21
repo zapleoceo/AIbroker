@@ -306,7 +306,7 @@ writes files into the workspace.
 5. Adapter crash -> `adapter_error`; stream ending without a terminal event ->
    `no_terminal_event`. Failures are never retried or rerouted. The one exception is
    quota exhaustion, which waits (below).
-6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files`:
+6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files` (each path is checked by `workspace.safe_file`, which `images.collect_out_images` reuses):
    regular, non-symlink files inside the workspace only; per-file cap
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
