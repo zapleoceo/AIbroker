@@ -26,6 +26,7 @@ from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI, refres
 from aibroker.agent.codex_refresh_proof import PROOF as REFRESH_PROOF
 from aibroker.agent.codex_refresh_proof import RefreshProof
 from aibroker.agent.constants import project_allowed
+from aibroker.agent.images import collect_out_images
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.policy import policy_violation
 from aibroker.agent.registry import make_adapter
@@ -372,8 +373,9 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             tool_choice=(req.get("client_job") or {}).get("tool_choice"),
             fence_leases=(lease,) if lease is not None else (),
             # the /ask2many page labels its jobs page=compare (services/compare.submit_model);
-            # the label can only take tools away, never add them
-            no_shell=(job.labels or {}).get("page") == "compare")
+            # the label can only take tools away, never add them. So can the caller's `no_shell`.
+            no_shell=bool((req.get("client_job") or {}).get("no_shell"))
+            or (job.labels or {}).get("page") == "compare")
         if isinstance(adapter, CodexCLI):
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
@@ -394,7 +396,9 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
             images = await asyncio.to_thread(_export_images, adapter, spec, started_at, cfg)
-            terminal = ev.RunCompleted(final_text=terminal.final_text, files=[*files, *images])
+            out_images = await asyncio.to_thread(_collect_out_images, workspace, files, images, cfg)
+            terminal = ev.RunCompleted(final_text=terminal.final_text,
+                                       files=[*files, *images, *out_images])
         return await _finish(run_id, terminal, totals, mode, lease)
     finally:
         cleanup_workspace(workspace)
@@ -411,6 +415,19 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
         return adapter.export_artifacts(spec, since)
     except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
         log.exception("artifact export failed for run %d", spec.run_id)
+        return []
+
+
+def _collect_out_images(workspace: str, files: list[ev.FileRef], images: list[ev.FileRef],
+                        cfg: ExecConfig) -> list[ev.FileRef]:
+    """Images the run wrote under out/ itself (any adapter), minus what is already reported."""
+    try:
+        return collect_out_images(
+            workspace, max_bytes=cfg.image_max_bytes, max_count=cfg.image_max_count,
+            ttl_s=cfg.files_ttl_s, exclude_sha256={f.sha256 for f in images if f.sha256},
+            exclude_paths={f.path for f in [*files, *images]})
+    except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
+        log.exception("out/ image collection failed in %s", workspace)
         return []
 
 

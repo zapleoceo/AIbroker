@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,8 @@ from pathlib import Path
 
 from aibroker.agent.events import FileRef
 from aibroker.agent.redact import redact_bytes
+
+log = logging.getLogger(__name__)
 
 
 def create_workspace(root: str, run_id: int) -> str:
@@ -44,6 +47,18 @@ def _safe_file(workspace: Path, rel: str) -> Path | None:
     return resolved
 
 
+def _workspace_relative(workspace: Path, rel: str) -> str | None:
+    """`rel` unchanged when relative; an absolute path becomes workspace-relative when it lies
+    inside the workspace (lexically, either spelling of the root), else None (outside: dropped)."""
+    if not Path(rel).is_absolute():
+        return rel
+    target = os.path.normpath(rel)
+    for root in (os.path.normpath(workspace), os.path.normpath(workspace.resolve())):
+        if target.startswith(root + os.sep):
+            return Path(target[len(root) + 1:]).as_posix()
+    return None
+
+
 def collect_files(workspace: str, paths: list[str], *, max_bytes: int, total_bytes: int,
                   max_count: int, ttl_s: int) -> list[FileRef]:
     """Read the named files into FileRef entries under the caps. Anything over a cap,
@@ -52,7 +67,13 @@ def collect_files(workspace: str, paths: list[str], *, max_bytes: int, total_byt
     expires = (datetime.now(UTC) + timedelta(seconds=ttl_s)).isoformat()
     out: list[FileRef] = []
     used = delivered = 0
-    for rel in dict.fromkeys(paths):
+    names: list[str] = []
+    for p in paths:
+        if (rel := _workspace_relative(ws, p)) is None:
+            log.debug("file outside the workspace not listed: %s", p)
+        else:
+            names.append(rel)
+    for rel in dict.fromkeys(names):
         real = _safe_file(ws, rel)
         if real is None:
             out.append(FileRef(path=rel, skipped="unsafe_path_or_missing"))

@@ -37,6 +37,7 @@ class _JobBody(Protocol):
     tools: list[Any] | None
     tool_choice: Any
     stream: bool | None
+    no_shell: bool
 
 
 def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[str, Any] | None:
@@ -79,6 +80,10 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
 
 def subscription_request_problem(body: _JobBody, capability: str, provider: str) -> str | None:
     """Reject controls that the Claude/Codex CLI route cannot apply."""
+    if body.no_shell and provider != "codex-sub":
+        return "unsupported_for_subscription_model: no_shell"
+    if body.no_shell and body.tools:        # the app-server tool path ignores no_shell
+        return "unsupported_for_subscription_model: no_shell with tools"
     if body.tools and capability == "vision":
         return "unsupported_for_subscription_model: tools on vision"
     if body.tools and provider not in ("codex-sub", "claude-sub"):

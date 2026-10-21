@@ -154,6 +154,9 @@ class ChatRequest(BaseModel):
     # (POST /tool-results with `terminal: true`) instead of starting another model turn.
     terminal_tools: list[str] | None = Field(None, min_length=1, max_length=32)
     stream: bool | None = None
+    # Codex subscription jobs only, no `tools`: the CLI runs with its command tools disabled
+    # (image generation stays on), so the model cannot write files through a shell.
+    no_shell: bool = False
     # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
     trace_id: str | None = None
@@ -770,7 +773,7 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
                 "tool_choice": body.tool_choice,
                 # only when set, so payload hashes of older clients do not change
                 **({"terminal_tools": body.terminal_tools} if body.terminal_tools else {})}
-               if body.tools else None))
+               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {}))
 
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
@@ -817,6 +820,8 @@ async def jobs_submit(
     client_hash = (payload_hash(ctx.project.id, capability, _client_request(body))
                    if idempotency_key else None)
     subscription = subscription_model(body.model)
+    if body.no_shell and subscription is None:
+        raise HTTPException(400, "unsupported_for_subscription_model: no_shell")
     # Subscription jobs validate their own attachments in subscription_messages.
     _require_image_access(ctx, [m.model_dump(exclude_unset=True) for m in body.messages],
                           check_decode=subscription is None)
@@ -869,7 +874,8 @@ async def jobs_submit(
                             "workflow": body.workflow,
                             "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
                             "tool_choice": body.tool_choice,
-                            "terminal_tools": body.terminal_tools or []},
+                            "terminal_tools": body.terminal_tools or [],
+                            **({"no_shell": True} if body.no_shell else {})},
                 job_idempotency_key=idempotency_key, job_payload_hash=client_hash,
                 trace_id=trace_id, labels=body.labels,
             )

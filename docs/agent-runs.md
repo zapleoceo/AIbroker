@@ -311,6 +311,16 @@ writes files into the workspace.
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
    then the API returns `expired: true` and no content.
+   Absolute paths are normalised first: inside the workspace they become relative, outside it
+   they are dropped (debug log, no `skipped` entry); `../` and symlinks stay rejected.
+   After the Codex image export, `collect_out_images` (`images.py`, run for every adapter) lists
+   the PNG/JPEG/WebP files the run itself wrote under `out/` (a shell or script, not the
+   built-in generation): regular non-symlink files, 1 byte to `AGENT_IMAGE_MAX_BYTES`, correct
+   magic bytes, a full Pillow decode of the format the extension names, at most 50 Mpx and
+   `AGENT_IMAGES_MAX_COUNT` images. A sha256 already exported this run, or a path
+   `collect_files` already returned, is not listed again. A rejected file gets `skipped`
+   (`unsafe_path`, `empty`, `too_large`, `not_an_image`). `no_shell` on the request
+   (`client_job.no_shell`, or the `page=compare` label) sets `AgentRunSpec.no_shell`.
 
 ## Models, usage, billing separation
 

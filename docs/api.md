@@ -854,6 +854,22 @@ subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
 routes, `null` otherwise.
+
+`POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
+without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code
+mode, browser, computer use, apps; image generation stays on), so the model cannot write a file
+through a shell. `400 unsupported_for_subscription_model: no_shell` on a `claude-sub` model, on a
+model that is not a subscription route, and (`... no_shell with tools`) together with `tools`. It
+enters the Idempotency-Key payload hash only when `true`, so the hashes of requests without it do
+not change. Use it for image jobs: a model that skips the built-in image generation and draws
+with a script otherwise leaves a file it wrote itself.
+
+`files[]` of a finished subscription job holds: files the run reported as changed (inside the
+workspace only: an absolute path inside the workspace is listed relative, one outside it is not
+listed at all), the PNGs Codex generated, and every PNG/JPEG/WebP the run wrote under `out/`
+itself (`collect_out_images`: sha256, width, height and content like a generated image, never twice
+for the same bytes or path). A rejected file is listed with `skipped` and no content:
+`unsafe_path`, `empty`, `too_large`, `not_an_image`.
 The catalog builds the fields with `input_modalities()`, `output_modalities()` and `supports_tools()`. The image flag comes from `subscription_image_output_verified()`, which fails closed (`False`) on an invalid setting without touching the catalog or routing; it lists only verified `codex-sub` models.
 `job_request` describes the Broker's validation of `POST /v1/jobs` for each
 model. It is `null` for routes served by other endpoints, such as embedding or
