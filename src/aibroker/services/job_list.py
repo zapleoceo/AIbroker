@@ -15,7 +15,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, type_coerce
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow
@@ -87,7 +88,9 @@ def decode_cursor(token: str) -> Cursor:
 def _has_label(col: Any, key: str, value: str, dialect: str) -> Any:
     if dialect == "sqlite":   # tests; labels is plain JSON there, no `@>`
         return func.json_extract(col, f'$."{key}"') == value   # key is check_token-validated
-    return col.contains({key: value})   # Postgres JSONB `@>`
+    # the model's type is JSON().with_variant(JSONB): its base JSON comparator would turn
+    # contains() into LIKE '%...%', so coerce to JSONB to get `@>` (GIN ix_deep_jobs_labels_gin)
+    return type_coerce(col, PG_JSONB).contains({key: value})
 
 
 def _filters(project_id: int, key: str, value: str, trace_id: str | None, dialect: str,

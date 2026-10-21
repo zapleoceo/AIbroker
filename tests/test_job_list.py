@@ -230,3 +230,14 @@ def test_cursor_roundtrip():
     assert job_list.decode_cursor(job_list.encode_cursor(c)) == c
     with pytest.raises(job_list.BadCursor):
         job_list.decode_cursor(job_list.encode_cursor(job_list.Cursor(0, 0, False)) + "!")
+
+
+def test_label_filter_compiles_to_jsonb_containment_on_postgres():
+    """The Postgres path cannot run on SQLite CI: pin the SQL it emits (`@>`, never LIKE)."""
+    from sqlalchemy.dialects import postgresql
+
+    from aibroker.db.models import DeepJobRow
+    from aibroker.services.job_list import _has_label
+    sql = str(_has_label(DeepJobRow.labels, "exam_run_id", "x", "postgresql").compile(
+        dialect=postgresql.dialect()))
+    assert "@>" in sql and "LIKE" not in sql.upper()

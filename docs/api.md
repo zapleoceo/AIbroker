@@ -537,7 +537,7 @@ result text, error text or secrets - poll the job for those. `model` is the mode
 until done), `requested_model` the pin, if any. Ordered by `job_id` ascending.
 
 The only accepted syntax is `label.<key>=<value>` (e.g. `GET /v1/jobs?label.exam_run_id=r42`); there is
-no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels`, served by the GIN index
+no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels` (`_has_label` coerces the column to JSONB; its generic JSON type would compile to LIKE), served by the GIN index
 `ix_deep_jobs_labels_gin (labels jsonb_path_ops)`, and the keyset walk by `ix_deep_jobs_project_id
 (project_id, id)` (both migration 024). Until 024 is applied the query still works but filters `labels`
 row by row within the project, so its cost grows with the project's retained jobs, not with the match
