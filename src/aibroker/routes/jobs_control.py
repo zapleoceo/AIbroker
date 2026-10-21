@@ -12,7 +12,8 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from aibroker.agent.constants import AGENT_SCOPE, project_allowed
+from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.policy import AgentPolicyViolation
 from aibroker.auth import ProjectCtx, require_project
 from aibroker.services.deep_jobs import IdempotencyConflict, replayed_job_id
 from aibroker.services.job_control import AgentCancelForbidden, cancel_job, cancel_matching
@@ -134,8 +135,8 @@ def _agent_reader(ctx: ProjectCtx) -> Callable[[str, dict[str, Any]], bool]:
     def readable(capability: str, request: dict[str, Any]) -> bool:
         try:
             _require_agent_read_access(ctx, SimpleNamespace(capability=capability, request=request))
-        except Exception:   # 403 / allowlist / policy: the same refusals a poll would answer
-            return False
+        except (HTTPException, AgentProjectNotAllowed, AgentPolicyViolation):
+            return False   # 403 / allowlist / policy: the same refusals a poll would answer
         return True
     return readable
 

@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.main import app
 from aibroker.services import job_list
-from aibroker.services.job_queue import _JOB_RETENTION_DAYS
+from aibroker.services.job_queue import JOB_RETENTION_DAYS
 from tests.test_job_idempotency import _h, _insert_agent_job, _plain_job, _set
 from tests.test_routes_proxy import _make_project
 
@@ -72,7 +72,7 @@ async def test_lists_only_the_callers_jobs_with_the_label_and_no_request_or_resu
     assert "SECRET" not in r.text and '"request"' not in r.text and "messages" not in r.text
     assert set(body) == {"jobs", "next_cursor", "pagination_complete", "no_nonterminal_in_filter",
                          "high_watermark", "retention_days", "as_of"}
-    assert body["retention_days"] == _JOB_RETENTION_DAYS
+    assert body["retention_days"] == JOB_RETENTION_DAYS
 
 
 @pytest.mark.parametrize("query", [
@@ -155,6 +155,18 @@ async def test_no_nonterminal_ignores_the_status_filter_and_other_labels():
     assert r2["jobs"] == [] and r2["no_nonterminal_in_filter"] is False
 
 
+async def test_no_nonterminal_is_computed_on_the_first_page_and_carried_in_the_cursor():
+    key, pid = await _make_project(["llm:chat"])
+    await _plain_job(pid, labels=LBL, status="done")
+    live = await _plain_job(pid, labels=LBL, status="running")
+    client = TestClient(app)
+    first = _get(client, key, "label.exam_run_id=run-1&limit=1").json()
+    assert first["no_nonterminal_in_filter"] is False
+    await _set(live, status="done")   # a rescan on page 2 would now say True; the carried value must not
+    second = _get(client, key, f"label.exam_run_id=run-1&limit=1&cursor={first['next_cursor']}").json()
+    assert second["no_nonterminal_in_filter"] is False and second["pagination_complete"] is True
+
+
 async def test_status_and_trace_id_filters():
     key, pid = await _make_project(["llm:chat"])
     a = await _plain_job(pid, labels=LBL, status="done", trace_id="t-a")
@@ -192,8 +204,9 @@ async def test_agent_rows_are_excluded_without_the_agent_scope(agents_open):
 
 
 @pytest.mark.parametrize("cursor", [
-    "!!!", "bm90LWpzb24", _cursor(after=1), _cursor(after="1", hw=2), _cursor(after=-1, hw=2),
-    _cursor(after=5, hw=2), _cursor(after=True, hw=2), _cursor(after=1, hw=2, x=3),
+    "!!!", "bm90LWpzb24", _cursor(after=1), _cursor(after=2**63, hw=2**63, nn=True), _cursor(after=1, hw=10**30, nn=True),
+    _cursor(after=1, hw=2), _cursor(after=1, hw=2, nn="x"), _cursor(after="1", hw=2, nn=True), _cursor(after=-1, hw=2, nn=True),
+    _cursor(after=5, hw=2, nn=True), _cursor(after=True, hw=2, nn=True), _cursor(after=1, hw=2, nn=True, x=3),
     base64.urlsafe_b64encode(b"[1,2]").decode(),
 ])
 async def test_malformed_or_tampered_cursor_is_422(cursor):
@@ -207,13 +220,13 @@ async def test_a_forged_cursor_cannot_reach_another_projects_jobs():
     _, other = await _make_project(["llm:chat"])
     foreign = await _plain_job(other, labels=LBL)
     mine = await _plain_job(pid, labels=LBL)
-    cur = _cursor(after=0, hw=mine + 1000)
+    cur = _cursor(after=0, hw=mine + 1000, nn=True)
     assert _ids(_get(TestClient(app), key, f"label.exam_run_id=run-1&cursor={cur}")) == [mine]
     assert foreign not in _ids(_get(TestClient(app), key))
 
 
 def test_cursor_roundtrip():
-    c = job_list.Cursor(7, 20)
+    c = job_list.Cursor(7, 20, True)
     assert job_list.decode_cursor(job_list.encode_cursor(c)) == c
     with pytest.raises(job_list.BadCursor):
-        job_list.decode_cursor(job_list.encode_cursor(job_list.Cursor(0, 0)) + "!")
+        job_list.decode_cursor(job_list.encode_cursor(job_list.Cursor(0, 0, False)) + "!")

@@ -148,6 +148,9 @@ CREATE INDEX IF NOT EXISTS ix_deep_jobs_dedup ON deep_jobs(project_id, capabilit
 -- Idempotency-Key uniqueness + trace lookup (migration 020).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deep_jobs_idempotency ON deep_jobs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_trace ON deep_jobs(project_id, trace_id) WHERE trace_id IS NOT NULL;
+-- GET /v1/jobs?label.k=v keyset walk + label containment (migration 024).
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_id ON deep_jobs(project_id, id);
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_labels_gin ON deep_jobs USING gin (labels jsonb_path_ops);
 
 -- Agent runs (017): side record + typed event log for `agent:*` deep_jobs rows.
 CREATE TABLE IF NOT EXISTS agent_runs (

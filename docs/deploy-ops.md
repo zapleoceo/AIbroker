@@ -206,6 +206,16 @@ docker exec -i aibroker-postgres psql -U aibroker aibroker -c \
   `Idempotency-Key` therefore lives exactly as long as its job row (see
   [api.md](api.md#idempotency-key-migration-020)).
 
+**Migration 024 (job-list indexes).** Adds `ix_deep_jobs_project_id (project_id, id)` and the GIN index
+`ix_deep_jobs_labels_gin (labels jsonb_path_ops)` for `GET /v1/jobs?label.k=v`. Additive, no code ordering
+dependency (the endpoint works without them, but scans `labels` row by row per project). Apply like 020:
+`psql -v ON_ERROR_STOP=1 -f` (autocommit; both are `CREATE INDEX CONCURRENTLY`, so no write lock on
+`deep_jobs`, but each build scans the whole table and the GIN index adds write cost to every insert and
+`labels` update). No `lock_timeout` is set because there is no ALTER. An interrupted build leaves an INVALID
+index that `IF NOT EXISTS` skips: `DROP INDEX CONCURRENTLY IF EXISTS <name>` and re-run; post-check
+`SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE indexrelid IN ('ix_deep_jobs_project_id'::regclass, 'ix_deep_jobs_labels_gin'::regclass);`
+must show `t` for both.
+
 Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable) and
 backfills it once. **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
 references the column on every request, so code that lands first breaks key selection

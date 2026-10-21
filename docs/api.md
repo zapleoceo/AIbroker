@@ -537,16 +537,19 @@ result text, error text or secrets - poll the job for those. `model` is the mode
 until done), `requested_model` the pin, if any. Ordered by `job_id` ascending.
 
 The only accepted syntax is `label.<key>=<value>` (e.g. `GET /v1/jobs?label.exam_run_id=r42`); there is
-no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels`, which has no GIN index;
-the planner narrows by `project_id` (indexes `ix_deep_jobs_project_date`, `ix_deep_jobs_trace`) and the
-`id` range, then filters `labels` row by row, so cost grows with the project's retained jobs
-(`retention_days`), not with the match count. No migration is added for that.
+no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels`, served by the GIN index
+`ix_deep_jobs_labels_gin (labels jsonb_path_ops)`, and the keyset walk by `ix_deep_jobs_project_id
+(project_id, id)` (both migration 024). Until 024 is applied the query still works but filters `labels`
+row by row within the project, so its cost grows with the project's retained jobs, not with the match
+count. `no_nonterminal_in_filter` is computed once, on the first page, and carried in the cursor, so later
+pages do not rescan; for `agent:*` rows that first-page check reads only `model` and `account_id` of the
+request, never the whole document.
 
 Response: `{jobs, next_cursor, pagination_complete, no_nonterminal_in_filter, high_watermark,
 retention_days, as_of}`.
 
 - `pagination_complete` - there is no further page within the watermark (`next_cursor` is `null`).
-- `no_nonterminal_in_filter` - computed by a separate query over the **whole** label/`trace_id`-filtered
+- `no_nonterminal_in_filter` - computed once, on the first page (then carried in the cursor), by a separate query over the **whole** label/`trace_id`-filtered
   set up to the watermark (the `status` filter is ignored, so `status=done` cannot claim that nothing is
   in flight): no job of that set is `pending` or `running`. It is independent of paging: the last page can
   hold only `done` jobs while an earlier page had a `running` one.
