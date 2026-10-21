@@ -164,7 +164,8 @@ One rule decides tools on a subscription route (2026-10-21, `providers/subscript
 `subscription_tools_accepted(model, project_id)` - the provider switch is on and the id is in
 `*_TOOLS_VERIFIED_MODELS`, or it is a canary (`subscription_tool_model_canary`: the id is in
 `*_TOOLS_CANARY_MODELS` and the project is in `canary_project_ids()`, the comma list
-`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`; duplicates or junk mean none). The submit
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`, ASCII digits only, at most 9 per id;
+duplicates, negatives, Unicode digits or other junk mean none). The submit
 route, the worker re-check and the catalog's `job_request.tools` all call it.
 `subscription_tools_advertised(model, project_id)` - the catalog's `supports_tools` - additionally
 needs proof: the id is verified, or attested (`subscription_tool_model_attested`: listed in
