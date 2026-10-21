@@ -26,7 +26,12 @@ from aibroker.agent.redact import redact, redact_final_text, redact_obj
 from aibroker.agent.subscription_job import output_problem
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
-from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash, replayed_job_id
+from aibroker.services.deep_jobs import (
+    _DEDUP_WINDOW_S,
+    PRIORITY_BATCH,
+    payload_hash,
+    replayed_job_id,
+)
 
 IN_FLIGHT = ("pending", "running")
 
@@ -93,10 +98,12 @@ async def create_run(
     client_job: dict[str, Any] | None = None,
     job_idempotency_key: str | None = None, job_payload_hash: str | None = None,
     trace_id: str | None = None, labels: dict[str, str] | None = None,
+    priority: int = PRIORITY_BATCH,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight).
 
+    `priority` (0 interactive, 1 batch) is the claim order only: it is not in the request or its hash.
     `job_*`/`trace_id`/`labels` are the /v1/jobs contract (deep_jobs columns): a job-level
     Idempotency-Key is checked against `job_payload_hash` (the CLIENT payload hash, free of the
     broker-picked account) and turns the in-flight payload dedup off for this request."""
@@ -129,7 +136,8 @@ async def create_run(
         async with get_session() as s:
             job = DeepJobRow(project_id=project.id, capability=capability, status="pending",
                              request=request, payload_hash=phash, trace_id=trace_id,
-                             labels=labels, idempotency_key=job_idempotency_key)
+                             labels=labels, idempotency_key=job_idempotency_key,
+                             priority=priority)
             s.add(job)
             await s.flush()
             s.add(AgentRunRow(

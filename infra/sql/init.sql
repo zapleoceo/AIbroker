@@ -138,11 +138,12 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
   trace_id VARCHAR(128),          -- client correlation id (020)
   labels JSONB,                   -- client labels, <= 8 keys (020)
   idempotency_key VARCHAR(128),   -- unique per project while the row lives (020)
-  cancel_requested BOOLEAN NOT NULL DEFAULT false   -- cooperative cancel of a running plain job (020)
+  cancel_requested BOOLEAN NOT NULL DEFAULT false,  -- cooperative cancel of a running plain job (020)
+  priority SMALLINT NOT NULL DEFAULT 1              -- claim order: 0 interactive, 1 batch (023)
 );
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);
--- Dispatcher claim scan (services/job_queue.py): eligible pending rows.
-CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after, created_at);
+-- Claim scans (services/job_queue.py, agent/worker.py): eligible pending rows, ORDER BY priority, created_at (023).
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_claim_order ON deep_jobs(status, priority, created_at);
 -- In-flight dedup lookup in submit_job (migration 010).
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_dedup ON deep_jobs(project_id, capability, payload_hash, created_at DESC);
 -- Idempotency-Key uniqueness + trace lookup (migration 020).

@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import logging
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -78,6 +78,8 @@ from aibroker.services.deep_jobs import (
     get_job,
     next_poll_after_s,
     payload_hash,
+    priority_name,
+    resolve_priority,
     submit_deep_job,
     submit_job,
     submit_job_ex,
@@ -161,6 +163,9 @@ class ChatRequest(BaseModel):
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
     trace_id: str | None = None
     labels: dict[str, str] | None = None
+    # Claim order (docs/api.md): `interactive` jobs are claimed before `batch` ones. Absent = batch,
+    # except labels.workflow == "orchestra:mascot-chat" (interactive). Never part of the payload hash.
+    priority: Literal["interactive", "batch"] | None = None
 
     @field_validator("trace_id")
     @classmethod
@@ -505,6 +510,8 @@ class DeepJobResponse(BaseModel):
     status: str = Field(description="pending|done|error|cancelled")
     trace_id: str | None = Field(None, description="client trace id given at submit, if any")
     labels: dict[str, str] | None = Field(None, description="client labels given at submit, if any")
+    priority: Literal["interactive", "batch"] | None = Field(
+        None, description="claim priority of the job: interactive jobs are claimed before batch")
     cancel_requested: bool | None = Field(
         None, description="true while a cancel was requested but the job is not terminal yet")
     text: str | None = None
@@ -662,7 +669,8 @@ def _job_response(row: Any) -> DeepJobResponse:
                             "labels": getattr(row, "labels", None),
                             "queued_ms": queued_ms, "run_ms": run_ms,
                             "error_code": error_code(str(row.status), meta.get("error_class"),
-                                                     getattr(row, "error_message", None))}
+                                                     getattr(row, "error_message", None)),
+                            "priority": priority_name(getattr(row, "priority", None))}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
                                requested_model=requested_model, account_id=account_id,
@@ -819,6 +827,7 @@ async def jobs_submit(
         raise HTTPException(422, str(exc)) from exc
     client_hash = (payload_hash(ctx.project.id, capability, _client_request(body))
                    if idempotency_key else None)
+    priority = resolve_priority(body.priority, body.labels)
     subscription = subscription_model(body.model)
     if body.no_shell and subscription is None:
         raise HTTPException(400, "unsupported_for_subscription_model: no_shell")
@@ -877,7 +886,7 @@ async def jobs_submit(
                             "terminal_tools": body.terminal_tools or [],
                             **({"no_shell": True} if body.no_shell else {})},
                 job_idempotency_key=idempotency_key, job_payload_hash=client_hash,
-                trace_id=trace_id, labels=body.labels,
+                trace_id=trace_id, labels=body.labels, priority=priority,
             )
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -906,6 +915,7 @@ async def jobs_submit(
             extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
                     "tool_choice": body.tool_choice} if body.tools else None),
             trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
+            priority=priority,
         )
     except IdempotencyConflict as exc:   # lost the key race to a different payload
         raise idempotency_conflict(exc) from exc

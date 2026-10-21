@@ -370,6 +370,7 @@ services:
       AGENT_WORKER_CAPABILITIES: "agent:claude"
       # Claims only runs of this subscription login (agent_runs.account_id); see docs/agent-runs.md.
       AGENT_ACCOUNT_ID: owner
+      AGENT_INTERACTIVE_RESERVE: ${AGENT_INTERACTIVE_RESERVE:-1}
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
@@ -437,6 +438,7 @@ services:
       AGENT_WORKER_CAPABILITIES: "agent:claude"
       # Claims only runs of this subscription login (agent_runs.account_id); see docs/agent-runs.md.
       AGENT_ACCOUNT_ID: claude-2
+      AGENT_INTERACTIVE_RESERVE: ${AGENT_INTERACTIVE_RESERVE:-1}
       # Its OWN confirmation: the owner's check of the first account never covers this Team seat.
       # The container still sees the standard setting name; only the .env source differs.
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF:-false}
@@ -508,6 +510,8 @@ services:
       AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF:-false}
       # Parallel Codex runs per container; the limits below are sized for 7. The code default is 1.
       AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}
+      # Slots kept for interactive (priority 0) runs, capped at concurrency - 1.
+      AGENT_INTERACTIVE_RESERVE: ${AGENT_INTERACTIVE_RESERVE:-1}
       # A caller that never answers a tool call frees the slot after this many seconds.
       AGENT_TOOL_WAIT_S: ${AGENT_TOOL_WAIT_S:-90}
       AGENT_CODEX_REFRESH_PROOF_S: ${AGENT_CODEX_REFRESH_PROOF_S:-1800}

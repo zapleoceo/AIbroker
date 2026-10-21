@@ -290,6 +290,23 @@ docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
 
 `infra/sql/init.sql` mirrors the DDL. Existing rows stay NULL (shown as «неизвестно»); nothing is backfilled.
 
+### Job priority: migration 023 (2026-10-21)
+
+Migration 023 (`023_deep_jobs_priority.sql`) adds `deep_jobs.priority SMALLINT NOT NULL DEFAULT 1` (0 = interactive,
+1 = batch; every old row and old client is batch). A constant default does not rewrite the table on Postgres 11+.
+It also creates `ix_deep_jobs_claim_order (status, priority, created_at)` and drops `ix_deep_jobs_claimable`
+(009): only the two claim scans (`claim_agent_runs`, the LLM dispatcher's `_claim_batch`) used it, and both now
+`ORDER BY priority, created_at`. Apply it BEFORE deploying the code (the ORM model names the column; see the
+pgbouncer rule below):
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/023_deep_jobs_priority.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL. Rollback is `DROP INDEX ix_deep_jobs_claim_order`, recreate
+`ix_deep_jobs_claimable ON deep_jobs (status, run_after, created_at)`, then drop the column. Set
+`AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
+
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
 Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)
@@ -896,6 +913,7 @@ docker compose up -d
 | `AGENT_CODEX_REFRESH_PROOF_S` | codex worker (default 1800, range 0..3600): after a gated run proves the login at the current `last_refresh`, new Codex runs skip the `__codex_auth__` start-up gate this long; 0 = gate every due start-up. See [agent-runs](agent-runs.md) |
 | `AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S` | codex worker (default 561600 = 6.5 days, max 7 days): a proof never covers a `last_refresh` this old, so start-ups near Codex's own ~8-day refresh (UNVERIFIED) are gated again. Keep it + `AGENT_CODEX_REFRESH_PROOF_S` below that interval |
 | `AGENT_IMAGES_TOTAL_BYTES` | bytes of all images of one run together, generated plus written to `out/` (agent workers, default 25165824 = 24 MiB; compose passes it to `agent-worker`, `agent-worker-claude2` and `agent-worker-codex`): an image that would pass it is listed in `files` with `skipped: "total_budget"` and no content |
+| `AGENT_INTERACTIVE_RESERVE` | agent workers (default `1`, range 0-8; passed to the codex worker and both Claude workers in `docker-compose.yml`): slots kept for `priority: interactive` runs. When free slots <= this, the worker claims only interactive runs; the effective value is `min(this, concurrency - 1)`, so a one-slot lane reserves nothing and still runs batch work (`effective_interactive_reserve`). `0` turns the reservation off |
 | `AGENT_TOOL_ARG_RETRIES` | schema-breaking client tool calls per Codex subscription run that are answered to the model as a rejected tool result instead of failing the run (default 2, range 0..5); see [subscription tool loop](subscription-tool-loop.md) |
 | `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` | api + Claude workers (default false): Claude subscription client tools over the stream-json control channel; see [subscription tool loop](subscription-tool-loop.md#claude-transport) |
 | `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` | JSON list of exact `claude-sub/<id>` routes advertised with `supports_tools: true` after a live round-trip (default `[]`) |

@@ -216,7 +216,7 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
                 "  SELECT id FROM deep_jobs "
                 "  WHERE status = 'pending' AND capability NOT LIKE 'agent:%' "
                 "    AND (run_after IS NULL OR run_after < now()) "
-                "  ORDER BY created_at "
+                "  ORDER BY priority, created_at "
                 "  LIMIT :n "
                 "  FOR UPDATE SKIP LOCKED"
                 f") RETURNING {_JOB_COLS_SQL}"

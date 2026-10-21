@@ -21,6 +21,7 @@ from aibroker.agent.runs import RunConflict, append_event
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow
+from aibroker.services.deep_jobs import PRIORITY_INTERACTIVE
 
 log = logging.getLogger(__name__)
 
@@ -71,23 +72,34 @@ def concurrency_for(capability: str) -> int:
     return max(0, n)
 
 
-async def claim_agent_runs(capability: str, limit: int) -> list[int]:
-    """Atomically move up to `limit` eligible pending runs of ONE capability to running."""
+def effective_interactive_reserve(reserve: int, concurrency: int) -> int:
+    """Slots kept for priority-0 (interactive) runs: AGENT_INTERACTIVE_RESERVE, capped at
+    concurrency - 1 so a lane never reserves itself out of batch work (concurrency 1 -> 0)."""
+    return max(0, min(reserve, concurrency - 1))
+
+
+async def claim_agent_runs(capability: str, limit: int, *,
+                           interactive_only: bool = False) -> list[int]:
+    """Atomically move up to `limit` eligible pending runs of ONE capability to running,
+    interactive (priority 0) before batch, oldest first within a priority.
+    `interactive_only` skips batch runs (the reserved slots)."""
     if limit <= 0:
         return []
     now = _now()
     stmt = select(DeepJobRow).where(
         DeepJobRow.capability == capability, DeepJobRow.status == "pending",
         (DeepJobRow.run_after.is_(None)) | (DeepJobRow.run_after < now))
+    if interactive_only:
+        stmt = stmt.where(DeepJobRow.priority == PRIORITY_INTERACTIVE)
     if account := get_settings().AGENT_ACCOUNT_ID.strip():
         # One worker = one subscription login: claim only that account's runs. An IN-subquery on
         # the agent_runs primary key (no join, so FOR UPDATE still locks only deep_jobs rows and
-        # the ix_deep_jobs_claimable scan narrows first).
+        # the ix_deep_jobs_claim_order scan narrows first).
         stmt = stmt.where(DeepJobRow.id.in_(
             select(AgentRunRow.run_id).where(AgentRunRow.account_id == account)))
     async with get_session() as s:
         rows = (await s.execute(
-            stmt.order_by(DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
+            stmt.order_by(DeepJobRow.priority, DeepJobRow.created_at).limit(limit).with_for_update(skip_locked=True)
         )).scalars().all()
         for r in rows:
             r.status = "running"
@@ -245,7 +257,9 @@ async def agent_worker_loop(stop: asyncio.Event,
                 await expire_overdue_waiting()
             for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
-                for run_id in await claim_agent_runs(cap, free):
+                reserved = free <= effective_interactive_reserve(
+                    get_settings().AGENT_INTERACTIVE_RESERVE, concurrency_for(cap))
+                for run_id in await claim_agent_runs(cap, free, interactive_only=reserved):
                     t = asyncio.create_task(_guarded(run_id, cfg))
                     inflight[cap].add(t)
                     t.add_done_callback(inflight[cap].discard)

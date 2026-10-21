@@ -141,6 +141,7 @@ continuity). Submit only enqueues (`pending`); a per-worker dispatcher
 | `created_at` / `completed_at` | Lifecycle timestamps |
 | `trace_id` / `labels` | Client correlation (migration 020): `varchar(128)` and JSONB (<= 8 string pairs). Echoed on submit/poll, logged, never in `payload_hash` |
 | `idempotency_key` | Client `Idempotency-Key` (migration 020), unique per project while the row lives; NULL for jobs submitted without one |
+| `priority` | `smallint NOT NULL DEFAULT 1` (migration 023): claim order, 0 = interactive, 1 = batch; claimers `ORDER BY priority, created_at`. Not part of `payload_hash` |
 | `cancel_requested` | `boolean NOT NULL DEFAULT false` (migration 020): client asked to cancel a `running` job; the dispatcher ends it `cancelled` at the next attempt boundary |
 
 Indexes: `(project_id, created_at)` for polling,
