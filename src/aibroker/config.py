@@ -143,6 +143,12 @@ class Settings(BaseSettings):
     # Separate owner confirmation for the Codex account. Claude's confirmation never
     # authorizes an autonomous Codex run.
     AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # After a gated Codex run proves the login works at the current `last_refresh`, new runs skip
+    # the start-up auth gate for this long (agent/codex_refresh_proof.py). 0 = always gate when due.
+    AGENT_CODEX_REFRESH_PROOF_S: float = Field(1800.0, ge=0, le=3600)
+    # ...but never once last_refresh is this old: near Codex's own (~8 d, UNVERIFIED) interval every
+    # start-up is gated again, so the time-based refresh happens under the lease.
+    AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S: float = Field(6.5 * 24 * 3600, ge=0, le=7 * 24 * 3600)
     # Server-side allowlist of project ids that may use agent runs (comma-separated ints). EMPTY =
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.

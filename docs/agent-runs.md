@@ -242,6 +242,8 @@ writes files into the workspace.
   refresh cannot be predicted from the file and is not covered; a two-run live canary remains a
   smoke test, not the safeguard. Slots are never shared
   with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
+- **Refresh proof** (`codex_refresh_proof.PROOF`, a `RefreshProof`: `record`, `covers`, `clear`; single Codex worker only - it is process memory). When a gated run releases the lease on its first model event and the login's `last_refresh` (`CodexCLI.last_refresh`, read once per decision; `refresh_due` decides) did not change during the call, the timestamp is recorded. For `AGENT_CODEX_REFRESH_PROOF_S` (default 1800 s, 0 disables) new runs with the same timestamp skip the gate, but never once it is older than `AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S` (6.5 days): near Codex's own ~8-day interval (UNVERIFIED) every start-up is gated again. Reason: for days between 4 and 8 days every start-up was serialised (prod 2026-10-21: last_refresh 142 h, one run in five waited ~96 s, a 120 s client timed out).
+  RESIDUAL RISK: runs that skip the gate hold no lease, so a refresh they trigger - in particular a 401-triggered one, which no timestamp predicts - is not serialised with other runs. The time-based refresh stays under the lease while max_age + window is below Codex's interval.
 - `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
   becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
   The scan selects only `id`, `started_at` and `request->wall_timeout_s`, never whole rows.

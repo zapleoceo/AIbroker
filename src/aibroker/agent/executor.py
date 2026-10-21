@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,7 +22,9 @@ from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.client_tools import clear_pending_call
-from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI
+from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI, refresh_due
+from aibroker.agent.codex_refresh_proof import PROOF as REFRESH_PROOF
+from aibroker.agent.codex_refresh_proof import RefreshProof
 from aibroker.agent.constants import project_allowed
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.policy import policy_violation
@@ -69,6 +71,9 @@ class ExecConfig:
     codex_auth_wait_s: float = 90.0          # max wait for it before the run is requeued
     codex_auth_poll_s: float = 1.0           # how often a waiting run retries the lease
     codex_refresh_due_after_s: float = CODEX_REFRESH_DUE_AFTER_S
+    codex_refresh_proof_s: float = 1800.0     # see agent/codex_refresh_proof.py
+    codex_refresh_proof_max_age_s: float = 6.5 * 24 * 3600
+    refresh_proof: RefreshProof = field(default_factory=lambda: REFRESH_PROOF)
     quota_backoff_base_s: float = 60.0
     quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
     env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
@@ -77,6 +82,8 @@ class ExecConfig:
 def exec_config_from_settings() -> ExecConfig:
     s = get_settings()
     return ExecConfig(
+        codex_refresh_proof_s=s.AGENT_CODEX_REFRESH_PROOF_S,
+        codex_refresh_proof_max_age_s=s.AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S,
         workspace_root=s.AGENT_WORKSPACE_ROOT, cancel_poll_s=s.AGENT_CANCEL_POLL_S,
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
@@ -185,9 +192,11 @@ class _AuthWaitCancelled(Exception):
 
 @dataclass
 class _AuthGate:
-    """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours."""
+    """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours.
+    `last_refresh` is the login's timestamp when the gate was taken (for the refresh proof)."""
     stack: contextlib.AsyncExitStack
     lease: Lease
+    last_refresh: datetime | None = None
 
     async def close(self) -> None:
         await self.stack.aclose()
@@ -199,15 +208,21 @@ async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig, run_id: int) -> _
     says one may be due (or cannot be read), hold ONE lease until the first event proving a completed
     model call, or until the run ended and its CLI was stopped; otherwise take nothing and runs stay
     fully parallel."""
-    if not isinstance(adapter, CodexCLI) or not adapter.refresh_maybe_due(cfg.codex_refresh_due_after_s):
+    if not isinstance(adapter, CodexCLI):
         return None
+    last = adapter.last_refresh()                 # read once per decision
+    if not refresh_due(last, after_s=cfg.codex_refresh_due_after_s):
+        return None
+    if cfg.refresh_proof.covers(last, cfg.codex_refresh_proof_s,
+                                max_age_s=cfg.codex_refresh_proof_max_age_s):
+        return None      # a gated run just proved the login works at this very timestamp
     deadline = time.monotonic() + cfg.codex_auth_wait_s
     while True:
         stack = contextlib.AsyncExitStack()
         lease = await stack.enter_async_context(session_lock(
             "__codex_auth__", "refresh", run_id, ttl_s=cfg.lease_ttl_s, heartbeat_s=cfg.lease_heartbeat_s))
         if lease is not None:
-            return _AuthGate(stack, lease)
+            return _AuthGate(stack, lease, last)
         await stack.aclose()
         if await _cancel_flag(run_id):       # ends `cancelled` at once, never as codex_auth_busy
             raise _AuthWaitCancelled
@@ -458,6 +473,8 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             # tool call, or turn usage) - NOT on session.assigned, which precedes the first model
             # request. UNVERIFIED: that Codex refreshes its token at/before that first request.
             if gate is not None and isinstance(item, ev.MessageDelta | ev.ToolCall | ev.Usage):
+                if isinstance(adapter, CodexCLI):
+                    cfg.refresh_proof.record(gate.last_refresh, adapter.last_refresh())
                 await gate.close()
                 gate = None
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):
