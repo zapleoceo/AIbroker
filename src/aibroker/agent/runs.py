@@ -260,7 +260,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
         needs_request = event.type == "model.observed" or event.type in TERMINAL_TYPES
         job = (await s.get(DeepJobRow, run_id,
                            options=[] if needs_request else [defer(DeepJobRow.request)])
-               if needs_request or event.type == "usage" else None)
+               if needs_request or event.type in ("usage", "run.started") else None)
         client_job = ((job.request or {}).get("client_job")
                       if job is not None and needs_request else None)
         response_format = client_job.get("response_format") if client_job else None
@@ -306,11 +306,16 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             if cut:
                 meta["observations_truncated"] = True
             job.result_meta = meta
+        # the FIRST execution start: a gate requeue or a quota wait must not reset queued_ms
+        if (event.type == "run.started" and job is not None
+                and not (job.result_meta or {}).get("first_started_at")):
+            job.result_meta = {**(job.result_meta or {}), "first_started_at": now.isoformat()}
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
         if event.type in TERMINAL_TYPES:
             run.outcome = OUTCOME_BY_TYPE[event.type]
             if job is not None:
+                first_started_at = (job.result_meta or {}).get("first_started_at")
                 history = (job.result_meta or {}).get("client_tool_history") or []
                 usage_observed = (job.result_meta or {}).get("usage_observed") or {}
                 observations = (job.result_meta or {}).get("model_observations") or []
@@ -349,12 +354,15 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
                     job.result_meta.update(evidence_meta)
+                    job.result_meta["error_class"] = event.error_class      # -> error_code
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
                     job.result_meta.update(evidence_meta)
                     job.error_message = event.type
+                if first_started_at:
+                    job.result_meta["first_started_at"] = first_started_at
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,
                                "attachments": strip_attachment_data(job.request["attachments"])}
@@ -408,6 +416,7 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
         job.started_at = None
         job.retry_count += 1
         job.run_after = _now() + timedelta(seconds=delay_s)
+        job.result_meta = {**(job.result_meta or {}), "pending_reason": "capacity_busy"}
         return job.retry_count
 
 
@@ -434,6 +443,7 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
         job.status = "pending"
         job.started_at = None
         job.run_after = not_before
+        job.result_meta = {**(job.result_meta or {}), "pending_reason": "waiting_quota"}
         return run.quota_waits
 
 

@@ -259,7 +259,11 @@ async def test_get_job_poll_view_matches_full_row_and_skips_prompt_and_audio():
                 policy_args = (full.request.get("model"), full.request.get("account_id", ""),
                                full.capability)
             view = await deep_jobs.get_job(jid, pid)
-            assert proxy._job_response(view) == expected, (name, status)
+            # these fixture rows have no completed_at, so queued_ms/run_ms grow with the clock
+            # (timings: tests/test_job_status.py); compare the rest exactly
+            moving = {"queued_ms", "run_ms"}
+            assert (proxy._job_response(view).model_dump(exclude=moving)
+                    == expected.model_dump(exclude=moving)), (name, status)
             assert (view.request.get("model"), view.request.get("account_id", ""),
                     view.capability) == policy_args
             assert set(view.request) <= {"model", "account_id", "client_job"}

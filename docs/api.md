@@ -501,6 +501,35 @@ all the given pairs); anything else is `422`. Response: `{"cancelled": [ids], "c
 Other projects' jobs are never touched, whatever their trace or labels. Agent jobs are skipped when the key
 lacks `llm:agent`. No new scope or key is needed — the ordinary `X-Project-Key`.
 
+**Status details on every poll (2026-10-21)** (`agent/job_status.py`: `error_code`, `job_timing`,
+`pending_detail`; all derived from the job row, no extra query):
+
+- `queued_ms`: submit -> first execution start. An agent run keeps its FIRST start
+  (`result_meta.first_started_at`), so a Codex auth-gate requeue or a quota wait does not reset it; an
+  API job uses the row's `started_at`. While nothing has started it grows with the clock.
+- `run_ms`: first execution start -> end (or now while running). It includes any later quota wait or
+  client-tool wait.
+- `pending_reason` (status `pending` only): `queued`, `running`, `tool_wait` (a client tool call is
+  waiting for your `POST /v1/jobs/{id}/tool-results`), `waiting_quota` (the subscription hit its
+  usage limit; `retry_at` = the reported reset), `capacity_busy` (requeued, e.g. the Codex start-up auth
+  gate; `retry_at` = when it is runnable again).
+- `error_code` (status `error` or `cancelled`): a stable, machine-readable reason next to the free-text
+  `error`, which is unchanged. Agent runs store their `error_class` (`result_meta.error_class`); older
+  rows fall back to the `<class>: ` prefix of `error`.
+
+| error_code | meaning |
+|---|---|
+| `subscription_disabled` | the provider account's organisation disabled subscription access (owner action needed) |
+| `auth_refresh_failed` | the CLI could not refresh its login token (transient; retry) |
+| `quota_exhausted` | usage limit hit and the reset is past the job's deadline |
+| `tool_call_expired` | no tool result arrived within `AGENT_TOOL_WAIT_S` |
+| `tool_not_called` | `tool_choice` required a tool, the model answered without one (after the reminders) |
+| `worker_restarted` | the worker died mid-run (found stale after wall timeout + grace) |
+| `capacity_busy` | the run could not start (session / auth-gate lease) after its requeue cap |
+| `cancelled` | cancelled by the client |
+| `internal_error` | an unclassified failure |
+| any other | the run's own error class as is, e.g. `cli_error`, `route_disabled`, `model_unavailable`, `invalid_json`, `client_tool_protocol` |
+
 `poll_after_s` is the broker's suggested wait before the next poll: 2 only in
 the submit response, then 5 s for a job under 30 s old, 10 s under 2 min, 20 s
 after that (`next_poll_after_s`). A job belongs to exactly one project — polling someone else's

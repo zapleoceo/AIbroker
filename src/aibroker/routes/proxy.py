@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import (
@@ -36,6 +37,7 @@ from aibroker.agent.client_tools import (
     submit_result,
 )
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.job_status import error_code, job_timing, pending_detail
 from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run, served_model_meta
@@ -545,6 +547,19 @@ class DeepJobResponse(BaseModel):
     poll_after_s: int | None = Field(
         None, description="present only while status=pending"
     )
+    error_code: str | None = Field(
+        None, description="stable machine-readable reason for status=error|cancelled "
+                          "(docs/api.md, agent.job_status.error_code); `error` stays free text")
+    queued_ms: int | None = Field(
+        None, description="submit -> first execution start (still growing while queued)")
+    run_ms: int | None = Field(
+        None, description="first execution start -> end (or now while running); includes any "
+                          "quota wait or tool wait after the start")
+    pending_reason: str | None = Field(
+        None, description="status=pending only: queued | running | tool_wait | waiting_quota | "
+                          "capacity_busy")
+    retry_at: datetime | None = Field(
+        None, description="waiting_quota / capacity_busy: when the job becomes runnable again")
 
 
 def _require_image_access(ctx: ProjectCtx, messages: list[dict[str, Any]], *,
@@ -632,11 +647,19 @@ def _job_response(row: Any) -> DeepJobResponse:
     polling on an empty answer. Any unexpected status defaults to pending for
     the same fail-safe reason."""
     request = getattr(row, "request", None) or {}
+    meta = row.result_meta or {}
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     # Subscription runs only: the account is chosen at creation and never changes.
     account_id = request.get("account_id") if request.get("client_job") else None
+    now = datetime.now(UTC).replace(tzinfo=None)
+    queued_ms, run_ms = job_timing(getattr(row, "created_at", None), meta.get("first_started_at"),
+                                   getattr(row, "started_at", None),
+                                   getattr(row, "completed_at", None), now)
     tags: dict[str, Any] = {"trace_id": getattr(row, "trace_id", None),
-                            "labels": getattr(row, "labels", None)}
+                            "labels": getattr(row, "labels", None),
+                            "queued_ms": queued_ms, "run_ms": run_ms,
+                            "error_code": error_code(str(row.status), meta.get("error_class"),
+                                                     getattr(row, "error_message", None))}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
                                requested_model=requested_model, account_id=account_id,
@@ -654,8 +677,10 @@ def _job_response(row: Any) -> DeepJobResponse:
             call = {"id": pending_tool["call_id"], "type": "function",
                     "function": {"name": pending_tool["name"],
                                  "arguments": pending_tool["arguments"]}}
+        reason, retry_at = pending_detail(str(row.status), getattr(row, "run_after", None),
+                                          meta.get("pending_reason"), call is not None, now)
         return DeepJobResponse(
-            job_id=row.id, status="pending",
+            job_id=row.id, status="pending", pending_reason=reason, retry_at=retry_at,
             requested_model=requested_model, account_id=account_id,
             evidence=_job_evidence(row.result_meta or {}, request, str(row.status)),
             cancel_requested=True if getattr(row, "cancel_requested", False) else None, **tags,
@@ -663,7 +688,6 @@ def _job_response(row: Any) -> DeepJobResponse:
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
         )
-    meta = row.result_meta or {}
     return DeepJobResponse(
         job_id=row.id, status="done", text=row.result_text,
         provider=meta.get("provider"), model=meta.get("model"),
