@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -319,3 +320,47 @@ async def test_claude_tools_switch_and_verified_list_gate_catalog_and_submit(mon
         await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
     assert exc.value.status_code == 503
     assert {r["id"]: r for r in listing()}[claude]["supports_tools"] is False
+
+
+def test_canary_projects_are_a_list_and_attestation_comes_from_settings(monkeypatch):
+    from aibroker.providers.subscriptions import (
+        canary_project_ids,
+        subscription_tool_model_attested,
+        subscription_tools_accepted,
+        subscription_tools_advertised,
+    )
+    s = get_settings()
+    models = ["claude-sub/claude-sonnet-5-5", "claude-sub/claude-opus-5-5"]
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5","claude-opus-5-5"],"codex-sub":[]}')
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED", True)
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS", "[]")
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS", json.dumps(models))
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS", "12, 34")
+    assert canary_project_ids() == {12, 34}
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", json.dumps(models[:1]))
+    for pid in (12, 34):
+        assert subscription_tools_accepted(models[1], pid)          # canary: tools accepted
+        assert subscription_tools_advertised(models[0], pid)        # attested: advertised
+        assert not subscription_tools_advertised(models[1], pid)    # no live proof: not advertised
+    assert not subscription_tools_accepted(models[0], 99)           # not a canary project
+    assert not subscription_tools_accepted(models[0], None)
+    assert not {r["id"]: r for r in listing(None)}[models[0]]["supports_tools"]
+    rows = {r["id"]: r for r in listing(34)}
+    assert rows[models[1]]["job_request"]["tools"] is True and rows[models[1]]["supports_tools"] is False
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", json.dumps(models))
+    rows = {r["id"]: r for r in listing(34)}
+    assert rows[models[1]]["supports_tools"] is rows[models[1]]["job_request"]["tools"] is True
+    for bad in ("12,12", "12,x", "abc", "12,²", "٣", "-1", "1" * 12):
+        monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS", bad)
+        assert canary_project_ids() == frozenset()
+        assert not subscription_tools_accepted(models[0], 12)
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", "default")   # compose sentinel
+    assert subscription_tool_model_attested(models[0]) and not subscription_tool_model_attested(models[1])
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", "not json")
+    assert not subscription_tool_model_attested(models[0])
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", '["other-sub/x"]')
+    assert not subscription_tool_model_attested("other-sub/x")
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED", False)
+    monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS", "12")
+    assert not subscription_tools_accepted(models[0], 12)           # the provider switch wins

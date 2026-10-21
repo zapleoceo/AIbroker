@@ -67,8 +67,7 @@ from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
     subscription_model_verified,
-    subscription_tool_model_canary,
-    subscription_tools_enabled,
+    subscription_tools_accepted,
 )
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
@@ -846,10 +845,7 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
-        if body.tools and not (subscription_tools_enabled(subscription.provider)
-                               and (catalog.supports_tools(subscription)
-                                    or subscription_tool_model_canary(subscription.id,
-                                                                      ctx.project.id))):
+        if body.tools and not subscription_tools_accepted(subscription.id, ctx.project.id):
             raise HTTPException(503, "subscription client tools are not enabled for this project and model")
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
         try:

@@ -898,7 +898,8 @@ docker compose up -d
 | `AGENT_TOOL_ARG_RETRIES` | schema-breaking client tool calls per Codex subscription run that are answered to the model as a rejected tool result instead of failing the run (default 2, range 0..5); see [subscription tool loop](subscription-tool-loop.md) |
 | `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` | api + Claude workers (default false): Claude subscription client tools over the stream-json control channel; see [subscription tool loop](subscription-tool-loop.md#claude-transport) |
 | `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` | JSON list of exact `claude-sub/<id>` routes advertised with `supports_tools: true` after a live round-trip (default `[]`) |
-| `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS` | JSON list of exact `claude-sub/<id>` routes allowed for the owner canary project only (`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`, default `[]`) |
+| `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS` | JSON list of exact `claude-sub/<id>` routes allowed for the canary projects only (`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`, default `[]`) |
+| `AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS` | api (JSON list, default `["claude-sub/claude-sonnet-5-5"]`): canary routes with a recorded live client-tool round-trip; the catalog shows `supports_tools: true` for them to the canary projects. Add an id only with the job id of its live round-trip |
 | `AGENT_TOOL_REQUIRED_REMINDERS` | follow-up turns per run that tell the model to call the required client tool after it finished with plain text (default 1, range 0..3) |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)
