@@ -107,6 +107,19 @@ async def claim_agent_runs(capability: str, limit: int, *,
         return [r.id for r in rows]
 
 
+async def claim_for_lane(capability: str, free: int, concurrency: int) -> list[int]:
+    """One tick's claims for a lane with `free` open slots: up to `free - reserve` runs of any
+    priority (interactive first), then the remaining slots (at most `reserve`) interactive-only,
+    so a batch backlog can never fill the reserved slot(s)."""
+    reserve = effective_interactive_reserve(get_settings().AGENT_INTERACTIVE_RESERVE, concurrency)
+    ids: list[int] = []
+    if (any_priority := free - reserve) > 0:
+        ids += await claim_agent_runs(capability, any_priority)
+    if (left := free - len(ids)) > 0:
+        ids += await claim_agent_runs(capability, left, interactive_only=True)
+    return ids
+
+
 async def fail_stale_agent_runs() -> int:
     """A `running` run whose worker died is FAILED (worker_lost), never re-run: a CLI run
     has side effects. Deadline = started_at + its wall timeout + grace."""
@@ -257,9 +270,7 @@ async def agent_worker_loop(stop: asyncio.Event,
                 await expire_overdue_waiting()
             for cap in caps:
                 free = concurrency_for(cap) - len(inflight[cap])
-                reserved = free <= effective_interactive_reserve(
-                    get_settings().AGENT_INTERACTIVE_RESERVE, concurrency_for(cap))
-                for run_id in await claim_agent_runs(cap, free, interactive_only=reserved):
+                for run_id in await claim_for_lane(cap, free, concurrency_for(cap)):
                     t = asyncio.create_task(_guarded(run_id, cfg))
                     inflight[cap].add(t)
                     t.add_done_callback(inflight[cap].discard)

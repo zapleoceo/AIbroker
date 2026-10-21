@@ -294,17 +294,23 @@ docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
 
 Migration 023 (`023_deep_jobs_priority.sql`) adds `deep_jobs.priority SMALLINT NOT NULL DEFAULT 1` (0 = interactive,
 1 = batch; every old row and old client is batch). A constant default does not rewrite the table on Postgres 11+.
-It also creates `ix_deep_jobs_claim_order (status, priority, created_at)` and drops `ix_deep_jobs_claimable`
-(009): only the two claim scans (`claim_agent_runs`, the LLM dispatcher's `_claim_batch`) used it, and both now
-`ORDER BY priority, created_at`. Apply it BEFORE deploying the code (the ORM model names the column; see the
-pgbouncer rule below):
+It also builds `ix_deep_jobs_claim_order (status, priority, created_at)` with `CREATE INDEX CONCURRENTLY` and then
+drops `ix_deep_jobs_claimable` (009) with `DROP INDEX CONCURRENTLY`: only the two claim scans (`claim_agent_runs`,
+the LLM dispatcher's `_claim_batch`) used it, and both now `ORDER BY priority, created_at` (`run_after` stays a
+filter, not an index column). Apply it BEFORE deploying the code (the ORM model names the column; see the
+pgbouncer rule below), with `psql -v ON_ERROR_STOP=1` in autocommit (never `psql -1`: CONCURRENTLY cannot run in
+a transaction; `lock_timeout` covers only the ALTER and is RESET before the build, as in 020):
 
 ```
 docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/023_deep_jobs_priority.sql
 ```
 
-`infra/sql/init.sql` mirrors the DDL. Rollback is `DROP INDEX ix_deep_jobs_claim_order`, recreate
-`ix_deep_jobs_claimable ON deep_jobs (status, run_after, created_at)`, then drop the column. Set
+`infra/sql/init.sql` mirrors the DDL (plain `CREATE INDEX`: it runs on an empty DB). An interrupted build leaves
+an INVALID index that `IF NOT EXISTS` skips: `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order` and re-run;
+post-check `indisvalid = t` in `pg_index`. Mixed-version window: workers from before this change ignore `priority`
+(claim by `created_at`, explicit column lists tolerate the new column), so they keep running between the migration and
+the deploy but do not honour priority. Rollback: `CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_deep_jobs_claimable ON
+deep_jobs (status, run_after, created_at)`, `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order`, then drop the column. Set
 `AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
 
 ### Migrations vs pgbouncer prepared statements (2026-10-13)

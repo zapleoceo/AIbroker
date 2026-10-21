@@ -231,8 +231,46 @@ async def test_worker_loop_takes_only_interactive_runs_in_the_reserved_slot():
         release.set()
         wake.set()
         await asyncio.wait_for(task, timeout=5)
-    assert calls[0] == (2, False)       # both slots free: batch work allowed
-    assert calls[1] == (1, True)        # free slots <= reserve: interactive only
+    # 2 slots, reserve 1: one slot open to any priority, the other interactive-only
+    assert calls[:2] == [(1, False), (1, True)]
+    # next tick (both mock claims took a slot): nothing free, no claim at all
+    assert len(calls) == 2
+
+
+async def _interactive(pid, task):
+    rid, _ = await create_run(
+        project=SimpleNamespace(id=pid), capability=CAP, prompt=task, task_id=task,
+        account_id="acc", session_id=None, idempotency_key=None, wall_timeout_s=30,
+        idle_timeout_s=30, allowed_tools=[], priority=PRIORITY_INTERACTIVE)
+    return rid
+
+
+@pytest.mark.parametrize("concurrency, reserve, expected_batch", [(10, 1, 9), (10, 3, 7), (4, 1, 3), (1, 1, 1)])
+async def test_batch_backlog_cannot_fill_the_reserved_slots(monkeypatch, concurrency, reserve,
+                                                            expected_batch):
+    """REAL claim_agent_runs: a fresh lane facing a big batch backlog leaves `reserve` slots free
+    (none for concurrency 1), and an interactive run arriving later takes exactly that room."""
+    monkeypatch.setattr(worker, "get_settings", lambda: _settings(AGENT_INTERACTIVE_RESERVE=reserve))
+    pid = await _project()
+    batch = [await _pending(pid, CAP, f"b{i}") for i in range(concurrency + 5)]
+    first = await worker.claim_for_lane(CAP, concurrency, concurrency)
+    assert first == batch[:expected_batch]
+    free = concurrency - len(first)
+    assert free == concurrency - expected_batch
+    # more batch work waiting, but the next tick (all slots that remain are reserved) takes none of it
+    assert await worker.claim_for_lane(CAP, free, concurrency) == []
+    chat = await _interactive(pid, "chat")
+    assert await worker.claim_for_lane(CAP, free, concurrency) == ([chat] if free else [])
+
+
+async def test_interactive_backlog_is_claimed_first_within_the_open_slots(monkeypatch):
+    monkeypatch.setattr(worker, "get_settings", lambda: _settings(AGENT_INTERACTIVE_RESERVE=1))
+    pid = await _project()
+    batch = await _pending(pid, CAP, "b")
+    chats = [await _interactive(pid, f"c{i}") for i in range(3)]
+    assert await worker.claim_for_lane(CAP, 3, 4) == chats
+    assert await worker.claim_for_lane(CAP, 1, 4) == []          # reserved slot: batch stays queued
+    assert await worker.claim_for_lane(CAP, 2, 4) == [batch]
 
 
 # --- schema --------------------------------------------------------------------------------

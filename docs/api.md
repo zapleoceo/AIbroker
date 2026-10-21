@@ -435,7 +435,7 @@ Interactive jobs are claimed before batch jobs, oldest first within a priority, 
 dispatcher and the subscription (`codex-sub/…`, `claude-sub/…`) agent workers. Absent means `batch`, except when
 `labels.workflow` is `"orchestra:mascot-chat"` (interactive); an explicit `priority` always wins. Agent
 workers also keep `AGENT_INTERACTIVE_RESERVE` slots (default 1) free of batch work, so a chat does not queue
-behind a batch backlog; a run already in flight is never preempted. The job's priority is echoed in **every**
+behind a batch backlog (priority is strict, with no aging: under a steady interactive load batch jobs can wait); a run already in flight is never preempted. The job's priority is echoed in **every**
 poll as `priority` (`"interactive"`/`"batch"`). Like `trace_id` and `labels` it is **never part of the payload
 hash**: an Idempotency-Key replay with another priority is still a replay (the stored job keeps its
 priority), and the legacy in-flight dedup (no key) returns the existing job whatever priority the duplicate asked for.

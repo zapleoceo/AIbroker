@@ -248,9 +248,11 @@ writes files into the workspace.
 - `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
   becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
   The scan selects only `id`, `started_at` and `request->wall_timeout_s`, never whole rows.
-- Reserved interactive slots: when a lane's free slots are <= `effective_interactive_reserve(
-  AGENT_INTERACTIVE_RESERVE, concurrency)` (= `min(reserve, concurrency - 1)`, so concurrency 1 reserves 0),
-  the tick claims with `interactive_only=True`. A batch backlog therefore never takes the last reserved
+- Reserved interactive slots: `claim_for_lane(capability, free, concurrency)` first claims up to
+  `free - reserve` runs of any priority, then the remaining slots interactive-only, where
+  `reserve = effective_interactive_reserve(AGENT_INTERACTIVE_RESERVE, concurrency)` (= `min(reserve,
+  concurrency - 1)`, so concurrency 1 reserves 0). Priority is strict with no aging: under a steady interactive
+  load batch runs can wait. A batch backlog therefore never takes the last reserved
   slot(s); an interactive run waits only for a slot to free, not behind the whole backlog. A running run
   is never preempted. `priority` comes from the submit (`interactive|batch`, default batch, or
   `labels.workflow == "orchestra:mascot-chat"` via `resolve_priority`; constants `PRIORITY_INTERACTIVE`,
