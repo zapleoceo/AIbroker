@@ -328,8 +328,10 @@ broker finishes its fallback chain). See `docs/api.md`.
   (`build_request` = the hashed payload, `find_by_idempotency_key`, `replayed_job_id`,
   `submit_job_ex` -> `SubmitOutcome`, `IdempotencyConflict`); `services/job_control.py`
   (`cancel_job` -> `CancelResult`, `cancel_matching` -> `BulkCancel`, `cancel_flag`,
-  `AgentCancelForbidden`); `routes/jobs_control.py` (`jobs_cancel`, `jobs_cancel_bulk`,
-  request/response models `BulkCancelRequest`, `CancelResponse`, `BulkCancelResponse`;
+  `AgentCancelForbidden`); `services/job_list.py` (`list_jobs` -> `JobPage`, keyset paging with a
+  high-watermark snapshot; `Cursor`, `encode_cursor`, `decode_cursor`, `BadCursor`: the opaque cursor);
+  `routes/jobs_control.py` (`jobs_list` = `GET /v1/jobs?label.k=v`, `jobs_cancel`, `jobs_cancel_bulk`,
+  request/response models `JobListItem`, `JobListResponse`, `BulkCancelRequest`, `CancelResponse`, `BulkCancelResponse`;
   `known_job_id` = the route-level replay lookup before pin validation and admission,
   `idempotency_conflict` = the 409 `idempotency_key_conflict` body with `existing_job_id`).
 - `drain_once()` is one deterministic pass (claim + run to completion) — what
