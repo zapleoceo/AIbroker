@@ -11,7 +11,7 @@ went. These pure functions read what the row already holds:
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 # error_class (agent RunFailed / runs.py) -> stable code. Classes not listed keep their own name
@@ -93,5 +93,7 @@ def pending_detail(status: str, run_after: datetime | None, reason: str | None,
     if status == "running":
         return ("tool_wait" if tool_waiting else "running", None)
     if run_after is not None and run_after > now:
-        return (reason if reason in ("waiting_quota", "capacity_busy") else "queued", run_after)
+        # the DB stores naive UTC; say so on the wire
+        at = run_after if run_after.tzinfo else run_after.replace(tzinfo=UTC)
+        return (reason if reason in ("waiting_quota", "capacity_busy") else "queued", at)
     return ("queued", None)

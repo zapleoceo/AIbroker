@@ -416,6 +416,8 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
         job.started_at = None
         job.retry_count += 1
         job.run_after = _now() + timedelta(seconds=delay_s)
+        # unlocked read-modify-write, safe by convention: a requeued run has no client tool in
+        # flight (it is requeued before it starts), like the model.observed fold above
         job.result_meta = {**(job.result_meta or {}), "pending_reason": "capacity_busy"}
         return job.retry_count
 
@@ -443,6 +445,8 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
         job.status = "pending"
         job.started_at = None
         job.run_after = not_before
+        # unlocked read-modify-write, safe by convention: the worker parking the run is the only
+        # writer now - submit_result only fires while that worker waits for a tool, not here
         job.result_meta = {**(job.result_meta or {}), "pending_reason": "waiting_quota"}
         return run.quota_waits
 

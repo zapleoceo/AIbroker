@@ -559,7 +559,8 @@ class DeepJobResponse(BaseModel):
         None, description="status=pending only: queued | running | tool_wait | waiting_quota | "
                           "capacity_busy")
     retry_at: datetime | None = Field(
-        None, description="waiting_quota / capacity_busy: when the job becomes runnable again")
+        None, description="waiting_quota / capacity_busy: when the job becomes runnable again "
+                          "(UTC, with offset)")
 
 
 def _require_image_access(ctx: ProjectCtx, messages: list[dict[str, Any]], *,

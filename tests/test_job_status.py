@@ -1,7 +1,7 @@
 """Client-facing job status details: error_code, queued_ms/run_ms, pending_reason/retry_at."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -59,9 +59,10 @@ def test_pending_detail():
     now = T0
     soon = T0 + timedelta(minutes=5)
     assert pending_detail("pending", None, None, False, now) == ("queued", None)
-    assert pending_detail("pending", soon, "waiting_quota", False, now) == ("waiting_quota", soon)
-    assert pending_detail("pending", soon, "capacity_busy", False, now) == ("capacity_busy", soon)
-    assert pending_detail("pending", soon, "weird", False, now) == ("queued", soon)
+    soon_utc = soon.replace(tzinfo=UTC)                  # naive DB value, sent as UTC
+    assert pending_detail("pending", soon, "waiting_quota", False, now) == ("waiting_quota", soon_utc)
+    assert pending_detail("pending", soon, "capacity_busy", False, now) == ("capacity_busy", soon_utc)
+    assert pending_detail("pending", soon, "weird", False, now) == ("queued", soon_utc)
     assert pending_detail("pending", T0 - timedelta(seconds=1), "waiting_quota", False, now) == (
         "queued", None)                                    # the wait is over: runnable again
     assert pending_detail("running", None, None, False, now) == ("running", None)
@@ -127,3 +128,17 @@ async def test_a_completed_job_reports_timings_and_no_error_code():
     done = await _poll(rid, pid)
     assert done.status == "done" and done.error_code is None and done.pending_reason is None
     assert done.queued_ms is not None and done.run_ms is not None
+
+
+@pytest.mark.parametrize("terminal", [
+    ev.RunCompleted(final_text="ok"), ev.RunFailed(error_class="cli_error", message="x"),
+    ev.RunCancelled()])
+async def test_first_start_survives_every_terminal_branch(terminal):
+    pid = {"run.completed": 9703, "run.failed": 9704, "run.cancelled": 9705}[terminal.type]
+    rid = await _job(pid)
+    await append_event(rid, ev.RunStarted(capability="agent:codex", account_id="owner"))
+    async with get_session() as s:
+        first = (await s.get(DeepJobRow, rid)).result_meta["first_started_at"]
+    await append_event(rid, terminal)
+    async with get_session() as s:
+        assert (await s.get(DeepJobRow, rid)).result_meta["first_started_at"] == first
