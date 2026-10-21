@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     AGENT_WORKER_ENABLED: bool = False
     AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
     AGENT_CONCURRENCY_CLAUDE: int = 1
+    # Slots a worker keeps for interactive (priority 0) runs: once free slots <= this, it claims
+    # only interactive runs. Effective value is min(this, concurrency - 1), so concurrency 1 reserves 0.
+    AGENT_INTERACTIVE_RESERVE: int = Field(1, ge=0, le=8)
     # How long a subscription run waits for the caller's tool result before the call expires (and
     # its worker slot is freed). The run keeps its slot while it waits.
     AGENT_TOOL_WAIT_S: int = Field(300, ge=10, le=1800)

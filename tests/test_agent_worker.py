@@ -531,7 +531,8 @@ def _worker_loop_env(stack, claim, guarded, stale, expire, unclaimed):
             ("register_real_adapters", lambda caps: None),
             ("exec_config_from_settings", lambda: SimpleNamespace(workspace_root="/w")),
             ("concurrency_for", lambda cap: 1),
-            ("get_settings", lambda: SimpleNamespace(AGENT_ACCOUNT_ID="a")),
+            ("get_settings", lambda: SimpleNamespace(AGENT_ACCOUNT_ID="a",
+                                                         AGENT_INTERACTIVE_RESERVE=1)),
             ("claim_agent_runs", claim), ("_guarded", guarded),
             ("fail_stale_agent_runs", stale), ("expire_overdue_waiting", expire),
             ("fail_unclaimed_runs", unclaimed)):
@@ -544,7 +545,7 @@ async def _run_worker_loop(*, cadence=None):
     stop, release = asyncio.Event(), asyncio.Event()
     claims: list[int] = []
 
-    async def claim(cap, free):
+    async def claim(cap, free, *, interactive_only=False):
         claims.append(free)
         return [len(claims)] if free > 0 else []
 

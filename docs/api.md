@@ -428,6 +428,18 @@ submits can still both insert). Client contract: resubmitting is harmless —
 you'll get back the in-flight `job_id`; just poll it. A request that carries an
 `Idempotency-Key` (below) opts OUT of this dedup.
 
+#### Priority (migration 023)
+
+`POST /v1/jobs` accepts an optional `priority`: `"interactive"` or `"batch"` (anything else is `422`).
+Interactive jobs are claimed before batch jobs, oldest first within a priority, by both the plain job
+dispatcher and the subscription (`codex-sub/…`, `claude-sub/…`) agent workers. Absent means `batch`, except when
+`labels.workflow` is `"orchestra:mascot-chat"` (interactive); an explicit `priority` always wins. Agent
+workers also keep `AGENT_INTERACTIVE_RESERVE` slots (default 1) free of batch work, so a chat does not queue
+behind a batch backlog (priority is strict, with no aging: under a steady interactive load batch jobs can wait); a run already in flight is never preempted. The job's priority is echoed in **every**
+poll as `priority` (`"interactive"`/`"batch"`). Like `trace_id` and `labels` it is **never part of the payload
+hash**: an Idempotency-Key replay with another priority is still a replay (the stored job keeps its
+priority), and the legacy in-flight dedup (no key) returns the existing job whatever priority the duplicate asked for.
+
 #### Trace id and labels (migration 020)
 
 `POST /v1/jobs` accepts two optional correlation fields; both are stored on the job, written to the
@@ -458,7 +470,7 @@ safe to retry. The key is unique **per project** (a partial unique index on
 | No key | the in-flight dedup above, unchanged |
 
 The canonical payload is the stored request: `model`, capability, `messages`, `max_tokens`, `temperature`,
-`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`,
+`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`, `priority`,
 headers and timestamps are excluded, so re-sending with another trace id is still a replay (the stored job
 keeps its original trace). Two simultaneous submits with one key race on the unique index; the loser gets
 the winner's job (`200` replay) or the `409`. For subscription pins (`claude-sub/…`, `codex-sub/…`) the

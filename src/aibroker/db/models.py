@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -254,6 +255,9 @@ class DeepJobRow(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_expr.false(),
                                                    nullable=False)
+    # Claim order (migration 023): 0 = interactive, 1 = batch (the default for old clients).
+    priority: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"),
+                                          nullable=False)
 
     __table_args__ = (
         Index("ux_deep_jobs_idempotency", "project_id", "idempotency_key", unique=True,
