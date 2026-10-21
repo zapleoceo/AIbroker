@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
 import os
 import re
 import stat
@@ -20,13 +21,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aibroker.agent.events import FileRef
-from aibroker.agent.workspace import _safe_file
+from aibroker.agent.workspace import safe_file
+
+log = logging.getLogger(__name__)
 
 GENERATED_DIR = "generated_images"      # fixed, relative to CODEX_HOME
 OUT_DIR = "out"
 _MAGIC = {"PNG": b"\x89PNG\r\n\x1a\n", "JPEG": b"\xff\xd8\xff", "WEBP": b"RIFF"}
 _EXT_FORMAT = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
 _MAX_OUT_FILES = 200                    # image-extension files looked at under out/
+_MAX_OUT_SCANNED = 5000                 # directory entries looked at under out/, files or not
+_MAX_OUT_DEPTH = 8
 _MAX_OUT_SKIPPED = 20                   # rejected files listed with a reason
 _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _MAX_DEPTH = 3
@@ -84,23 +89,25 @@ def snapshot_generated_paths(codex_home: str | None) -> set[str] | None:
         return None
 
 
-def _too_large(path: Path, root: Path, size: int) -> FileRef:
+def _too_large(path: Path, root: Path, size: int, reason: str = "too_large") -> FileRef:
     """An over-cap generated image: named by its Codex call id only (never a host path)."""
     call_id = path.stem if path.parent == root and _CALL_ID.fullmatch(path.stem) else None
     return FileRef(path=f"{OUT_DIR}/{call_id or 'generated'}.png", size=size,
-                   skipped="too_large", image_call_id=call_id,
+                   skipped=reason, image_call_id=call_id,
                    image_provenance="artifact_filename" if call_id else None)
 
 
 def export_generated_pngs(codex_home: str | None, workspace: str, since: float, *,
                           max_bytes: int, max_count: int, ttl_s: int,
                           baseline: set[str] | None = None,
-                          session_id: str | None = None) -> list[FileRef]:
+                          session_id: str | None = None,
+                          total_bytes: int | None = None) -> list[FileRef]:
     """Copy PNGs from this new Codex thread's directory into <workspace>/out.
     `since` is the run's start (epoch seconds): older files are excluded. Anything unsafe,
     undecodable or over the count is skipped silently (never partially copied). An image over
     `max_bytes` is reported as a FileRef with `skipped="too_large"` and its size (no content),
-    so the caller sees why the picture is missing instead of an empty `files`."""
+    so the caller sees why the picture is missing instead of an empty `files`. `total_bytes` is the
+    budget for all exported images together: one that would pass it is `skipped="total_budget"`."""
     if not codex_home or not session_id or not _SESSION_ID.fullmatch(session_id):
         return []
     root = Path(codex_home) / GENERATED_DIR
@@ -116,6 +123,7 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     expires = (datetime.now(UTC) + timedelta(seconds=ttl_s)).isoformat()
     refs: list[FileRef] = []
     seen: set[str] = set()
+    used = 0
     for path in _candidates(root):
         if len(refs) >= max_count:
             break
@@ -143,7 +151,11 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
         digest = hashlib.sha256(data).hexdigest()
         if dims is None or digest in seen:
             continue
+        if total_bytes is not None and used + len(data) > total_bytes:
+            refs.append(_too_large(path, root, len(data), "total_budget"))
+            continue
         seen.add(digest)
+        used += len(data)
         out_dir.mkdir(mode=0o700, exist_ok=True)
         name = f"generated-{len(refs) + 1}-{digest[:12]}.png"
         (out_dir / name).write_bytes(data)
@@ -156,59 +168,100 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     return refs
 
 
+def _norm(path: str) -> str:
+    """A relative path as one spelling: `./out/a.png` == `out/a.png`, `/` separators."""
+    return os.path.normpath(path).replace("\\", "/")
+
+
 def _out_candidates(out_dir: Path) -> list[Path]:
-    """Image-extension files under out/ (any depth, no symlinked directory), sorted, capped."""
+    """Image-extension files under out/ (symlinked files included, symlinked directories not),
+    sorted. The walk is bounded: every entry scanned counts (`_MAX_OUT_SCANNED`), directories deeper
+    than `_MAX_OUT_DEPTH` are not entered, and it stops at once when a cap is hit."""
     found: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(out_dir, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if not (Path(dirpath) / d).is_symlink())
-        found += [Path(dirpath) / f for f in sorted(filenames)
-                  if Path(f).suffix.lower() in _EXT_FORMAT]
-        if len(found) >= _MAX_OUT_FILES:
-            break
-    return found[:_MAX_OUT_FILES]
+    scanned = 0
+    stack = [(out_dir, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > _MAX_OUT_SCANNED or len(found) >= _MAX_OUT_FILES:
+                        log.debug("out/ scan stopped at %d entries, %d images", scanned, len(found))
+                        return sorted(found)
+                    if entry.is_dir(follow_symlinks=False):
+                        if depth < _MAX_OUT_DEPTH:
+                            stack.append((Path(entry.path), depth + 1))
+                        else:
+                            log.debug("out/ scan: not entering %s (depth cap)", entry.path)
+                    elif Path(entry.name).suffix.lower() in _EXT_FORMAT:
+                        found.append(Path(entry.path))
+        except OSError:
+            continue
+    return sorted(found)
+
+
+def _opened_regular(real: Path, expect: os.stat_result, max_bytes: int) -> bytes | None:
+    """At most max_bytes + 1 bytes of `real`, only if the opened descriptor is the same regular,
+    single-link file `expect` described: a swap for a FIFO or a symlink, or a hardlink to a file
+    outside the workspace, is refused. O_NONBLOCK keeps a swapped-in FIFO from hanging the open."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(real, flags)
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                    or (st.st_ino, st.st_dev) != (expect.st_ino, expect.st_dev)):
+                return None
+            return fh.read(max_bytes + 1)
+    except OSError:
+        return None
 
 
 def _load_out_image(ws: Path, path: Path, max_bytes: int) -> tuple[bytes, int, str | None]:
     """(bytes, size, skip reason) of one candidate; bytes are empty when a reason is set."""
-    real = _safe_file(ws, path.relative_to(ws).as_posix())
+    real = safe_file(ws, path.relative_to(ws).as_posix())
     if real is None:
         return b"", 0, "unsafe_path"
-    size = real.stat().st_size
-    if size == 0:
-        return b"", 0, "empty"
-    if size > max_bytes:
-        return b"", size, "too_large"
     try:
-        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as fh:
-            data = fh.read(max_bytes + 1)
+        st = real.stat()
     except OSError:
-        return b"", size, "unsafe_path"
+        return b"", 0, "unsafe_path"
+    if st.st_size == 0:
+        return b"", 0, "empty"
+    if st.st_size > max_bytes:
+        return b"", st.st_size, "too_large"
+    data = _opened_regular(real, st, max_bytes)
+    if data is None:
+        return b"", st.st_size, "unsafe_path"
     if len(data) > max_bytes:               # grew between stat and read
         return b"", len(data), "too_large"
     return data, len(data), None
 
 
 def collect_out_images(workspace: str, *, max_bytes: int, max_count: int, ttl_s: int,
+                       total_bytes: int | None = None,
                        exclude_sha256: frozenset[str] | set[str] = frozenset(),
                        exclude_paths: frozenset[str] | set[str] = frozenset()) -> list[FileRef]:
     """Images the run itself wrote under <workspace>/out/ (a shell, a script), as FileRefs shaped
     like `export_generated_pngs`: sha256, width, height, content. Never listed twice: a path in
-    `exclude_paths` (already reported) or a sha256 in `exclude_sha256` (already exported, or seen
-    here) is dropped. A file that fails a check is listed with `skipped` and no content:
-    `unsafe_path` (symlink / not regular), `empty`, `too_large`, `not_an_image` (the bytes are not
-    a decodable image of the format the extension claims)."""
+    `exclude_paths` (already reported; compared normalised) or a sha256 in `exclude_sha256`
+    (already exported, or seen here) is dropped. A file that fails a check is listed with
+    `skipped` and no content: `unsafe_path` (symlink, not a regular single-link file), `empty`,
+    `too_large`, `not_an_image` (the bytes are not a decodable image of the format the extension
+    claims), `total_budget` (it would pass `total_bytes`, the budget for all images of the run)."""
     ws = Path(workspace)
     out_dir = ws / OUT_DIR
     if out_dir.is_symlink() or not out_dir.is_dir():
         return []
     expires = (datetime.now(UTC) + timedelta(seconds=ttl_s)).isoformat()
+    skip_paths = {_norm(p) for p in exclude_paths}
     seen = set(exclude_sha256)
     refs: list[FileRef] = []
-    delivered = rejected = 0
+    delivered = rejected = used = 0
     for path in _out_candidates(out_dir):
         rel = path.relative_to(ws).as_posix()
-        if rel in exclude_paths:
+        if rel in skip_paths:
             continue
         if delivered >= max_count:
             break
@@ -216,15 +269,18 @@ def collect_out_images(workspace: str, *, max_bytes: int, max_count: int, ttl_s:
         dims = None if reason else _decode_image(data, _EXT_FORMAT[path.suffix.lower()])
         if reason is None and dims is None:
             reason = "not_an_image"
+        digest = hashlib.sha256(data).hexdigest() if reason is None else ""
+        if reason is None and digest in seen:
+            continue
+        if reason is None and total_bytes is not None and used + size > total_bytes:
+            reason = "total_budget"
         if reason:
             if rejected < _MAX_OUT_SKIPPED:
                 rejected += 1
                 refs.append(FileRef(path=rel, size=size, skipped=reason))
             continue
-        digest = hashlib.sha256(data).hexdigest()
-        if digest in seen:
-            continue
         seen.add(digest)
+        used += size
         delivered += 1
         refs.append(FileRef(path=rel, size=size, sha256=digest, width=dims[0], height=dims[1],
                             content_b64=base64.b64encode(data).decode(), expires_at=expires))

@@ -319,7 +319,13 @@ writes files into the workspace.
    magic bytes, a full Pillow decode of the format the extension names, at most 50 Mpx and
    `AGENT_IMAGES_MAX_COUNT` images. A sha256 already exported this run, or a path
    `collect_files` already returned, is not listed again. A rejected file gets `skipped`
-   (`unsafe_path`, `empty`, `too_large`, `not_an_image`). `no_shell` on the request
+   (`unsafe_path`, `empty`, `too_large`, `not_an_image`, `total_budget`). The walk of `out/` is
+   bounded (5000 entries scanned, depth 8, 200 image files); each file is opened `O_NOFOLLOW`
+   `O_NONBLOCK` and refused unless the descriptor is the same regular, single-link file that
+   was checked (a hardlink to an outside file or a swapped-in FIFO is `unsafe_path`). Paths are
+   compared normalised (`./out/a.png` == `out/a.png`) and bytes by sha256, also against `files`
+   that carry content. `AGENT_IMAGES_TOTAL_BYTES` (24 MiB) is one budget for the generated export
+   and this collector together. `no_shell` on the request
    (`client_job.no_shell`, or the `page=compare` label) sets `AgentRunSpec.no_shell`.
 
 ## Models, usage, billing separation

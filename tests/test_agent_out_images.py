@@ -4,7 +4,9 @@ from __future__ import annotations
 import io
 import logging
 import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -146,14 +148,121 @@ def test_an_absolute_path_inside_the_workspace_becomes_relative_outside_is_dropp
     assert "outside the workspace" in caplog.text
 
 
-def _cfg():
+def _cfg(**kw):
     from aibroker.agent.executor import ExecConfig
-    return ExecConfig(workspace_root="/unused", env={}, image_max_bytes=10**6, image_max_count=4)
+    return ExecConfig(workspace_root="/unused", env={}, image_max_bytes=10**6, image_max_count=4,
+                      **kw)
 
 
 
 def test_an_unsafe_path_verdict_is_listed_without_reading(tmp_path, monkeypatch):
     _put(tmp_path, "a.png", _img("PNG"))
-    monkeypatch.setattr("aibroker.agent.images._safe_file", lambda *_: None)   # symlink-free hosts
+    monkeypatch.setattr("aibroker.agent.images.safe_file", lambda *_: None)   # symlink-free hosts
     refs = collect_out_images(str(tmp_path), **_CAPS)
     assert [(r.path, r.skipped, r.content_b64) for r in refs] == [("out/a.png", "unsafe_path", None)]
+
+
+def test_the_out_walk_stops_at_the_entry_cap_and_the_depth_cap(tmp_path, monkeypatch, caplog):
+    for i in range(12):
+        _put(tmp_path, f"i{i:02}.png", _img("PNG", (2 + i, 2)))
+    monkeypatch.setattr("aibroker.agent.images._MAX_OUT_SCANNED", 5)
+    with caplog.at_level(logging.DEBUG, logger="aibroker.agent.images"):
+        assert len(collect_out_images(str(tmp_path), **_CAPS)) <= 4
+    assert "scan stopped" in caplog.text
+    deep = tmp_path / "deep"
+    nested = "/".join(f"d{i}" for i in range(10))
+    _put(deep, f"{nested}/low.png", _img("PNG"))
+    _put(deep, "d0/d1/high.png", _img("PNG", (9, 9)))
+    monkeypatch.undo()
+    assert [r.path for r in collect_out_images(str(deep), **_CAPS)] == ["out/d0/d1/high.png"]
+
+
+def test_a_hardlink_to_a_file_outside_the_workspace_is_unsafe(tmp_path):
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_img("PNG"))
+    ws = tmp_path / "ws"
+    (ws / "out").mkdir(parents=True)
+    try:
+        os.link(outside, ws / "out" / "h.png")
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("hardlinks not available")
+    refs = collect_out_images(str(ws), **_CAPS)
+    assert [(r.path, r.skipped, r.content_b64) for r in refs] == [("out/h.png", "unsafe_path", None)]
+
+
+def test_a_fifo_is_never_opened_for_content(tmp_path):
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no fifo support")
+    (tmp_path / "out").mkdir()
+    os.mkfifo(tmp_path / "out" / "pipe.png")
+    refs = collect_out_images(str(tmp_path), **_CAPS)
+    assert [(r.path, r.skipped) for r in refs] == [("out/pipe.png", "unsafe_path")]
+
+
+@pytest.mark.parametrize("swap", [
+    {"st_mode": stat.S_IFIFO | 0o600},                  # became a FIFO between the checks
+    {"st_ino": -1},                                     # another file than the one checked
+    {"st_nlink": 2},                                    # hardlinked
+])
+def test_a_descriptor_that_differs_from_the_checked_file_is_refused(tmp_path, monkeypatch, swap):
+    _put(tmp_path, "a.png", _img("PNG"))
+    real_fstat = os.fstat
+
+    def fake(fd):
+        st = real_fstat(fd)
+        fields = {k: getattr(st, k) for k in ("st_mode", "st_ino", "st_dev", "st_nlink")}
+        return SimpleNamespace(**{**fields, **swap})
+    monkeypatch.setattr("aibroker.agent.images.os.fstat", fake)
+    refs = collect_out_images(str(tmp_path), **_CAPS)
+    assert [(r.skipped, r.content_b64) for r in refs] == [("unsafe_path", None)]
+
+
+def test_path_dedupe_normalises_and_files_content_dedupes_by_sha(tmp_path):
+    png = _img("PNG", (4, 4))
+    _put(tmp_path, "a.png", png)
+    assert collect_out_images(str(tmp_path), exclude_paths={"./out/a.png"}, **_CAPS) == []
+    _put(tmp_path, "copy.png", png)                          # same bytes as a reported file
+    other = tmp_path / "report.bin"
+    other.write_bytes(png)
+    files = collect_files(str(tmp_path), ["./report.bin", "./out/a.png"], max_bytes=10**6,
+                          total_bytes=10**6, max_count=5, ttl_s=60)
+    assert all(f.content_b64 for f in files)
+    assert _collect_out_images(str(tmp_path), files, [], _cfg()) == []
+
+
+def test_the_total_budget_covers_both_the_export_and_the_out_collector(tmp_path):
+    one, two = _img("PNG", (4, 4)), _img("PNG", (5, 5), (1, 2, 3))
+    _put(tmp_path, "a.png", one)
+    _put(tmp_path, "b.png", two)
+    refs = collect_out_images(str(tmp_path), total_bytes=len(one) + 1, **_CAPS)
+    assert [(r.path, r.skipped) for r in refs] == [("out/a.png", None), ("out/b.png", "total_budget")]
+    assert refs[1].size == len(two) and refs[1].content_b64 is None
+    # the executor hands the collector what the generated images left over
+    spent = ev_ref(len(one))
+    assert [(r.path, r.skipped) for r in _collect_out_images(
+        str(tmp_path), [], [spent], _cfg(image_total_bytes=len(one)))] == [
+        ("out/a.png", "total_budget"), ("out/b.png", "total_budget")]
+    # the generated export itself stops at the budget and writes nothing for the refused image
+    home, sid = tmp_path / "home", "11111111-2222-3333-4444-555555555555"
+    gen = home / "generated_images" / sid
+    gen.mkdir(parents=True)
+    (gen / "call_1.png").write_bytes(one)
+    (gen / "call_2.png").write_bytes(two)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    exported = export_generated_pngs(str(home), str(ws), 0, session_id=sid,
+                                     total_bytes=len(one) + 1, **_CAPS)
+    assert [r.skipped for r in exported] == [None, "total_budget"]
+    assert exported[1].content_b64 is None and len(list((ws / "out").iterdir())) == 1
+
+
+def ev_ref(size):
+    from aibroker.agent.events import FileRef
+    return FileRef(path="out/generated-1-x.png", size=size, sha256="0" * 64, content_b64="eA==")
+
+
+def test_the_budget_setting_default_and_compose_wiring():
+    from aibroker.config import Settings
+    assert Settings().AGENT_IMAGES_TOTAL_BYTES == 24 * 1024 * 1024
+    compose = (Path(__file__).parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    assert compose.count("AGENT_IMAGES_TOTAL_BYTES: ${AGENT_IMAGES_TOTAL_BYTES:-25165824}") == 3

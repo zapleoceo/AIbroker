@@ -30,7 +30,7 @@ def cleanup_workspace(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _safe_file(workspace: Path, rel: str) -> Path | None:
+def safe_file(workspace: Path, rel: str) -> Path | None:
     """The file only if it is a regular, non-symlink file physically inside workspace."""
     if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
         return None
@@ -74,7 +74,7 @@ def collect_files(workspace: str, paths: list[str], *, max_bytes: int, total_byt
         else:
             names.append(rel)
     for rel in dict.fromkeys(names):
-        real = _safe_file(ws, rel)
+        real = safe_file(ws, rel)
         if real is None:
             out.append(FileRef(path=rel, skipped="unsafe_path_or_missing"))
             continue

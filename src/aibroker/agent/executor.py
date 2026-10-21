@@ -8,7 +8,9 @@ error from the adapter stays `quota_exhausted`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import logging
 import os
 import time
@@ -61,6 +63,7 @@ class ExecConfig:
     files_ttl_s: int = 3600
     image_max_bytes: int = 8 * 1024 * 1024
     image_max_count: int = 4
+    image_total_bytes: int = 24 * 1024 * 1024
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
     lease_ttl_s: float = 120.0         # > 3 x heartbeat: a crashed worker's lease expires
@@ -87,7 +90,8 @@ def exec_config_from_settings() -> ExecConfig:
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
         files_ttl_s=s.AGENT_FILES_TTL_S, image_max_bytes=s.AGENT_IMAGE_MAX_BYTES,
-        image_max_count=s.AGENT_IMAGES_MAX_COUNT, lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
+        image_max_count=s.AGENT_IMAGES_MAX_COUNT, image_total_bytes=s.AGENT_IMAGES_TOTAL_BYTES,
+        lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
         lease_heartbeat_s=s.AGENT_SESSION_LEASE_HEARTBEAT_S,
         paid_continuation_verified_off=s.AGENT_PAID_CONTINUATION_VERIFIED_OFF,
         codex_paid_continuation_verified_off=s.AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF,
@@ -408,6 +412,7 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
                    cfg: ExecConfig) -> list[ev.FileRef]:
     """The worker collects the CLI's out-of-workspace artifacts (Codex: generated PNGs)."""
     for attr, value in (("image_max_bytes", cfg.image_max_bytes), ("image_max_count", cfg.image_max_count),
+                        ("image_total_bytes", cfg.image_total_bytes),
                         ("image_ttl_s", cfg.files_ttl_s)):
         if hasattr(adapter, attr):
             setattr(adapter, attr, value)
@@ -420,12 +425,18 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
 
 def _collect_out_images(workspace: str, files: list[ev.FileRef], images: list[ev.FileRef],
                         cfg: ExecConfig) -> list[ev.FileRef]:
-    """Images the run wrote under out/ itself (any adapter), minus what is already reported."""
+    """Images the run wrote under out/ itself (any adapter), minus what is already reported (by
+    path, or by content: the exported images and the `files` that carry bytes) and within what is
+    left of the run's image byte budget."""
     try:
+        shas = {f.sha256 for f in images if f.sha256}
+        shas |= {hashlib.sha256(base64.b64decode(f.content_b64)).hexdigest()
+                 for f in files if f.content_b64}
+        spent = sum(f.size for f in images if f.content_b64)
         return collect_out_images(
             workspace, max_bytes=cfg.image_max_bytes, max_count=cfg.image_max_count,
-            ttl_s=cfg.files_ttl_s, exclude_sha256={f.sha256 for f in images if f.sha256},
-            exclude_paths={f.path for f in [*files, *images]})
+            ttl_s=cfg.files_ttl_s, total_bytes=max(cfg.image_total_bytes - spent, 0),
+            exclude_sha256=shas, exclude_paths={f.path for f in [*files, *images]})
     except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
         log.exception("out/ image collection failed in %s", workspace)
         return []
