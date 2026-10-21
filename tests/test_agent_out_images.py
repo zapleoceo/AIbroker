@@ -266,3 +266,15 @@ def test_the_budget_setting_default_and_compose_wiring():
     assert Settings().AGENT_IMAGES_TOTAL_BYTES == 24 * 1024 * 1024
     compose = (Path(__file__).parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
     assert compose.count("AGENT_IMAGES_TOTAL_BYTES: ${AGENT_IMAGES_TOTAL_BYTES:-25165824}") == 3
+
+
+def test_the_capped_selection_is_sorted_and_a_bad_files_entry_does_not_drop_the_rest(
+        tmp_path, monkeypatch):
+    for name in ("z", "m", "a", "k"):
+        _put(tmp_path, f"{name}.png", _img("PNG", (2 + ord(name) % 7, 3)))
+    monkeypatch.setattr("aibroker.agent.images._MAX_OUT_FILES", 2)
+    assert [r.path for r in collect_out_images(str(tmp_path), **_CAPS)] == ["out/a.png", "out/k.png"]
+    from aibroker.agent.events import FileRef
+    bad = FileRef(path="x.bin", size=3, content_b64="!!not base64!!")
+    assert [r.path for r in _collect_out_images(str(tmp_path), [bad], [], _cfg())] == [
+        "out/a.png", "out/k.png"]

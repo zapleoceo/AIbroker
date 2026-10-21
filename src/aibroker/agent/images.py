@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import itertools
 import logging
 import os
 import re
@@ -183,7 +184,11 @@ def _out_candidates(out_dir: Path) -> list[Path]:
     while stack:
         directory, depth = stack.pop()
         try:
-            with os.scandir(directory) as entries:
+            with os.scandir(directory) as it:
+                # at most the scan budget left, then sorted: the same selection on every run
+                entries = sorted(itertools.islice(it, _MAX_OUT_SCANNED - scanned + 1),
+                                 key=lambda e: e.name)
+                subdirs: list[Path] = []
                 for entry in entries:
                     scanned += 1
                     if scanned > _MAX_OUT_SCANNED or len(found) >= _MAX_OUT_FILES:
@@ -191,11 +196,12 @@ def _out_candidates(out_dir: Path) -> list[Path]:
                         return sorted(found)
                     if entry.is_dir(follow_symlinks=False):
                         if depth < _MAX_OUT_DEPTH:
-                            stack.append((Path(entry.path), depth + 1))
+                            subdirs.append(Path(entry.path))
                         else:
                             log.debug("out/ scan: not entering %s (depth cap)", entry.path)
                     elif Path(entry.name).suffix.lower() in _EXT_FORMAT:
                         found.append(Path(entry.path))
+                stack += [(d, depth + 1) for d in reversed(subdirs)]   # popped in sorted order
         except OSError:
             continue
     return sorted(found)

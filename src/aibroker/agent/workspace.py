@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from aibroker.agent.events import FileRef
 from aibroker.agent.redact import redact_bytes
@@ -50,7 +50,7 @@ def safe_file(workspace: Path, rel: str) -> Path | None:
 def _workspace_relative(workspace: Path, rel: str) -> str | None:
     """`rel` unchanged when relative; an absolute path becomes workspace-relative when it lies
     inside the workspace (lexically, either spelling of the root), else None (outside: dropped)."""
-    if not Path(rel).is_absolute():
+    if not (Path(rel).is_absolute() or PurePosixPath(rel).is_absolute()):   # CLI paths are POSIX
         return rel
     target = os.path.normpath(rel)
     for root in (os.path.normpath(workspace), os.path.normpath(workspace.resolve())):

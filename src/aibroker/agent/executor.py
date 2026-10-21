@@ -430,8 +430,12 @@ def _collect_out_images(workspace: str, files: list[ev.FileRef], images: list[ev
     left of the run's image byte budget."""
     try:
         shas = {f.sha256 for f in images if f.sha256}
-        shas |= {hashlib.sha256(base64.b64decode(f.content_b64)).hexdigest()
-                 for f in files if f.content_b64}
+        for f in files:
+            if f.content_b64:
+                try:
+                    shas.add(hashlib.sha256(base64.b64decode(f.content_b64)).hexdigest())
+                except ValueError:      # one undecodable entry must not drop the whole collection
+                    log.debug("files entry %s: content is not valid base64", f.path)
         spent = sum(f.size for f in images if f.content_b64)
         return collect_out_images(
             workspace, max_bytes=cfg.image_max_bytes, max_count=cfg.image_max_count,
