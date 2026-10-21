@@ -345,12 +345,13 @@ def test_canary_projects_are_a_list_and_attestation_comes_from_settings(monkeypa
         assert not subscription_tools_advertised(models[1], pid)    # no live proof: not advertised
     assert not subscription_tools_accepted(models[0], 99)           # not a canary project
     assert not subscription_tools_accepted(models[0], None)
+    assert not {r["id"]: r for r in listing(None)}[models[0]]["supports_tools"]
     rows = {r["id"]: r for r in listing(34)}
     assert rows[models[1]]["job_request"]["tools"] is True and rows[models[1]]["supports_tools"] is False
     monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS", json.dumps(models))
     rows = {r["id"]: r for r in listing(34)}
     assert rows[models[1]]["supports_tools"] is rows[models[1]]["job_request"]["tools"] is True
-    for bad in ("12,12", "12,x", "abc"):
+    for bad in ("12,12", "12,x", "abc", "12,²", "٣", "-1", "1" * 12):
         monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS", bad)
         assert canary_project_ids() == frozenset()
         assert not subscription_tools_accepted(models[0], 12)

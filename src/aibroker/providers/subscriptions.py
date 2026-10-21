@@ -80,7 +80,6 @@ def subscription_model_verified(model: str) -> bool:
 _TOOL_SETTINGS = {"codex-sub": "CODEX", "claude-sub": "CLAUDE"}
 
 
-
 def _tool_model_ids(field: str, provider: str) -> list[str]:
     try:
         value = json.loads(getattr(get_settings(), field))
@@ -108,11 +107,15 @@ def subscription_tool_model_verified(model: str) -> bool:
         f"AGENT_SUBSCRIPTION_{key}_TOOLS_VERIFIED_MODELS", provider)
 
 
+_PROJECT_ID = re.compile(r"[0-9]{1,9}")
+
+
 def canary_project_ids() -> frozenset[int]:
     """Projects allowed the exact-model tool canaries; duplicates or junk mean none."""
     raw = [p.strip() for p in get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS.split(",")
            if p.strip()]
-    if not all(p.isdigit() for p in raw) or len(raw) != len(set(raw)):
+    # ASCII digits only: str.isdigit() also accepts "²" or "٣", which int() rejects or remaps
+    if not all(_PROJECT_ID.fullmatch(p) for p in raw) or len(raw) != len(set(raw)):
         return frozenset()
     return frozenset(int(p) for p in raw)
 
