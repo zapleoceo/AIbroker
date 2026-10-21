@@ -513,6 +513,7 @@ lacks `llm:agent`. No new scope or key is needed — the ordinary `X-Project-Key
   waiting for your `POST /v1/jobs/{id}/tool-results`), `waiting_quota` (the subscription hit its
   usage limit; `retry_at` = the reported reset), `capacity_busy` (requeued, e.g. the Codex start-up auth
   gate; `retry_at` = when it is runnable again).
+  `retry_at` is UTC with an explicit offset (`...+00:00`).
 - `error_code` (status `error` or `cancelled`): a stable, machine-readable reason next to the free-text
   `error`, which is unchanged. Agent runs store their `error_class` (`result_meta.error_class`); older
   rows fall back to the `<class>: ` prefix of `error`.
