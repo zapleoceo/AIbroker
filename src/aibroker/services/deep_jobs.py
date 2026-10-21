@@ -377,6 +377,9 @@ class JobView(NamedTuple):
     trace_id: str | None
     labels: dict[str, str] | None
     cancel_requested: bool
+    started_at: datetime | None
+    completed_at: datetime | None
+    run_after: datetime | None
     request: dict[str, Any]
 
 
@@ -398,6 +401,7 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
                 DeepJobRow.status, DeepJobRow.result_text, DeepJobRow.result_meta,
                 DeepJobRow.error_message, DeepJobRow.created_at, DeepJobRow.trace_id,
                 DeepJobRow.labels, DeepJobRow.cancel_requested,
+                DeepJobRow.started_at, DeepJobRow.completed_at, DeepJobRow.run_after,
                 *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
             ).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
         )).one_or_none()
@@ -405,8 +409,8 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
         return None
     # A missing key and a JSON null both read back as None; the callers treat
     # them alike, so only non-null keys are rebuilt (`.get(k, default)` keeps working).
-    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[11:], strict=True) if v is not None}
-    return JobView(*r[:11], request=request)
+    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[14:], strict=True) if v is not None}
+    return JobView(*r[:14], request=request)
 
 
 def next_poll_after_s(created_at: datetime) -> int:
