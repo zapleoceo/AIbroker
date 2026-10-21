@@ -378,6 +378,7 @@ def test_only_an_account_down_failure_with_a_timestamp_pauses(monkeypatch):
     assert _reset_of("run.failed", {"error_class": "worker_lost", "message": DISABLED}, ts) is None
     assert _reset_of("run.completed", down, ts) is None
 
+
 async def test_deadline_expiry_keeps_the_reset_so_the_account_stays_paused():
     pid, _ = await _project()
     rid = await _run(pid, "owner")
