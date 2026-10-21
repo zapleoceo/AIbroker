@@ -531,9 +531,16 @@ would be allowed (`llm:agent` scope, allowlist, policy) - otherwise it is silent
 | `limit` | 1..200, default 100 |
 | `cursor` | opaque token from `next_cursor`; a malformed or tampered one is `422` |
 
-Items hold metadata only: `job_id`, `status`, `capability`, `created_at`, `started_at`, `completed_at`,
+Items hold metadata only: `job_id`, `status`, `capability`, `model`, `requested_model`, `created_at`, `started_at`, `completed_at`,
 `labels`, `trace_id`, `idempotency_key`, `retry_count`, `cancel_requested`. Never the request, prompts,
-result text, error text or secrets - poll the job for those. Ordered by `job_id` ascending.
+result text, error text or secrets - poll the job for those. `model` is the model that answered (null
+until done), `requested_model` the pin, if any. Ordered by `job_id` ascending.
+
+The only accepted syntax is `label.<key>=<value>` (e.g. `GET /v1/jobs?label.exam_run_id=r42`); there is
+no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels`, which has no GIN index;
+the planner narrows by `project_id` (indexes `ix_deep_jobs_project_date`, `ix_deep_jobs_trace`) and the
+`id` range, then filters `labels` row by row, so cost grows with the project's retained jobs
+(`retention_days`), not with the match count. No migration is added for that.
 
 Response: `{jobs, next_cursor, pagination_complete, no_nonterminal_in_filter, high_watermark,
 retention_days, as_of}`.

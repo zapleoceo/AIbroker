@@ -32,6 +32,10 @@ _LIST_COLS = (
     DeepJobRow.id, DeepJobRow.status, DeepJobRow.capability, DeepJobRow.created_at,
     DeepJobRow.started_at, DeepJobRow.completed_at, DeepJobRow.labels, DeepJobRow.trace_id,
     DeepJobRow.idempotency_key, DeepJobRow.retry_count, DeepJobRow.cancel_requested,
+    # Two scalar JSON extracts - never the whole request / result_meta documents.
+    DeepJobRow.result_meta["model"].as_string().label("model"),
+    func.coalesce(DeepJobRow.request["client_job"]["model"].as_string(),
+                  DeepJobRow.request["model"].as_string()).label("requested_model"),
 )
 
 
@@ -96,7 +100,7 @@ def _filters(project_id: int, key: str, value: str, trace_id: str | None, dialec
 
 def _item(row: Any) -> dict[str, Any]:
     return {"job_id": row.id, "status": row.status, "capability": row.capability,
-            "created_at": row.created_at, "started_at": row.started_at,
+            "model": row.model, "requested_model": row.requested_model, "created_at": row.created_at, "started_at": row.started_at,
             "completed_at": row.completed_at, "labels": row.labels, "trace_id": row.trace_id,
             "idempotency_key": row.idempotency_key, "retry_count": row.retry_count,
             "cancel_requested": row.cancel_requested}

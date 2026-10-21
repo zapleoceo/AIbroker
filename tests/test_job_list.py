@@ -20,7 +20,7 @@ from tests.test_job_idempotency import _h, _insert_agent_job, _plain_job, _set
 from tests.test_routes_proxy import _make_project
 
 LBL = {"exam_run_id": "run-1"}
-FIELDS = {"job_id", "status", "capability", "created_at", "started_at", "completed_at", "labels",
+FIELDS = {"job_id", "status", "capability", "model", "requested_model", "created_at", "started_at", "completed_at", "labels",
           "trace_id", "idempotency_key", "retry_count", "cancel_requested"}
 
 
@@ -57,7 +57,9 @@ async def test_lists_only_the_callers_jobs_with_the_label_and_no_request_or_resu
     await _plain_job(pid, labels={"exam_run_id": "run-2"})
     await _plain_job(pid)
     await _plain_job(other, labels=LBL)
-    await _set(mine, result_text="SECRET-ANSWER", error_message="SECRET-ERR")
+    await _set(mine, result_text="SECRET-ANSWER", error_message="SECRET-ERR",
+               result_meta={"model": "m-served", "tool_calls": "SECRET-META"},
+               request={"model": "m-pin", "messages": [{"role": "user", "content": "SECRET-PROMPT"}]})
     r = _get(TestClient(app), key)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -66,6 +68,7 @@ async def test_lists_only_the_callers_jobs_with_the_label_and_no_request_or_resu
     item = body["jobs"][0]
     assert item["labels"] == LBL and item["trace_id"] == "t-1" and item["idempotency_key"] == "k-1"
     assert item["status"] == "pending" and item["retry_count"] == 0 and item["cancel_requested"] is False
+    assert item["model"] == "m-served" and item["requested_model"] == "m-pin"
     assert "SECRET" not in r.text and '"request"' not in r.text and "messages" not in r.text
     assert set(body) == {"jobs", "next_cursor", "pagination_complete", "no_nonterminal_in_filter",
                          "high_watermark", "retention_days", "as_of"}

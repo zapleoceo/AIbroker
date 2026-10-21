@@ -102,6 +102,8 @@ class JobListItem(BaseModel):
     job_id: int
     status: str
     capability: str
+    model: str | None = Field(None, description="model that answered; null until the job is done")
+    requested_model: str | None = Field(None, description="requested model pin, if any")
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
