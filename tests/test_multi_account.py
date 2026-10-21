@@ -12,9 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select
 
+from aibroker.agent import accounts, worker
 from aibroker.agent import events as ev
 from aibroker.agent import policy as pol
-from aibroker.agent import worker
 from aibroker.agent.accounts import QUOTA_LOOKBACK, _reset_of, pick_account, quota_resets
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.policy import ProjectPolicy, policy_for
@@ -325,6 +325,58 @@ def test_reset_parsing_tolerates_garbage_and_timezones():
     assert _reset_of("run.failed", {"error_class": "quota_exhausted",
                                     "reset_at": "2030-01-01T02:00:00+02:00"}) == datetime(2030, 1, 1)
 
+
+DISABLED = "Your organization has disabled Claude subscription access for Claude Code"
+
+
+def _pause(monkeypatch, seconds: float) -> None:
+    monkeypatch.setattr(accounts, "get_settings",
+                        lambda: SimpleNamespace(AGENT_ACCOUNT_DISABLED_PAUSE_S=seconds))
+
+
+async def _fail_disabled(pid: int, account: str, age: timedelta = timedelta()) -> None:
+    rid = await _run(pid, account)
+    await append_event(rid, ev.RunFailed(error_class="cli_error", message=DISABLED))
+    if age:
+        async with get_session() as s:
+            for row in (await s.execute(select(AgentRunEventRow).where(
+                    AgentRunEventRow.run_id == rid))).scalars():
+                row.ts = _now() - age
+
+
+async def test_a_disabled_login_is_skipped_even_when_the_other_account_is_busier(monkeypatch):
+    _pause(monkeypatch, 3600)
+    pid, _ = await _project()
+    await _fail_disabled(pid, "owner")
+    await _run(pid, "claude-2", "busy")                         # claude-2 has 1 unfinished, owner 0
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
+    assert "owner" in await quota_resets(["owner"], CAP)
+
+
+async def test_a_disabled_login_is_probed_again_after_the_pause(monkeypatch):
+    _pause(monkeypatch, 3600)
+    pid, _ = await _project()
+    await _fail_disabled(pid, "owner", age=timedelta(hours=2))
+    assert await quota_resets(["owner"], CAP) == {}
+    assert await pick_account(("owner", "claude-2"), CAP) == "owner"
+
+
+async def test_a_zero_pause_turns_the_skip_off(monkeypatch):
+    _pause(monkeypatch, 0)
+    pid, _ = await _project()
+    await _fail_disabled(pid, "owner")
+    assert await pick_account(("owner", "claude-2"), CAP) == "owner"
+
+
+def test_only_an_account_down_failure_with_a_timestamp_pauses(monkeypatch):
+    _pause(monkeypatch, 600)
+    ts = datetime(2030, 1, 1)
+    down = {"error_class": "cli_error", "message": DISABLED}
+    assert _reset_of("run.failed", down, ts) == ts + timedelta(seconds=600)
+    assert _reset_of("run.failed", down) is None                         # no event time
+    assert _reset_of("run.failed", {"error_class": "cli_error", "message": "boom"}, ts) is None
+    assert _reset_of("run.failed", {"error_class": "worker_lost", "message": DISABLED}, ts) is None
+    assert _reset_of("run.completed", down, ts) is None
 
 async def test_deadline_expiry_keeps_the_reset_so_the_account_stays_paused():
     pid, _ = await _project()
