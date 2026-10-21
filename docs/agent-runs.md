@@ -228,6 +228,12 @@ writes files into the workspace.
   requeue repeats no event) and holds it until the first event proving a model call completed
   (`message.delta`, `tool.call` or `usage`; NOT `session.assigned`, which precedes the first model
   request - the ordering is UNVERIFIED), or until the run ends and its CLI is fully stopped. There is
+  [Refresh proof, 2026-10-17+: when a gated run releases the lease on its first model event and the
+  login's `last_refresh` (`CodexCLI.last_refresh`) did not change during the call, `codex_refresh_proof.PROOF` (a `RefreshProof`: `record`, `covers`, `clear`) records that
+  timestamp; for `AGENT_CODEX_REFRESH_PROOF_S` (default 1800 s, 0 disables) new runs whose
+  timestamp is still the same skip the gate. Reason: Codex's own interval is longer than 4 days, so
+  for days every start-up was serialised (prod 2026-10-21: one run in five waited ~96 s, a 120 s
+  client timed out). The first run after the window takes the gate again and renews the proof.]
   no time-based early release: a silent start-up is not proof that the refresh finished, so it stays
   under the lease and is bounded only by the run's idle timeout (300 s by default) or, for a
   client-tool run where idle equals wall, the wall timeout (1800 s). A CLI that ends its own

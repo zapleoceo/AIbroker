@@ -39,6 +39,15 @@ def _adapters(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_refresh_proof():
+    """The proof lives in process memory: every test starts without one."""
+    from aibroker.agent.codex_refresh_proof import PROOF
+    PROOF.clear()
+    yield
+    PROOF.clear()
+
+
+@pytest.fixture(autouse=True)
 def _take_turns_on_the_db(serialized_db):
     """Concurrent runs share the single-connection test DB: see conftest.serialized_db."""
 
@@ -642,3 +651,66 @@ async def test_a_cancel_after_the_gate_on_a_taken_over_resume_writes_nothing(tmp
     assert await execute_run(rid, _cfg(tmp_path)) is None      # stopped as a zombie
     assert rig.entered == []
     assert await list_events(rid) == []              # no unfenced run.cancelled
+
+
+
+# --- refresh proof: a gated run that worked opens the gate for the proof window ---------------
+
+
+def test_refresh_proof_unit_rules():
+    from aibroker.agent.codex_refresh_proof import RefreshProof
+    t = datetime(2026, 10, 15, tzinfo=UTC)
+    proof = RefreshProof()
+    assert not proof.covers(t, 1800, now=0)                    # nothing proven yet
+    assert proof.record(t, t, now=100) is True
+    assert proof.covers(t, 1800, now=1900)                     # inside the window
+    assert not proof.covers(t, 1800, now=1901)                 # window over: gate again
+    assert not proof.covers(t + timedelta(seconds=1), 1800, now=200)   # Codex refreshed since
+    assert not proof.covers(t, 0, now=100)                     # 0 disables the proof
+    assert not proof.covers(None, 1800, now=100)               # unreadable timestamp
+    assert proof.record(t, t + timedelta(hours=1), now=300) is False   # refreshed during the call
+    assert proof.record(None, None, now=300) is False
+    proof.clear()
+    assert not proof.covers(t, 1800, now=100)
+
+
+async def test_after_a_gated_run_proves_the_login_the_next_run_skips_the_gate(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home, _ago(days=6))                        # due: the gate applies
+    ids = await _runs(2, base=9480)
+    rig = _Rig(monkeypatch, ids, first_event="model")
+    _register(home)
+    rig.gates[ids[0]].set()
+    assert await asyncio.wait_for(execute_run(ids[0], _cfg(tmp_path)), 10) == "completed"
+    assert rig.attempts_by(ids[0]) >= 1 and rig.released == [ids[0]]   # gated, then proved
+    rig.gates[ids[1]].set()
+    assert await asyncio.wait_for(execute_run(ids[1], _cfg(tmp_path)), 10) == "completed"
+    assert rig.attempts_by(ids[1]) == 0              # no lease even tried: the proof covered it
+
+
+@pytest.mark.parametrize("proof_s, refreshed", [(0.0, False), (1800.0, True)])
+async def test_no_proof_when_disabled_or_when_codex_refreshed_during_the_run(
+        tmp_path, monkeypatch, proof_s, refreshed):
+    home = tmp_path / "home"
+    _auth(home, _ago(days=6))
+    ids = await _runs(2, base=9490 if refreshed else 9495)
+    rig = _Rig(monkeypatch, ids, first_event="model")
+    _register(home)
+    if refreshed:
+        stale = read_last_refresh(str(home))
+        calls = []
+
+        def _last_refresh(_self):
+            # run 1: proof check and gate take see the old stamp, the release sees a new one
+            calls.append(1)
+            return stale if len(calls) <= 2 else stale + timedelta(seconds=5)
+        monkeypatch.setattr(CodexCLI, "last_refresh", _last_refresh)
+    rig.gates[ids[0]].set()
+    assert await asyncio.wait_for(execute_run(ids[0], _cfg(tmp_path, codex_refresh_proof_s=proof_s)),
+                                  10) == "completed"
+    if refreshed:
+        _auth(home, _ago(days=6))                    # still due by the file, but unproven
+    rig.gates[ids[1]].set()
+    assert await asyncio.wait_for(execute_run(ids[1], _cfg(tmp_path, codex_refresh_proof_s=proof_s)),
+                                  10) == "completed"
+    assert rig.attempts_by(ids[1]) >= 1              # gated again

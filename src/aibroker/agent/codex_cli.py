@@ -194,6 +194,10 @@ class CodexCLI(SubprocessCLI):
     def refresh_maybe_due(self, after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
         return refresh_maybe_due(self._env.get("CODEX_HOME"), after_s=after_s)
 
+    def last_refresh(self) -> datetime | None:
+        """`last_refresh` of this login (the timestamp only; see read_last_refresh)."""
+        return read_last_refresh(self._env.get("CODEX_HOME"))
+
     def snapshot_artifacts(self) -> None:
         """Called just before this run starts; only the run's own thread dir is compared."""
         self._image_baseline = snapshot_generated_paths(self._env.get("CODEX_HOME"))
