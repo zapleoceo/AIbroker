@@ -26,10 +26,8 @@ from aibroker.providers.subscriptions import (
     subscription_model,
     subscription_model_verified,
     subscription_models,
-    subscription_tool_model_canary,
-    subscription_tool_model_canary_advertised,
-    subscription_tool_model_verified,
-    subscription_tools_enabled,
+    subscription_tools_accepted,
+    subscription_tools_advertised,
 )
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
@@ -175,10 +173,7 @@ def supports_tools(spec: ModelSpec, project_id: int | None = None) -> bool | Non
     from aibroker.services.tool_contract import TOOL_PROVIDERS
 
     if spec.provider in ("codex-sub", "claude-sub"):
-        return (subscription_tools_enabled(spec.provider)
-                and (subscription_tool_model_verified(spec.id)
-                     or (project_id is not None
-                         and subscription_tool_model_canary_advertised(spec.id, project_id))))
+        return subscription_tools_advertised(spec.id, project_id)
     if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
             or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):
         return False
@@ -198,10 +193,7 @@ def listing(project_id: int | None = None,
         tool_support = supports_tools(m, project_id)
         request_tools = tool_support
         if m.pricing == "subscription":
-            request_tools = (subscription_tools_enabled(m.provider)
-                             and (subscription_tool_model_verified(m.id)
-                                  or (project_id is not None
-                                      and subscription_tool_model_canary(m.id, project_id))))
+            request_tools = subscription_tools_accepted(m.id, project_id)
         also = [o.id for o in pinnable_models()
                 if o.id != m.id and canonical_name(o.id) == canonical_name(m.id)]
         rows.append({

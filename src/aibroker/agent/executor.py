@@ -40,9 +40,7 @@ from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.providers.subscriptions import (
     PROVIDERS,
-    subscription_tool_model_canary,
-    subscription_tool_model_verified,
-    subscription_tools_enabled,
+    subscription_tools_accepted,
 )
 from aibroker.services.job_meta import log_tag
 
@@ -124,11 +122,8 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
     req = dict(job.request)
     client_tools = (req.get("client_job") or {}).get("tools") or []
     provider = next((p for p, cap in PROVIDERS.items() if cap == run.capability), "")
-    if client_tools and (not subscription_tools_enabled(provider)
-                         or not run.model
-                         or not (subscription_tool_model_verified(f"{provider}/{run.model}")
-                                 or subscription_tool_model_canary(f"{provider}/{run.model}",
-                                                                   run.project_id))):
+    if client_tools and (not run.model or not subscription_tools_accepted(
+            f"{provider}/{run.model}", run.project_id)):
         return await _finish(run_id, ev.RunFailed(
             error_class="route_disabled", message="client tools are not verified"), {})
     totals: dict[str, int | None] = {}

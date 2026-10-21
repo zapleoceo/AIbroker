@@ -181,12 +181,17 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS: str = "[]"
+    # Comma-separated project ids for the exact-model tool canaries of BOTH providers (the name is
+    # historical); duplicates or junk make it empty. Prod: "12" (Orchestra).
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS: str = ""
-    # Claude client tools (claude_tool_turn): same gate shape as Codex; the canary reuses
-    # AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS (owner project 12 only).
+    # Claude client tools (claude_tool_turn): same gate shape as Codex.
     AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS: str = "[]"
     AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS: str = "[]"
+    # Canary routes with a recorded live client-tool round-trip (call -> caller result -> final
+    # answer) on that exact id: the catalog advertises supports_tools=true for them to the canary
+    # projects. Evidence before listing: Sonnet job 557226 (2026-10-14).
+    AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS: str = '["claude-sub/claude-sonnet-5-5"]'
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

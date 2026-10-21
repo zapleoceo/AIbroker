@@ -160,14 +160,17 @@ scope, external port, credential, API-paid fallback, or wider Linux sandbox is
 part of this design. Claude uses the same durable callback contract over its
 own transport, below.
 
-`subscription_tool_model_canary` evaluates the temporary exact project/model
-gate. `subscription_tool_model_canary_advertised` (used by `catalog.supports_tools`
-with the caller's project id) advertises a Claude pin that is in the canary list
-only when that exact pin also has a live tool-callback attestation in
-`_CATALOG_CANARY_TOOL_ATTESTATIONS` and `subscription_tools_enabled` is on. Each
-Claude pin needs its own attestation before it is advertised; a pin without one
-stays `supports_tools: false` even when it is in the canary list. Today the only
-attested pin is `claude-sub/claude-sonnet-5-5` (job 557226, 2026-10-14). The POST
+One rule decides tools on a subscription route (2026-10-21, `providers/subscriptions.py`):
+`subscription_tools_accepted(model, project_id)` - the provider switch is on and the id is in
+`*_TOOLS_VERIFIED_MODELS`, or it is a canary (`subscription_tool_model_canary`: the id is in
+`*_TOOLS_CANARY_MODELS` and the project is in `canary_project_ids()`, the comma list
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`; duplicates or junk mean none). The submit
+route, the worker re-check and the catalog's `job_request.tools` all call it.
+`subscription_tools_advertised(model, project_id)` - the catalog's `supports_tools` - additionally
+needs proof: the id is verified, or attested (`subscription_tool_model_attested`: listed in
+`AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS` after a recorded live round-trip on that exact id). So
+`job_request.tools: true` with `supports_tools: false` means "accepted for this project, not yet
+proven live". Default attestation: `claude-sub/claude-sonnet-5-5` (job 557226, 2026-10-14). The POST
 job canary gate is unchanged. `ModelRerouted` records an explicit App Server reroute notification in
 the run event stream before the tool turn fails; no notification is not proof
 of the serving model.
@@ -214,9 +217,9 @@ Gates mirror Codex: `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED`, the exact-id list
 `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` and
 `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS` (only `claude-sub/` ids that are
 themselves account-verified; anything else empties the list), and the shared
-project canary `AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS` (owner project
-12). `subscription_tools_enabled(provider)` is the per-provider switch used by the
-catalog, the submit route and the worker. A model is listed in the verified list
+project canary `AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS` (a comma list; prod: 12).
+`subscription_tools_enabled(provider)` is the per-provider switch inside
+`subscription_tools_accepted`, which the catalog, the submit route and the worker share. A model is listed in the verified list
 only after a live round-trip (call -> caller result -> final answer) on that
 exact id.
 
