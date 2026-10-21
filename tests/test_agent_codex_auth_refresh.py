@@ -668,6 +668,9 @@ def test_refresh_proof_unit_rules():
     assert not proof.covers(t + timedelta(seconds=1), 1800, now=200)   # Codex refreshed since
     assert not proof.covers(t, 0, now=100)                     # 0 disables the proof
     assert not proof.covers(None, 1800, now=100)               # unreadable timestamp
+    young, old = t + timedelta(days=6), t + timedelta(days=7)  # age of the stamp at "now_utc"
+    assert proof.covers(t, 1800, max_age_s=6.5 * 86400, now=200, now_utc=young)
+    assert not proof.covers(t, 1800, max_age_s=6.5 * 86400, now=200, now_utc=old)
     assert proof.record(t, t + timedelta(hours=1), now=300) is False   # refreshed during the call
     assert proof.record(None, None, now=300) is False
     proof.clear()
@@ -688,29 +691,26 @@ async def test_after_a_gated_run_proves_the_login_the_next_run_skips_the_gate(tm
     assert rig.attempts_by(ids[1]) == 0              # no lease even tried: the proof covered it
 
 
-@pytest.mark.parametrize("proof_s, refreshed", [(0.0, False), (1800.0, True)])
-async def test_no_proof_when_disabled_or_when_codex_refreshed_during_the_run(
-        tmp_path, monkeypatch, proof_s, refreshed):
+@pytest.mark.parametrize("case", ["disabled", "refreshed", "unreadable", "too_old"])
+async def test_no_proof_is_used_when_disabled_refreshed_unreadable_or_too_old(
+        tmp_path, monkeypatch, case):
     home = tmp_path / "home"
-    _auth(home, _ago(days=6))
-    ids = await _runs(2, base=9490 if refreshed else 9495)
+    _auth(home, _ago(days=7) if case == "too_old" else _ago(days=6))
+    ids = await _runs(2, base={"disabled": 9490, "refreshed": 9493, "unreadable": 9496,
+                               "too_old": 9499}[case])
     rig = _Rig(monkeypatch, ids, first_event="model")
     _register(home)
-    if refreshed:
-        stale = read_last_refresh(str(home))
-        calls = []
-
-        def _last_refresh(_self):
-            # run 1: proof check and gate take see the old stamp, the release sees a new one
-            calls.append(1)
-            return stale if len(calls) <= 2 else stale + timedelta(seconds=5)
-        monkeypatch.setattr(CodexCLI, "last_refresh", _last_refresh)
+    cfg = _cfg(tmp_path, codex_refresh_proof_s=0.0 if case == "disabled" else 1800.0)
+    t1 = asyncio.create_task(execute_run(ids[0], cfg))
+    await _until(lambda: rig.entered == [ids[0]])         # run 1 holds the gate inside its CLI
+    if case == "refreshed":
+        _auth(home, _ago(seconds=1))                     # Codex refreshed during the call...
+    elif case == "unreadable":
+        _auth(home, raw="{broken")                       # ...or the file became unreadable
     rig.gates[ids[0]].set()
-    assert await asyncio.wait_for(execute_run(ids[0], _cfg(tmp_path, codex_refresh_proof_s=proof_s)),
-                                  10) == "completed"
-    if refreshed:
-        _auth(home, _ago(days=6))                    # still due by the file, but unproven
+    assert await asyncio.wait_for(t1, 10) == "completed"
+    if case in ("refreshed", "unreadable"):
+        _auth(home, _ago(days=6))                        # due again by the file, but unproven
     rig.gates[ids[1]].set()
-    assert await asyncio.wait_for(execute_run(ids[1], _cfg(tmp_path, codex_refresh_proof_s=proof_s)),
-                                  10) == "completed"
-    assert rig.attempts_by(ids[1]) >= 1              # gated again
+    assert await asyncio.wait_for(execute_run(ids[1], cfg), 10) == "completed"
+    assert rig.attempts_by(ids[1]) >= 1                  # gated again

@@ -137,14 +137,19 @@ def read_last_refresh(codex_home: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def refresh_maybe_due(codex_home: str | None, now: datetime | None = None,
-                      after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
-    """True when a token refresh may happen soon. A missing or unreadable timestamp counts as due
-    (serialize conservatively); a timestamp in the future (clock skew) does not."""
-    last = read_last_refresh(codex_home)
+def refresh_due(last: datetime | None, now: datetime | None = None,
+                after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+    """True when a refresh may happen soon for this `last_refresh`. A missing or unreadable
+    timestamp counts as due (serialize conservatively); one in the future (clock skew) does not."""
     if last is None:
         return True
     return ((now or datetime.now(UTC)) - last).total_seconds() >= after_s
+
+
+def refresh_maybe_due(codex_home: str | None, now: datetime | None = None,
+                      after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+    """refresh_due for the login in `codex_home`."""
+    return refresh_due(read_last_refresh(codex_home), now, after_s)
 
 
 def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
