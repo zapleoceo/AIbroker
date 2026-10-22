@@ -252,6 +252,7 @@ services:
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
       # Agent-run allowlist (fail-closed when empty); the agent-worker needs the same value.
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_FILES_IN_TABLE: ${AGENT_FILES_IN_TABLE:-false}   # migration 025 rollout flag (docs/deploy-ops.md)
       # Per-project model/account policy (JSON, fail-closed); the agent-worker re-checks it.
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       # "default" retains the Settings default without nesting JSON in Compose interpolation.
@@ -374,6 +375,7 @@ services:
       # Stays false until the owner has checked the Claude account settings (docs/agent-runs.md).
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_FILES_IN_TABLE: ${AGENT_FILES_IN_TABLE:-false}   # migration 025 rollout flag (docs/deploy-ops.md)
       AGENT_IMAGES_TOTAL_BYTES: ${AGENT_IMAGES_TOTAL_BYTES:-25165824}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
@@ -443,6 +445,7 @@ services:
       # The container still sees the standard setting name; only the .env source differs.
       AGENT_PAID_CONTINUATION_VERIFIED_OFF: ${AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF:-false}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_FILES_IN_TABLE: ${AGENT_FILES_IN_TABLE:-false}   # migration 025 rollout flag (docs/deploy-ops.md)
       AGENT_IMAGES_TOTAL_BYTES: ${AGENT_IMAGES_TOTAL_BYTES:-25165824}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}
@@ -518,6 +521,7 @@ services:
       AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S: ${AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S:-561600}
       AGENT_IMAGE_MAX_BYTES: ${AGENT_IMAGE_MAX_BYTES:-8388608}
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
+      AGENT_FILES_IN_TABLE: ${AGENT_FILES_IN_TABLE:-false}   # migration 025 rollout flag (docs/deploy-ops.md)
       AGENT_IMAGES_TOTAL_BYTES: ${AGENT_IMAGES_TOTAL_BYTES:-25165824}
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}
       AGENT_SUBSCRIPTION_MODELS: ${AGENT_SUBSCRIPTION_MODELS:-default}

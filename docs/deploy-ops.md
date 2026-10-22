@@ -347,6 +347,9 @@ Rollout in two steps, so that a rollback is a config flip:
    `psql -v ON_ERROR_STOP=1 < infra/sql/migrations/025_deep_job_files.sql`
 2. Set `AGENT_FILES_IN_TABLE=true` (the writer: `store_files` for png/jpeg/webp/gif only; text-like
    files stay inline because they are small and pglz compresses them) and restart.
+   The flag lives in the server `.env` (`AGENT_FILES_IN_TABLE=true`); `docker-compose.yml` passes it to `api`
+   and the three agent workers (the writer runs in the workers), so a flip is `.env` + `docker compose up -d`
+   of those services.
 
 Rollback: set the flag back to false (new jobs write inline; rows already written to the table are still served by
 the dual-read code until they are purged, <= 7 days). A plain revert to the pre-025 code is only safe after all
