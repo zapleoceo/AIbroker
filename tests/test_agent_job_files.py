@@ -270,9 +270,9 @@ async def test_real_migration_025_on_postgres_then_dual_read_and_retention_casca
     await _apply_migration_file()                                  # idempotent (IF NOT EXISTS)
 
     assert (await _scalar("SELECT to_regclass('deep_job_files')::text"))[0] == "deep_job_files"
-    assert (await _scalar("SELECT attstorage FROM pg_attribute WHERE attrelid = 'deep_job_files'::regclass "
+    assert (await _scalar("SELECT attstorage::text FROM pg_attribute WHERE attrelid = 'deep_job_files'::regclass "
                           "AND attname = 'data'"))[0] == "e"
-    assert tuple(await _scalar("SELECT confdeltype, confrelid::regclass::text FROM pg_constraint "
+    assert tuple(await _scalar("SELECT confdeltype::text, confrelid::regclass::text FROM pg_constraint "
                                "WHERE conrelid = 'deep_job_files'::regclass AND contype = 'f'")) == ("c", "deep_jobs")
     assert (await _scalar(
         "SELECT count(*) FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid "
