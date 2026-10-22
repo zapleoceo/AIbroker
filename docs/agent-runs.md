@@ -322,7 +322,7 @@ writes files into the workspace.
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
    then the API returns `expired: true` and no content.
-   Storage: with `AGENT_FILES_IN_TABLE` (default off) the bytes of png/jpeg/webp/gif/zip/pdf/gz files go
+   Storage: with `AGENT_FILES_IN_TABLE` (default off) the bytes of png/jpeg/webp/gif files go
    to `deep_job_files` (`job_files.store_files`, same transaction as the result; `result_meta.files[i]` keeps
    the metadata, `content_b64: null` and `content_ref: i`); other files, non-canonical base64 and every
    job written with the flag off keep `content_b64` inline. Readers (`job_files.live_files` for both

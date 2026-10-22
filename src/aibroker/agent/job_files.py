@@ -24,9 +24,9 @@ log = logging.getLogger(__name__)
 REF_KEY = "content_ref"
 # Already-compressed formats only: pglz cannot shrink them (measured 733 vs 723 MB on PNG), so
 # they go to a STORAGE EXTERNAL column. Text-like files are small and compressible: stay inline.
-_BINARY_MIMES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                 ".webp": "image/webp", ".gif": "image/gif", ".zip": "application/zip",
-                 ".pdf": "application/pdf", ".gz": "application/gzip"}
+_BINARY_MIMES = {".png": "image/png",                                    # measured 2026-10-22: 100% of inline content
+                 ".jpg": "image/jpeg", ".jpeg": "image/jpeg",             # assumption: image codecs are
+                 ".webp": "image/webp", ".gif": "image/gif"}              # already compressed (not measured)
 
 
 def _mime(path: Any) -> str:
@@ -74,9 +74,12 @@ async def store_files(s: AsyncSession, job_id: int, files: list[dict[str, Any]],
                             job_id, f.get("path"))
             out.append(f)
             continue
+        digest = hashlib.sha256(data).hexdigest()
+        if f.get("sha256") and f["sha256"] != digest:
+            log.warning("job %d file %s: event sha256 does not match the bytes, stored the computed one",
+                        job_id, f.get("path"))
         s.add(DeepJobFileRow(
-            job_id=job_id, idx=idx, sha256=f.get("sha256") or hashlib.sha256(data).hexdigest(),
-            mime=mime,
+            job_id=job_id, idx=idx, sha256=digest, mime=mime,
             size=len(data), expires_at=_naive_utc(f.get("expires_at")), data=data))
         out.append({**{k: v for k, v in f.items() if k != "content_b64"},
                     "content_b64": None, REF_KEY: idx})

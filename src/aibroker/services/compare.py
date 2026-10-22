@@ -257,6 +257,7 @@ async def poll_job(project: ProjectRow, job_id: int) -> Any | None:
     from aibroker.services.deep_jobs import get_job
 
     row = await get_job(job_id, project.id)
+    # sync, inline-only view: compare never reads files; a table-stored file would show content_b64 null
     return None if row is None else proxy._job_response(row)
 
 

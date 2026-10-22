@@ -11,11 +11,13 @@ import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select, text, update
 from test_agent_runs import _get, _project, _submit
 
+import aibroker.db.engine as engine_mod
 from aibroker.agent import events as ev
 from aibroker.agent.constants import AGENT_SCOPE
 from aibroker.agent.job_files import store_files
@@ -108,13 +110,13 @@ async def test_flag_off_writes_inline_exactly_as_before():
 
 async def test_size_accounting_is_the_decoded_base64_length(flag):
     _, rid = await _new_run()
-    files = [_file("out/a.png", PNG), _file("b.zip", OTHER)]
+    files = [_file("out/a.png", PNG), _file("b.jpg", OTHER)]
     await append_event(rid, ev.RunCompleted(final_text="ok", files=files))
     rows = await _rows(rid)
     assert len(rows) == 2
     for row, f in zip(rows, files, strict=True):
         assert row.size == len(row.data) == len(base64.b64decode(f.content_b64)) == f.size
-    assert rows[1].mime == "application/zip"
+    assert rows[1].mime == "image/jpeg"
     assert sum(r.size for r in rows) < sum(len(f.content_b64) for f in files)   # ~25% less than base64
 
 
@@ -238,3 +240,57 @@ async def test_retention_purge_removes_file_rows_with_the_job(flag):
         job.completed_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=JOB_RETENTION_DAYS + 1)
     await purge_finished_jobs()
     assert await _rows(rid) == []
+
+
+MIGRATION_025 = Path(__file__).resolve().parent.parent / "infra" / "sql" / "migrations" / "025_deep_job_files.sql"
+
+
+async def _apply_migration_file() -> None:
+    """The real file through asyncpg's simple-query protocol (as psql sends it, BEGIN/COMMIT included)."""
+    async with engine_mod._engine.connect() as conn:
+        raw = await conn.get_raw_connection()
+        await raw.driver_connection.execute(MIGRATION_025.read_text(encoding="utf-8"))
+
+
+async def _scalar(sql: str):
+    async with get_session() as s:
+        return (await s.execute(text(sql))).first()
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="applies the real SQL migration: Postgres only (CI integration job)")
+async def test_real_migration_025_on_postgres_then_dual_read_and_retention_cascade(flag):
+    """The ORM-built test schema minus deep_job_files stands in for the schema after migrations <= 024
+    (the repo has no migration runner: migrations are applied by hand with psql)."""
+    async with engine_mod._engine.begin() as conn:
+        await conn.execute(text("SET LOCAL aibroker.allow_destructive_ddl = 'on'"))
+        await conn.execute(text("DROP TABLE deep_job_files"))
+    assert (await _scalar("SELECT to_regclass('deep_job_files')"))[0] is None
+
+    await _apply_migration_file()
+    await _apply_migration_file()                                  # idempotent (IF NOT EXISTS)
+
+    assert (await _scalar("SELECT to_regclass('deep_job_files')::text"))[0] == "deep_job_files"
+    assert (await _scalar("SELECT attstorage FROM pg_attribute WHERE attrelid = 'deep_job_files'::regclass "
+                          "AND attname = 'data'"))[0] == "e"
+    assert tuple(await _scalar("SELECT confdeltype, confrelid::regclass::text FROM pg_constraint "
+                               "WHERE conrelid = 'deep_job_files'::regclass AND contype = 'f'")) == ("c", "deep_jobs")
+    assert (await _scalar(
+        "SELECT count(*) FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid "
+        "AND a.attnum = i.indkey[0] WHERE i.indrelid = 'deep_job_files'::regclass "
+        "AND a.attname = 'job_id'"))[0] >= 1                       # PK (job_id, idx) leads with job_id
+
+    f = _file("out/a.png", PNG)
+    new_key, new_id = await _new_run()                              # written after the migration, flag on
+    await append_event(new_id, ev.RunCompleted(final_text="ok", files=[f]))
+    old_key, old_id = await _legacy_run([f])                        # legacy inline row
+    assert len(await _rows(new_id)) == 1 and await _rows(old_id) == []
+    assert (await _get(new_key, f"/{new_id}")).json()["files"] == [f.model_dump()]
+    assert (await _get(old_key, f"/{old_id}")).json()["files"] == [f.model_dump()]
+
+    from aibroker.services.job_queue import JOB_RETENTION_DAYS, purge_finished_jobs
+
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, new_id)
+        job.completed_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=JOB_RETENTION_DAYS + 1)
+    assert await purge_finished_jobs() >= 1
+    assert await _rows(new_id) == []

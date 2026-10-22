@@ -329,7 +329,12 @@ Measured 2026-10-22: `deep_jobs` TOAST 1.44 GB, of which `result_meta.files[].co
 (278 files, avg ~2 MB, max 2.9 MB; every inline file is a PNG, the only other files are `.txt` without content);
 pglz does not compress it (733 vs 723 MB). Migration 025 (`025_deep_job_files.sql`) creates `deep_job_files`
 (`job_id` FK -> `deep_jobs` ON DELETE CASCADE, `idx`, `sha256`, `mime`, `size`, `expires_at`, `data BYTEA`,
-`STORAGE EXTERNAL`): additive, one new table, nothing existing is touched, no data is moved or deleted.
+`STORAGE EXTERNAL`): additive, one new table, nothing existing is touched, no data is moved or deleted. Locking: the foreign key makes
+`CREATE TABLE` take `SHARE ROW EXCLUSIVE` on `deep_jobs` for the duration of the transaction (milliseconds), so writes
+to `deep_jobs` (submit, claim, finish) briefly wait; reads do not. The file is one transaction (`BEGIN` ... `COMMIT`)
+with `SET LOCAL lock_timeout = '5s'` and `statement_timeout = '60s'`: if a long `deep_jobs` transaction holds the
+table it fails with `lock timeout` and applies nothing - run it again a minute later (it is idempotent,
+`IF NOT EXISTS`); never raise the timeout to force it.
 Retention is unchanged (7 days; the cascade removes the bytes with the job).
 
 Honest expectation: the raw bytes are ~25% smaller than their base64 (3/4), and pglz is no longer run on PNG.
@@ -340,7 +345,7 @@ Rollout in two steps, so that a rollback is a config flip:
 1. Apply the migration, then deploy code that reads both formats (`aibroker.agent.job_files.live_files`) with
    `AGENT_FILES_IN_TABLE` unset/false: new jobs still write inline exactly as before.
    `psql -v ON_ERROR_STOP=1 < infra/sql/migrations/025_deep_job_files.sql`
-2. Set `AGENT_FILES_IN_TABLE=true` (the writer: `store_files` for png/jpeg/webp/gif/zip/pdf/gz only; text-like
+2. Set `AGENT_FILES_IN_TABLE=true` (the writer: `store_files` for png/jpeg/webp/gif only; text-like
    files stay inline because they are small and pglz compresses them) and restart.
 
 Rollback: set the flag back to false (new jobs write inline; rows already written to the table are still served by
@@ -348,6 +353,14 @@ the dual-read code until they are purged, <= 7 days). A plain revert to the pre-
 jobs written with the flag on are gone from retention (7 days after the flag was turned off): the old code returns
 `content_b64: null` (without `expired`) for such a job. The table is dropped only by a separate decision, after that
 (`SET aibroker.allow_destructive_ddl = 'on'; DROP TABLE deep_job_files;`).
+
+Notes. (a) Only PNG was measured (100% of inline content); jpeg/webp/gif are an assumption (codecs are already
+compressed), pdf/zip/gz are deliberately left inline (a PDF can be uncompressed). (b) After a full code revert the old
+reader would also pass the internal key `content_ref` through to clients for such jobs. (c) `deep_jobs` TOAST does not
+shrink physically: freed space is reused after retention, and the files only shrink with `VACUUM FULL` (separate
+decision, takes an exclusive lock). (d) `services/compare.py` calls the sync `_job_response(row)`, which would show
+`content_b64: null` for a table-stored file; compare does not read files today. (e) `SET LOCAL` timeouts end with the
+transaction, which is the same effect as `SET` + `RESET` in 020/022/023.
 
 Verify after enabling (still to be measured live): `pg_total_relation_size('deep_job_files')` against the growth of
 `pg_total_relation_size('deep_jobs')` over 24 h, and a `GET /v1/agent/runs/{id}` of a new job returning the PNG.

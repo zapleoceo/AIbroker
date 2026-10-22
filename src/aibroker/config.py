@@ -216,7 +216,7 @@ class Settings(BaseSettings):
     # all images of one run together (generated + written to out/); over it: skipped=total_budget
     AGENT_IMAGES_TOTAL_BYTES: int = 24 * 1024 * 1024
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
-    # New agent jobs keep already-compressed files (png/jpeg/webp/gif/zip/pdf) as raw bytes in
+    # New agent jobs keep already-compressed files (png measured; jpeg/webp/gif assumed incompressible) as raw bytes in
     # deep_job_files instead of base64 in result_meta. OFF = write inline as before; readers
     # understand both formats either way (docs/agent-runs.md, migration 025).
     AGENT_FILES_IN_TABLE: bool = False
