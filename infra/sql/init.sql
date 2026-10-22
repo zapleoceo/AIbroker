@@ -190,6 +190,19 @@ CREATE TABLE IF NOT EXISTS agent_run_events (
   PRIMARY KEY (run_id, seq)
 );
 
+-- Raw bytes of agent job files (025): result_meta.files[].content_ref points here. Additive.
+CREATE TABLE IF NOT EXISTS deep_job_files (
+  job_id BIGINT NOT NULL REFERENCES deep_jobs(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  sha256 VARCHAR(64) NOT NULL,
+  mime VARCHAR(127) NOT NULL,
+  size INTEGER NOT NULL,
+  expires_at TIMESTAMP,
+  data BYTEA NOT NULL,
+  PRIMARY KEY (job_id, idx)
+);
+ALTER TABLE deep_job_files ALTER COLUMN data SET STORAGE EXTERNAL;
+
 -- Agent session leases (018): replaces the Postgres advisory lock, so the agent worker needs only
 -- the pgbouncer connection (no direct connection, no session-level lock). Additive.
 CREATE TABLE IF NOT EXISTS agent_session_leases (

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
 
@@ -11,6 +10,7 @@ from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
 
+from aibroker.agent.job_files import live_files_inline as live_files  # noqa: F401 - re-export
 from aibroker.strict_json import loads_strict
 
 _REF_KEYS = ("$ref", "$dynamicRef", "$recursiveRef")
@@ -134,11 +134,3 @@ def output_problem(text: str, response_format: dict[str, Any] | None) -> str | N
         except Exception:  # noqa: BLE001 - a validator failure must not pass as success
             return "InvalidJSON: json_schema validation failed"
     return None
-
-
-def live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    if files is None:
-        return None
-    now = datetime.now(UTC).isoformat()
-    return [{**f, "content_b64": None, "expired": True}
-            if f.get("expires_at") and f["expires_at"] < now else f for f in files]
