@@ -323,6 +323,35 @@ the deploy but do not honour priority. Rollback: `CREATE INDEX CONCURRENTLY IF N
 deep_jobs (status, run_after, created_at)`, `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order`, then drop the column. Set
 `AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
 
+### Agent file bytes in a table: migration 025 (2026-10-22)
+
+Measured 2026-10-22: `deep_jobs` TOAST 1.44 GB, of which `result_meta.files[].content_b64` is ~706 MB of base64 PNG
+(278 files, avg ~2 MB, max 2.9 MB; every inline file is a PNG, the only other files are `.txt` without content);
+pglz does not compress it (733 vs 723 MB). Migration 025 (`025_deep_job_files.sql`) creates `deep_job_files`
+(`job_id` FK -> `deep_jobs` ON DELETE CASCADE, `idx`, `sha256`, `mime`, `size`, `expires_at`, `data BYTEA`,
+`STORAGE EXTERNAL`): additive, one new table, nothing existing is touched, no data is moved or deleted.
+Retention is unchanged (7 days; the cascade removes the bytes with the job).
+
+Honest expectation: the raw bytes are ~25% smaller than their base64 (3/4), and pglz is no longer run on PNG.
+That is ~25% of the base64 payload of the NEW files only, not 25% of the database.
+
+Rollout in two steps, so that a rollback is a config flip:
+
+1. Apply the migration, then deploy code that reads both formats (`aibroker.agent.job_files.live_files`) with
+   `AGENT_FILES_IN_TABLE` unset/false: new jobs still write inline exactly as before.
+   `psql -v ON_ERROR_STOP=1 < infra/sql/migrations/025_deep_job_files.sql`
+2. Set `AGENT_FILES_IN_TABLE=true` (the writer: `store_files` for png/jpeg/webp/gif/zip/pdf/gz only; text-like
+   files stay inline because they are small and pglz compresses them) and restart.
+
+Rollback: set the flag back to false (new jobs write inline; rows already written to the table are still served by
+the dual-read code until they are purged, <= 7 days). A plain revert to the pre-025 code is only safe after all
+jobs written with the flag on are gone from retention (7 days after the flag was turned off): the old code returns
+`content_b64: null` (without `expired`) for such a job. The table is dropped only by a separate decision, after that
+(`SET aibroker.allow_destructive_ddl = 'on'; DROP TABLE deep_job_files;`).
+
+Verify after enabling (still to be measured live): `pg_total_relation_size('deep_job_files')` against the growth of
+`pg_total_relation_size('deep_jobs')` over 24 h, and a `GET /v1/agent/runs/{id}` of a new job returning the PNG.
+
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
 Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)

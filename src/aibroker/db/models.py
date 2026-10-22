@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -332,6 +333,24 @@ class AgentRunEventRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class DeepJobFileRow(Base):
+    """Raw bytes of one file a finished agent job produced (migration 025). The job's
+    result_meta.files[idx] keeps the metadata and a `content_ref`; the bytes live here, not as
+    base64 inside result_meta. Deleted with the job (retention) through the FK."""
+    __tablename__ = "deep_job_files"
+
+    job_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("deep_jobs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    idx: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime: Mapped[str] = mapped_column(String(127), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class CompareRequestRow(Base):

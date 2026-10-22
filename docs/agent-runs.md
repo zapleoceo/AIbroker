@@ -135,6 +135,7 @@ client-visible request id `job-<id>` are reused - plus:
 |---|---|---|
 | `agent_runs` | `AgentRunRow` | `task_id`, `account_id`, `session_id` (set from the first `session.assigned`), `resume_session_id`, `idempotency_key`, `workspace`, `cancel_requested`, `last_event_at`, `last_seq`, `outcome` |
 | `agent_run_events` | `AgentRunEventRow` | `(run_id, seq)`, `ts`, `type`, `payload` (JSONB); cascade-deleted with the job |
+| `deep_job_files` | `DeepJobFileRow` | `(job_id, idx)`, `sha256`, `mime`, `size`, `expires_at`, `data` (raw bytes, STORAGE EXTERNAL); cascade-deleted with the job; written only when `AGENT_FILES_IN_TABLE` is on (migration 025) |
 | `agent_session_leases` | `AgentSessionLeaseRow` | PK `(account_id, session_id)`; `run_id` (current holder), `lease_until`, `heartbeat_at`, `fence` (fencing token, +1 per acquisition; expired in place on release, never deleted) |
 
 Migration `infra/sql/migrations/017_agent_runs.sql`, mirrored in `infra/sql/init.sql`.
@@ -321,6 +322,13 @@ writes files into the workspace.
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
    then the API returns `expired: true` and no content.
+   Storage: with `AGENT_FILES_IN_TABLE` (default off) the bytes of png/jpeg/webp/gif/zip/pdf/gz files go
+   to `deep_job_files` (`job_files.store_files`, same transaction as the result; `result_meta.files[i]` keeps
+   the metadata, `content_b64: null` and `content_ref: i`); other files, non-canonical base64 and every
+   job written with the flag off keep `content_b64` inline. Readers (`job_files.live_files` for both
+   `GET /v1/agent/runs/{id}` and `GET /v1/jobs/{id}`, `live_files_inline` for the synchronous inline-only
+   view) return the same JSON in both formats: `content_b64` is encoded on read, `content_ref` is never
+   exposed. Rollout/rollback: [deploy-ops.md](deploy-ops.md#agent-file-bytes-in-a-table-migration-025-2026-10-22).
    Absolute paths are normalised first: inside the workspace they become relative, outside it
    they are dropped (debug log, no `skipped` entry); `../` and symlinks stay rejected.
    After the Codex image export, `collect_out_images` (`images.py`, run for every adapter) lists

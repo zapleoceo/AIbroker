@@ -21,9 +21,11 @@ from aibroker.agent.events import (
     RunCancelled,
     RunWaitingQuota,
 )
+from aibroker.agent.job_files import store_files
 from aibroker.agent.lock import Lease, check_fence
 from aibroker.agent.redact import redact, redact_final_text, redact_obj
 from aibroker.agent.subscription_job import output_problem
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.services.deep_jobs import (
@@ -344,7 +346,11 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 job.completed_at = now
                 if event.type == "run.completed":
                     job.result_text = final_text
-                    job.result_meta = {"files": [f.model_dump() for f in event.files],
+                    # bytes go to deep_job_files in this same transaction (atomic with the result)
+                    stored = await store_files(
+                        s, run_id, [f.model_dump() for f in event.files],
+                        enabled=get_settings().AGENT_FILES_IN_TABLE)
+                    job.result_meta = {"files": stored,
                                        "client_tool_history": history,
                                        "usage_observed": usage_observed}
                     if client_job:

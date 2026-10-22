@@ -37,6 +37,7 @@ from aibroker.agent.client_tools import (
     submit_result,
 )
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.job_files import live_files as resolve_live_files
 from aibroker.agent.job_status import error_code, job_timing, pending_detail
 from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
@@ -645,7 +646,17 @@ def _job_evidence(meta: dict[str, Any], request: dict[str, Any] | None = None,
     )
 
 
-def _job_response(row: Any) -> DeepJobResponse:
+_SYNC_FILES: Any = object()  # `files` not resolved by the caller: inline content only
+
+
+async def _row_files(row: Any) -> list[dict[str, Any]] | None:
+    """The job's files with bytes read from deep_job_files where they live there."""
+    if row.status != "done":
+        return None
+    return await resolve_live_files(row.id, (row.result_meta or {}).get("files"))
+
+
+def _job_response(row: Any, files: Any = _SYNC_FILES) -> DeepJobResponse:
     """Shape a deep_jobs row into the poll response — shared by /v1/deep and
     /v1/jobs.
 
@@ -718,7 +729,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         vision_format=meta.get("vision_format"),
         tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
         refusal=meta.get("refusal"),
-        files=live_files(meta.get("files")),
+        files=live_files(meta.get("files")) if files is _SYNC_FILES else files,
         **tags,
     )
 
@@ -750,7 +761,7 @@ async def deep_poll(
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row)  # pragma: no cover
+    return _job_response(row, await _row_files(row))  # pragma: no cover
 
 
 # ─── Generic async jobs — submit+poll for ANY chat capability (Phase 4) ─────
@@ -790,7 +801,7 @@ async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
     if row is None:  # pragma: no cover — pruned between the key lookup and this read
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
-    content = {**jsonable_encoder(_job_response(row)), "poll_url": f"/v1/jobs/{job_id}"}
+    content = {**jsonable_encoder(_job_response(row, await _row_files(row))), "poll_url": f"/v1/jobs/{job_id}"}
     return JSONResponse(content, headers={
         "Idempotent-Replay": "true", REQUEST_ID_HEADER: job_request_id(job_id)})
 
@@ -975,7 +986,7 @@ async def jobs_poll(
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row)  # pragma: no cover
+    return _job_response(row, await _row_files(row))  # pragma: no cover
 
 
 # ─── Model catalog ──────────────────────────────────────────────────────────
