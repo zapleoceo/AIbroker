@@ -606,6 +606,10 @@ separately by the owner. Stopping the worker leaves queued runs `pending` and in
 A stopped worker stays stopped across deploys: `infra/aibroker-deploy.sh` builds it but
 recreates only the workers that were running (see
 [deploy-ops.md](deploy-ops.md#agent-workers-in-every-deploy-since-2026-10-13)).
+The workers use `restart: unless-stopped`: a worker that was running comes back by itself after a
+host reboot or a Docker daemon restart, while a worker stopped with `docker compose stop` (the rollback
+above) stays stopped. Before 2026-10-22 they had `restart: "no"` and had to be started by hand after
+every reboot.
 
 ### Billing gate: paid continuation
 

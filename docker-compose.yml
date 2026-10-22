@@ -403,7 +403,7 @@ services:
     cpus: 1
     mem_limit: 1g
     pids_limit: 256
-    restart: "no"
+    restart: unless-stopped   # survives a reboot; an owner `stop` (the rollback) still keeps it stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
   # Second Claude subscription login: same image and hardening as agent-worker, its OWN auth volume.
@@ -472,7 +472,7 @@ services:
     cpus: 1
     mem_limit: 1g
     pids_limit: 256
-    restart: "no"
+    restart: unless-stopped   # survives a reboot; an owner `stop` (the rollback) still keeps it stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
   agent-worker-codex:
@@ -554,7 +554,7 @@ services:
     cpus: 3
     mem_limit: 3g
     pids_limit: 768
-    restart: "no"
+    restart: unless-stopped   # survives a reboot; an owner `stop` (the rollback) still keeps it stopped
     logging: {driver: json-file, options: {max-size: 10m, max-file: 3}}
 
 networks:
