@@ -368,6 +368,37 @@ transaction, which is the same effect as `SET` + `RESET` in 020/022/023.
 Verify after enabling (still to be measured live): `pg_total_relation_size('deep_job_files')` against the growth of
 `pg_total_relation_size('deep_jobs')` over 24 h, and a `GET /v1/agent/runs/{id}` of a new job returning the PNG.
 
+### Clearing expired agent file bytes (opt-in tool, Room #4040)
+
+`aibroker.scripts.clear_expired_files` clears the CONTENT of already-expired inline files: for `agent:*` jobs in a
+terminal status, each `result_meta.files[i]` with inline `content_b64` and `expires_at` strictly before the cutoff
+becomes `content_b64: null, expired: true` - the same JSON the API already serves after expiry (`GET /v1/agent/runs/{id}`,
+`GET /v1/jobs/{id}` do not change; only JSON key order inside the file object may differ). Jobs, `request`, `result_text`,
+usage, traces and every other key are kept. `deep_job_files` rows are NOT touched (only counted in the report).
+Nothing schedules it: it runs only when an operator starts it. No retention change, no `VACUUM`.
+
+```
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files                 # dry-run (default), writes nothing
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files --cutoff 2026-10-23T10:00:00Z   # dry-run at a fixed cutoff
+# execute: same cutoff as the dry-run you reviewed, and the exact confirmation string
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files --execute     --cutoff 2026-10-23T10:00:00Z --confirm CLEAR-EXPIRED-2026-10-23T10:00:00Z
+```
+
+- Cutoff: UTC, whole seconds, never in the future. Default (dry-run only) is now minus `--margin-seconds` (300), so a
+  file inside its live window is never touched. `--execute` refuses without an explicit `--cutoff` and the exact
+  `--confirm`. Expiry is compared as the API does (ISO string compare, `COLLATE "C"`); a file without a well-formed
+  `expires_at` is skipped and reported.
+- Batches of `--batch-size` jobs (20), one transaction each with `SET LOCAL lock_timeout '2s'`, `statement_timeout '30s'`;
+  rows are locked `FOR UPDATE SKIP LOCKED` (a job a writer holds is skipped and cleared by the next run), the rewrite is
+  one SQL `UPDATE` with jsonb functions (no JSON passes through Python). A batch that hits a timeout rolls back alone, is
+  counted as failed and the exit code is 1. Idempotent: a second run clears 0. The dry-run runs in a `READ ONLY` transaction.
+- The report logs cutoff, jobs scanned, jobs/files/base64 bytes to clear and cleared, skipped (not expired, no
+  `expires_at`, files already in `deep_job_files`), the breakdown by project and capability, and the `deep_job_files`
+  count / `sum(size)` / expired.
+- NOT reversible from the database: after clearing, the bytes exist only in the daily `aibroker` dumps (3 days on the
+  server, 60 days on the NAS). The physical size of `deep_jobs` does not shrink (freed TOAST space is reused; only
+  `VACUUM FULL` returns it, which is a separate decision with an exclusive lock).
+
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
 Incident 2026-10-13, 09:29-09:39 UTC: migration 019 (`ALTER TABLE api_keys ADD COLUMN`)

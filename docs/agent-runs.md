@@ -138,6 +138,11 @@ client-visible request id `job-<id>` are reused - plus:
 | `deep_job_files` | `DeepJobFileRow` | `(job_id, idx)`, `sha256`, `mime`, `size`, `expires_at`, `data` (raw bytes, STORAGE EXTERNAL); cascade-deleted with the job; written only when `AGENT_FILES_IN_TABLE` is on (migration 025) |
 | `agent_session_leases` | `AgentSessionLeaseRow` | PK `(account_id, session_id)`; `run_id` (current holder), `lease_until`, `heartbeat_at`, `fence` (fencing token, +1 per acquisition; expired in place on release, never deleted) |
 
+Expired inline file bytes can be cleared by hand with `python -m aibroker.scripts.clear_expired_files` (dry-run by
+default; see `docs/deploy-ops.md`, "Clearing expired agent file bytes"). It sets `content_b64: null, expired: true` on
+files the API already reports as expired, so poll responses do not change; it is not scheduled and does not touch
+`deep_job_files`.
+
 Migration `infra/sql/migrations/017_agent_runs.sql`, mirrored in `infra/sql/init.sql`.
 Migration `infra/sql/migrations/018_agent_session_leases.sql` adds `agent_session_leases`.
 The LLM dispatcher (`services/job_queue.py`) never claims or stale-requeues `agent:%` rows;
