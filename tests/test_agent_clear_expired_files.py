@@ -190,32 +190,4 @@ async def test_deep_job_files_rows_are_reported_but_never_changed():
     assert (await _get(key, f"/{rid}")).json()["files"][0]["expired"] is True
 
 
-def _args(*argv: str):
-    return tool.build_parser().parse_args(list(argv))
-
-
-def test_execute_needs_exact_confirm_and_explicit_safe_cutoff():
-    iso = CUTOFF.strftime("%Y-%m-%dT%H:%M:%SZ")
-    now = datetime.now(UTC)
-    assert tool.resolve(_args(), now)[1] is False                              # dry-run by default
-    ok = _args("--execute", "--cutoff", iso, "--confirm", f"CLEAR-EXPIRED-{iso}")
-    assert tool.resolve(ok, now) == (CUTOFF, True)
-    future = (now + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for bad in (["--execute", "--cutoff", iso],
-                ["--execute", "--cutoff", iso, "--confirm", "yes"],
-                ["--execute", "--cutoff", iso, "--confirm", "CLEAR-EXPIRED-2020-01-01T00:00:00Z"],
-                ["--execute", "--confirm", f"CLEAR-EXPIRED-{iso}"],              # no explicit cutoff
-                ["--cutoff", iso, "--confirm", f"CLEAR-EXPIRED-{iso}"],          # confirm without execute
-                ["--cutoff", future],                                            # future cutoff
-                ["--cutoff", "2026-10-01T00:00:00"]):                            # no UTC offset
-        with pytest.raises(ValueError):
-            tool.resolve(_args(*bad), now)
-    default = tool.default_cutoff(now)
-    assert default == (now - timedelta(minutes=5)).replace(microsecond=0) and default.microsecond == 0
-
-
-async def test_main_refuses_without_confirm_and_changes_nothing():
-    jid, _ = await _job([_f("a.png", CUTOFF - timedelta(hours=1))])
-    iso = CUTOFF.strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert await tool.main(["--execute", "--cutoff", iso]) == 2
-    assert (await _meta(jid))["files"][0]["content_b64"] == B64
+# Argument/confirm/main-refusal tests (no DB) live in test_clear_expired_files_unit.py so they run on SQLite.
