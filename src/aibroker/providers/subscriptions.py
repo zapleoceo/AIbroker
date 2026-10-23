@@ -69,6 +69,39 @@ def subscription_image_output_verified(model: str) -> bool:
     return provider == "codex-sub" and mid in ids.get("codex-sub", [])
 
 
+_MAX_EVIDENCE_STR = 200
+_MAX_EVIDENCE_KEYS = 16
+_bad_tested_raw: str | None = None
+
+
+def subscription_model_evidence() -> dict[str, dict[str, str | int]]:
+    """Live-test evidence per catalog id. Isolated from `_catalog`: a malformed value
+    logs an ERROR and yields {} so it can never disable the catalog."""
+    global _bad_tested_raw
+    raw = get_settings().AGENT_SUBSCRIPTION_TESTED_MODELS.strip() or "{}"
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        if raw != _bad_tested_raw:  # once per distinct bad value, not per request
+            _bad_tested_raw = raw
+            log.error("AGENT_SUBSCRIPTION_TESTED_MODELS invalid: treating as empty")
+        return {}
+    known = {m.id for m in subscription_models()}
+    out: dict[str, dict[str, str | int]] = {}
+    for model, evidence in data.items():
+        valid = isinstance(evidence, dict) and 0 < len(evidence) <= _MAX_EVIDENCE_KEYS and all(
+            isinstance(k, str) and isinstance(v, str | int) and not isinstance(v, bool)
+            and len(k) <= _MAX_EVIDENCE_STR and len(str(v)) <= _MAX_EVIDENCE_STR
+            for k, v in evidence.items())
+        if model not in known or not valid:
+            log.warning("AGENT_SUBSCRIPTION_TESTED_MODELS entry ignored: %s", model)
+            continue
+        out[model] = dict(evidence)
+    return out
+
+
 def subscription_models() -> list[ModelSpec]:
     return _catalog()[0]
 

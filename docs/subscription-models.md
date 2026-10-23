@@ -13,6 +13,15 @@ has `available: true` only after its exact id is in the owner-confirmed
 separately approved worker route enabled. A client merging catalogs should key by `(source, id)`, not the
 bare `name`: an API model and subscription model can have different billing.
 
+Two lists, two meanings. `AGENT_SUBSCRIPTION_VERIFIED_MODELS` is the allow-list: only its IDs
+are allowed to select, and that is what `available` reports. `AGENT_SUBSCRIPTION_TESTED_MODELS`
+is the proof: a JSON object from catalog id to evidence (`{"capability": "job id or note"}`),
+surfaced as `tested` and `evidence` on the row. It is informational only and never gates
+selection, so a tested ID missing from the verified list stays unavailable. Vision evidence
+`attachment:<job>` means file-attachment input was proven, not native image input.
+`subscription_model_evidence()` (`src/aibroker/providers/subscriptions.py`) parses it; malformed
+input logs an ERROR and is treated as empty, and the catalog is unaffected.
+
 Submit using the existing `POST /v1/jobs?capability=chat:fast` and the ordinary
 `ChatRequest`, setting `model` to the exact catalog id. The response keeps
 `job_id`, `poll_url`, and `poll_after_s`; poll the existing `GET /v1/jobs/{id}`.
