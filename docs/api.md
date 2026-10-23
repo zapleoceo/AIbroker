@@ -896,6 +896,11 @@ There is no fuzzy or nearest-version matching: a model missing from the table is
 guess. Wherever a score is shown, the attribution `Benchmarks: Artificial Analysis` goes with it;
 the `/ask2many` page shows it.
 
+Subscription rows also carry two informational fields: `tested` (bool) and `evidence`
+(object mapping a capability to a job id or a short note, or `null`). `tested: true` means
+a live test proved that route; it never decides selection, which is still `available`.
+Non-subscription rows have neither field. See [subscription-models.md](subscription-models.md).
+
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
 `["text"]` for chat and embedding. It is `null` when the lane does not define

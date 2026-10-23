@@ -186,6 +186,9 @@ class Settings(BaseSettings):
     # Codex models whose image GENERATION (exported PNG files) was verified live; the catalog lists
     # them with output_modalities ["text", "image"]. Must be verified Codex models.
     AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS: str = '{"codex-sub":[]}'
+    # Live-test evidence per catalog id ({id: {capability: job_id_or_note}}); informational only,
+    # never gates selection (that is VERIFIED_MODELS).
+    AGENT_SUBSCRIPTION_TESTED_MODELS: str = "{}"
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"

@@ -24,6 +24,7 @@ from aibroker.providers.registry import (
 )
 from aibroker.providers.subscriptions import (
     subscription_model,
+    subscription_model_evidence,
     subscription_model_verified,
     subscription_models,
     subscription_tools_accepted,
@@ -189,6 +190,7 @@ def listing(project_id: int | None = None,
             codex_auth_available: bool = True) -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
+    evidence = subscription_model_evidence()
     for m in pinnable_models():
         tool_support = supports_tools(m, project_id)
         request_tools = tool_support
@@ -216,6 +218,8 @@ def listing(project_id: int | None = None,
             **({"available": subscription_model_verified(m.id) and
                (m.provider != "codex-sub" or
                 (get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED and codex_auth_available))}
+               if m.pricing == "subscription" else {}),
+            **({"tested": m.id in evidence, "evidence": evidence.get(m.id)}
                if m.pricing == "subscription" else {}),
         })
     return rows
