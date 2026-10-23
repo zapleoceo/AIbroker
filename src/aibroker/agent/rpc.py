@@ -6,6 +6,7 @@ one-second polling path in charge of claiming queued jobs.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -92,6 +93,12 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await writer.wait_closed()
 
 
+def _log_polling_only(capability: str, path: Path) -> None:
+    log.warning("worker RPC not mounted: capability=%s socket=%s mode=polling only "
+                "(RPC dir read-only / not mounted); instant wake is inactive, "
+                "database polling claims jobs", capability, path)
+
+
 async def start_worker_rpc(capability: str, wake: asyncio.Event) -> asyncio.AbstractServer | None:
     """Listen only when the approved worker-only RPC volume is mounted correctly."""
     path = RPC_SOCKETS.get(capability)
@@ -100,13 +107,22 @@ async def start_worker_rpc(capability: str, wake: asyncio.Event) -> asyncio.Abst
     directory = path.parent.stat()
     if directory.st_uid != os.getuid() or stat.S_IMODE(directory.st_mode) != 0o700:
         raise RuntimeError("worker RPC directory must be owned by worker uid and mode 0700")
+    if not os.access(path.parent, os.W_OK):
+        _log_polling_only(capability, path)
+        return None
     if os.path.lexists(path):
         existing = path.lstat()
         if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.getuid():
             raise RuntimeError("worker RPC path is not an owned socket")
         path.unlink()
-    server = await asyncio.start_unix_server(
-        lambda r, w: _handle(r, w, capability, wake), path=str(path), limit=4096)
+    try:
+        server = await asyncio.start_unix_server(
+            lambda r, w: _handle(r, w, capability, wake), path=str(path), limit=4096)
+    except OSError as exc:
+        if exc.errno != errno.EROFS:
+            raise  # only the expected read-only mount is a mode; everything else stays an error
+        _log_polling_only(capability, path)
+        return None
     path.chmod(0o600)
     return server
 
