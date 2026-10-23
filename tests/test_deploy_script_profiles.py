@@ -152,3 +152,42 @@ def test_deploy_aborts_when_running_probe_fails(tmp_path):
     proc, log = _run_deploy(tmp_path, "agent-worker", ps_fail=True)
     assert proc.returncode != 0
     assert not any(ln.startswith("docker compose up") for ln in log)
+
+
+# --- deploy contract: a worker the owner stopped stays stopped ------------------
+# Pairs with `restart: unless-stopped` in docker-compose.yml: the restart policy keeps a stopped
+# worker down across reboots, and deploy must not be the thing that brings it back.
+
+FORCING = re.compile(r"--force-recreate|--always-recreate-deps|\bcompose\b.*\b(start|restart|unpause)\b")
+
+
+def test_deploy_script_never_forces_or_starts_workers():
+    commands = [ln.strip() for ln in SCRIPT.splitlines() if ln.strip().startswith("docker ")]
+    assert commands
+    for ln in commands:
+        assert not FORCING.search(ln), ln
+        assert not re.match(r"docker (start|restart|unpause)\b", ln), ln
+
+
+def test_only_the_guarded_up_can_create_a_profiled_worker():
+    guarded = re.search(
+        r'if \[ -n "\$ACTIVE_AGENT" \]; then\n\s+docker compose --profile agent up -d --no-deps \$ACTIVE_AGENT\n\s*fi',
+        SCRIPT,
+    )
+    assert guarded, "the worker `up` must sit inside an ACTIVE_AGENT guard"
+    # the profile-less `up` cannot see profiled services, so it never starts a stopped worker
+    assert re.search(r"^docker compose up -d --remove-orphans$", SCRIPT, re.M)
+
+
+@needs_bash
+def test_stopped_workers_get_no_start_or_up_during_deploy(tmp_path):
+    proc, log = _run_deploy(tmp_path, "agent-worker")  # claude2 and codex were stopped by the owner
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for stopped in ("agent-worker-claude2", "agent-worker-codex"):
+        touching = [
+            ln
+            for ln in log
+            if stopped in ln and not ln.startswith(AGENT_BUILD) and " ps " not in ln
+        ]
+        assert touching == [], touching
+    assert not [ln for ln in log if FORCING.search(ln)], log
