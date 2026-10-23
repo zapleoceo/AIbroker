@@ -393,6 +393,12 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                   req.get("idle_timeout_s", 300)), cfg, lease, gate)
         if isinstance(terminal, ev.RunFailed) and terminal.error_class == "quota_exhausted":
             return await _wait_for_quota(run, job, terminal, totals, mode, cfg, lease)
+        if (isinstance(terminal, ev.RunFailed) and terminal.error_class == "model_unavailable"
+                and run.model):
+            terminal = ev.RunFailed(
+                error_class="model_unavailable",
+                message=f"{run.model} is not available on this subscription account "
+                        f"({terminal.message[:500]})")
         if isinstance(terminal, ev.RunCompleted):
             paths = changed + [f.path for f in terminal.files]
             files = await asyncio.to_thread(
