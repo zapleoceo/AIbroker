@@ -466,3 +466,14 @@ def test_docs_have_the_codex_section_and_login_handoff():
     for needle in ("CodexCLI", "codex login --device-auth", "agent_codex_auth", "auth_mode",
                    "openai-chatgpt-subscription", "device code", "no `-a` flag"):
         assert needle in docs, needle
+
+
+def test_codex_parser_model_not_supported_on_account_is_model_unavailable():
+    p = CodexParser()
+    _feed(p, [{"type": "turn.failed", "error": {"message": (
+        "The 'gpt-x' model is not supported when using Codex with a ChatGPT account.")}}])
+    f = p.finish(1)
+    assert f.error_class == "model_unavailable" and f.reset_at is None
+    q = CodexParser()
+    _feed(q, [{"type": "error", "message": "You've hit your usage limit"}])
+    assert q.finish(1).error_class == "quota_exhausted"
