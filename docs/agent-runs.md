@@ -566,6 +566,12 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
   worker.** Two containers on one login would refresh the OAuth token concurrently, which is a real
   failure (prod job 547951).
 - `agent-worker-claude2` has no RPC socket volume and no RPC wake: it finds new runs by its 1 s database poll.
+  The image still creates the empty RPC directory, but the container root is read-only, so the socket cannot
+  be bound. `start_worker_rpc` recognises this expected case (only when the socket unlink/`bind` fails with
+  errno `EROFS`), returns `None` and logs one WARNING line `worker RPC not mounted: capability=... socket=...
+  mode=polling only (RPC dir read-only / not mounted)` instead of an ERROR with a traceback. Instant wake
+  stays off; other errors (any other errno, wrong owner/mode) still propagate to the ERROR path in
+  `run_worker`.
 - **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
   `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
   listed order, and among those without an active quota pause picks the one with the fewest
