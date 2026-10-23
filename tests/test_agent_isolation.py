@@ -86,7 +86,10 @@ def _adapters(monkeypatch):
 
 HARDENING = ("read_only: true", "init: true", "cap_drop: [ALL]", "no-new-privileges:true",
              "networks: [agent_db]",
-             'profiles: ["agent"]', 'restart: "no"')
+             'profiles: ["agent"]')
+# `unless-stopped`: a running worker survives a host reboot, an owner `stop` (the rollback) stays stopped.
+# `always` would resurrect a stopped worker on reboot, `"no"` leaves every reboot to a manual start.
+RESTART_POLICY = re.compile(r"^    restart: unless-stopped(\s+#.*)?$", re.M)
 
 
 @pytest.mark.parametrize("name", ["agent-worker", "agent-worker-claude2", "agent-worker-codex"])
@@ -94,6 +97,8 @@ def test_all_workers_share_the_same_hardening(name):
     svc = _service(name)
     for line in HARDENING:
         assert line in svc, (name, line)
+    assert RESTART_POLICY.search(svc), name
+    assert 'restart: "no"' not in svc and "restart: always" not in svc, name
     assert re.search(r"- /var/lib/aibroker/agent-workspaces:size=\d+m", svc) and "- /tmp:size=" in svc
     for banned in ("docker.sock", "privileged", "network_mode", "pid: host", "devices",
                    "ANTHROPIC_", "OPENAI_", "CODEX_API"):
