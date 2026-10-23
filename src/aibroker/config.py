@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     # answer) on that exact id: the catalog advertises supports_tools=true for them to the canary
     # projects. Evidence before listing: Sonnet job 557226 (2026-10-14).
     AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS: str = '["claude-sub/claude-sonnet-5-5"]'
+    # How long new-run selection skips a Claude account after a run on it failed with
+    # `subscription_disabled` (the organization turned off subscription access; agent/accounts.py).
+    AGENT_ACCOUNT_DISABLED_PAUSE_S: float = 3600.0
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0
