@@ -31,6 +31,8 @@ class FileRef(BaseModel):
     sha256: str | None = None       # set for exported images
     width: int | None = None
     height: int | None = None
+    image_call_id: str | None = None  # Codex artifact filename stem, never a filesystem path
+    image_provenance: Literal["artifact_filename"] | None = None
 
 
 class RunStarted(_Event):

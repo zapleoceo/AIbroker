@@ -21,12 +21,19 @@ from aibroker.agent.events import (
     RunCancelled,
     RunWaitingQuota,
 )
+from aibroker.agent.job_files import store_files
 from aibroker.agent.lock import Lease, check_fence
 from aibroker.agent.redact import redact, redact_final_text, redact_obj
 from aibroker.agent.subscription_job import output_problem
+from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunEventRow, AgentRunRow, DeepJobRow, ProjectRow
-from aibroker.services.deep_jobs import _DEDUP_WINDOW_S, payload_hash, replayed_job_id
+from aibroker.services.deep_jobs import (
+    _DEDUP_WINDOW_S,
+    PRIORITY_BATCH,
+    payload_hash,
+    replayed_job_id,
+)
 
 IN_FLIGHT = ("pending", "running")
 
@@ -93,10 +100,12 @@ async def create_run(
     client_job: dict[str, Any] | None = None,
     job_idempotency_key: str | None = None, job_payload_hash: str | None = None,
     trace_id: str | None = None, labels: dict[str, str] | None = None,
+    priority: int = PRIORITY_BATCH,
 ) -> tuple[int, bool]:
     """Enqueue a run -> (run_id, created). created=False: an existing run was returned
     (same idempotency_key, or identical payload still in flight).
 
+    `priority` (0 interactive, 1 batch) is the claim order only: it is not in the request or its hash.
     `job_*`/`trace_id`/`labels` are the /v1/jobs contract (deep_jobs columns): a job-level
     Idempotency-Key is checked against `job_payload_hash` (the CLIENT payload hash, free of the
     broker-picked account) and turns the in-flight payload dedup off for this request."""
@@ -129,7 +138,8 @@ async def create_run(
         async with get_session() as s:
             job = DeepJobRow(project_id=project.id, capability=capability, status="pending",
                              request=request, payload_hash=phash, trace_id=trace_id,
-                             labels=labels, idempotency_key=job_idempotency_key)
+                             labels=labels, idempotency_key=job_idempotency_key,
+                             priority=priority)
             s.add(job)
             await s.flush()
             s.add(AgentRunRow(
@@ -260,7 +270,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
         needs_request = event.type == "model.observed" or event.type in TERMINAL_TYPES
         job = (await s.get(DeepJobRow, run_id,
                            options=[] if needs_request else [defer(DeepJobRow.request)])
-               if needs_request or event.type == "usage" else None)
+               if needs_request or event.type in ("usage", "run.started") else None)
         client_job = ((job.request or {}).get("client_job")
                       if job is not None and needs_request else None)
         response_format = client_job.get("response_format") if client_job else None
@@ -306,11 +316,16 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             if cut:
                 meta["observations_truncated"] = True
             job.result_meta = meta
+        # the FIRST execution start: a gate requeue or a quota wait must not reset queued_ms
+        if (event.type == "run.started" and job is not None
+                and not (job.result_meta or {}).get("first_started_at")):
+            job.result_meta = {**(job.result_meta or {}), "first_started_at": now.isoformat()}
         if event.type == "session.assigned" and run.session_id is None:
             run.session_id = event.session_id
         if event.type in TERMINAL_TYPES:
             run.outcome = OUTCOME_BY_TYPE[event.type]
             if job is not None:
+                first_started_at = (job.result_meta or {}).get("first_started_at")
                 history = (job.result_meta or {}).get("client_tool_history") or []
                 usage_observed = (job.result_meta or {}).get("usage_observed") or {}
                 observations = (job.result_meta or {}).get("model_observations") or []
@@ -331,7 +346,11 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                 job.completed_at = now
                 if event.type == "run.completed":
                     job.result_text = final_text
-                    job.result_meta = {"files": [f.model_dump() for f in event.files],
+                    # bytes go to deep_job_files in this same transaction (atomic with the result)
+                    stored = await store_files(
+                        s, run_id, [f.model_dump() for f in event.files],
+                        enabled=get_settings().AGENT_FILES_IN_TABLE)
+                    job.result_meta = {"files": stored,
                                        "client_tool_history": history,
                                        "usage_observed": usage_observed}
                     if client_job:
@@ -349,12 +368,15 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
                     job.result_meta.update(evidence_meta)
+                    job.result_meta["error_class"] = event.error_class      # -> error_code
                     job.error_message = redact(f"{event.error_class}: {event.message}")
                 else:
                     job.result_meta = {"client_tool_history": history,
                                        "usage_observed": usage_observed}
                     job.result_meta.update(evidence_meta)
                     job.error_message = event.type
+                if first_started_at:
+                    job.result_meta["first_started_at"] = first_started_at
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,
                                "attachments": strip_attachment_data(job.request["attachments"])}
@@ -408,6 +430,9 @@ async def requeue_run(run_id: int, delay_s: float) -> int:
         job.started_at = None
         job.retry_count += 1
         job.run_after = _now() + timedelta(seconds=delay_s)
+        # unlocked read-modify-write, safe by convention: a requeued run has no client tool in
+        # flight (it is requeued before it starts), like the model.observed fold above
+        job.result_meta = {**(job.result_meta or {}), "pending_reason": "capacity_busy"}
         return job.retry_count
 
 
@@ -434,6 +459,9 @@ async def park_for_quota(run_id: int, not_before: datetime, reset_reported: bool
         job.status = "pending"
         job.started_at = None
         job.run_after = not_before
+        # unlocked read-modify-write, safe by convention: the worker parking the run is the only
+        # writer now - submit_result only fires while that worker waits for a tool, not here
+        job.result_meta = {**(job.result_meta or {}), "pending_reason": "waiting_quota"}
         return run.quota_waits
 
 

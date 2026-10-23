@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
@@ -41,6 +43,8 @@ from aibroker.agent.parsers import ClaudeParser, parse_claude_auth_details, pars
 from aibroker.agent.registry import register_adapter
 from aibroker.agent.settings_guard import settings_problem
 from aibroker.agent.tools import disallowed_tools, tool_names, validate_tools
+
+log = logging.getLogger(__name__)
 
 Probe = Callable[[list[str], Mapping[str, str]], Awaitable[str]]
 
@@ -91,8 +95,43 @@ async def _run_probe(argv: list[str], env: Mapping[str, str]) -> str:  # pragma:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT, env=dict(env))
-    out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except TimeoutError:
+        # a probe left running keeps (or abandons) the CLI's OAuth refresh lock
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
     return out.decode(errors="replace")
+
+
+# Claude Code serialises OAuth token refresh with an mkdir lock in its config dir. A CLI killed in
+# the middle of a refresh leaves the empty directory behind and every later run fails with
+# "Failed to refresh OAuth token: another Claude Code process is refreshing it" (prod 2026-10-17:
+# owner since 09:34:42, claude-2 for 13 h). A refresh takes seconds, so a lock older than this,
+# checked when THIS worker starts a run (one claude process per login at a time), is abandoned.
+OAUTH_LOCK = ".oauth_refresh.lock"
+OAUTH_LOCK_STALE_S = 120.0
+
+
+def clear_stale_oauth_lock(config_dir: str | None, now: float | None = None) -> bool:
+    """Remove the CLI's abandoned refresh lock: only an EMPTY directory older than
+    OAUTH_LOCK_STALE_S. Never touches any credential file. True when removed."""
+    if not config_dir:
+        return False
+    lock = os.path.join(config_dir, OAUTH_LOCK)
+    try:
+        if not os.path.isdir(lock) or os.listdir(lock):
+            return False
+        age = (time.time() if now is None else now) - os.stat(lock).st_mtime
+        if age < OAUTH_LOCK_STALE_S:
+            return False
+        os.rmdir(lock)
+    except OSError:
+        return False
+    log.warning("removed abandoned Claude OAuth refresh lock (age %.0fs)", age)
+    return True
 
 
 class SubprocessCLI:
@@ -142,6 +181,7 @@ class SubprocessCLI:
         return self._auth
 
     def export_artifacts(self, run: AgentRunSpec, since: float) -> list[FileRef]:
+        del run, since                   # the base adapter exports nothing (Codex overrides)
         return []
 
     async def list_models(self) -> list[ModelInfo] | None:
@@ -234,9 +274,22 @@ class ClaudeCLI(SubprocessCLI):
     def stdin_payload(self, run: AgentRunSpec) -> str:
         return build_claude_prompt(run)
 
+    async def start(self, run: AgentRunSpec) -> AsyncIterator[StreamEvent]:
+        """Caller-declared tools need the stream-json control channel (claude_tool_turn)."""
+        if run.client_tools:
+            from aibroker.agent.claude_tool_turn import run_tool_turn
+            stream = run_tool_turn(self, run)
+        else:
+            stream = super().start(run)
+        async for item in stream:
+            yield item
+
     def preflight(self, run: AgentRunSpec) -> tuple[str, str] | None:
         problem = settings_problem(self._env.get("CLAUDE_CONFIG_DIR"), run.workspace)
-        return ("settings_refused", problem) if problem else None
+        if problem:
+            return ("settings_refused", problem)
+        clear_stale_oauth_lock(self._env.get("CLAUDE_CONFIG_DIR"))
+        return None
 
     async def billing_mode(self) -> BillingMode:
         """`claude auth status`; anything but a positive claude.ai login is not subscription."""

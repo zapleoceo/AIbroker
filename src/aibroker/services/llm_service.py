@@ -27,7 +27,11 @@ from aibroker.providers.context_limits import (
     estimate_prompt_tokens,
     fits_context,
 )
-from aibroker.providers.cost import estimate_llm_cost, estimate_transcription_cost
+from aibroker.providers.cost import (
+    bills_on_free_key,
+    estimate_llm_cost,
+    estimate_transcription_cost,
+)
 from aibroker.providers.decisions import (
     DECISION_FALLBACK_MODEL,
     JEV_INPUT_USD_PER_TOKEN,
@@ -515,8 +519,9 @@ async def run_chat(
                 key=key, project=project, provider=provider, model=use_model,
                 capability=capability, workflow=workflow, est_tokens=est_tokens,
                 # Worst-case cost (full max_tokens generated) reserved BEFORE the
-                # call; free-tier keys never estimate/reserve.
-                estimated_cost=(0.0 if key.tier == "free"
+                # call; free-tier keys skip reservation except for paid
+                # OpenRouter routes that can debit their prepaid balance.
+                estimated_cost=(0.0 if key.tier == "free" and not bills_on_free_key(use_model)
                                 else estimate_llm_cost(use_model, est_tokens, max_tokens)),
                 call=_chat_call(
                     provider=provider, key=key, model=use_model, messages=messages,
@@ -551,9 +556,9 @@ async def run_chat(
                 if step.tier is not None:
                     # Pinned walk: the free pass already ran before the paid one.
                     return _exhausted_for(res.error)
-                # A project/global COST cap blocks only PAID keys — $0 free keys are
-                # exempt — so a cap-block must NOT abort the walk: downgrade to
-                # free-only for the rest of it and retry THIS provider free-only
+                # A project/global COST cap normally blocks paid keys; free keys
+                # serving paid OpenRouter routes can also be capped. A cap-block
+                # must not abort a mixed-provider walk: retry THIS provider free-only
                 # (gemini is MIXED: 1 paid + 7 free keys; the same loop is bounded by
                 # _max_keys and pick_and_reserve now filters to free).
                 if require_tier != "free":

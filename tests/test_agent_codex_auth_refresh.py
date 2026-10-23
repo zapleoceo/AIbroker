@@ -39,6 +39,15 @@ def _adapters(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_refresh_proof():
+    """The proof lives in process memory: every test starts without one."""
+    from aibroker.agent.codex_refresh_proof import PROOF
+    PROOF.clear()
+    yield
+    PROOF.clear()
+
+
+@pytest.fixture(autouse=True)
 def _take_turns_on_the_db(serialized_db):
     """Concurrent runs share the single-connection test DB: see conftest.serialized_db."""
 
@@ -642,3 +651,66 @@ async def test_a_cancel_after_the_gate_on_a_taken_over_resume_writes_nothing(tmp
     assert await execute_run(rid, _cfg(tmp_path)) is None      # stopped as a zombie
     assert rig.entered == []
     assert await list_events(rid) == []              # no unfenced run.cancelled
+
+
+
+# --- refresh proof: a gated run that worked opens the gate for the proof window ---------------
+
+
+def test_refresh_proof_unit_rules():
+    from aibroker.agent.codex_refresh_proof import RefreshProof
+    t = datetime(2026, 10, 15, tzinfo=UTC)
+    proof = RefreshProof()
+    assert not proof.covers(t, 1800, now=0)                    # nothing proven yet
+    assert proof.record(t, t, now=100) is True
+    assert proof.covers(t, 1800, now=1900)                     # inside the window
+    assert not proof.covers(t, 1800, now=1901)                 # window over: gate again
+    assert not proof.covers(t + timedelta(seconds=1), 1800, now=200)   # Codex refreshed since
+    assert not proof.covers(t, 0, now=100)                     # 0 disables the proof
+    assert not proof.covers(None, 1800, now=100)               # unreadable timestamp
+    young, old = t + timedelta(days=6), t + timedelta(days=7)  # age of the stamp at "now_utc"
+    assert proof.covers(t, 1800, max_age_s=6.5 * 86400, now=200, now_utc=young)
+    assert not proof.covers(t, 1800, max_age_s=6.5 * 86400, now=200, now_utc=old)
+    assert proof.record(t, t + timedelta(hours=1), now=300) is False   # refreshed during the call
+    assert proof.record(None, None, now=300) is False
+    proof.clear()
+    assert not proof.covers(t, 1800, now=100)
+
+
+async def test_after_a_gated_run_proves_the_login_the_next_run_skips_the_gate(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _auth(home, _ago(days=6))                        # due: the gate applies
+    ids = await _runs(2, base=9480)
+    rig = _Rig(monkeypatch, ids, first_event="model")
+    _register(home)
+    rig.gates[ids[0]].set()
+    assert await asyncio.wait_for(execute_run(ids[0], _cfg(tmp_path)), 10) == "completed"
+    assert rig.attempts_by(ids[0]) >= 1 and rig.released == [ids[0]]   # gated, then proved
+    rig.gates[ids[1]].set()
+    assert await asyncio.wait_for(execute_run(ids[1], _cfg(tmp_path)), 10) == "completed"
+    assert rig.attempts_by(ids[1]) == 0              # no lease even tried: the proof covered it
+
+
+@pytest.mark.parametrize("case", ["disabled", "refreshed", "unreadable", "too_old"])
+async def test_no_proof_is_used_when_disabled_refreshed_unreadable_or_too_old(
+        tmp_path, monkeypatch, case):
+    home = tmp_path / "home"
+    _auth(home, _ago(days=7) if case == "too_old" else _ago(days=6))
+    ids = await _runs(2, base={"disabled": 9490, "refreshed": 9493, "unreadable": 9496,
+                               "too_old": 9499}[case])
+    rig = _Rig(monkeypatch, ids, first_event="model")
+    _register(home)
+    cfg = _cfg(tmp_path, codex_refresh_proof_s=0.0 if case == "disabled" else 1800.0)
+    t1 = asyncio.create_task(execute_run(ids[0], cfg))
+    await _until(lambda: rig.entered == [ids[0]])         # run 1 holds the gate inside its CLI
+    if case == "refreshed":
+        _auth(home, _ago(seconds=1))                     # Codex refreshed during the call...
+    elif case == "unreadable":
+        _auth(home, raw="{broken")                       # ...or the file became unreadable
+    rig.gates[ids[0]].set()
+    assert await asyncio.wait_for(t1, 10) == "completed"
+    if case in ("refreshed", "unreadable"):
+        _auth(home, _ago(days=6))                        # due again by the file, but unproven
+    rig.gates[ids[1]].set()
+    assert await asyncio.wait_for(execute_run(ids[1], cfg), 10) == "completed"
+    assert rig.attempts_by(ids[1]) >= 1                  # gated again

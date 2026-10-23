@@ -2,8 +2,11 @@
 
 Status: implemented behind `AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED=false` and
 an empty `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` list. The default
-catalog reports `supports_tools: false`. Claude subscription jobs still reject
-tools. Native API-provider tools retain their existing contract.
+catalog reports `supports_tools: false`. Claude subscription jobs have the same
+loop behind `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED=false` and an empty
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` (see
+[Claude transport](#claude-transport)). Native API-provider tools retain their
+existing contract.
 
 ## Verified transport capability
 
@@ -55,9 +58,35 @@ or same `callId`), fails the run closed; a repeated `thread/start` reply is igno
    the worker, even when the worker's poll lands after the deadline: `take_result`
    returns a ready result past the deadline.
    The worker sends the bounded result as `DynamicToolCallResponse` and
-   continues the same turn. Repeating the identical result is idempotent.
+   continues the same turn. Repeating the identical result is idempotent while the
+   job remains running; once terminal, `GET` reports its outcome and result POSTs
+   return `409`.
    After the final model answer, the existing `GET /v1/jobs/{id}` returns
    `status: done` and `finish_reason: stop`.
+5. Terminal output tool (optional, backward compatible). A job may declare
+   `terminal_tools` (names of its own declared tools, e.g. PydanticAI's
+   `final_result`; subscription jobs only; part of the payload hash only when set).
+   A successful result posted with `"terminal": true` is accepted only for the pending
+   call of such a tool (`submit_result`; a failed result or any other mismatch gets `409`
+   and the call stays waiting).
+   The flag is part of the result digest, so an identical replay is idempotent and the
+   same body without the flag conflicts. The worker (`take_result` returns
+   `(success, content, terminal)`) acknowledges the call to the model as usual, then
+   stops the turn instead of letting the model write another answer: Codex
+   `turn/interrupt {threadId, turnId}`, its successful response, and
+   `turn/completed` with status
+   `interrupted` (or `completed`); Claude a successful control `interrupt`
+   response and a turn `result` line. Claude may mark an interrupted result
+   `is_error: true`; that counts as a stop only when `terminal_reason` is
+   `aborted_streaming` or `aborted_tools`, with no result text, errors, or API error
+   status. Other Claude failures, including quota or execution failures, fail the
+   job. Only a confirmed
+   successful stop finishes the job: `done`, text `""`,
+   `finish_reason: stop`, no `tool_calls`, usage as reported up to the stop (absent
+   fields stay `null`, never 0), `cost_usd: null`. No confirmation within
+   `TERMINAL_STOP_S` (30 s), or another tool call after the terminal result, fails the
+   run (`client_tool_protocol`, `terminal_stop_unconfirmed`) instead of reporting done.
+   `client_tool_history` marks the call `terminal: true`.
 
 The pending call and result use `deep_jobs.result_meta` under row locks. The
 worker checks its lease fence before publishing or consuming a callback and
@@ -128,15 +157,79 @@ canary settings and put only that exact route in
 `AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS` to advertise it. A failed
 canary leaves the verified list empty. No new
 scope, external port, credential, API-paid fallback, or wider Linux sandbox is
-part of this design. Claude subscription tools require a separate adapter:
-the current Claude headless CLI does not expose this client-response pause;
-the Claude Agent SDK has in-process MCP tool handlers, which would need the
-same durable Broker callback contract and separate review.
+part of this design. Claude uses the same durable callback contract over its
+own transport, below.
 
-`subscription_tool_model_canary` evaluates the temporary exact project/model
-gate. `ModelRerouted` records an explicit App Server reroute notification in
+One rule decides tools on a subscription route (2026-10-21, `providers/subscriptions.py`):
+`subscription_tools_accepted(model, project_id)` - the provider switch is on and the id is in
+`*_TOOLS_VERIFIED_MODELS`, or it is a canary (`subscription_tool_model_canary`: the id is in
+`*_TOOLS_CANARY_MODELS` and the project is in `canary_project_ids()`, the comma list
+`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`, ASCII digits only, at most 9 per id;
+duplicates, negatives, Unicode digits or other junk mean none). The submit
+route, the worker re-check and the catalog's `job_request.tools` all call it.
+`subscription_tools_advertised(model, project_id)` - the catalog's `supports_tools` - additionally
+needs proof: the id is verified, or attested (`subscription_tool_model_attested`: listed in
+`AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS` after a recorded live round-trip on that exact id). So
+`job_request.tools: true` with `supports_tools: false` means "accepted for this project, not yet
+proven live". Default attestation: `claude-sub/claude-sonnet-5-5` (job 557226, 2026-10-14). The POST
+job canary gate is unchanged. `ModelRerouted` records an explicit App Server reroute notification in
 the run event stream before the tool turn fails; no notification is not proof
 of the serving model.
+
+## Claude transport
+
+Headless `claude -p` has no client-response pause of its own, so a Claude
+client-tool run (`ClaudeCLI.start` -> `claude_tool_turn.run_tool_turn`) uses the
+CLI's stream-json control channel, the one the Claude Agent SDK uses for its
+in-process MCP servers (wire format taken from `claude-agent-sdk`, MIT):
+
+- `build_tool_argv` adds `--input-format stream-json` and
+  `--mcp-config={"mcpServers":{"broker":{"type":"sdk","name":"broker"}}}` to the
+  usual flags (`--strict-mcp-config`, `--setting-sources=user`,
+  `--disallowedTools=`). An `sdk` server is not a process, file or socket: the CLI
+  sends its MCP traffic to the worker as `control_request` / `mcp_message` lines
+  and waits for our `control_response`. Built-in tools stay off (`--tools ""`;
+  `Read(inputs/**)` only for attachments) and the allow-list names only
+  `mcp__broker__<tool>`. Tool names must match `[A-Za-z0-9_-]{1,51}` (the API's
+  64-character limit minus the prefix).
+- The worker writes a control `initialize`, then the prompt as a stream-json user
+  message, and keeps stdin open. It answers MCP `initialize`, `tools/list` (the
+  declared tools, `inputSchema` = the caller's `parameters`), `ping` and
+  notifications; any other method gets JSON-RPC `-32601`.
+- `tools/call` goes through the same `publish_call` / `take_result` as Codex, with
+  a Broker call id `call_claude_<run>_<n>`. The caller's result returns as MCP
+  `content` text with `isError` = not `success`. A schema-breaking call is
+  answered with `isError: true` and the rule (never a value), within
+  `AGENT_TOOL_ARG_RETRIES`; any other conflict fails the run closed.
+- Any other control request (a permission prompt, another MCP server, a cancel
+  of a request we have not answered) fails the run closed (`client_tool_protocol`);
+  a cancel of an already answered request is ignored. A line that is not valid JSON
+  is skipped, as on the plain path. The `apiKeySource` billing check
+  of the stream parser still applies.
+- `tool_choice` `required` (or a named function) with no call by the end of a
+  turn sends up to `AGENT_TOOL_REQUIRED_REMINDERS` reminder user messages on the
+  same session; usage is summed over the turns (per-turn `result.usage` is
+  assumed - verified on the first live reminder run) and is reported on failed
+  and cancelled runs too.
+- `MCP_TOOL_TIMEOUT` is set for the CLI to `AGENT_TOOL_WAIT_S` + 60 s, so the CLI
+  does not abandon a call the caller may still answer.
+
+Gates mirror Codex: `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED`, the exact-id lists
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` and
+`AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS` (only `claude-sub/` ids that are
+themselves account-verified; anything else empties the list), and the shared
+project canary `AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS` (a comma list; prod: 12).
+`subscription_tools_enabled(provider)` is the per-provider switch inside
+`subscription_tools_accepted`, which the catalog, the submit route and the worker share. A model is listed in the verified list
+only after a live round-trip (call -> caller result -> final answer) on that
+exact id.
+
+
+Interrupted-turn check (`interrupt_was_clean`, 2026-10-17): after a terminal result the CLI's
+`result` carries `terminal_reason` `aborted_tools`/`aborted_streaming` and, in Claude Code 2.1.x,
+an `errors` entry starting with `[ede_diagnostic]` that only describes the interrupt. Such
+entries are not errors; any other entry, an `api_error_status` or answer text still fails the
+run. The stop is logged with field names and sizes only (`_result_shape`).
 
 ## Input image canary
 

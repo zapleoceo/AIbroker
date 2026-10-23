@@ -1,7 +1,7 @@
 # Pricing: how every call is costed
 
 All prices end up in `cost_usd` on `usage_log`, which feeds the per-key, per-project
-and global daily caps. Free-tier keys are zeroed afterwards by `_billed_cost`; the
+and global daily caps. Free-tier keys are zeroed afterwards by `_billed_cost` (except paid OpenRouter override routes, see below); the
 numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 (helpers + override tables) and `providers/cost.py` (`estimate_llm_cost`,
 `whisper_cost`, `register_price_overrides`; the override table itself is the registry, `providers/provider_specs/`).
@@ -10,7 +10,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 
 | Path | Price source |
 | --- | --- |
-| OpenRouter chat | `usage.cost` from the response when present (the real bill), else the LiteLLM estimate. `_prefer_reported_cost`. |
+| OpenRouter chat | `usage.cost` from the response when present (the real bill), else the LiteLLM estimate. `_prefer_reported_cost` (a reported 0 on a paid `override` route is replaced by the estimate). |
 | OpenRouter decisions (`/api/alpha/decisions`) | `usage.cost` when OpenRouter reports it (even `0`); otherwise the registry/LiteLLM estimate (`estimate_llm_cost`), never a silent `$0`. Same helper `reported_cost`. |
 | All other chat/vision/structured | `litellm.cost_per_token` from LiteLLM's map (pinned `litellm==1.103.2`) x `peak_multiplier` (DeepSeek weekday peak). |
 | Embeddings | Same map, input tokens only. |
@@ -56,6 +56,15 @@ The usage write after a successful paid call runs as its own tracked task behind
 `cloudflare/@cf/openai/gpt-oss-120b` ($0.35 in / $0.75 out per M) comes from LiteLLM's
 map and matches developers.cloudflare.com/workers-ai/platform/pricing (2026-10-03).
 Anthropic `claude-sonnet-5` is permanently $2/$10 per M.
+
+## OpenRouter override routes (2026-10-15)
+
+For OpenRouter models registered with `pricing="override"` (`providers/provider_specs/openrouter.py`), the registry's `input_usd_per_mtok` / `output_usd_per_mtok` is the price floor:
+
+* No LiteLLM price (or a LiteLLM exception): cost = registry rate x tokens x `peak_multiplier`. The cost-cap reservation is not zeroed for a registry-priced route.
+* LiteLLM price present: cost = max(LiteLLM, registry), then x `peak_multiplier`.
+* Reported `usage.cost` of 0 with a positive estimate: the estimate is used.
+* Free-tier keys: not zeroed by `_billed_cost` when the rate is positive. Zero-rate `:free` overrides still bill $0.
 
 ## Adding a model
 

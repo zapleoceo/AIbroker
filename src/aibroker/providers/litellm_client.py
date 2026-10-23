@@ -27,6 +27,7 @@ from aibroker.providers.prompt_cache import (
     apply_cache_key,
     apply_prompt_cache,
 )
+from aibroker.providers.registry import model_spec
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +171,12 @@ def _prefer_reported_cost(model: str, usage: Any, estimated: float) -> float:
     if model.split("/", 1)[0] != "openrouter":
         return estimated
     reported = reported_cost(usage)
+    spec = model_spec(model)
+    if (reported == 0 and estimated > 0 and spec is not None
+            and spec.provider == "openrouter" and spec.pricing == "override"):
+        # A zero may be a placeholder for an absent OpenRouter charge. For a
+        # declared paid route, use the registry price so its cap cannot vanish.
+        return estimated
     return estimated if reported is None else reported
 
 

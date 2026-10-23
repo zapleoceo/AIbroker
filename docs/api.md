@@ -72,6 +72,68 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 | `POST` | `/logout` | Clears session cookie, redirects to `/login` |
 | `GET` | `/logout` | Does NOT log out (2026-10-02, so a stray `<img src=/logout>` cannot sign the owner out) — redirects to `/dashboard` |
 | `GET` | `/dashboard/assets.css`, `/dashboard/assets.js` | Dashboard CSS/JS, public, versioned by content hash (`?v=`), cached for a year |
+| `GET` | `/ask2many` | Compare page: one question to many models. Without a login it shows the Telegram login widget; with one it sets the `aib_compare` cookie. See below |
+| `GET` | `/ask2many/auth/tg` | Telegram Login Widget callback (`tg_callback`): a valid signature from ANY Telegram user sets the `aib_ask` cookie (30 days, path `/ask2many`) and redirects to `/ask2many`; a bad signature is `401` with the login page |
+| `POST` | `/ask2many/logout` | Drops the `aib_ask` cookie |
+| `GET` | `/ask2many/api/models` | Models offered on the page (`page_models`: top 20, one per name): `{data:[{id, name, provider, intelligence_index, subscription}], attribution, source, captured_on, limits}` |
+| `POST` | `/ask2many/api/requests` | Body `{prompt, models}`; `202` with `{id}`. `429` while this browser or IP has an unfinished question; `422` for an empty prompt or unknown models; `503` if the project is not provisioned |
+| `GET` | `/ask2many/api/requests/{id}` | Poll: `{id, prompt, created_at, done, results:[…], usage:{…}}`, one result per model. `404` for an unknown id |
+| `GET` | `/ask2many/api/history?q=&page=` | Past requests, newest first, 20 per page; `q` is a case-insensitive substring of the prompt. Items have the poll shape, with `usage` |
+
+### `/ask2many` — compare page (2026-10-14)
+
+Codex runs from this page have no command tools (2026-10-16): the page labels its jobs
+`page=compare`, the worker sets `AgentRunSpec.no_shell`, and `build_codex_argv` adds
+`--disable` for every `NO_SHELL_FEATURES` entry (shell, unified exec, code mode, browser, computer
+use, apps). Reason: on 2026-10-16 anonymous prompts made Codex run `id`, `uname`, `ls` and `which`
+in the worker sandbox (no secrets or network were reachable).
+
+Login (2026-10-16): any Telegram user, through the same bot and signature check
+(`verify_telegram_widget`) as the dashboard. The session is its own HMAC cookie `aib_ask`
+(`ask_user` / `require_ask_user`); every `/ask2many/api/*` call without it is `401`. It grants
+nothing on the dashboard, which still admits only `OWNER_TELEGRAM_ID`. The HTML shell is static; everything dynamic is rendered with `textContent`, so
+prompts and answers from strangers cannot inject markup. One prompt (up to 4000 characters;
+a whitespace-only prompt is `422`) goes to 1-12 ticked chat models at once. Each model call is a
+Broker job submitted with the same logic as `POST /v1/jobs`, in process, as the dedicated project
+`model-compare`. Its daily and monthly money caps are 0. The page does no price checks of its own:
+every ticked model is dispatched and Broker's cost guard decides by the project caps set in the
+dashboard; a refusal ends as `refused` with the reason shown. The project key is generated
+once and discarded at provisioning (see [deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)),
+so it is never printed, stored in plaintext or sent to the browser.
+
+**Output limit.** API models are sent with `max_tokens` = 16384 (`JOB_MAX_TOKENS_MAX`). The Broker default of 1024 was spent on reasoning, which gave empty or cut-off answers. Subscription models are sent without `max_tokens` (see below).
+
+**Subscription models.** Claude and Codex subscription models (`claude-sub/*`, `codex-sub/*`) are offered too
+when the Broker catalog does not mark them `available: false`. `codex-sub` is enabled by the owner's decision of
+15.10: the agent runs in the separate container `aibroker-agent-worker-codex`, and the shell of `codex exec` stays
+(sandbox `workspace-write`, approval never); the owner accepted that. Subscription rows carry `subscription: true` and the page
+shows them with a thin «подписка» label. They are sent like any client sends them: the `POST /v1/jobs`
+logic with capability `chat:smart` and the pinned model id, without `max_tokens` (the subscription contract rejects any value other than the default), so Broker runs them as `agent:claude` / `agent:codex`.
+Text only, no tools. The lane is chosen by `subscription_lane`. Answer, error and timeout show like any other model.
+They need `llm:agent` on the project and the deploy-time allowlist and policy
+([deploy-ops.md](deploy-ops.md#compare-page-migration-021-and-project-provisioning-2026-10-14)). Until those are set,
+a subscription model ends `refused` with `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)`
+or `отказ: политика проекта (<code>)`; other models are unaffected.
+
+The page offers the top 20 models by `intelligence_index` (`page_models`), one per model name (a subscription route first, then a free-provider route), unscored last, ties by name.
+On desktop (>=1024px) the page has two columns: the question, the selected-model chips with a counter and the Ask button on the left, and a scrolling, filterable model table (model, score, «подписка» tag; click a row to select or deselect; Enter/Space on a row; Ctrl+Enter submits) on the right, with answers and history below; it is one column on phones, with a dark theme that follows `prefers-color-scheme` and no external assets. The score column has an ⓘ tooltip and a caption: Artificial Analysis Intelligence Index, a combined intelligence score across benchmarks, higher is smarter. The score is shown only in that table, not on the chips or the answer cards. Each answer card shows its input and output tokens and the request cost («по подписке» for subscription models).
+
+**Guard.** One unfinished question at a time, per browser (`aib_compare`, httpOnly, 365 days)
+and per client IP, enforced on the server. A request is unfinished until every selected model
+is `done`, `truncated`, `error` or `refused`; a second submit meanwhile gets `429` with a Russian message.
+Safety net: after 300 s a request counts as finished, and its still-pending results become
+`error` with `таймаут: модель не ответила за 5 минут`. A background tracker saves answers even
+if the page is closed.
+
+Results carry `status` (`pending`, `done`, `truncated`, `error`, `refused`), `answer` or `error`,
+`model_served` (`"unknown"` when not known), `latency_ms` and the model's
+`intelligence_index` as it was at submit time. `truncated` is a job that finished with `finish_reason` `length`: it is terminal and counts as finished for the guard. The page shows it as «обрезано: модель упёрлась в лимит длины ответа» with the partial text, or «пусто — всё ушло на рассуждение» when the text is empty. It is not shown as done.
+
+Each result also has `tokens_in`, `tokens_out`, `cost_usd` and `finish_reason`, all taken from `result_meta` of the job. `null` means Broker reported nothing and the page shows «неизвестно»; it is never 0, and a real `0.0` stays `0`. `subscription` is `true` for `claude-sub/*` and `codex-sub/*`: the page shows «по подписке» instead of a price, and no API price is invented.
+
+The request carries `usage`: `{tokens_in, tokens_out, cost_usd, tokens_unknown, cost_unknown, subscription}`. It is computed by `usage_totals` over the finished (`done` and `truncated`) models that reported values. Subscription models are never priced; they are counted in `subscription`. `tokens_unknown` and `cost_unknown` count the finished models that reported nothing. The page shows the sums as «Итого: …», with a note for the unknown ones.
+
+Every request and its results are stored in `compare_requests` and `compare_results` (migrations 021 and 022, see [domain-model.md](domain-model.md)). No retention job covers them yet.
 
 ### `/v1/health` — content negotiation (2026-07-11)
 
@@ -109,7 +171,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`\|`cancelled`; also `trace_id`, `labels`) |
 | `POST` | `/v1/jobs/{job_id}/cancel` | — | `{job_id, state, status}` — `state` is `cancelled`, `cancel_requested` or `already_terminal`; `404` for another project's job. See "Cancel" below |
 | `POST` | `/v1/jobs/cancel` | `{"trace_id": …}` **or** `{"labels": {…}}` | `{cancelled: [ids], cancel_requested: [ids], already_terminal: n}` — bulk cancel of this project's in-flight jobs |
-| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content}` | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its deadline (`AGENT_TOOL_WAIT_S`: 90 s in production, code default 300 s) without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
+| `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content, terminal?}` (`terminal: true` requires `success: true` and a tool the job named in `terminal_tools`: the job then ends `done` with empty text instead of another model turn) | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its deadline (`AGENT_TOOL_WAIT_S`: 90 s in production, code default 300 s) without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
 | `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
@@ -117,7 +179,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
-| `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids (see [subscription-models.md](subscription-models.md)) |
+| `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
@@ -366,6 +428,18 @@ submits can still both insert). Client contract: resubmitting is harmless —
 you'll get back the in-flight `job_id`; just poll it. A request that carries an
 `Idempotency-Key` (below) opts OUT of this dedup.
 
+#### Priority (migration 023)
+
+`POST /v1/jobs` accepts an optional `priority`: `"interactive"` or `"batch"` (anything else is `422`).
+Interactive jobs are claimed before batch jobs, oldest first within a priority, by both the plain job
+dispatcher and the subscription (`codex-sub/…`, `claude-sub/…`) agent workers. Absent means `batch`, except when
+`labels.workflow` is `"orchestra:mascot-chat"` (interactive); an explicit `priority` always wins. Agent
+workers also keep `AGENT_INTERACTIVE_RESERVE` slots (default 1) free of batch work, so a chat does not queue
+behind a batch backlog (priority is strict, with no aging: under a steady interactive load batch jobs can wait); a run already in flight is never preempted. The job's priority is echoed in **every**
+poll as `priority` (`"interactive"`/`"batch"`). Like `trace_id` and `labels` it is **never part of the payload
+hash**: an Idempotency-Key replay with another priority is still a replay (the stored job keeps its
+priority), and the legacy in-flight dedup (no key) returns the existing job whatever priority the duplicate asked for.
+
 #### Trace id and labels (migration 020)
 
 `POST /v1/jobs` accepts two optional correlation fields; both are stored on the job, written to the
@@ -396,7 +470,7 @@ safe to retry. The key is unique **per project** (a partial unique index on
 | No key | the in-flight dedup above, unchanged |
 
 The canonical payload is the stored request: `model`, capability, `messages`, `max_tokens`, `temperature`,
-`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`,
+`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`, `priority`,
 headers and timestamps are excluded, so re-sending with another trace id is still a replay (the stored job
 keeps its original trace). Two simultaneous submits with one key race on the unique index; the loser gets
 the winner's job (`200` replay) or the `409`. For subscription pins (`claude-sub/…`, `codex-sub/…`) the
@@ -439,6 +513,36 @@ all the given pairs); anything else is `422`. Response: `{"cancelled": [ids], "c
 Other projects' jobs are never touched, whatever their trace or labels. Agent jobs are skipped when the key
 lacks `llm:agent`. No new scope or key is needed — the ordinary `X-Project-Key`.
 
+**Status details on every poll (2026-10-21)** (`agent/job_status.py`: `error_code`, `job_timing`,
+`pending_detail`; all derived from the job row, no extra query):
+
+- `queued_ms`: submit -> first execution start. An agent run keeps its FIRST start
+  (`result_meta.first_started_at`), so a Codex auth-gate requeue or a quota wait does not reset it; an
+  API job uses the row's `started_at`. While nothing has started it grows with the clock.
+- `run_ms`: first execution start -> end (or now while running). It includes any later quota wait or
+  client-tool wait.
+- `pending_reason` (status `pending` only): `queued`, `running`, `tool_wait` (a client tool call is
+  waiting for your `POST /v1/jobs/{id}/tool-results`), `waiting_quota` (the subscription hit its
+  usage limit; `retry_at` = the reported reset), `capacity_busy` (requeued, e.g. the Codex start-up auth
+  gate; `retry_at` = when it is runnable again).
+  `retry_at` is UTC with an explicit offset (`...+00:00`).
+- `error_code` (status `error` or `cancelled`): a stable, machine-readable reason next to the free-text
+  `error`, which is unchanged. Agent runs store their `error_class` (`result_meta.error_class`); older
+  rows fall back to the `<class>: ` prefix of `error`.
+
+| error_code | meaning |
+|---|---|
+| `subscription_disabled` | the provider account's organisation disabled subscription access (owner action needed) |
+| `auth_refresh_failed` | the CLI could not refresh its login token (transient; retry) |
+| `quota_exhausted` | usage limit hit and the reset is past the job's deadline |
+| `tool_call_expired` | no tool result arrived within `AGENT_TOOL_WAIT_S` |
+| `tool_not_called` | `tool_choice` required a tool, the model answered without one (after the reminders) |
+| `worker_restarted` | the worker died mid-run (found stale after wall timeout + grace) |
+| `capacity_busy` | the run could not start (session / auth-gate lease) after its requeue cap |
+| `cancelled` | cancelled by the client |
+| `internal_error` | an unclassified failure |
+| any other | the run's own error class as is, e.g. `cli_error`, `route_disabled`, `model_unavailable`, `invalid_json`, `client_tool_protocol` |
+
 `poll_after_s` is the broker's suggested wait before the next poll: 2 only in
 the submit response, then 5 s for a job under 30 s old, 10 s under 2 min, 20 s
 after that (`next_poll_after_s`). A job belongs to exactly one project — polling someone else's
@@ -453,6 +557,59 @@ budget. `chat:deep` is **async-only** (nemotron runs minutes);
 `POST /v1/chat` returns `410 Gone` for every capability. `POST /v1/deep` +
 `GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
 endpoints.
+
+### List jobs by label — `GET /v1/jobs?label.<key>=<value>`
+
+Read-only list of **your project's** jobs carrying one label pair, for a client that tags every job
+(e.g. `labels.exam_run_id`) and wants to see what the broker holds under that tag. Same key, scope and
+project isolation as the poll `GET /v1/jobs/{job_id}`; an `agent:*` job is listed only when a poll of it
+would be allowed (`llm:agent` scope, allowlist, policy) - otherwise it is silently absent.
+
+| Query | Meaning |
+|---|---|
+| `label.<key>=<value>` | **required, exactly one pair**; key and value follow the label rules (1-128 chars of `[A-Za-z0-9._:-]`). Zero or two pairs, a bad key/value, or an unknown query parameter is `422` |
+| `trace_id` | optional exact match |
+| `status` | optional: `pending` \| `running` \| `done` \| `error` \| `cancelled` |
+| `limit` | 1..200, default 100 |
+| `cursor` | opaque token from `next_cursor`; a malformed or tampered one is `422` |
+
+Items hold metadata only: `job_id`, `status`, `capability`, `model`, `requested_model`, `created_at`, `started_at`, `completed_at`,
+`labels`, `trace_id`, `idempotency_key`, `retry_count`, `cancel_requested`. Never the request, prompts,
+result text, error text or secrets - poll the job for those. `model` is the model that answered (null
+until done), `requested_model` the pin, if any. Ordered by `job_id` ascending.
+
+The only accepted syntax is `label.<key>=<value>` (e.g. `GET /v1/jobs?label.exam_run_id=r42`); there is
+no `labels[...]` form. **Cost:** the match is a JSONB `@>` on `deep_jobs.labels` (`_has_label` coerces the column to JSONB; its generic JSON type would compile to LIKE), served by the GIN index
+`ix_deep_jobs_labels_gin (labels jsonb_path_ops)`, and the keyset walk by `ix_deep_jobs_project_id
+(project_id, id)` (both migration 024). Until 024 is applied the query still works but filters `labels`
+row by row within the project, so its cost grows with the project's retained jobs, not with the match
+count. `no_nonterminal_in_filter` is computed once, on the first page, and carried in the cursor, so later
+pages do not rescan; for `agent:*` rows that first-page check reads only `model` and `account_id` of the
+request, never the whole document.
+
+Response: `{jobs, next_cursor, pagination_complete, no_nonterminal_in_filter, high_watermark,
+retention_days, as_of}`.
+
+- `pagination_complete` - there is no further page within the watermark (`next_cursor` is `null`).
+- `no_nonterminal_in_filter` - computed once, on the first page (then carried in the cursor), by a separate query over the **whole** label/`trace_id`-filtered
+  set up to the watermark (the `status` filter is ignored, so `status=done` cannot claim that nothing is
+  in flight): no job of that set is `pending` or `running`. It is independent of paging: the last page can
+  hold only `done` jobs while an earlier page had a `running` one.
+- `high_watermark` - the highest `job_id` of your project when the first page was served; the cursor
+  carries it, and every later page is bounded by `id <= high_watermark`.
+- `retention_days` - `JOB_RETENTION_DAYS`; finished jobs older than this are purged.
+- `as_of` - server time of this page.
+
+**What a listing does not prove.**
+
+- The snapshot is **not atomic across pages**: the *set* of ids is fixed by the watermark, but a listed
+  job's `status` can change between pages.
+- A job created after the first page (`job_id` above `high_watermark`) is not in this walk; start a new
+  walk (no cursor) to see it.
+- Finished jobs older than `retention_days` are deleted, so the list cannot prove that a job never
+  existed. A client must reconcile against the job ids it submitted itself (poll the missing ones).
+- A row id can become visible slightly out of order under concurrent inserts, so a job committed in the
+  instant of the first page may fall on either side of the watermark.
 
 ### `/v1/embed?provider=<p>` (default `voyage`)
 
@@ -708,7 +865,7 @@ new registry entry shows up here with no other change.
 ```json
 {"object": "list", "data": [
   {"id": "cerebras/gpt-oss-120b", "object": "model", "owned_by": "cerebras",
-   "name": "gpt-oss-120b",
+   "name": "gpt-oss-120b", "intelligence_index": 11.6,
    "capabilities": ["chat:code", "chat:fast", "chat:smart", "structured"],
    "supports_tools": false, "modalities": ["text"],
    "job_request": {"max_tokens": {"default": 1024, "accepted": {"minimum": 1,
@@ -731,6 +888,14 @@ the subscription fee is outside this price. An unknown price has no invented zer
 Entries are ordered the way a bare name resolves (free providers by rank,
 paid last). Free-tier keys bill $0 whatever the nominal price shows.
 
+`intelligence_index` is the Artificial Analysis Intelligence Index (v4.3) as a float, or `null`.
+It is looked up by the model's exact canonical name (`providers.catalog.canonical_name`: last
+path segment, lower-cased, version included) in the static table in `providers/model_scores.py`.
+That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`.
+There is no fuzzy or nearest-version matching: a model missing from the table is `null`, not a
+guess. Wherever a score is shown, the attribution `Benchmarks: Artificial Analysis` goes with it;
+the `/ask2many` page shows it.
+
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
 `["text"]` for chat and embedding. It is `null` when the lane does not define
@@ -738,7 +903,11 @@ one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
 when the enabled model's support is unknown. Subscription routes report
-`supports_tools: false`; no client tool-call handoff is verified. Only exact
+`supports_tools: false` unless the caller's project is in the Claude tools canary
+(project 12) and the exact pin has a live tool-callback attestation (today only
+`claude-sub/claude-sonnet-5-5`); the rows of `GET /v1/models` are built per caller
+project (`catalog.listing(ctx.project.id)`). Codex subscription rows keep the global
+verified list. Only exact
 Codex IDs separately verified for input vision list image input on the
 `vision` lane, limited to embedded data URLs. The input-vision verified list
 defaults to empty. Any `image_url` block on `/v1/jobs` or `/v1/deep` requires `llm:vision`, not only
@@ -750,6 +919,24 @@ subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
 routes, `null` otherwise.
+
+`POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
+without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code
+mode, browser, computer use, apps; image generation stays on), so the model cannot write a file
+through a shell. `400 unsupported_for_subscription_model: no_shell` on a `claude-sub` model, on a
+model that is not a subscription route, and (`... no_shell with tools`) together with `tools`. It
+enters the Idempotency-Key payload hash only when `true`, so the hashes of requests without it do
+not change. It relies on the `NO_SHELL_FEATURES` list of `codex-cli` 0.162.1 (the `--disable`
+feature names); recheck that list after every Codex CLI upgrade. Use it for image jobs: a model that skips the built-in image generation and draws
+with a script otherwise leaves a file it wrote itself.
+
+`files[]` of a finished subscription job holds: files the run reported as changed (inside the
+workspace only: an absolute path inside the workspace is listed relative, one outside it is not
+listed at all), the PNGs Codex generated, and every PNG/JPEG/WebP the run wrote under `out/`
+itself (`collect_out_images`: sha256, width, height and content like a generated image, never twice
+for the same bytes or path). A rejected file is listed with `skipped` and no content:
+`unsafe_path` (a symlink, a hardlinked or non-regular file), `empty`, `too_large`, `not_an_image`,
+`total_budget` (all images of one job together are capped by `AGENT_IMAGES_TOTAL_BYTES`, 24 MiB).
 The catalog builds the fields with `input_modalities()`, `output_modalities()` and `supports_tools()`. The image flag comes from `subscription_image_output_verified()`, which fails closed (`False`) on an invalid setting without touching the catalog or routing; it lists only verified `codex-sub` models.
 `job_request` describes the Broker's validation of `POST /v1/jobs` for each
 model. It is `null` for routes served by other endpoints, such as embedding or
@@ -763,6 +950,15 @@ The catalog builds this field through `job_request_contract`. Subscription
 submission uses `subscription_request_problem` and
 `subscription_prompt_problem` to enforce the stated acceptance rules before
 enqueue.
+For subscription pins, `supports_tools` reports an exact-model callback
+attestation. `job_request.tools` and `job_request.tool_history` report whether
+Broker currently accepts those fields for this caller: the provider tools
+switch must be on and the pin must be verified or enabled for the existing
+project-12 tools route. Thus an authorized project-12 pin can show
+`supports_tools: false` and `job_request.tools: true` until a real job proves
+its callback. Acceptance is not a promise of upstream success; failed jobs
+return their terminal error through `GET /v1/jobs/{job_id}`. The POST route
+still enforces its project, account, model and tools policy independently.
 
 ### Cache affinity (2026-10-03)
 

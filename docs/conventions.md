@@ -26,8 +26,10 @@ src/aibroker/
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
     job_control.py     cancel one job / bulk cancel by trace_id or labels
+    job_list.py        read-only list of a project's jobs by one label (keyset + watermark)
     job_meta.py        trace_id / labels / Idempotency-Key validation
     response_cache.py  exact-match LRU+TTL for translate/prefilter
+    compare.py         /ask2many fan-out, one-question guard, history (project model-compare)
   providers/
     registry.py        ProviderSpec/ModelSpec + views (leaf)
     specs.py           ordered registration of provider definitions
@@ -40,10 +42,12 @@ src/aibroker/
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
     health_probes.py   Cheapest call per provider
+    model_scores.py    Artificial Analysis Intelligence Index: static table, exact name match only
   routes/
     health.py          / + /healthz + /v1/health
     proxy.py           /v1/jobs + /v1/embed
-    jobs_control.py    /v1/jobs/{id}/cancel + /v1/jobs/cancel
+    jobs_control.py    GET /v1/jobs?label.k=v + /v1/jobs/{id}/cancel + /v1/jobs/cancel
+    compare.py         /ask2many public compare page + /ask2many/api/* (no login)
     admin.py           /admin/* (X-Admin-Key)
     dashboard*.py      /login + /dashboard + /dashboard/* (split: dashboard.py + dashboard_assets/data/render/scopes.py)
   telemetry/
@@ -51,6 +55,7 @@ src/aibroker/
     notifier.py        Telegram alert + throttle
   scripts/
     bootstrap.py       create admin-ops project
+    provision_compare.py  create/re-assert project model-compare (caps 0); deploy step, migration 021
   monitor.py           background health-probe loop (separate container)
 ```
 

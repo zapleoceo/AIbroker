@@ -141,6 +141,7 @@ continuity). Submit only enqueues (`pending`); a per-worker dispatcher
 | `created_at` / `completed_at` | Lifecycle timestamps |
 | `trace_id` / `labels` | Client correlation (migration 020): `varchar(128)` and JSONB (<= 8 string pairs). Echoed on submit/poll, logged, never in `payload_hash` |
 | `idempotency_key` | Client `Idempotency-Key` (migration 020), unique per project while the row lives; NULL for jobs submitted without one |
+| `priority` | `smallint NOT NULL DEFAULT 1` (migration 023): claim order, 0 = interactive, 1 = batch; claimers `ORDER BY priority, created_at`. Not part of `payload_hash` |
 | `cancel_requested` | `boolean NOT NULL DEFAULT false` (migration 020): client asked to cancel a `running` job; the dispatcher ends it `cancelled` at the next attempt boundary |
 
 Indexes: `(project_id, created_at)` for polling,
@@ -161,6 +162,62 @@ constants are only seeds, overridden once reality is observed.
 | `learned_max_request_tokens` | Observed request-size ceiling |
 | `learned_at` | When last updated |
 | `sample_count` | How many observations back the learned value |
+
+### `compare_requests` and `compare_results` (migrations 021, 022)
+
+The public `/ask2many` page (see [api.md](api.md#ask2many--public-compare-page-2026-10-14)).
+One row per submitted question, one row per model answer. Each answer's job is a `deep_jobs`
+row of project `model-compare`, which has a zero money cap.
+
+| Table / column | Notes |
+|---|---|
+| `compare_requests.prompt` | The question, TEXT. History search matches it case-insensitively |
+| `compare_requests.browser_id` | Anonymous id from the httpOnly cookie `aib_compare`. Part of the one-question-at-a-time guard |
+| `compare_requests.client_ip` | Same guard, per IP. `''` when unknown |
+| `compare_results.request_id` | FK, CASCADE: deleting a request removes its results |
+| `compare_results.model_id` | The exact catalog id that was pinned |
+| `compare_results.capability` | The chat lane the model was submitted on |
+| `compare_results.intelligence_index` | Artificial Analysis score at submit time; NULL = unknown |
+| `compare_results.job_id` | `deep_jobs.id`; NULL when the submit was refused |
+| `compare_results.status` | `pending` / `done` / `truncated` / `error` / `refused`. `truncated` = finished with `finish_reason` `length`. A request is finished when all its results are terminal |
+| `compare_results.answer`, `error`, `model_served`, `latency_ms` | Filled on `done` or failure. `model_served` NULL = unknown |
+| `compare_results.tokens_in`, `tokens_out` | INTEGER, from `result_meta` of the job; NULL = Broker reported nothing (shown as «неизвестно», never 0) |
+| `compare_results.cost_usd` | DOUBLE PRECISION, request cost from `result_meta`; NULL = unknown. A real 0.0 is stored as 0 |
+| `compare_results.finish_reason` | VARCHAR(32); `length` marks a `truncated` answer |
+| `compare_results.billing_type` | VARCHAR(20); `subscription` for `claude-sub/*` and `codex-sub/*`. Such rows are never priced |
+
+Columns `tokens_in`, `tokens_out`, `cost_usd`, `finish_reason` and `billing_type` come from migration 022 (`022_compare_usage.sql`, mirrored in `init.sql`): nullable, added with `ADD COLUMN IF NOT EXISTS`, no rewrite.
+
+Neither table has a retention job yet. Indexes: `created_at DESC`, `(browser_id, created_at DESC)`
+and `(client_ip, created_at DESC)` on `compare_requests`; `request_id` on `compare_results`.
+
+### `/ask2many` compare path: public names
+
+Code reference for the compare page. Service and route modules are in `src/aibroker/services/compare.py` and `src/aibroker/routes/compare.py`.
+
+- `CompareRequestRow`, `CompareResultRow`: ORM rows for `compare_requests` and `compare_results` (`src/aibroker/db/models.py`).
+- `SubmitIn`: request body of the submit route, a prompt of 1 to `MAX_PROMPT_CHARS` characters and 1 to `MAX_MODELS` models (`src/aibroker/routes/compare.py`).
+- `Refused`: exception raised when Broker refuses a submit before it runs; `str()` is the user-facing reason (`src/aibroker/services/compare.py`).
+- `Score`: `NamedTuple` of an Artificial Analysis entry (`value`, `aa_slug`, `aa_name`). `SCORES` maps a catalog id to it (`src/aibroker/providers/model_scores.py`).
+- `browser_id_from`: returns the `aib_compare` cookie value when well formed, otherwise a fresh random id (`src/aibroker/services/compare.py`).
+- `set_browser_cookie`: sets the httpOnly `aib_compare` cookie, `SameSite=Lax`, with `secure` taken from the request (`src/aibroker/services/compare.py`).
+- `active_request_id`: newest unfinished request of this browser or this IP, or `None` (`src/aibroker/services/compare.py`).
+- `create_request`: runs the one-question-at-a-time guard and inserts the request with its `pending` result rows in one transaction; raises HTTP 429 while busy (`src/aibroker/services/compare.py`).
+- `chat_models`: every catalog model the page could offer: chat-routable API models (lane from `lane_for`) and available Claude/Codex subscription models (`subscription: true`). Sorted by `intelligence_index` descending, unscored last, then by name; input of `page_models` (`src/aibroker/services/compare.py`).
+- `page_models`: the models the page offers and the ONLY ones submit accepts (422 for any other id). Takes `chat_models()`, keeps one model per name (priority: subscription route, then a free-provider route, then the first id), sorts by `intelligence_index` descending, unscored last, then by name, and returns the first `TOP_MODELS` = 20 (`src/aibroker/services/compare.py`).
+- `lane_for`: the first chat lane a model is wired for whose provider chain includes its provider, or `None` (`src/aibroker/services/compare.py`).
+- `subscription_lane`: the lane for a Claude/Codex subscription model: `chat:smart` if offered, else the first chat lane, or `None` (`src/aibroker/services/compare.py`).
+- `is_subscription`: `True` for a `claude-sub/*` or `codex-sub/*` model id, decided by the id prefix (`src/aibroker/services/compare.py`).
+- `get_project`: the active `model-compare` project row, or `None` (`src/aibroker/services/compare.py`).
+- `spawn_tracker`: runs `fan_out` and `sync_request` in a background task (`src/aibroker/services/compare.py`).
+- `fan_out`: submits one job per result row concurrently; a `Refused` submit is stored as `refused`, other errors as `error` (`src/aibroker/services/compare.py`).
+- `submit_model`: enqueues one chat job through Broker's `/v1/jobs` logic as the compare project, also for subscription models, with `max_tokens` = 16384 for API models and no `max_tokens` for subscription models; returns the job id or raises `Refused` (`src/aibroker/services/compare.py`).
+- `poll_job`: reads a Broker job's current response for a project, or `None` (`src/aibroker/services/compare.py`).
+- `is_cap_error`: `True` when a job error is one of Broker's budget-cap messages (`src/aibroker/services/compare.py`).
+- `cancel_model_job`: best-effort cancel of a still-unfinished job; a failure is logged, not raised (`src/aibroker/services/compare.py`).
+- `sync_request`: copies terminal job states into the result rows (`finish_reason` `length` becomes `truncated`) and times out rows still pending after `ACTIVE_TIMEOUT_S`. Idempotent (`src/aibroker/services/compare.py`).
+- `search_history`: newest-first page of requests, with an optional case-insensitive substring match on the prompt (`src/aibroker/services/compare.py`).
+- `usage_totals`: sums `tokens_in`, `tokens_out` and `cost_usd` over the finished (`done`, `truncated`) results that reported them, counts the unknown ones (`tokens_unknown`, `cost_unknown`), and counts subscription results in `subscription` without pricing them (`src/aibroker/services/compare.py`).
 
 ## Migrations
 

@@ -209,6 +209,16 @@ docker exec -i aibroker-postgres psql -U aibroker aibroker -c \
   `Idempotency-Key` therefore lives exactly as long as its job row (see
   [api.md](api.md#idempotency-key-migration-020)).
 
+**Migration 024 (job-list indexes).** Adds `ix_deep_jobs_project_id (project_id, id)` and the GIN index
+`ix_deep_jobs_labels_gin (labels jsonb_path_ops)` for `GET /v1/jobs?label.k=v`. Additive, no code ordering
+dependency (the endpoint works without them, but scans `labels` row by row per project). Apply like 020:
+`psql -v ON_ERROR_STOP=1 -f` (autocommit; both are `CREATE INDEX CONCURRENTLY`, so no write lock on
+`deep_jobs`, but each build scans the whole table and the GIN index adds write cost to every insert and
+`labels` update). No `lock_timeout` is set because there is no ALTER. An interrupted build leaves an INVALID
+index that `IF NOT EXISTS` skips: `DROP INDEX CONCURRENTLY IF EXISTS <name>` and re-run; post-check
+`SELECT indexrelid::regclass, indisvalid FROM pg_index WHERE indexrelid IN ('ix_deep_jobs_project_id'::regclass, 'ix_deep_jobs_labels_gin'::regclass);`
+must show `t` for both.
+
 Migration 019 (2026-10-13, monthly caps) adds `api_keys.monthly_reset_at DATE` (nullable) and
 backfills it once. **Apply it BEFORE deploying this code.** Key selection (`pick_and_reserve`)
 references the column on every request, so code that lands first breaks key selection
@@ -238,6 +248,159 @@ warns once) if the code lands first, but apply it before deploying so the trail 
 recorded from the first request. The index line should be run separately with
 `CREATE INDEX CONCURRENTLY` on the live table. Also new, no action needed: setting
 `AFFINITY_TTL_S` (default 7200) and Redis keys `aib:raff:*` (route affinity; fail-open).
+
+### Compare page: migration 021 and project provisioning (2026-10-14)
+
+Migration 021 (`021_compare_page.sql`) adds `compare_requests` and `compare_results` for the
+public `/ask2many` page. It is additive: no existing table is touched, and only the `/ask2many`
+routes read the new tables. Apply it BEFORE deploying the code that reads them:
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/021_compare_page.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL. After the deploy, provision the dedicated project once,
+inside the API container, the same way as `bootstrap`:
+
+```
+docker exec -it aibroker-api python -m aibroker.scripts.provision_compare
+```
+
+It prints `project 'model-compare': created` (or `updated`, with the caps at 0). The script is
+idempotent: it creates the project on the first run and then re-asserts the scopes (`llm:chat`, `llm:edit`,
+`llm:deep`, `llm:agent`) and the two money caps, without rotating anything. Until it has run, `POST /ask2many/api/requests`
+returns `503`.
+
+Subscription models on the page need server env that the script does not set (it is not in the repo).
+Before they can run: add the `model-compare` project's numeric id to `AGENT_ALLOWED_PROJECT_IDS`; add an entry for
+that id to `AGENT_PROJECT_POLICY` allowing the `claude-sub` and `codex-sub` models and accounts it should use; and configure the
+subscription catalog, the verified models and `AGENT_SUBSCRIPTION_CODEX_ENABLED` as for any subscription client.
+`codex-sub` is enabled by the owner's decision of 15.10: its agent runs in the separate container
+`aibroker-agent-worker-codex`, and the shell of `codex exec` stays (sandbox `workspace-write`, approval never,
+`allowed_tools=[]` does not switch it off); the owner accepted that. Subscription jobs cost $0, so the money caps (0)
+do not limit them; only the project request cap does (owner decision). The formats are in [subscription-models.md](subscription-models.md) and [auth.md](auth.md#scopes). Until then a
+subscription model shows `отказ: проект не допущен к подписочным моделям (agent_project_not_allowed)` or
+`отказ: политика проекта (<code>)` as its result; other models are unaffected.
+
+The project's daily and monthly caps are 0. The cost guard then refuses paid models and free
+models run. To raise the limit, change the caps on the `model-compare` project in the dashboard
+(Projects) or in SQL. Do not raise it by re-running the script: each run sets both caps back to
+0. The project key is generated, hashed and discarded by the script. Nobody can read it
+afterwards, and it is never printed or sent to a browser.
+
+### Compare page: migration 022 (usage columns, 2026-10-15)
+
+Migration 022 (`022_compare_usage.sql`) adds nullable columns `tokens_in`, `tokens_out`, `cost_usd`,
+`finish_reason` and `billing_type` to `compare_results`. It is additive and does not rewrite the table. Apply it
+BEFORE deploying the code that writes them: the ORM model names these columns, so the code fails against a
+database without them (see the pgbouncer rule below):
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/022_compare_usage.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL. Existing rows stay NULL (shown as «неизвестно»); nothing is backfilled.
+
+### Job priority: migration 023 (2026-10-21)
+
+Migration 023 (`023_deep_jobs_priority.sql`) adds `deep_jobs.priority SMALLINT NOT NULL DEFAULT 1` (0 = interactive,
+1 = batch; every old row and old client is batch). A constant default does not rewrite the table on Postgres 11+.
+It also builds `ix_deep_jobs_claim_order (status, priority, created_at)` with `CREATE INDEX CONCURRENTLY` and then
+drops `ix_deep_jobs_claimable` (009) with `DROP INDEX CONCURRENTLY`: only the two claim scans (`claim_agent_runs`,
+the LLM dispatcher's `_claim_batch`) used it, and both now `ORDER BY priority, created_at` (`run_after` stays a
+filter, not an index column). Apply it BEFORE deploying the code (the ORM model names the column; see the
+pgbouncer rule below), with `psql -v ON_ERROR_STOP=1` in autocommit (never `psql -1`: CONCURRENTLY cannot run in
+a transaction; `lock_timeout` covers only the ALTER and is RESET before the build, as in 020):
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/023_deep_jobs_priority.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL (plain `CREATE INDEX`: it runs on an empty DB). An interrupted build leaves
+an INVALID index that `IF NOT EXISTS` skips: `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order` and re-run;
+post-check `indisvalid = t` in `pg_index`. Mixed-version window: workers from before this change ignore `priority`
+(claim by `created_at`, explicit column lists tolerate the new column), so they keep running between the migration and
+the deploy but do not honour priority. Rollback: `CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_deep_jobs_claimable ON
+deep_jobs (status, run_after, created_at)`, `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order`, then drop the column. Set
+`AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
+
+### Agent file bytes in a table: migration 025 (2026-10-22)
+
+Measured 2026-10-22: `deep_jobs` TOAST 1.44 GB, of which `result_meta.files[].content_b64` is ~706 MB of base64 PNG
+(278 files, avg ~2 MB, max 2.9 MB; every inline file is a PNG, the only other files are `.txt` without content);
+pglz does not compress it (733 vs 723 MB). Migration 025 (`025_deep_job_files.sql`) creates `deep_job_files`
+(`job_id` FK -> `deep_jobs` ON DELETE CASCADE, `idx`, `sha256`, `mime`, `size`, `expires_at`, `data BYTEA`,
+`STORAGE EXTERNAL`): additive, one new table, nothing existing is touched, no data is moved or deleted. Locking: the foreign key makes
+`CREATE TABLE` take `SHARE ROW EXCLUSIVE` on `deep_jobs` for the duration of the transaction (milliseconds), so writes
+to `deep_jobs` (submit, claim, finish) briefly wait; reads do not. The file is one transaction (`BEGIN` ... `COMMIT`)
+with `SET LOCAL lock_timeout = '5s'` and `statement_timeout = '60s'`: if a long `deep_jobs` transaction holds the
+table it fails with `lock timeout` and applies nothing - run it again a minute later (it is idempotent,
+`IF NOT EXISTS`); never raise the timeout to force it.
+Retention is unchanged (7 days; the cascade removes the bytes with the job).
+
+Honest expectation: the raw bytes are ~25% smaller than their base64 (3/4), and pglz is no longer run on PNG.
+That is ~25% of the base64 payload of the NEW files only, not 25% of the database.
+
+Rollout in two steps, so that a rollback is a config flip:
+
+1. Apply the migration, then deploy code that reads both formats (`aibroker.agent.job_files.live_files`) with
+   `AGENT_FILES_IN_TABLE` unset/false: new jobs still write inline exactly as before.
+   `psql -v ON_ERROR_STOP=1 < infra/sql/migrations/025_deep_job_files.sql`
+2. Set `AGENT_FILES_IN_TABLE=true` (the writer: `store_files` for png/jpeg/webp/gif only; text-like
+   files stay inline because they are small and pglz compresses them) and restart.
+   The flag lives in the server `.env` (`AGENT_FILES_IN_TABLE=true`); `docker-compose.yml` passes it to `api`
+   and the three agent workers (the writer runs in the workers), so a flip is `.env` + `docker compose up -d`
+   of those services.
+
+Rollback: set the flag back to false (new jobs write inline; rows already written to the table are still served by
+the dual-read code until they are purged, <= 7 days). A plain revert to the pre-025 code is only safe after all
+jobs written with the flag on are gone from retention (7 days after the flag was turned off): the old code returns
+`content_b64: null` (without `expired`) for such a job. The table is dropped only by a separate decision, after that
+(`SET aibroker.allow_destructive_ddl = 'on'; DROP TABLE deep_job_files;`).
+
+Notes. (a) Only PNG was measured (100% of inline content); jpeg/webp/gif are an assumption (codecs are already
+compressed), pdf/zip/gz are deliberately left inline (a PDF can be uncompressed). (b) After a full code revert the old
+reader would also pass the internal key `content_ref` through to clients for such jobs. (c) `deep_jobs` TOAST does not
+shrink physically: freed space is reused after retention, and the files only shrink with `VACUUM FULL` (separate
+decision, takes an exclusive lock). (d) `services/compare.py` calls the sync `_job_response(row)`, which would show
+`content_b64: null` for a table-stored file; compare does not read files today. (e) `SET LOCAL` timeouts end with the
+transaction, which is the same effect as `SET` + `RESET` in 020/022/023.
+
+Verify after enabling (still to be measured live): `pg_total_relation_size('deep_job_files')` against the growth of
+`pg_total_relation_size('deep_jobs')` over 24 h, and a `GET /v1/agent/runs/{id}` of a new job returning the PNG.
+
+### Clearing expired agent file bytes (opt-in tool, Room #4040)
+
+`aibroker.scripts.clear_expired_files` clears the CONTENT of already-expired inline files: for `agent:*` jobs in a
+terminal status, each `result_meta.files[i]` with inline `content_b64` and `expires_at` strictly before the cutoff
+becomes `content_b64: null, expired: true` - the same JSON the API already serves after expiry (`GET /v1/agent/runs/{id}`,
+`GET /v1/jobs/{id}` do not change; only JSON key order inside the file object may differ). Jobs, `request`, `result_text`,
+usage, traces and every other key are kept. `deep_job_files` rows are NOT touched (only counted in the report).
+Nothing schedules it: it runs only when an operator starts it. No retention change, no `VACUUM`.
+
+```
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files                 # dry-run (default), writes nothing
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files --cutoff 2026-10-23T10:00:00Z   # dry-run at a fixed cutoff
+# execute: same cutoff as the dry-run you reviewed, and the exact confirmation string
+docker exec aibroker-api python -m aibroker.scripts.clear_expired_files --execute     --cutoff 2026-10-23T10:00:00Z --confirm CLEAR-EXPIRED-2026-10-23T10:00:00Z
+```
+
+- Cutoff: UTC, whole seconds, never in the future. Default (dry-run only) is now minus `--margin-seconds` (300), so a
+  file inside its live window is never touched. `--execute` refuses without an explicit `--cutoff` and the exact
+  `--confirm`. Expiry is compared as the API does (ISO string compare, `COLLATE "C"`); a file without a well-formed
+  `expires_at` is skipped and reported.
+- Batches of `--batch-size` jobs (20), one transaction each with `SET LOCAL lock_timeout '2s'`, `statement_timeout '30s'`;
+  rows are locked `FOR UPDATE SKIP LOCKED` (a job a writer holds is skipped and cleared by the next run), the rewrite is
+  one SQL `UPDATE` with jsonb functions (no JSON passes through Python). A batch that hits a timeout rolls back alone, is
+  counted as failed and the exit code is 1. Idempotent: a second run clears 0. The dry-run runs in a `READ ONLY` transaction.
+- The report logs cutoff, jobs scanned, jobs/files/base64 bytes to clear and cleared, skipped (not expired, no
+  `expires_at`, files already in `deep_job_files`), the breakdown by project and capability, and the `deep_job_files`
+  count / `sum(size)` / expired.
+- NOT reversible from the database: after clearing, the bytes exist only in the daily `aibroker` dumps (3 days on the
+  server, 60 days on the NAS). The physical size of `deep_jobs` does not shrink (freed TOAST space is reused; only
+  `VACUUM FULL` returns it, which is a separate decision with an exclusive lock).
 
 ### Migrations vs pgbouncer prepared statements (2026-10-13)
 
@@ -842,7 +1005,16 @@ docker compose up -d
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |
 | `AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS` | JSON `{"codex-sub":[...]}` (api; default empty): verified Codex models whose live image generation was confirmed - the catalog lists them with `output_modalities` `["text", "image"]`; prod 2026-10-14: `gpt-6.1-sol` (PNG jobs 551063, 551214) |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | per-process SQLAlchemy pool (defaults 10 / 20, the api). `docker-compose.yml` sets 2 / 3 for `monitor` and the two Claude agent workers, which use the DB lightly, and 4 / 6 for `agent-worker-codex`, which runs `AGENT_CONCURRENCY_CODEX` (6-7) runs at once (each run: event writes, 1 s cancel poll, lease/auth-gate heartbeats, client-tool poll); read in `aibroker.db.engine.init_engine` |
+| `AGENT_CODEX_REFRESH_PROOF_S` | codex worker (default 1800, range 0..3600): after a gated run proves the login at the current `last_refresh`, new Codex runs skip the `__codex_auth__` start-up gate this long; 0 = gate every due start-up. See [agent-runs](agent-runs.md) |
+| `AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S` | codex worker (default 561600 = 6.5 days, max 7 days): a proof never covers a `last_refresh` this old, so start-ups near Codex's own ~8-day refresh (UNVERIFIED) are gated again. Keep it + `AGENT_CODEX_REFRESH_PROOF_S` below that interval |
+| `AGENT_IMAGES_TOTAL_BYTES` | bytes of all images of one run together, generated plus written to `out/` (agent workers, default 25165824 = 24 MiB; compose passes it to `agent-worker`, `agent-worker-claude2` and `agent-worker-codex`): an image that would pass it is listed in `files` with `skipped: "total_budget"` and no content |
+| `AGENT_INTERACTIVE_RESERVE` | agent workers (default `1`, range 0-8; passed to the codex worker and both Claude workers in `docker-compose.yml`): slots kept for `priority: interactive` runs. When free slots <= this, the worker claims only interactive runs; the effective value is `min(this, concurrency - 1)`, so a one-slot lane reserves nothing and still runs batch work (`effective_interactive_reserve`). `0` turns the reservation off |
 | `AGENT_TOOL_ARG_RETRIES` | schema-breaking client tool calls per Codex subscription run that are answered to the model as a rejected tool result instead of failing the run (default 2, range 0..5); see [subscription tool loop](subscription-tool-loop.md) |
+| `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` | api + Claude workers (default false): Claude subscription client tools over the stream-json control channel; see [subscription tool loop](subscription-tool-loop.md#claude-transport) |
+| `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS` | JSON list of exact `claude-sub/<id>` routes advertised with `supports_tools: true` after a live round-trip (default `[]`) |
+| `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS` | JSON list of exact `claude-sub/<id>` routes allowed for the canary projects only (`AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS`, default `[]`) |
+| `AGENT_ACCOUNT_DISABLED_PAUSE_S` | api (default 3600, `0` = off): after a Claude run fails with `subscription_disabled`, new-run account selection skips that account for this many seconds (`agent/accounts.py`, [account selection](agent-runs.md)) |
+| `AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS` | api (JSON list, default `["claude-sub/claude-sonnet-5-5"]`): canary routes with a recorded live client-tool round-trip; the catalog shows `supports_tools: true` for them to the canary projects. Add an id only with the job id of its live round-trip |
 | `AGENT_TOOL_REQUIRED_REMINDERS` | follow-up turns per run that tell the model to call the required client tool after it finished with plain text (default 1, range 0..3) |
 
 ### GitHub Actions secrets (`zapleoceo/AIbroker`)

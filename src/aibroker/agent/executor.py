@@ -8,12 +8,14 @@ error from the adapter stays `quota_exhausted`.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,8 +24,11 @@ from aibroker.agent.adapter import AgentCLI, AgentRunSpec
 from aibroker.agent.attachments import write_attachments
 from aibroker.agent.billing import check_billing_mode
 from aibroker.agent.client_tools import clear_pending_call
-from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI
+from aibroker.agent.codex_cli import CODEX_REFRESH_DUE_AFTER_S, CodexCLI, refresh_due
+from aibroker.agent.codex_refresh_proof import PROOF as REFRESH_PROOF
+from aibroker.agent.codex_refresh_proof import RefreshProof
 from aibroker.agent.constants import project_allowed
+from aibroker.agent.images import collect_out_images
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.policy import policy_violation
 from aibroker.agent.registry import make_adapter
@@ -39,8 +44,8 @@ from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import AgentRunRow, DeepJobRow, ProjectRow
 from aibroker.providers.subscriptions import (
-    subscription_tool_model_canary,
-    subscription_tool_model_verified,
+    PROVIDERS,
+    subscription_tools_accepted,
 )
 from aibroker.services.job_meta import log_tag
 
@@ -56,8 +61,9 @@ class ExecConfig:
     files_total_bytes: int = 1024 * 1024
     files_max_count: int = 20
     files_ttl_s: int = 3600
-    image_max_bytes: int = 2 * 1024 * 1024
+    image_max_bytes: int = 8 * 1024 * 1024
     image_max_count: int = 4
+    image_total_bytes: int = 24 * 1024 * 1024
     session_busy_delay_s: float = 5.0
     session_busy_max: int = 60
     lease_ttl_s: float = 120.0         # > 3 x heartbeat: a crashed worker's lease expires
@@ -67,6 +73,9 @@ class ExecConfig:
     codex_auth_wait_s: float = 90.0          # max wait for it before the run is requeued
     codex_auth_poll_s: float = 1.0           # how often a waiting run retries the lease
     codex_refresh_due_after_s: float = CODEX_REFRESH_DUE_AFTER_S
+    codex_refresh_proof_s: float = 1800.0     # see agent/codex_refresh_proof.py
+    codex_refresh_proof_max_age_s: float = 6.5 * 24 * 3600
+    refresh_proof: RefreshProof = field(default_factory=lambda: REFRESH_PROOF)
     quota_backoff_base_s: float = 60.0
     quota_backoff_cap_s: float = 1800.0   # exponential backoff cap when no reset time is given
     env: Mapping[str, str] | None = None   # worker env the billing guard inspects (default os.environ)
@@ -75,11 +84,14 @@ class ExecConfig:
 def exec_config_from_settings() -> ExecConfig:
     s = get_settings()
     return ExecConfig(
+        codex_refresh_proof_s=s.AGENT_CODEX_REFRESH_PROOF_S,
+        codex_refresh_proof_max_age_s=s.AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S,
         workspace_root=s.AGENT_WORKSPACE_ROOT, cancel_poll_s=s.AGENT_CANCEL_POLL_S,
         cancel_grace_s=s.AGENT_CANCEL_GRACE_S, file_max_bytes=s.AGENT_FILE_MAX_BYTES,
         files_total_bytes=s.AGENT_FILES_TOTAL_BYTES, files_max_count=s.AGENT_FILES_MAX_COUNT,
         files_ttl_s=s.AGENT_FILES_TTL_S, image_max_bytes=s.AGENT_IMAGE_MAX_BYTES,
-        image_max_count=s.AGENT_IMAGES_MAX_COUNT, lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
+        image_max_count=s.AGENT_IMAGES_MAX_COUNT, image_total_bytes=s.AGENT_IMAGES_TOTAL_BYTES,
+        lease_ttl_s=s.AGENT_SESSION_LEASE_TTL_S,
         lease_heartbeat_s=s.AGENT_SESSION_LEASE_HEARTBEAT_S,
         paid_continuation_verified_off=s.AGENT_PAID_CONTINUATION_VERIFIED_OFF,
         codex_paid_continuation_verified_off=s.AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF,
@@ -121,13 +133,11 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
             error_class="route_disabled", message="codex subscription route is not enabled"), {})
     req = dict(job.request)
     client_tools = (req.get("client_job") or {}).get("tools") or []
-    if client_tools and (not get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
-                         or not run.model
-                         or not (subscription_tool_model_verified(f"codex-sub/{run.model}")
-                                 or subscription_tool_model_canary(f"codex-sub/{run.model}",
-                                                                   run.project_id))):
+    provider = next((p for p, cap in PROVIDERS.items() if cap == run.capability), "")
+    if client_tools and (not run.model or not subscription_tools_accepted(
+            f"{provider}/{run.model}", run.project_id)):
         return await _finish(run_id, ev.RunFailed(
-            error_class="route_disabled", message="codex client tools are not verified"), {})
+            error_class="route_disabled", message="client tools are not verified"), {})
     totals: dict[str, int | None] = {}
     if not project_allowed(run.project_id):    # removed from the allowlist while queued
         return await _finish(run_id, ev.RunFailed(
@@ -182,9 +192,11 @@ class _AuthWaitCancelled(Exception):
 
 @dataclass
 class _AuthGate:
-    """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours."""
+    """The held refresh lease with its exit stack: `lease.lost` says it can no longer be assumed ours.
+    `last_refresh` is the login's timestamp when the gate was taken (for the refresh proof)."""
     stack: contextlib.AsyncExitStack
     lease: Lease
+    last_refresh: datetime | None = None
 
     async def close(self) -> None:
         await self.stack.aclose()
@@ -196,15 +208,21 @@ async def _codex_auth_gate(adapter: AgentCLI, cfg: ExecConfig, run_id: int) -> _
     says one may be due (or cannot be read), hold ONE lease until the first event proving a completed
     model call, or until the run ended and its CLI was stopped; otherwise take nothing and runs stay
     fully parallel."""
-    if not isinstance(adapter, CodexCLI) or not adapter.refresh_maybe_due(cfg.codex_refresh_due_after_s):
+    if not isinstance(adapter, CodexCLI):
         return None
+    last = adapter.last_refresh()                 # read once per decision
+    if not refresh_due(last, after_s=cfg.codex_refresh_due_after_s):
+        return None
+    if cfg.refresh_proof.covers(last, cfg.codex_refresh_proof_s,
+                                max_age_s=cfg.codex_refresh_proof_max_age_s):
+        return None      # a gated run just proved the login works at this very timestamp
     deadline = time.monotonic() + cfg.codex_auth_wait_s
     while True:
         stack = contextlib.AsyncExitStack()
         lease = await stack.enter_async_context(session_lock(
             "__codex_auth__", "refresh", run_id, ttl_s=cfg.lease_ttl_s, heartbeat_s=cfg.lease_heartbeat_s))
         if lease is not None:
-            return _AuthGate(stack, lease)
+            return _AuthGate(stack, lease, last)
         await stack.aclose()
         if await _cancel_flag(run_id):       # ends `cancelled` at once, never as codex_auth_busy
             raise _AuthWaitCancelled
@@ -357,7 +375,11 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
             attachments=attached,
             client_tools=list((req.get("client_job") or {}).get("tools") or []),
             tool_choice=(req.get("client_job") or {}).get("tool_choice"),
-            fence_leases=(lease,) if lease is not None else ())
+            fence_leases=(lease,) if lease is not None else (),
+            # the /ask2many page labels its jobs page=compare (services/compare.submit_model);
+            # the label can only take tools away, never add them. So can the caller's `no_shell`.
+            no_shell=bool((req.get("client_job") or {}).get("no_shell"))
+            or (job.labels or {}).get("page") == "compare")
         if isinstance(adapter, CodexCLI):
             adapter.snapshot_artifacts()
         # 1 s of slack: file mtimes come from the kernel's coarse clock and can lag time.time()
@@ -378,7 +400,9 @@ async def _drive_held_gate(run: AgentRunRow, job: DeepJobRow, adapter: AgentCLI,
                 total_bytes=cfg.files_total_bytes, max_count=cfg.files_max_count,
                 ttl_s=cfg.files_ttl_s)
             images = await asyncio.to_thread(_export_images, adapter, spec, started_at, cfg)
-            terminal = ev.RunCompleted(final_text=terminal.final_text, files=[*files, *images])
+            out_images = await asyncio.to_thread(_collect_out_images, workspace, files, images, cfg)
+            terminal = ev.RunCompleted(final_text=terminal.final_text,
+                                       files=[*files, *images, *out_images])
         return await _finish(run_id, terminal, totals, mode, lease)
     finally:
         cleanup_workspace(workspace)
@@ -388,6 +412,7 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
                    cfg: ExecConfig) -> list[ev.FileRef]:
     """The worker collects the CLI's out-of-workspace artifacts (Codex: generated PNGs)."""
     for attr, value in (("image_max_bytes", cfg.image_max_bytes), ("image_max_count", cfg.image_max_count),
+                        ("image_total_bytes", cfg.image_total_bytes),
                         ("image_ttl_s", cfg.files_ttl_s)):
         if hasattr(adapter, attr):
             setattr(adapter, attr, value)
@@ -395,6 +420,29 @@ def _export_images(adapter: AgentCLI, spec: AgentRunSpec, since: float,
         return adapter.export_artifacts(spec, since)
     except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
         log.exception("artifact export failed for run %d", spec.run_id)
+        return []
+
+
+def _collect_out_images(workspace: str, files: list[ev.FileRef], images: list[ev.FileRef],
+                        cfg: ExecConfig) -> list[ev.FileRef]:
+    """Images the run wrote under out/ itself (any adapter), minus what is already reported (by
+    path, or by content: the exported images and the `files` that carry bytes) and within what is
+    left of the run's image byte budget."""
+    try:
+        shas = {f.sha256 for f in images if f.sha256}
+        for f in files:
+            if f.content_b64:
+                try:
+                    shas.add(hashlib.sha256(base64.b64decode(f.content_b64)).hexdigest())
+                except ValueError:      # one undecodable entry must not drop the whole collection
+                    log.debug("files entry %s: content is not valid base64", f.path)
+        spent = sum(f.size for f in images if f.content_b64)
+        return collect_out_images(
+            workspace, max_bytes=cfg.image_max_bytes, max_count=cfg.image_max_count,
+            ttl_s=cfg.files_ttl_s, total_bytes=max(cfg.image_total_bytes - spent, 0),
+            exclude_sha256=shas, exclude_paths={f.path for f in [*files, *images]})
+    except Exception:  # noqa: BLE001 - a missing image must never fail an otherwise finished run
+        log.exception("out/ image collection failed in %s", workspace)
         return []
 
 
@@ -452,6 +500,8 @@ async def _stream(run_id: int, adapter: AgentCLI, spec: AgentRunSpec,
             # tool call, or turn usage) - NOT on session.assigned, which precedes the first model
             # request. UNVERIFIED: that Codex refreshes its token at/before that first request.
             if gate is not None and isinstance(item, ev.MessageDelta | ev.ToolCall | ev.Usage):
+                if isinstance(adapter, CodexCLI):
+                    cfg.refresh_proof.record(gate.last_refresh, adapter.last_refresh())
                 await gate.close()
                 gate = None
             if isinstance(item, ev.RunCompleted | ev.RunFailed | ev.RunCancelled):

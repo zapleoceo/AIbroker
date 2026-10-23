@@ -43,6 +43,11 @@ CONFIG_OVERRIDES = (
     'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
 )
 PERMISSION_PROFILE = "broker"
+# `--disable` features for a no_shell run (codex-cli 0.162.1 `codex features list`). Verified live
+# 2026-10-16: with these off, "Run: id" is answered "command execution is disabled" and the JSON
+# stream has no command_execution item. image_generation stays on (no shell involved).
+NO_SHELL_FEATURES = ("shell_tool", "unified_exec", "code_mode_host", "browser_use",
+                     "browser_use_external", "computer_use", "in_app_browser", "apps")
 _ABS_PATH = re.compile(r"^/[A-Za-z0-9_./-]+\Z")
 
 
@@ -132,14 +137,19 @@ def read_last_refresh(codex_home: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def refresh_maybe_due(codex_home: str | None, now: datetime | None = None,
-                      after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
-    """True when a token refresh may happen soon. A missing or unreadable timestamp counts as due
-    (serialize conservatively); a timestamp in the future (clock skew) does not."""
-    last = read_last_refresh(codex_home)
+def refresh_due(last: datetime | None, now: datetime | None = None,
+                after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+    """True when a refresh may happen soon for this `last_refresh`. A missing or unreadable
+    timestamp counts as due (serialize conservatively); one in the future (clock skew) does not."""
     if last is None:
         return True
     return ((now or datetime.now(UTC)) - last).total_seconds() >= after_s
+
+
+def refresh_maybe_due(codex_home: str | None, now: datetime | None = None,
+                      after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
+    """refresh_due for the login in `codex_home`."""
+    return refresh_due(read_last_refresh(codex_home), now, after_s)
 
 
 def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
@@ -159,6 +169,8 @@ def build_codex_argv(run: AgentRunSpec, binary: str = "codex",
         argv.append(f"--model={run.model}")
     for override in (*CONFIG_OVERRIDES, *permission_overrides(codex_home)):
         argv += ["-c", override]
+    if run.no_shell:
+        argv += [f"--disable={feature}" for feature in NO_SHELL_FEATURES]
     argv += ["--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "-"]
     return argv
 
@@ -178,14 +190,19 @@ class CodexCLI(SubprocessCLI):
                  sandbox_probe: SandboxProbe | None = None) -> None:
         super().__init__(binary, probe, kill_grace_s, env)
         self._sandbox_probe = sandbox_probe or _run_sandbox_probe
-        self.image_max_bytes = 2 * 1024 * 1024        # set by the executor from ExecConfig
+        self.image_max_bytes = 8 * 1024 * 1024        # set by the executor from ExecConfig
         self.image_max_count = 4
+        self.image_total_bytes = 24 * 1024 * 1024
         self.image_ttl_s = 3600
         self._image_baseline: set[str] | None = None
         self._image_session_id: str | None = None
 
     def refresh_maybe_due(self, after_s: float = CODEX_REFRESH_DUE_AFTER_S) -> bool:
         return refresh_maybe_due(self._env.get("CODEX_HOME"), after_s=after_s)
+
+    def last_refresh(self) -> datetime | None:
+        """`last_refresh` of this login (the timestamp only; see read_last_refresh)."""
+        return read_last_refresh(self._env.get("CODEX_HOME"))
 
     def snapshot_artifacts(self) -> None:
         """Called just before this run starts; only the run's own thread dir is compared."""
@@ -242,7 +259,7 @@ class CodexCLI(SubprocessCLI):
             return []  # a claimed new thread already has artifacts: cannot prove ownership
         return export_generated_pngs(
             self._env.get("CODEX_HOME"), run.workspace, since, max_bytes=self.image_max_bytes,
-            max_count=self.image_max_count, ttl_s=self.image_ttl_s,
+            max_count=self.image_max_count, ttl_s=self.image_ttl_s, total_bytes=self.image_total_bytes,
             baseline=self._image_baseline, session_id=self._image_session_id)
 
     def process_env(self, run: AgentRunSpec) -> dict[str, str]:

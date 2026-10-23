@@ -82,6 +82,28 @@ def payload_hash(project_id: int, capability: str, request: dict[str, Any]) -> s
     return hashlib.md5(f"{project_id}:{capability}:{canonical}".encode()).hexdigest()
 
 
+PRIORITY_INTERACTIVE = 0
+PRIORITY_BATCH = 1
+_PRIORITY_CODES = {"interactive": PRIORITY_INTERACTIVE, "batch": PRIORITY_BATCH}
+# Orchestra's chat label: interactive without the client having to send `priority` (it asked for this).
+INTERACTIVE_WORKFLOW_LABEL = "orchestra:mascot-chat"
+
+
+def resolve_priority(requested: str | None, labels: dict[str, str] | None) -> int:
+    """Claim priority of a submitted job: the explicit `priority` wins; absent -> batch, except
+    labels.workflow == INTERACTIVE_WORKFLOW_LABEL -> interactive. Never part of the payload hash."""
+    if requested is not None:
+        return _PRIORITY_CODES[requested]
+    if (labels or {}).get("workflow") == INTERACTIVE_WORKFLOW_LABEL:
+        return PRIORITY_INTERACTIVE
+    return PRIORITY_BATCH
+
+
+def priority_name(code: int | None) -> str:
+    """The wire name of a stored priority code (NULL/unknown reads as batch, the default)."""
+    return "interactive" if code == PRIORITY_INTERACTIVE else "batch"
+
+
 class IdempotencyConflict(Exception):
     """The Idempotency-Key was already used by this project with a different payload."""
 
@@ -222,6 +244,7 @@ async def submit_job_ex(
     trace_id: str | None = None,
     labels: dict[str, str] | None = None,
     idempotency_key: str | None = None,
+    priority: int = PRIORITY_BATCH,
 ) -> SubmitOutcome:
     """ENQUEUE a job for any chat `capability` and return its id immediately.
 
@@ -261,7 +284,7 @@ async def submit_job_ex(
                 row = DeepJobRow(project_id=project.id, capability=capability,
                                   status="pending", request=request,
                                   payload_hash=phash, trace_id=trace_id, labels=labels,
-                                  idempotency_key=idempotency_key)
+                                  idempotency_key=idempotency_key, priority=priority)
                 s.add(row)
                 await s.flush()
                 job_id = row.id
@@ -377,6 +400,10 @@ class JobView(NamedTuple):
     trace_id: str | None
     labels: dict[str, str] | None
     cancel_requested: bool
+    started_at: datetime | None
+    completed_at: datetime | None
+    run_after: datetime | None
+    priority: int
     request: dict[str, Any]
 
 
@@ -398,6 +425,8 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
                 DeepJobRow.status, DeepJobRow.result_text, DeepJobRow.result_meta,
                 DeepJobRow.error_message, DeepJobRow.created_at, DeepJobRow.trace_id,
                 DeepJobRow.labels, DeepJobRow.cancel_requested,
+                DeepJobRow.started_at, DeepJobRow.completed_at, DeepJobRow.run_after,
+                DeepJobRow.priority,
                 *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
             ).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
         )).one_or_none()
@@ -405,8 +434,8 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
         return None
     # A missing key and a JSON null both read back as None; the callers treat
     # them alike, so only non-null keys are rebuilt (`.get(k, default)` keeps working).
-    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[11:], strict=True) if v is not None}
-    return JobView(*r[:11], request=request)
+    request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[15:], strict=True) if v is not None}
+    return JobView(*r[:15], request=request)
 
 
 def next_poll_after_s(created_at: datetime) -> int:

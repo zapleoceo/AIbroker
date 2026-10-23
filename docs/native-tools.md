@@ -59,9 +59,10 @@ execute the client's tools.
 No database migration is needed: tool contracts participate in the existing
 JSONB request payload and dedup hash; results use existing result metadata.
 
-Claude subscription pins reject `tools` and tool history. Codex subscription
-pins have a separate, disabled-by-default App Server callback path described
-in [subscription tool loop](subscription-tool-loop.md). Unlike the native API
+Codex and Claude subscription pins have separate, disabled-by-default callback
+paths (Codex App Server, Claude stream-json control channel) described in
+[subscription tool loop](subscription-tool-loop.md); while off they reject
+`tools` and tool history. Unlike the native API
 provider's terminal tool result, its pending `GET /v1/jobs/{id}` response has
 `tool_calls` and `finish_reason: tool_calls`; the same project submits the
 result to `POST /v1/jobs/{id}/tool-results` and polls the same job for a final

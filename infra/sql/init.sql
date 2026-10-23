@@ -138,16 +138,20 @@ CREATE TABLE IF NOT EXISTS deep_jobs (
   trace_id VARCHAR(128),          -- client correlation id (020)
   labels JSONB,                   -- client labels, <= 8 keys (020)
   idempotency_key VARCHAR(128),   -- unique per project while the row lives (020)
-  cancel_requested BOOLEAN NOT NULL DEFAULT false   -- cooperative cancel of a running plain job (020)
+  cancel_requested BOOLEAN NOT NULL DEFAULT false,  -- cooperative cancel of a running plain job (020)
+  priority SMALLINT NOT NULL DEFAULT 1              -- claim order: 0 interactive, 1 batch (023)
 );
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_date ON deep_jobs(project_id, created_at);
--- Dispatcher claim scan (services/job_queue.py): eligible pending rows.
-CREATE INDEX IF NOT EXISTS ix_deep_jobs_claimable ON deep_jobs(status, run_after, created_at);
+-- Claim scans (services/job_queue.py, agent/worker.py): eligible pending rows, ORDER BY priority, created_at (023).
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_claim_order ON deep_jobs(status, priority, created_at);
 -- In-flight dedup lookup in submit_job (migration 010).
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_dedup ON deep_jobs(project_id, capability, payload_hash, created_at DESC);
 -- Idempotency-Key uniqueness + trace lookup (migration 020).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_deep_jobs_idempotency ON deep_jobs(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_deep_jobs_trace ON deep_jobs(project_id, trace_id) WHERE trace_id IS NOT NULL;
+-- GET /v1/jobs?label.k=v keyset walk + label containment (migration 024).
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_project_id ON deep_jobs(project_id, id);
+CREATE INDEX IF NOT EXISTS ix_deep_jobs_labels_gin ON deep_jobs USING gin (labels jsonb_path_ops);
 
 -- Agent runs (017): side record + typed event log for `agent:*` deep_jobs rows.
 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -186,6 +190,19 @@ CREATE TABLE IF NOT EXISTS agent_run_events (
   PRIMARY KEY (run_id, seq)
 );
 
+-- Raw bytes of agent job files (025): result_meta.files[].content_ref points here. Additive.
+CREATE TABLE IF NOT EXISTS deep_job_files (
+  job_id BIGINT NOT NULL REFERENCES deep_jobs(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  sha256 VARCHAR(64) NOT NULL,
+  mime VARCHAR(127) NOT NULL,
+  size INTEGER NOT NULL,
+  expires_at TIMESTAMP,
+  data BYTEA NOT NULL,
+  PRIMARY KEY (job_id, idx)
+);
+ALTER TABLE deep_job_files ALTER COLUMN data SET STORAGE EXTERNAL;
+
 -- Agent session leases (018): replaces the Postgres advisory lock, so the agent worker needs only
 -- the pgbouncer connection (no direct connection, no session-level lock). Additive.
 CREATE TABLE IF NOT EXISTS agent_session_leases (
@@ -197,6 +214,39 @@ CREATE TABLE IF NOT EXISTS agent_session_leases (
   fence BIGINT NOT NULL DEFAULT 1,   -- +1 per acquisition; writes of a run carry it (fencing)
   PRIMARY KEY (account_id, session_id)
 );
+
+-- Model compare page (021): one row per submitted prompt, one per (prompt, model) answer.
+CREATE TABLE IF NOT EXISTS compare_requests (
+  id BIGSERIAL PRIMARY KEY,
+  prompt TEXT NOT NULL,
+  browser_id VARCHAR(64) NOT NULL,                -- anonymous httpOnly-cookie id (one question at a time)
+  client_ip VARCHAR(64) NOT NULL DEFAULT '',      -- same guard, per IP
+  created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_compare_requests_created ON compare_requests(created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_compare_requests_browser ON compare_requests(browser_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_compare_requests_ip ON compare_requests(client_ip, created_at DESC);
+CREATE TABLE IF NOT EXISTS compare_results (
+  id BIGSERIAL PRIMARY KEY,
+  request_id BIGINT NOT NULL REFERENCES compare_requests(id) ON DELETE CASCADE,
+  model_id VARCHAR(200) NOT NULL,                 -- the exact catalog id that was pinned
+  capability VARCHAR(30) NOT NULL,
+  intelligence_index DOUBLE PRECISION,            -- AA score at submit time; NULL = unknown
+  job_id BIGINT,                                  -- deep_jobs.id; NULL when the submit was refused
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending|done|error|refused
+  answer TEXT,
+  error TEXT,
+  model_served VARCHAR(200),                      -- NULL = unknown
+  latency_ms INTEGER,
+  tokens_in INTEGER,                              -- 022: from the job's result_meta, NULL = unknown
+  tokens_out INTEGER,
+  cost_usd DOUBLE PRECISION,
+  finish_reason VARCHAR(32),                      -- 'length' = cut off (status 'truncated')
+  billing_type VARCHAR(20),
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
+  completed_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_compare_results_request ON compare_results(request_id);
 
 -- ─── Folded-in migrations (kept in sync with infra/sql/migrations/) ─────────
 -- 002 discovered free-tier limits (parsed from provider response headers)

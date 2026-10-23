@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import base64
 import logging
-from typing import Annotated, Any
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -28,6 +29,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from aibroker.agent.accounts import pick_account
+from aibroker.agent.auth_health import codex_auth_available
 from aibroker.agent.client_tools import (
     MAX_RESULT_BYTES,
     ClientToolConflict,
@@ -35,6 +37,8 @@ from aibroker.agent.client_tools import (
     submit_result,
 )
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.job_files import live_files as resolve_live_files
+from aibroker.agent.job_status import error_code, job_timing, pending_detail
 from aibroker.agent.policy import AgentPolicyViolation, policy_for, policy_violation
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import RunRejected, create_run, served_model_meta
@@ -64,7 +68,7 @@ from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
     subscription_model_verified,
-    subscription_tool_model_canary,
+    subscription_tools_accepted,
 )
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
@@ -75,6 +79,8 @@ from aibroker.services.deep_jobs import (
     get_job,
     next_poll_after_s,
     payload_hash,
+    priority_name,
+    resolve_priority,
     submit_deep_job,
     submit_job,
     submit_job_ex,
@@ -147,11 +153,20 @@ class ChatRequest(BaseModel):
     workflow: str | None = None
     tools: list[ToolDefinition] | None = Field(None, min_length=1, max_length=32)
     tool_choice: str | dict[str, Any] | None = None
+    # Subscription client tools only: output tools whose caller result may end the job
+    # (POST /tool-results with `terminal: true`) instead of starting another model turn.
+    terminal_tools: list[str] | None = Field(None, min_length=1, max_length=32)
     stream: bool | None = None
+    # Codex subscription jobs only, no `tools`: the CLI runs with its command tools disabled
+    # (image generation stays on), so the model cannot write files through a shell.
+    no_shell: bool = False
     # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
     trace_id: str | None = None
     labels: dict[str, str] | None = None
+    # Claim order (docs/api.md): `interactive` jobs are claimed before `batch` ones. Absent = batch,
+    # except labels.workflow == "orchestra:mascot-chat" (interactive). Never part of the payload hash.
+    priority: Literal["interactive", "batch"] | None = None
 
     @field_validator("trace_id")
     @classmethod
@@ -174,6 +189,12 @@ class ChatRequest(BaseModel):
                             self.tool_choice)
         elif self.tool_choice is not None:
             raise ValueError("tool_choice requires tools")
+        if self.terminal_tools is not None:
+            names = {tool.function.name for tool in self.tools or []}
+            if (not self.tools or subscription_model(self.model) is None
+                    or len(set(self.terminal_tools)) != len(self.terminal_tools)
+                    or not set(self.terminal_tools) <= names):
+                raise ValueError("terminal_tools must name declared tools of a subscription job")
         pending: set[str] = set()
         seen: set[str] = set()
         for message in self.messages:
@@ -490,6 +511,8 @@ class DeepJobResponse(BaseModel):
     status: str = Field(description="pending|done|error|cancelled")
     trace_id: str | None = Field(None, description="client trace id given at submit, if any")
     labels: dict[str, str] | None = Field(None, description="client labels given at submit, if any")
+    priority: Literal["interactive", "batch"] | None = Field(
+        None, description="claim priority of the job: interactive jobs are claimed before batch")
     cancel_requested: bool | None = Field(
         None, description="true while a cancel was requested but the job is not terminal yet")
     text: str | None = None
@@ -534,6 +557,20 @@ class DeepJobResponse(BaseModel):
     poll_after_s: int | None = Field(
         None, description="present only while status=pending"
     )
+    error_code: str | None = Field(
+        None, description="stable machine-readable reason for status=error|cancelled "
+                          "(docs/api.md, agent.job_status.error_code); `error` stays free text")
+    queued_ms: int | None = Field(
+        None, description="submit -> first execution start (still growing while queued)")
+    run_ms: int | None = Field(
+        None, description="first execution start -> end (or now while running); includes any "
+                          "quota wait or tool wait after the start")
+    pending_reason: str | None = Field(
+        None, description="status=pending only: queued | running | tool_wait | waiting_quota | "
+                          "capacity_busy")
+    retry_at: datetime | None = Field(
+        None, description="waiting_quota / capacity_busy: when the job becomes runnable again "
+                          "(UTC, with offset)")
 
 
 def _require_image_access(ctx: ProjectCtx, messages: list[dict[str, Any]], *,
@@ -609,7 +646,17 @@ def _job_evidence(meta: dict[str, Any], request: dict[str, Any] | None = None,
     )
 
 
-def _job_response(row: Any) -> DeepJobResponse:
+_SYNC_FILES: Any = object()  # `files` not resolved by the caller: inline content only
+
+
+async def _row_files(row: Any) -> list[dict[str, Any]] | None:
+    """The job's files with bytes read from deep_job_files where they live there."""
+    if row.status != "done":
+        return None
+    return await resolve_live_files(row.id, (row.result_meta or {}).get("files"))
+
+
+def _job_response(row: Any, files: Any = _SYNC_FILES) -> DeepJobResponse:
     """Shape a deep_jobs row into the poll response — shared by /v1/deep and
     /v1/jobs.
 
@@ -621,11 +668,20 @@ def _job_response(row: Any) -> DeepJobResponse:
     polling on an empty answer. Any unexpected status defaults to pending for
     the same fail-safe reason."""
     request = getattr(row, "request", None) or {}
+    meta = row.result_meta or {}
     requested_model = (request.get("client_job") or {}).get("model") or request.get("model")
     # Subscription runs only: the account is chosen at creation and never changes.
     account_id = request.get("account_id") if request.get("client_job") else None
+    now = datetime.now(UTC).replace(tzinfo=None)
+    queued_ms, run_ms = job_timing(getattr(row, "created_at", None), meta.get("first_started_at"),
+                                   getattr(row, "started_at", None),
+                                   getattr(row, "completed_at", None), now)
     tags: dict[str, Any] = {"trace_id": getattr(row, "trace_id", None),
-                            "labels": getattr(row, "labels", None)}
+                            "labels": getattr(row, "labels", None),
+                            "queued_ms": queued_ms, "run_ms": run_ms,
+                            "error_code": error_code(str(row.status), meta.get("error_class"),
+                                                     getattr(row, "error_message", None)),
+                            "priority": priority_name(getattr(row, "priority", None))}
     if row.status == "error":
         return DeepJobResponse(job_id=row.id, status="error", error=row.error_message,
                                requested_model=requested_model, account_id=account_id,
@@ -643,8 +699,10 @@ def _job_response(row: Any) -> DeepJobResponse:
             call = {"id": pending_tool["call_id"], "type": "function",
                     "function": {"name": pending_tool["name"],
                                  "arguments": pending_tool["arguments"]}}
+        reason, retry_at = pending_detail(str(row.status), getattr(row, "run_after", None),
+                                          meta.get("pending_reason"), call is not None, now)
         return DeepJobResponse(
-            job_id=row.id, status="pending",
+            job_id=row.id, status="pending", pending_reason=reason, retry_at=retry_at,
             requested_model=requested_model, account_id=account_id,
             evidence=_job_evidence(row.result_meta or {}, request, str(row.status)),
             cancel_requested=True if getattr(row, "cancel_requested", False) else None, **tags,
@@ -652,7 +710,6 @@ def _job_response(row: Any) -> DeepJobResponse:
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
         )
-    meta = row.result_meta or {}
     return DeepJobResponse(
         job_id=row.id, status="done", text=row.result_text,
         provider=meta.get("provider"), model=meta.get("model"),
@@ -672,7 +729,7 @@ def _job_response(row: Any) -> DeepJobResponse:
         vision_format=meta.get("vision_format"),
         tool_calls=meta.get("tool_calls"), finish_reason=meta.get("finish_reason"),
         refusal=meta.get("refusal"),
-        files=live_files(meta.get("files")),
+        files=live_files(meta.get("files")) if files is _SYNC_FILES else files,
         **tags,
     )
 
@@ -704,7 +761,7 @@ async def deep_poll(
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row)  # pragma: no cover
+    return _job_response(row, await _row_files(row))  # pragma: no cover
 
 
 # ─── Generic async jobs — submit+poll for ANY chat capability (Phase 4) ─────
@@ -732,7 +789,10 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
         max_tokens=body.max_tokens, temperature=body.temperature,
         response_format=body.response_format, workflow=body.workflow,
         extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
-                "tool_choice": body.tool_choice} if body.tools else None))
+                "tool_choice": body.tool_choice,
+                # only when set, so payload hashes of older clients do not change
+                **({"terminal_tools": body.terminal_tools} if body.terminal_tools else {})}
+               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {}))
 
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
@@ -741,7 +801,7 @@ async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
     if row is None:  # pragma: no cover — pruned between the key lookup and this read
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
-    content = {**jsonable_encoder(_job_response(row)), "poll_url": f"/v1/jobs/{job_id}"}
+    content = {**jsonable_encoder(_job_response(row, await _row_files(row))), "poll_url": f"/v1/jobs/{job_id}"}
     return JSONResponse(content, headers={
         "Idempotent-Replay": "true", REQUEST_ID_HEADER: job_request_id(job_id)})
 
@@ -778,7 +838,10 @@ async def jobs_submit(
         raise HTTPException(422, str(exc)) from exc
     client_hash = (payload_hash(ctx.project.id, capability, _client_request(body))
                    if idempotency_key else None)
+    priority = resolve_priority(body.priority, body.labels)
     subscription = subscription_model(body.model)
+    if body.no_shell and subscription is None:
+        raise HTTPException(400, "unsupported_for_subscription_model: no_shell")
     # Subscription jobs validate their own attachments in subscription_messages.
     _require_image_access(ctx, [m.model_dump(exclude_unset=True) for m in body.messages],
                           check_decode=subscription is None)
@@ -807,11 +870,8 @@ async def jobs_submit(
             raise AgentPolicyViolation(violation)
         if problem := subscription_request_problem(body, capability, subscription.provider):
             raise HTTPException(400, problem)
-        if body.tools and not (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
-                               and (catalog.supports_tools(subscription)
-                                    or subscription_tool_model_canary(subscription.id,
-                                                                      ctx.project.id))):
-            raise HTTPException(503, "Codex subscription client tools are not enabled for this project and model")
+        if body.tools and not subscription_tools_accepted(subscription.id, ctx.project.id):
+            raise HTTPException(503, "subscription client tools are not enabled for this project and model")
         messages = [m.model_dump(exclude_unset=True) for m in body.messages]
         try:
             messages, attachments = subscription_messages(messages)
@@ -833,9 +893,11 @@ async def jobs_submit(
                             "model": subscription.id, "response_format": body.response_format,
                             "workflow": body.workflow,
                             "tools": [t.model_dump(exclude_none=True) for t in body.tools or []],
-                            "tool_choice": body.tool_choice},
+                            "tool_choice": body.tool_choice,
+                            "terminal_tools": body.terminal_tools or [],
+                            **({"no_shell": True} if body.no_shell else {})},
                 job_idempotency_key=idempotency_key, job_payload_hash=client_hash,
-                trace_id=trace_id, labels=body.labels,
+                trace_id=trace_id, labels=body.labels, priority=priority,
             )
         except RunRejected as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -864,6 +926,7 @@ async def jobs_submit(
             extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
                     "tool_choice": body.tool_choice} if body.tools else None),
             trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
+            priority=priority,
         )
     except IdempotencyConflict as exc:   # lost the key race to a different payload
         raise idempotency_conflict(exc) from exc
@@ -923,7 +986,7 @@ async def jobs_poll(
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
     response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row)  # pragma: no cover
+    return _job_response(row, await _row_files(row))  # pragma: no cover
 
 
 # ─── Model catalog ──────────────────────────────────────────────────────────
@@ -933,6 +996,9 @@ class ClientToolResultIn(BaseModel):
     call_id: str = Field(min_length=1, max_length=128)
     success: bool
     content: str = Field(max_length=MAX_RESULT_BYTES)
+    # true: this is the result of a declared terminal output tool; the worker acknowledges it,
+    # stops the model turn and finishes the job with empty text instead of another turn
+    terminal: bool = False
 
 
 @router.post("/jobs/{job_id}/tool-results", status_code=status.HTTP_202_ACCEPTED)
@@ -953,7 +1019,7 @@ async def jobs_tool_result(
         raise AgentPolicyViolation(violation)
     try:
         accepted = await submit_result(job_id, ctx.project.id, body.call_id,
-                                       body.success, body.content)
+                                       body.success, body.content, terminal=body.terminal)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -971,4 +1037,7 @@ async def list_models(ctx: ProjectCtx = Depends(require_project)) -> ModelsRespo
     `id` (`gemini/gemini-2.5-flash`) or a bare `name` (`gpt-oss-120b`); a name
     served by several providers resolves deterministically (free-tier keys first,
     then fixed provider rank)."""
-    return ModelsResponse(data=catalog.listing())
+    auth_available = (await codex_auth_available()
+                      if get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED else False)
+    return ModelsResponse(data=catalog.listing(
+        ctx.project.id, codex_auth_available=auth_available))

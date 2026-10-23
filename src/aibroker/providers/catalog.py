@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from aibroker.config import get_settings
 from aibroker.providers.job_contract import job_request_contract
+from aibroker.providers.model_scores import intelligence_index
 from aibroker.providers.registry import (
     ModelSpec,
     all_models,
@@ -25,7 +26,8 @@ from aibroker.providers.subscriptions import (
     subscription_model,
     subscription_model_verified,
     subscription_models,
-    subscription_tool_model_verified,
+    subscription_tools_accepted,
+    subscription_tools_advertised,
 )
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
@@ -166,13 +168,12 @@ def output_modalities(spec: ModelSpec) -> list[str] | None:
     return None
 
 
-def supports_tools(spec: ModelSpec) -> bool | None:
+def supports_tools(spec: ModelSpec, project_id: int | None = None) -> bool | None:
     """Native tools require both a Broker-enabled adapter and model support."""
     from aibroker.services.tool_contract import TOOL_PROVIDERS
 
-    if spec.provider == "codex-sub":
-        return (get_settings().AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED
-                and subscription_tool_model_verified(spec.id))
+    if spec.provider in ("codex-sub", "claude-sub"):
+        return subscription_tools_advertised(spec.id, project_id)
     if (spec.provider not in TOOL_PROVIDERS or spec.transport != "litellm"
             or not any(capability_family(cap) == "chat" for cap in spec.capabilities)):
         return False
@@ -184,11 +185,15 @@ def supports_tools(spec: ModelSpec) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def listing() -> list[dict[str, object]]:
+def listing(project_id: int | None = None,
+            codex_auth_available: bool = True) -> list[dict[str, object]]:
     """The GET /v1/models payload rows (OpenAI-style `data` entries)."""
     rows = []
     for m in pinnable_models():
-        tool_support = supports_tools(m)
+        tool_support = supports_tools(m, project_id)
+        request_tools = tool_support
+        if m.pricing == "subscription":
+            request_tools = subscription_tools_accepted(m.id, project_id)
         also = [o.id for o in pinnable_models()
                 if o.id != m.id and canonical_name(o.id) == canonical_name(m.id)]
         rows.append({
@@ -199,15 +204,18 @@ def listing() -> list[dict[str, object]]:
             "billing_type": ("subscription" if m.pricing == "subscription" else
                              "local" if m.pricing == "local" else "api"),
             "name": canonical_name(m.id),
+            # Artificial Analysis Intelligence Index: exact name+version match only, else null.
+            "intelligence_index": intelligence_index(canonical_name(m.id)),
             "capabilities": sorted(m.capabilities),
             "supports_tools": tool_support,
-            "job_request": job_request_contract(m, tool_support),
+            "job_request": job_request_contract(m, request_tools),
             "modalities": input_modalities(m),
             "output_modalities": output_modalities(m),
             "also_served_by": also,
             "price": price_info(m),
             **({"available": subscription_model_verified(m.id) and
-               (m.provider != "codex-sub" or get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED)}
+               (m.provider != "codex-sub" or
+                (get_settings().AGENT_SUBSCRIPTION_CODEX_ENABLED and codex_auth_available))}
                if m.pricing == "subscription" else {}),
         })
     return rows

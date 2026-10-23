@@ -14,6 +14,8 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -254,6 +256,9 @@ class DeepJobRow(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_expr.false(),
                                                    nullable=False)
+    # Claim order (migration 023): 0 = interactive, 1 = batch (the default for old clients).
+    priority: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"),
+                                          nullable=False)
 
     __table_args__ = (
         Index("ux_deep_jobs_idempotency", "project_id", "idempotency_key", unique=True,
@@ -328,3 +333,60 @@ class AgentRunEventRow(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class DeepJobFileRow(Base):
+    """Raw bytes of one file a finished agent job produced (migration 025). The job's
+    result_meta.files[idx] keeps the metadata and a `content_ref`; the bytes live here, not as
+    base64 inside result_meta. Deleted with the job (retention) through the FK."""
+    __tablename__ = "deep_job_files"
+
+    job_id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("deep_jobs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    idx: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mime: Mapped[str] = mapped_column(String(127), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class CompareRequestRow(Base):
+    """One prompt submitted on the public /compare page (migration 021)."""
+    __tablename__ = "compare_requests"
+
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    browser_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    client_ip: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class CompareResultRow(Base):
+    """One model's answer to a compare request (migration 021)."""
+    __tablename__ = "compare_results"
+
+    id: Mapped[int] = mapped_column(PkBigInt, primary_key=True, autoincrement=True)
+    request_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("compare_requests.id", ondelete="CASCADE"), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    capability: Mapped[str] = mapped_column(String(30), nullable=False)
+    intelligence_index: Mapped[float | None] = mapped_column(Float)
+    job_id: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    model_served: Mapped[str | None] = mapped_column(String(200))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    # Usage from the job's result_meta (migration 022); NULL = Broker reported nothing.
+    tokens_in: Mapped[int | None] = mapped_column(Integer)
+    tokens_out: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    finish_reason: Mapped[str | None] = mapped_column(String(32))
+    billing_type: Mapped[str | None] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    __table_args__ = (Index("ix_compare_results_request", "request_id"),)

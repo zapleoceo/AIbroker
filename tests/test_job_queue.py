@@ -495,10 +495,10 @@ async def test_purge_finished_jobs_respects_status_and_age():
     finished one must survive so a caller polling its result still finds it."""
     from datetime import timedelta
 
-    from aibroker.services.job_queue import _JOB_RETENTION_DAYS, purge_finished_jobs
+    from aibroker.services.job_queue import JOB_RETENTION_DAYS, purge_finished_jobs
 
     old = datetime.now(UTC).replace(tzinfo=None) - timedelta(
-        days=_JOB_RETENTION_DAYS + 1)
+        days=JOB_RETENTION_DAYS + 1)
     fresh = datetime.now(UTC).replace(tzinfo=None)
     ids = {}
     async with get_session() as s:

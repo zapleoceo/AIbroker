@@ -1,7 +1,6 @@
 """Agent runs API (owner-only, scope llm:agent): /v1/agent/runs. See docs/agent-runs.md."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -10,6 +9,7 @@ from pydantic import BaseModel, Field
 from aibroker.agent.attachments import MAX_FILES, NAME_PATTERN, validate_attachments
 from aibroker.agent.codex_cli import UUID_RE
 from aibroker.agent.constants import AGENT_SCOPE, AgentProjectNotAllowed, project_allowed
+from aibroker.agent.job_files import live_files
 from aibroker.agent.policy import AgentPolicyViolation, policy_violation
 from aibroker.agent.rpc import wake_worker
 from aibroker.agent.runs import (
@@ -123,23 +123,14 @@ def _require_agent_scope(ctx: ProjectCtx) -> None:
         raise AgentProjectNotAllowed(ctx.project.id)
 
 
-def _live_files(files: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """Past its TTL a file keeps its name/size but loses its content."""
-    if files is None:
-        return None
-    now = datetime.now(UTC).isoformat()
-    out = []
-    for f in files:
-        if f.get("expires_at") and f["expires_at"] < now:
-            f = {**f, "content_b64": None, "expired": True}
-        out.append(f)
-    return out
+async def _files_of(job: Any) -> list[dict[str, Any]] | None:
+    return await live_files(job.id, (job.result_meta or {}).get("files"))
 
 
-def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None) -> AgentRunResponse:
+def _shape(run: Any, job: Any, attested: dict[str, Any] | None = None,
+           files: list[dict[str, Any]] | None = None) -> AgentRunResponse:
     state = run.outcome or ("running" if job.status == "running" else (
         "waiting_quota" if run.quota_waits else "pending"))
-    files = _live_files((job.result_meta or {}).get("files"))
     usage = None
     if run.usage_source is not None:
         observed = (job.result_meta or {}).get("usage_observed") or {}
@@ -227,7 +218,7 @@ async def _owned_run(run_id: int, ctx: ProjectCtx) -> Any:
 async def agent_run_get(run_id: int, ctx: ProjectCtx = Depends(require_project)) -> AgentRunResponse:
     _require_agent_scope(ctx)
     hit = await _owned_run(run_id, ctx)
-    return _shape(*hit, await get_attestation(run_id))
+    return _shape(*hit, await get_attestation(run_id), await _files_of(hit[1]))
 
 
 @router.get("/runs/{run_id}/events", response_model=AgentEventsResponse)
@@ -254,4 +245,4 @@ async def agent_run_cancel(run_id: int, ctx: ProjectCtx = Depends(require_projec
     hit = await cancel_run(run_id, ctx.project.id)
     if hit is None:
         raise HTTPException(404, "run not found")
-    return _shape(*hit, await get_attestation(run_id))
+    return _shape(*hit, await get_attestation(run_id), await _files_of(hit[1]))

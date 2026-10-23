@@ -11,6 +11,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
+from aibroker.agent.constants import AGENT_CAPABILITIES
 from aibroker.agent.lock import Lease, check_fence
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -53,8 +54,10 @@ def is_waiting(call: dict[str, Any]) -> bool:
     return call.get("state") == "waiting" and _now() < datetime.fromisoformat(call["deadline"])
 
 
-def _digest(success: bool, content: str) -> str:
-    return hashlib.sha256(json.dumps([success, content], ensure_ascii=False).encode()).hexdigest()
+def _digest(success: bool, content: str, terminal: bool = False) -> str:
+    # the terminal flag joins the digest only when set, so older replays keep their digest
+    body = [success, content, True] if terminal else [success, content]
+    return hashlib.sha256(json.dumps(body, ensure_ascii=False).encode()).hexdigest()
 
 
 _SHOWN_RULES = {"maxLength", "minLength", "maxItems", "minItems", "maximum", "minimum", "type",
@@ -120,7 +123,7 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
             await check_fence(s, lease)
         job = (await s.execute(select(DeepJobRow).where(DeepJobRow.id == run_id)
                                .with_for_update())).scalar_one_or_none()
-        if job is None or job.status != "running" or not job.capability == "agent:codex":
+        if job is None or job.status != "running" or job.capability not in AGENT_CAPABILITIES:
             raise ClientToolConflict("job is not running")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:
@@ -154,18 +157,19 @@ async def publish_call(run_id: int, call_id: str, name: str, arguments: Any,
 
 
 async def submit_result(run_id: int, project_id: int, call_id: str,
-                        success: bool, content: str) -> bool:
-    """Commit a same-project result once; identical retries return False."""
+                        success: bool, content: str, *, terminal: bool = False) -> bool:
+    """Commit a same-project result once; identical retries return False. `terminal` is
+    accepted only for the pending call of a tool the job declared in `terminal_tools`."""
     if len(content.encode()) > MAX_RESULT_BYTES:
         raise ValueError("tool result exceeds limit")
-    digest = _digest(success, content)
+    digest = _digest(success, content, terminal)
     async with get_session() as s:
         job = (await s.execute(select(DeepJobRow).where(
             DeepJobRow.id == run_id, DeepJobRow.project_id == project_id
         ).with_for_update())).scalar_one_or_none()
         if job is None:
             raise LookupError("job not found")
-        if job.status != "running" or job.capability != "agent:codex":
+        if job.status != "running" or job.capability not in AGENT_CAPABILITIES:
             raise ClientToolConflict("job is not waiting for a client tool")
         run = await s.get(AgentRunRow, run_id)
         if run is None or run.cancel_requested:
@@ -183,15 +187,22 @@ async def submit_result(run_id: int, project_id: int, call_id: str,
             raise ClientToolConflict("a different result was already submitted")
         if call.get("state") != "waiting" or _now() >= datetime.fromisoformat(call["deadline"]):
             raise ClientToolConflict("tool call expired")
-        call.update(state="ready", success=success, content=content, digest=digest)
+        terminal_tools = ((job.request or {}).get("client_job") or {}).get("terminal_tools") or []
+        if terminal and not success:
+            raise ClientToolConflict("a failed tool result cannot be terminal output")
+        if terminal and call.get("name") not in terminal_tools:
+            raise ClientToolConflict("terminal is allowed only for a declared terminal output tool")
+        call.update(state="ready", success=success, content=content, digest=digest,
+                    terminal=terminal)
         meta["client_tool"] = call
         job.result_meta = meta
         return True
 
 
 async def take_result(run_id: int, call_id: str,
-                      fences: tuple[Lease, ...] = ()) -> tuple[bool, str] | None:
-    """Worker consumes a committed result and retains only its digest for replay checks."""
+                      fences: tuple[Lease, ...] = ()) -> tuple[bool, str, bool] | None:
+    """Worker consumes a committed result -> (success, content, terminal) and retains only its
+    digest (and the terminal mark) for replay checks."""
     async with get_session() as s:
         for lease in fences:
             await check_fence(s, lease)
@@ -212,9 +223,11 @@ async def take_result(run_id: int, call_id: str,
             if _now() >= datetime.fromisoformat(call["deadline"]):
                 raise ClientToolConflict("tool call expired")
             return None
-        result = bool(call["success"]), str(call["content"])
+        terminal = bool(call.get("terminal"))
+        result = bool(call["success"]), str(call["content"]), terminal
         history = list(meta.get("client_tool_history") or [])
-        history.append({"call_id": call_id, "digest": call["digest"]})
+        history.append({"call_id": call_id, "digest": call["digest"],
+                        **({"terminal": True} if terminal else {})})
         meta["client_tool_history"] = history
         meta.pop("client_tool", None)
         job.result_meta = meta

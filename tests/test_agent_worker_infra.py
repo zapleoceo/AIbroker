@@ -51,7 +51,8 @@ def test_agent_worker_has_no_privilege_expansion():
     assert "no-new-privileges:true" in code
     assert re.search(r"cpus: 1\b", code) and "mem_limit: 1g" in code and "pids_limit: 256" in code
     assert "NEEDS OWNER OK" in svc and "AGENT_PAID_CONTINUATION_VERIFIED_OFF" in svc
-    assert 'restart: "no"' in code
+    assert re.search(r"^    restart: unless-stopped(\s|$)", code, re.M)   # survives a reboot, `stop` sticks
+    assert 'restart: "no"' not in code and "restart: always" not in code
 
 
 def test_named_auth_volume_is_declared():

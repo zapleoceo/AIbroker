@@ -135,7 +135,13 @@ client-visible request id `job-<id>` are reused - plus:
 |---|---|---|
 | `agent_runs` | `AgentRunRow` | `task_id`, `account_id`, `session_id` (set from the first `session.assigned`), `resume_session_id`, `idempotency_key`, `workspace`, `cancel_requested`, `last_event_at`, `last_seq`, `outcome` |
 | `agent_run_events` | `AgentRunEventRow` | `(run_id, seq)`, `ts`, `type`, `payload` (JSONB); cascade-deleted with the job |
+| `deep_job_files` | `DeepJobFileRow` | `(job_id, idx)`, `sha256`, `mime`, `size`, `expires_at`, `data` (raw bytes, STORAGE EXTERNAL); cascade-deleted with the job; written only when `AGENT_FILES_IN_TABLE` is on (migration 025) |
 | `agent_session_leases` | `AgentSessionLeaseRow` | PK `(account_id, session_id)`; `run_id` (current holder), `lease_until`, `heartbeat_at`, `fence` (fencing token, +1 per acquisition; expired in place on release, never deleted) |
+
+Expired inline file bytes can be cleared by hand with `python -m aibroker.scripts.clear_expired_files` (dry-run by
+default; see `docs/deploy-ops.md`, "Clearing expired agent file bytes"). It sets `content_b64: null, expired: true` on
+files the API already reports as expired, so poll responses do not change; it is not scheduled and does not touch
+`deep_job_files`.
 
 Migration `infra/sql/migrations/017_agent_runs.sql`, mirrored in `infra/sql/init.sql`.
 Migration `infra/sql/migrations/018_agent_session_leases.sql` adds `agent_session_leases`.
@@ -210,8 +216,9 @@ writes files into the workspace.
 `aibroker.agent.worker` is a lane of its own, started from the app lifespan only when
 `AGENT_WORKER_ENABLED=true` (off by default - enable it on the one process that has the CLIs).
 
-- `claim_agent_runs(capability, limit)` claims `agent:*` rows of ONE capability
-  (`FOR UPDATE SKIP LOCKED`); `concurrency_for` gives the slots
+- `claim_agent_runs(capability, limit, *, interactive_only=False)` claims `agent:*` rows of ONE capability
+  (`FOR UPDATE SKIP LOCKED`) in `ORDER BY priority, created_at` order: interactive (`priority` 0) first, then
+  batch (1), oldest first within each. `interactive_only=True` skips batch rows; `concurrency_for` gives the slots
   (`AGENT_CONCURRENCY_CODEX` / `AGENT_CONCURRENCY_CLAUDE`, default 1). Compose passes
   `AGENT_CONCURRENCY_CODEX: ${AGENT_CONCURRENCY_CODEX:-1}` to `agent-worker-codex`; the operator
   sets `AGENT_CONCURRENCY_CODEX=7` in `.env` for the production plan. **Auth-refresh guard:**
@@ -242,9 +249,20 @@ writes files into the workspace.
   refresh cannot be predicted from the file and is not covered; a two-run live canary remains a
   smoke test, not the safeguard. Slots are never shared
   with the LLM dispatcher, whose claim and stale-requeue SQL exclude `agent:%`.
+- **Refresh proof** (`codex_refresh_proof.PROOF`, a `RefreshProof`: `record`, `covers`, `clear`; single Codex worker only - it is process memory). When a gated run releases the lease on its first model event and the login's `last_refresh` (`CodexCLI.last_refresh`, read once per decision; `refresh_due` decides) did not change during the call, the timestamp is recorded. For `AGENT_CODEX_REFRESH_PROOF_S` (default 1800 s, 0 disables) new runs with the same timestamp skip the gate, but never once it is older than `AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S` (6.5 days): near Codex's own ~8-day interval (UNVERIFIED) every start-up is gated again. Reason: for days between 4 and 8 days every start-up was serialised (prod 2026-10-21: last_refresh 142 h, one run in five waited ~96 s, a 120 s client timed out).
+  RESIDUAL RISK: runs that skip the gate hold no lease, so a refresh they trigger - in particular a 401-triggered one, which no timestamp predicts - is not serialised with other runs. The time-based refresh stays under the lease while max_age + window is below Codex's interval.
 - `fail_stale_agent_runs`: a `running` run past `started_at + wall_timeout + 300 s`
   becomes `run.failed worker_lost`. It is **never re-run** (a CLI run has side effects).
   The scan selects only `id`, `started_at` and `request->wall_timeout_s`, never whole rows.
+- Reserved interactive slots: `claim_for_lane(capability, free, concurrency)` first claims up to
+  `free - reserve` runs of any priority, then the remaining slots interactive-only, where
+  `reserve = effective_interactive_reserve(AGENT_INTERACTIVE_RESERVE, concurrency)` (= `min(reserve,
+  concurrency - 1)`, so concurrency 1 reserves 0). Priority is strict with no aging: under a steady interactive
+  load batch runs can wait. A batch backlog therefore never takes the last reserved
+  slot(s); an interactive run waits only for a slot to free, not behind the whole backlog. A running run
+  is never preempted. `priority` comes from the submit (`interactive|batch`, default batch, or
+  `labels.workflow == "orchestra:mascot-chat"` via `resolve_priority`; constants `PRIORITY_INTERACTIVE`,
+  `PRIORITY_BATCH`, `INTERACTIVE_WORKFLOW_LABEL`; wire name from `priority_name`).
 - Loop cadence: the claim runs every tick (1 s, or at once on a wake-up); every finished run
   task sets the wake event, so its slot is refilled immediately. The housekeeping sweeps
   (`fail_stale_agent_runs`, `expire_overdue_waiting`, `fail_unclaimed_runs`) run on startup and
@@ -304,11 +322,34 @@ writes files into the workspace.
 5. Adapter crash -> `adapter_error`; stream ending without a terminal event ->
    `no_terminal_event`. Failures are never retried or rerouted. The one exception is
    quota exhaustion, which waits (below).
-6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files`:
+6. **Files**: paths from `file.changed` and `run.completed.files` go through `collect_files` (each path is checked by `workspace.safe_file`, which `images.collect_out_images` reuses):
    regular, non-symlink files inside the workspace only; per-file cap
    (`AGENT_FILE_MAX_BYTES`), total cap, count cap; over-cap/unsafe entries are listed with
    `skipped` and no content. Content is served until `expires_at` (`AGENT_FILES_TTL_S`),
    then the API returns `expired: true` and no content.
+   Storage: with `AGENT_FILES_IN_TABLE` (default off) the bytes of png/jpeg/webp/gif files go
+   to `deep_job_files` (`job_files.store_files`, same transaction as the result; `result_meta.files[i]` keeps
+   the metadata, `content_b64: null` and `content_ref: i`); other files, non-canonical base64 and every
+   job written with the flag off keep `content_b64` inline. Readers (`job_files.live_files` for both
+   `GET /v1/agent/runs/{id}` and `GET /v1/jobs/{id}`, `live_files_inline` for the synchronous inline-only
+   view) return the same JSON in both formats: `content_b64` is encoded on read, `content_ref` is never
+   exposed. Rollout/rollback: [deploy-ops.md](deploy-ops.md#agent-file-bytes-in-a-table-migration-025-2026-10-22).
+   Absolute paths are normalised first: inside the workspace they become relative, outside it
+   they are dropped (debug log, no `skipped` entry); `../` and symlinks stay rejected.
+   After the Codex image export, `collect_out_images` (`images.py`, run for every adapter) lists
+   the PNG/JPEG/WebP files the run itself wrote under `out/` (a shell or script, not the
+   built-in generation): regular non-symlink files, 1 byte to `AGENT_IMAGE_MAX_BYTES`, correct
+   magic bytes, a full Pillow decode of the format the extension names, at most 50 Mpx and
+   `AGENT_IMAGES_MAX_COUNT` images. A sha256 already exported this run, or a path
+   `collect_files` already returned, is not listed again. A rejected file gets `skipped`
+   (`unsafe_path`, `empty`, `too_large`, `not_an_image`, `total_budget`). The walk of `out/` is
+   bounded (5000 entries scanned, depth 8, 200 image files); each file is opened `O_NOFOLLOW`
+   `O_NONBLOCK` and refused unless the descriptor is the same regular, single-link file that
+   was checked (a hardlink to an outside file or a swapped-in FIFO is `unsafe_path`). Paths are
+   compared normalised (`./out/a.png` == `out/a.png`) and bytes by sha256, also against `files`
+   that carry content. `AGENT_IMAGES_TOTAL_BYTES` (24 MiB) is one budget for the generated export
+   and this collector together. `no_shell` on the request
+   (`client_job.no_shell`, or the `page=compare` label) sets `AgentRunSpec.no_shell`.
 
 ## Models, usage, billing separation
 
@@ -530,13 +571,28 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
   worker.** Two containers on one login would refresh the OAuth token concurrently, which is a real
   failure (prod job 547951).
 - `agent-worker-claude2` has no RPC socket volume and no RPC wake: it finds new runs by its 1 s database poll.
+  The image still creates the empty RPC directory, but the container root is read-only, so the socket cannot
+  be bound. `start_worker_rpc` recognises this expected case (only when the socket unlink/`bind` fails with
+  errno `EROFS`), returns `None` and logs one WARNING line `worker RPC not mounted: capability=... socket=...
+  mode=polling only (RPC dir read-only / not mounted)` instead of an ERROR with a traceback. Instant wake
+  stays off; other errors (any other errno, wrong owner/mode) still propagate to the ERROR path in
+  `run_worker`.
 - **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
   `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
-  listed order, and picks the first one without an active quota pause. A pause is the latest
+  listed order, and among those without an active quota pause picks the one with the fewest
+  unfinished runs (`unfinished_runs`: pending, queued or running; ties keep the listed order, 2026-10-17).
+  A pause is the latest
   `run.waiting_quota` / `run.failed quota_exhausted` signal whose stored reset time is still in the future
   (every such signal counts; lookback 8 days, so a weekly limit that resets days ahead still pauses the
   account; a deadline-expired wait keeps its reset in `reset_at`). If every
   candidate is paused, the one whose reset comes first is picked, and the job waits honestly there.
+- **Account-down pause** (`ACCOUNT_DOWN_CODES`, `_reset_of`; 2026-10-21): a `run.failed` whose `error_code` is
+  `subscription_disabled` ("organization has disabled Claude subscription access": the login cannot serve at all, it
+  is not a usage limit) pauses that account for `AGENT_ACCOUNT_DISABLED_PAUSE_S` (default 3600 s, `0` = off) from the
+  failure time, through the same `quota_resets` scan. Selection then sends new runs to the other login even when that
+  one is busier; the first run after the pause probes the account again. A re-login does not lift the pause
+  early: the account stays skipped until the hour runs out (lower the setting, or wait). Reason: prod 2026-10-19..20, `owner`
+  answered every run with that error (198 runs) while `claude-2` sat idle, because the tie-break kept picking `owner`.
 - A started run never changes account; a quota wait stays on the same account; there is no fallback to
   paid API. `codex-sub` stays on `owner`.
 - **Catalog:** `claude-sub/claude-opus-5-5` and `claude-sub/claude-haiku-5-5` are listed but
@@ -568,6 +624,10 @@ separately by the owner. Stopping the worker leaves queued runs `pending` and in
 A stopped worker stays stopped across deploys: `infra/aibroker-deploy.sh` builds it but
 recreates only the workers that were running (see
 [deploy-ops.md](deploy-ops.md#agent-workers-in-every-deploy-since-2026-10-13)).
+The workers use `restart: unless-stopped`: a worker that was running comes back by itself after a
+host reboot or a Docker daemon restart, while a worker stopped with `docker compose stop` (the rollback
+above) stays stopped. Before 2026-10-22 they had `restart: "no"` and had to be started by hand after
+every reboot.
 
 ### Billing gate: paid continuation
 
@@ -688,6 +748,45 @@ the device-code flow, then check with
 ChatGPT-plan run requires a separate owner check. Codex uses
 `AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF` (default false), never Claude's
 `AGENT_PAID_CONTINUATION_VERIFIED_OFF`.
+
+**Codex catalog health (`agent/auth_health.py`).** `GET /v1/models` marks every `codex-sub/*` row
+`available: false` while the owner's Codex login is known to be broken. `codex_auth_available()`
+(async, returns `bool`) decides this from terminal run metadata only:
+
+- it selects owner runs (`account_id` `owner`, capability `agent:codex`, `outcome` `completed` or
+  `failed`) and joins exactly the terminal event of each run: the event whose `seq` equals the run's
+  `last_seq`, with type `run.completed` or `run.failed`;
+- it orders by `last_event_at` desc, then `run_id` desc, and reads at most 128 rows, newest first;
+- the first `run.completed` makes it available (`true`);
+- the first `run.failed` with `error_class` `cli_error` and a message containing
+  `workspace routing discovery unauthorized (401)` (case-insensitive) makes it unavailable (`false`);
+- any other failure is skipped; with no match in the window it returns `true`.
+
+The answer is cached per process for 30 seconds, so a new run can take up to 30 s to show in
+`GET /v1/models`.
+
+**Fail-closed on DB errors.** If the lookup raises `SQLAlchemyError` or `OSError`, it logs a
+warning and returns `false` (cached for the same 30 s). Only the `codex-sub` rows are affected;
+the rest of `GET /v1/models` is unchanged. Other exceptions are not caught and propagate.
+
+Only `GET /v1/models` uses the result (`list_models` in `routes/proxy.py`). The check runs only
+when `AGENT_SUBSCRIPTION_CODEX_ENABLED` is on; otherwise it is not called and `false` is passed.
+The result goes to `catalog.listing(project_id, codex_auth_available=...)` (`providers/catalog.py`),
+where a `codex-sub` row is `available` only when the model is verified and both the owner flag and
+this check allow it.
+
+**`POST /v1/jobs` is not blocked** by this check, so the owner can verify recovery after re-login
+with a direct Broker job. Its `run.completed` flips the listing back to `available: true` (after
+the cache TTL). Only a `cli_error` 401 failure flips it to `false`; other failures do not.
+
+**Recovery:** the owner re-logs in with the Codex login handoff above (device-code `codex login`,
+then `codex login ... status` must show a ChatGPT login), then sends one direct job. The query has
+no project filter, so a recovery run from any project counts. Only a subsequent successful direct
+Broker run re-enables the catalog; if it fails, investigate the new error.
+
+Public names: `codex_auth_available` (function, `agent/auth_health.py`) and the keyword parameter
+`codex_auth_available` of `catalog.listing`. Module constants `_AUTH_401` and `_CACHE_SECONDS` are
+private.
 
 ## Codex: container split, read isolation, redaction (independent review fixes)
 
@@ -857,7 +956,7 @@ Codex runs execute in parallel up to `AGENT_CONCURRENCY_CODEX` per worker; only 
 CLI session is exclusive (per-session lease on account_id + session id). Generated images stay
 isolated because export reads only the run's own thread UUID directory (`images.py`), against a
 per-thread baseline. Each image is at most
-`AGENT_IMAGE_MAX_BYTES` (2 MiB) each and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
+`AGENT_IMAGE_MAX_BYTES` (8 MiB since 2026-10-16; Codex PNGs run 1.7-2.1 MB, the old 2 MiB dropped some; passed to agent-worker-codex in compose) each - a larger image is listed in `files` with `skipped: "too_large"` and its `size`, no content and `AGENT_IMAGES_MAX_COUNT` (4), fully decodable by Pillow as PNG,
 de-duplicated by content. Each is returned by the API as a normal run file under `out/` with `sha256`,
 `width`, `height` and the content, subject to the usual TTL. `run.completed` events contain only file
 metadata; PNG bytes remain in `deep_jobs.result_meta` until the normal 7-day job purge, even though
@@ -873,3 +972,7 @@ Orchestra's authenticated end-to-end image request and the Claude critic's
 receipt of decodable PNG bytes remain. Account-aware CLI catalog discovery
 remains later work. Multi-account is done as one worker container per login (see
 [Multiple Claude subscription accounts](#multiple-claude-subscription-accounts)).
+
+### Abandoned Claude OAuth refresh lock (2026-10-17)
+
+Claude Code serialises OAuth refresh with an mkdir lock `.oauth_refresh.lock` in its config dir. A CLI killed mid-refresh leaves it behind, and every later run fails with "Failed to refresh OAuth token: another Claude Code process is refreshing it". `ClaudeCLI.preflight` calls `clear_stale_oauth_lock`: it removes only an EMPTY lock directory older than `OAUTH_LOCK_STALE_S` (120 s) and never touches credentials. The `claude auth status` probe is now killed on its 20 s timeout instead of being left holding the lock.

@@ -114,7 +114,7 @@ _CLAIMED: dict[int, datetime | None] = {}
 # made the nightly dump ~886 MB of finished work nobody would ever read again.
 # Deletion is capped per pass so a first run on a huge backlog can't lock the
 # table or blow up WAL — it simply takes several passes to catch up.
-_JOB_RETENTION_DAYS = int(os.environ.get("JOB_RETENTION_DAYS", "7"))
+JOB_RETENTION_DAYS = int(os.environ.get("JOB_RETENTION_DAYS", "7"))
 _JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
 # Stale-running requeue cadence. Its window is _STALE_RUNNING_S (25 min), so
 # sweeping every ~1-5 s tick bought nothing but a write-lock round trip.
@@ -216,7 +216,7 @@ async def _claim_batch(limit: int) -> list[DeepJobRow]:  # pragma: no cover
                 "  SELECT id FROM deep_jobs "
                 "  WHERE status = 'pending' AND capability NOT LIKE 'agent:%' "
                 "    AND (run_after IS NULL OR run_after < now()) "
-                "  ORDER BY created_at "
+                "  ORDER BY priority, created_at "
                 "  LIMIT :n "
                 "  FOR UPDATE SKIP LOCKED"
                 f") RETURNING {_JOB_COLS_SQL}"
@@ -478,11 +478,11 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
                 "  LIMIT :batch"
                 ")"
             ),
-            {"days": _JOB_RETENTION_DAYS, "batch": _JOB_RETENTION_BATCH},
+            {"days": JOB_RETENTION_DAYS, "batch": _JOB_RETENTION_BATCH},
         )).rowcount or 0
     if deleted:
         log.info("job retention: deleted %d finished jobs older than %dd",
-                 deleted, _JOB_RETENTION_DAYS)
+                 deleted, JOB_RETENTION_DAYS)
     return deleted
 
 

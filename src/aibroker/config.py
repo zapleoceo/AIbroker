@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     AGENT_WORKER_ENABLED: bool = False
     AGENT_CONCURRENCY_CODEX: int = 1       # per capability, independent of LLM jobs
     AGENT_CONCURRENCY_CLAUDE: int = 1
+    # Slots a worker keeps for interactive (priority 0) runs: once free slots <= this, it claims
+    # only interactive runs. Effective value is min(this, concurrency - 1), so concurrency 1 reserves 0.
+    AGENT_INTERACTIVE_RESERVE: int = Field(1, ge=0, le=8)
     # How long a subscription run waits for the caller's tool result before the call expires (and
     # its worker slot is freed). The run keeps its slot while it waits.
     AGENT_TOOL_WAIT_S: int = Field(300, ge=10, le=1800)
@@ -143,6 +146,12 @@ class Settings(BaseSettings):
     # Separate owner confirmation for the Codex account. Claude's confirmation never
     # authorizes an autonomous Codex run.
     AGENT_CODEX_PAID_CONTINUATION_VERIFIED_OFF: bool = False
+    # After a gated Codex run proves the login works at the current `last_refresh`, new runs skip
+    # the start-up auth gate for this long (agent/codex_refresh_proof.py). 0 = always gate when due.
+    AGENT_CODEX_REFRESH_PROOF_S: float = Field(1800.0, ge=0, le=3600)
+    # ...but never once last_refresh is this old: near Codex's own (~8 d, UNVERIFIED) interval every
+    # start-up is gated again, so the time-based refresh happens under the lease.
+    AGENT_CODEX_REFRESH_PROOF_MAX_AGE_S: float = Field(6.5 * 24 * 3600, ge=0, le=7 * 24 * 3600)
     # Server-side allowlist of project ids that may use agent runs (comma-separated ints). EMPTY =
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.
@@ -181,7 +190,20 @@ class Settings(BaseSettings):
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_MODELS: str = "[]"
+    # Comma-separated project ids for the exact-model tool canaries of BOTH providers (the name is
+    # historical); duplicates or junk make it empty. Prod: "12" (Orchestra).
     AGENT_SUBSCRIPTION_CODEX_TOOLS_CANARY_PROJECT_IDS: str = ""
+    # Claude client tools (claude_tool_turn): same gate shape as Codex.
+    AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED: bool = False
+    AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS: str = "[]"
+    AGENT_SUBSCRIPTION_CLAUDE_TOOLS_CANARY_MODELS: str = "[]"
+    # Canary routes with a recorded live client-tool round-trip (call -> caller result -> final
+    # answer) on that exact id: the catalog advertises supports_tools=true for them to the canary
+    # projects. Evidence before listing: Sonnet job 557226 (2026-10-14).
+    AGENT_SUBSCRIPTION_TOOLS_ATTESTED_MODELS: str = '["claude-sub/claude-sonnet-5-5"]'
+    # How long new-run selection skips a Claude account after a run on it failed with
+    # `subscription_disabled` (the organization turned off subscription access; agent/accounts.py).
+    AGENT_ACCOUNT_DISABLED_PAUSE_S: float = 3600.0
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0
@@ -191,9 +213,16 @@ class Settings(BaseSettings):
     AGENT_FILE_MAX_BYTES: int = 256 * 1024     # per returned file
     AGENT_FILES_TOTAL_BYTES: int = 1024 * 1024
     AGENT_FILES_MAX_COUNT: int = 20
-    AGENT_IMAGE_MAX_BYTES: int = 2 * 1024 * 1024   # per exported generated image
+    # per exported generated image; Codex gpt-image PNGs run 1.7-2.1 MB, so 2 MiB dropped some
+    AGENT_IMAGE_MAX_BYTES: int = 8 * 1024 * 1024
     AGENT_IMAGES_MAX_COUNT: int = 4
+    # all images of one run together (generated + written to out/); over it: skipped=total_budget
+    AGENT_IMAGES_TOTAL_BYTES: int = 24 * 1024 * 1024
     AGENT_FILES_TTL_S: int = 3600          # returned file content expires after this
+    # New agent jobs keep already-compressed files (png measured; jpeg/webp/gif assumed incompressible) as raw bytes in
+    # deep_job_files instead of base64 in result_meta. OFF = write inline as before; readers
+    # understand both formats either way (docs/agent-runs.md, migration 025).
+    AGENT_FILES_IN_TABLE: bool = False
 
     # Host
     PUBLIC_HOST: str = "aib.zapleo.com"
