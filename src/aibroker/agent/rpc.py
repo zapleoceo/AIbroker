@@ -107,15 +107,13 @@ async def start_worker_rpc(capability: str, wake: asyncio.Event) -> asyncio.Abst
     directory = path.parent.stat()
     if directory.st_uid != os.getuid() or stat.S_IMODE(directory.st_mode) != 0o700:
         raise RuntimeError("worker RPC directory must be owned by worker uid and mode 0700")
-    if not os.access(path.parent, os.W_OK):
-        _log_polling_only(capability, path)
-        return None
     if os.path.lexists(path):
         existing = path.lstat()
         if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.getuid():
             raise RuntimeError("worker RPC path is not an owned socket")
-        path.unlink()
     try:
+        if os.path.lexists(path):
+            path.unlink()
         server = await asyncio.start_unix_server(
             lambda r, w: _handle(r, w, capability, wake), path=str(path), limit=4096)
     except OSError as exc:

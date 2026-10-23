@@ -64,7 +64,8 @@ is introduced.
 The socket is optional at runtime. If the volume is missing or the directory
 owner/mode is wrong, the worker keeps database polling and Broker's wake hint
 has no effect. The directory guard never relaxes its permissions to start RPC.
-A directory that exists but is not writable (read-only root filesystem and no RPC volume, e.g.
-`agent-worker-claude2`) is the explicit "polling only" mode: `start_worker_rpc` logs one WARNING line
-(capability, socket path, mode) and returns `None`. Only `EROFS`/non-writable is treated this way;
+A directory on a read-only root filesystem with no RPC volume (e.g.
+`agent-worker-claude2`) is the explicit "polling only" mode, entered only when the socket unlink/bind
+fails with errno `EROFS`: `start_worker_rpc` logs one WARNING line
+(capability, socket path, mode) and returns `None`. A non-writable directory alone is not enough, and the existing socket-path validation runs first;
 any other `OSError` and the owner/mode check still surface as errors.

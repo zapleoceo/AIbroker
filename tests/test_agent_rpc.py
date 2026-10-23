@@ -75,22 +75,47 @@ async def test_erofs_on_bind_means_polling_only_mode(monkeypatch, tmp_path: Path
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
-async def test_unwritable_directory_is_polling_only(monkeypatch, tmp_path: Path, caplog):
+async def test_stale_own_socket_unlink_erofs_is_polling_only(monkeypatch, tmp_path: Path, caplog):
     tmp_path.chmod(0o700)
     sock = tmp_path / "worker.sock"
+    import socket as socket_mod
+    s = socket_mod.socket(socket_mod.AF_UNIX)
+    s.bind(str(sock))
+    s.close()
     monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", sock)
-    monkeypatch.setattr(rpc.os, "access", lambda *_a, **_k: False)  # read-only mount view
-    called = False
+    real_unlink = Path.unlink
 
-    async def never(*_a, **_k):
-        nonlocal called
-        called = True
+    def ro_unlink(self, *a, **k):
+        if self == sock:
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        return real_unlink(self, *a, **k)
 
-    monkeypatch.setattr(asyncio, "start_unix_server", never)
+    monkeypatch.setattr(Path, "unlink", ro_unlink)
     with caplog.at_level(logging.INFO, logger=rpc.log.name):
         assert await rpc.start_worker_rpc("agent:codex", asyncio.Event()) is None
-    assert not called
-    assert any("polling only" in r.getMessage() for r in caplog.records)
+    assert len([r for r in caplog.records if "polling only" in r.getMessage()]) == 1
+
+
+async def test_non_socket_path_still_refused_even_if_dir_unwritable(monkeypatch, tmp_path: Path):
+    tmp_path.chmod(0o700)
+    sock = tmp_path / "worker.sock"
+    sock.write_text("not a socket")
+    monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", sock)
+    monkeypatch.setattr(rpc.os, "access", lambda *_a, **_k: False)
+    monkeypatch.setattr(asyncio, "start_unix_server", _boom(errno.EROFS))
+    with pytest.raises(RuntimeError, match="not an owned socket"):
+        await rpc.start_worker_rpc("agent:codex", asyncio.Event())
+
+
+async def test_unwritable_dir_without_erofs_is_not_polling_only(monkeypatch, tmp_path: Path, caplog):
+    tmp_path.chmod(0o700)
+    monkeypatch.setitem(rpc.RPC_SOCKETS, "agent:codex", tmp_path / "worker.sock")
+    monkeypatch.setattr(rpc.os, "access", lambda *_a, **_k: False)
+    monkeypatch.setattr(asyncio, "start_unix_server", _boom(errno.EACCES))
+    with pytest.raises(OSError) as exc:
+        await rpc.start_worker_rpc("agent:codex", asyncio.Event())
+    assert exc.value.errno == errno.EACCES
+    assert not [r for r in caplog.records if "polling only" in r.getMessage()]
 
 
 @pytest.mark.parametrize("code", [errno.EACCES, errno.EADDRINUSE, errno.ENOSPC])
