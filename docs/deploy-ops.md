@@ -638,33 +638,35 @@ in the codebase was the one written for `deep_jobs` after it reached 1.6GB.
 |---|---|---|
 | `check_local_services` — GET `VISION_LOCAL_URL/health` | `local:vision` | api's `/healthz` stays green while it is down; the chain falls through to the cloud tier silently |
 | `check_queue_backlog` — jobs pending/running past `MONITOR_QUEUE_STUCK_MIN` (30) | `queue:backlog` | a wedged dispatcher was invisible until a client complained |
-| `check_backup_freshness` — newest `*.dump` under `MONITOR_BACKUP_DIR` younger than `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` | see below |
+| `check_backup_freshness` — **disabled in production** since 2026-10-25: `MONITOR_BACKUP_DIR` is unset, so it returns immediately. When set, it checked the newest `*.dump` under that directory against `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` (not emitted in production) | see below |
 
 Each is an alert/recover pair, so a fix clears itself; a failing check never
 stops the others.
 
 ### Backups are made by vera3, not by this stack
 
-The nightly `pg_dump -Fc` of `aibroker-postgres` (plus a tarball of `.env`) is
-produced by **`/usr/local/bin/vera-backup.sh`** — vera3's script, root
-crontab 03:30 — into `/var/backups/vera/aibroker/daily/<date>/aibroker.dump`,
-verified against `SHA256SUMS`, pulled nightly by a Synology NAS over a
-read-only `rrsync` user, and pruned locally only once the NAS has read it.
-That is a solid chain, but aibroker did not own or verify any of it, and the
-"Disaster recovery" runbook below described a manual `pg_dump` that nobody
-runs. If vera3's script ever dropped the `backup_project aibroker` line, this
-stack would lose its backups without noticing. `check_backup_freshness` closes
-that: the monitor mounts the dump directory read-only (`AIBROKER_BACKUP_DIR`,
-default `/var/backups/vera/aibroker/daily`) and alerts once a day while no
-dump under 36h old exists.
+The nightly `pg_dump -Fc` of `aibroker-postgres` is produced by
+**`/usr/local/bin/vera-backup.sh`** — vera3's script, root crontab 03:30 — and
+pulled nightly by a Synology NAS over a read-only `rrsync` user. Since
+2026-10-23 the aibroker dump goes straight to the NAS stream (vera3's
+`SKIP_DB_PROJECTS`); it is no longer written to
+`/var/backups/vera/aibroker/daily/<date>/`, so that local tree has no fresh
+`aibroker.dump`. aibroker does not own or verify the backup chain; the
+"Disaster recovery" runbook below describes the NAS copy.
 
-The tree is `root:verabackup 750` and the monitor runs as uid 10001, so it
-joins the host's `verabackup` group (`group_add`, gid via `VERABACKUP_GID`,
-default 1001) — the least privilege that can read it. The very first live tick
-ran without that and paged a false `backup:stale` ("none found"); the check
-also falls back to the newest date-directory's mtime when the files inside are
-unreadable, so a permissions regression degrades to a coarser signal rather
-than a false alarm.
+The monitor's local age check was removed at the owner's request on
+2026-10-25. In `docker-compose.yml` the monitor service no longer sets
+`MONITOR_BACKUP_DIR`, no longer mounts a dump directory at `/backups`, and no
+longer joins the `verabackup` group (`group_add`). The code of
+`check_backup_freshness` is kept in `src/aibroker/monitor.py`; with
+`MONITOR_BACKUP_DIR` unset it returns immediately, so `backup:stale` is not
+raised in production. Re-enabling it would require setting `MONITOR_BACKUP_DIR`
+and mounting a directory that actually receives aibroker dumps. Verifying that
+the NAS received the dump is a separate open question and is not implemented.
+
+Historical: before 2026-10-25 the monitor read the local dump tree, which is
+`root:verabackup 750`, and needed the `verabackup` group to do so. The first
+live tick without that group paged a false `backup:stale` (2026-09-07).
 
 ## Local vision (2026-08-31)
 
@@ -1068,9 +1070,10 @@ docker compose up -d
 
 The Postgres volume (`aibroker_pgdata`) is the only persistent state. Backups
 are made by vera3, not by this stack (see "Backups are made by vera3" above):
-the nightly `pg_dump -Fc` lands in
-`/var/backups/vera/aibroker/daily/<date>/aibroker.dump`, produced by vera3's
-`vera-backup.sh`. Restore from the newest verified dump of that tree.
+the nightly `pg_dump -Fc` is produced by vera3's `vera-backup.sh` and goes to
+the NAS stream (not to `/var/backups/vera/aibroker/daily/`, since 2026-10-23).
+Restore from the newest verified NAS copy; the backup owner (vera3) holds the
+access path.
 
 A manual dump is only an optional pre-migration snapshot:
 ```

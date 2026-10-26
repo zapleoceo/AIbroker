@@ -113,6 +113,34 @@ async def test_check_queue_backlog(stuck, expect_alert):
     assert recover.await_count == (0 if expect_alert else 1)
 
 
+def _compose_monitor_service() -> str:
+    import re
+    from pathlib import Path
+    compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(
+        encoding="utf-8").replace("\r\n", "\n")
+    m = re.search(r"^  monitor:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n)", compose, re.S | re.M)
+    assert m, "monitor service not found in docker-compose.yml"
+    return "\n".join(ln for ln in m.group(1).splitlines() if not ln.strip().startswith("#"))
+
+
+def test_compose_monitor_has_no_local_dump_age_check():
+    """Owner 2026-10-25: the aibroker dump goes to the NAS stream, so the local
+    "no fresh aibroker.dump under /backups" warning is removed. The check stays
+    in code but is disabled by an unset MONITOR_BACKUP_DIR; nothing mounts or
+    grants access to the local dump tree any more."""
+    service = _compose_monitor_service()
+    assert "MONITOR_BACKUP_DIR" not in service
+    assert "/backups" not in service
+    assert "group_add" not in service
+    assert "VISION_LOCAL_URL" in service          # the other monitor inputs stay
+
+
+def test_monitor_loop_keeps_the_other_checks():
+    import inspect
+    source = inspect.getsource(monitor)
+    assert "check_local_services, check_queue_backlog" in source
+
+
 def test_newest_dump_mtime_falls_back_to_child_dir_mtime_when_unreadable(tmp_path):
     """REGRESSION: the dump dirs are root:verabackup 750 and the monitor is
     unprivileged — it can list the root but not enter the date dirs, so the
