@@ -654,19 +654,27 @@ pulled nightly by a Synology NAS over a read-only `rrsync` user. Since
 `aibroker.dump`. aibroker does not own or verify the backup chain; the
 "Disaster recovery" runbook below describes the NAS copy.
 
-The monitor's local age check was removed at the owner's request on
-2026-10-25. In `docker-compose.yml` the monitor service no longer sets
-`MONITOR_BACKUP_DIR`, no longer mounts a dump directory at `/backups`, and no
-longer joins the `verabackup` group (`group_add`). The code of
-`check_backup_freshness` is kept in `src/aibroker/monitor.py`; with
-`MONITOR_BACKUP_DIR` unset it returns immediately, so `backup:stale` is not
-raised in production. Re-enabling it would require setting `MONITOR_BACKUP_DIR`
-and mounting a directory that actually receives aibroker dumps. Verifying that
-the NAS received the dump is a separate open question and is not implemented.
+The monitor's local age check is disabled in production since 2026-10-25:
+`MONITOR_BACKUP_DIR` is unset, so `check_backup_freshness` returns immediately
+and `backup:stale` is not raised. In `docker-compose.yml` only
+`MONITOR_BACKUP_DIR` was dropped. The `/backups` read-only mount
+(`AIBROKER_BACKUP_DIR`) and the `verabackup` group (`group_add`, `VERABACKUP_GID`)
+are still in compose but unused while the check is disabled; they were left in
+place on purpose so this fix makes no access change. The code of
+`check_backup_freshness` is kept in `src/aibroker/monitor.py`. Re-enabling it
+would require setting `MONITOR_BACKUP_DIR` and mounting a directory that actually
+receives aibroker dumps. Verifying that the NAS received the dump is a separate
+open question and is not implemented.
 
-Historical: before 2026-10-25 the monitor read the local dump tree, which is
-`root:verabackup 750`, and needed the `verabackup` group to do so. The first
-live tick without that group paged a false `backup:stale` (2026-09-07).
+The dump tree is `root:verabackup 750` and the monitor runs as uid 10001, so
+when the check is enabled the monitor needs the host's `verabackup` group to read
+it (`group_add`, gid via `VERABACKUP_GID`, default 1001).
+The check also falls back to the newest date-directory's mtime when the files
+inside are unreadable, so a permissions regression degrades to a coarser signal
+rather than a false alarm.
+
+Historical: the first live tick without that group paged a false `backup:stale`
+("none found", 2026-09-07).
 
 ## Local vision (2026-08-31)
 

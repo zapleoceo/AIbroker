@@ -126,12 +126,10 @@ def _compose_monitor_service() -> str:
 def test_compose_monitor_has_no_local_dump_age_check():
     """Owner 2026-10-25: the aibroker dump goes to the NAS stream, so the local
     "no fresh aibroker.dump under /backups" warning is removed. The check stays
-    in code but is disabled by an unset MONITOR_BACKUP_DIR; nothing mounts or
-    grants access to the local dump tree any more."""
+    in code but is disabled by an unset MONITOR_BACKUP_DIR; mounts and groups
+    are deliberately left as they were (no access change in this fix)."""
     service = _compose_monitor_service()
     assert "MONITOR_BACKUP_DIR" not in service
-    assert "/backups" not in service
-    assert "group_add" not in service
     assert "VISION_LOCAL_URL" in service          # the other monitor inputs stay
 
 

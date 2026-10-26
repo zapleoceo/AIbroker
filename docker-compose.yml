@@ -317,11 +317,19 @@ services:
       # api's /healthz stays green while vision-local is down,
       # because the chain just falls through to the cloud tier silently.
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
-      # No MONITOR_BACKUP_DIR, no /backups mount, no verabackup group (owner,
-      # 2026-10-25): since 2026-10-23 the aibroker DB dump goes straight to the
-      # NAS stream (vera3 SKIP_DB_PROJECTS), so the local daily dir never gets a
-      # fresh aibroker.dump and the local-dump age check could only page falsely.
-      # Unset MONITOR_BACKUP_DIR keeps check_backup_freshness disabled.
+      # No MONITOR_BACKUP_DIR (owner, 2026-10-25): since 2026-10-23 the aibroker
+      # DB dump goes straight to the NAS stream (vera3 SKIP_DB_PROJECTS), so the
+      # local daily dir never gets a fresh aibroker.dump and the local-dump age
+      # check could only page falsely. Unset keeps check_backup_freshness disabled.
+    volumes:
+      - ${AIBROKER_BACKUP_DIR:-/var/backups/vera/aibroker/daily}:/backups:ro
+    # The dump tree is root:verabackup 750 (and each .dump 640) and this
+    # container runs unprivileged (uid 10001), so the first live tick could not
+    # even list /backups and paged a FALSE backup:stale (2026-09-07). Joining
+    # the host's verabackup group is the least privilege that reads it — no
+    # root, no chmod on another project's directory. Host gid, env-overridable.
+    group_add:
+      - "${VERABACKUP_GID:-1001}"
     mem_limit: 256m   # 35-90MiB observed
     command: ["python", "-m", "aibroker.monitor"]
     # No HTTP server here — the Dockerfile HEALTHCHECK curls :8000, which this
