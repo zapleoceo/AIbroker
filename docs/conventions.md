@@ -148,7 +148,7 @@ split.
   the session first runs `SET aibroker.allow_destructive_ddl = 'on'`.
 - **Test isolation** (`tests/_isolation.py`, applied by conftest before any app import):
   `REDIS_URL`, `TELEGRAM_BOT_TOKEN`, `VISION_LOCAL_URL`, `MONITOR_BACKUP_DIR`
-  (optional; unset in production, which disables the backup age check)
+  (optional; empty disables the backup age check; the monitor service in `docker-compose.yml` no longer sets it, owner request of 2026-10-25, effective once deployed)
   are forced empty, `OWNER_TELEGRAM_ID` a fake id, `ALERT_STATE_DIR` a fresh temp dir, and
   `Settings` ignores any cwd `.env`. pytest refuses to start if `/.dockerenv` exists or cwd is
   `/var/www/aibroker`, unless `CI=true` or `AIB_TEST_SANDBOX=1` — a deliberate isolated test

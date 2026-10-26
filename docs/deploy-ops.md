@@ -638,7 +638,7 @@ in the codebase was the one written for `deep_jobs` after it reached 1.6GB.
 |---|---|---|
 | `check_local_services` — GET `VISION_LOCAL_URL/health` | `local:vision` | api's `/healthz` stays green while it is down; the chain falls through to the cloud tier silently |
 | `check_queue_backlog` — jobs pending/running past `MONITOR_QUEUE_STUCK_MIN` (30) | `queue:backlog` | a wedged dispatcher was invisible until a client complained |
-| `check_backup_freshness` — **disabled in production** since 2026-10-25: `MONITOR_BACKUP_DIR` is unset, so it returns immediately. When set, it checked the newest `*.dump` under that directory against `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` (not emitted in production) | see below |
+| `check_backup_freshness` — **not active once this change is deployed**: the monitor service in `docker-compose.yml` no longer sets `MONITOR_BACKUP_DIR` (owner request of 2026-10-25), so it returns immediately. When `MONITOR_BACKUP_DIR` is set, it checks the newest `*.dump` under that directory against `MONITOR_BACKUP_MAX_AGE_H` (36h); the age decision is the pure `backup_is_fresh` | `backup:stale` (not raised once deployed) | see below |
 
 Each is an alert/recover pair, so a fix clears itself; a failing check never
 stops the others.
@@ -654,13 +654,14 @@ pulled nightly by a Synology NAS over a read-only `rrsync` user. Since
 `aibroker.dump`. aibroker does not own or verify the backup chain; the
 "Disaster recovery" runbook below describes the NAS copy.
 
-The monitor's local age check is disabled in production since 2026-10-25:
-`MONITOR_BACKUP_DIR` is unset, so `check_backup_freshness` returns immediately
-and `backup:stale` is not raised. In `docker-compose.yml` only
-`MONITOR_BACKUP_DIR` was dropped. The `/backups` read-only mount
-(`AIBROKER_BACKUP_DIR`) and the `verabackup` group (`group_add`, `VERABACKUP_GID`)
-are still in compose but unused while the check is disabled; they were left in
-place on purpose so this fix makes no access change. The code of
+The monitor's local age check is switched off by the compose change: the
+monitor service in `docker-compose.yml` no longer sets `MONITOR_BACKUP_DIR`
+(owner request of 2026-10-25), so once this configuration is deployed
+`check_backup_freshness` returns immediately and `backup:stale` is not raised.
+Only `MONITOR_BACKUP_DIR` is dropped in that change. The `/backups` read-only
+mount (`AIBROKER_BACKUP_DIR`) and the `verabackup` group (`group_add`,
+`VERABACKUP_GID`) stay in compose but are unused once the check is off; they
+are kept on purpose so this change makes no access change. The code of
 `check_backup_freshness` is kept in `src/aibroker/monitor.py`. Re-enabling it
 would require setting `MONITOR_BACKUP_DIR` and mounting a directory that actually
 receives aibroker dumps. Verifying that the NAS received the dump is a separate
