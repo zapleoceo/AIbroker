@@ -317,9 +317,10 @@ services:
       # api's /healthz stays green while vision-local is down,
       # because the chain just falls through to the cloud tier silently.
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
-      # Nightly dumps are made by vera3's /usr/local/bin/vera-backup.sh, not by
-      # this stack — aibroker only VERIFIES they keep appearing. Empty disables.
-      MONITOR_BACKUP_DIR: /backups
+      # No MONITOR_BACKUP_DIR (owner, 2026-10-25): since 2026-10-23 the aibroker
+      # DB dump goes straight to the NAS stream (vera3 SKIP_DB_PROJECTS), so the
+      # local daily dir never gets a fresh aibroker.dump and the local-dump age
+      # check could only page falsely. Unset keeps check_backup_freshness disabled.
     volumes:
       - ${AIBROKER_BACKUP_DIR:-/var/backups/vera/aibroker/daily}:/backups:ro
     # The dump tree is root:verabackup 750 (and each .dump 640) and this

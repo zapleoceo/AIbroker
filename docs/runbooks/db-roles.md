@@ -11,7 +11,7 @@ role exists. `<PG>` below means
 `docker exec -i aibroker-postgres psql -U aibroker -d aibroker -v ON_ERROR_STOP=1`.
 
 ## 0. Preconditions
-- A fresh backup exists (`MONITOR_BACKUP_DIR`) and a restore was tested.
+- A fresh backup exists on the NAS stream (confirm with the backup owner, vera3; the local age check is off once the compose change that drops `MONITOR_BACKUP_DIR` is deployed) and a restore was tested.
 - `<PG> -c "SELECT rolname, rolsuper FROM pg_roles WHERE rolname='aibroker'"` shows `t`.
 
 ## 1. Create the role (password from a secret, never in git)
