@@ -207,6 +207,9 @@ class Settings(BaseSettings):
     # How long new-run selection skips a Claude account after a run on it failed with
     # `subscription_disabled` (the organization turned off subscription access; agent/accounts.py).
     AGENT_ACCOUNT_DISABLED_PAUSE_S: float = 3600.0
+    # Claude accounts never picked for NEW /v1/jobs runs (comma-separated account ids, empty = none),
+    # e.g. a login that is known broken until the owner signs in again (agent/accounts.py).
+    AGENT_CLAUDE_EXCLUDED_ACCOUNTS: str = ""
     # Session lease (agent_session_leases): TTL must exceed ~3 heartbeats so one missed beat
     # never frees a live session, yet a crashed worker's lease expires on its own.
     AGENT_SESSION_LEASE_TTL_S: float = 120.0

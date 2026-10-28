@@ -28,8 +28,17 @@ QUOTA_LOOKBACK = timedelta(days=8)
 # A failure that says the LOGIN cannot serve at all (not a usage limit): the organization turned off
 # subscription access for Claude Code. Every new run on that account fails at once, so selection
 # skips it for AGENT_ACCOUNT_DISABLED_PAUSE_S after the failure; the next run after the pause probes
-# it again (prod 2026-10-21: 198 runs failed on `owner` while `claude-2` sat idle).
-ACCOUNT_DOWN_CODES = frozenset({"subscription_disabled"})
+# it again (prod 2026-10-21: 198 runs failed on `owner` while `claude-2` sat idle). A failed OAuth
+# refresh counts the same way: every run on that login fails in seconds until it is fixed (prod
+# 2026-10-27..28, owner: job 588602 and others).
+ACCOUNT_DOWN_CODES = frozenset({"subscription_disabled", "auth_refresh_failed"})
+
+
+def excluded_accounts() -> frozenset[str]:
+    """Accounts the operator took out of new-run selection (AGENT_CLAUDE_EXCLUDED_ACCOUNTS,
+    comma-separated; empty = none)."""
+    raw = get_settings().AGENT_CLAUDE_EXCLUDED_ACCOUNTS
+    return frozenset(a.strip() for a in raw.split(",") if a.strip())
 
 
 def _now() -> datetime:
@@ -104,7 +113,9 @@ async def pick_account(candidates: tuple[str, ...], capability: str,
                        now: datetime | None = None) -> str | None:
     """The account for a NEW run: among candidates without an active quota pause, the one with
     the fewest unfinished runs (ties: policy order); else the candidate whose pause ends first.
-    None when there are no candidates."""
+    Excluded accounts (`excluded_accounts`) are never candidates. None when none are left."""
+    excluded = excluded_accounts()
+    candidates = tuple(a for a in candidates if a not in excluded)
     if not candidates:
         return None
     if len(candidates) == 1:
