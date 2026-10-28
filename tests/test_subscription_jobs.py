@@ -152,15 +152,90 @@ async def test_jobs_subscription_pin_reuses_submit_shape_and_exact_cli_model(mon
     assert kwargs["allowed_tools"] == []
 
 
+VISION_SCOPES = ("llm:chat", "llm:agent", "llm:vision")
+
+
+def _image_block(fmt: str = "PNG", media: str = "image/png", raw: bytes | None = None) -> dict:
+    if raw is None:
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(buf, format=fmt)
+        raw = buf.getvalue()
+    url = f"data:{media};base64,{base64.b64encode(raw).decode()}"
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _claude_vision(monkeypatch, vision: str) -> AsyncMock:
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"claude-sub":["claude-sonnet-5-5","claude-opus-5-5"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS", vision)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    create = AsyncMock(return_value=(42, True))
+    monkeypatch.setattr(proxy, "create_run", create)
+    return create
+
+
+def _image_request(block: dict, model: str = "claude-sub/claude-opus-5-5") -> proxy.ChatRequest:
+    return proxy.ChatRequest.model_validate({"model": model, "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "Design around this hero"}, block]}]})
+
+
+@pytest.mark.asyncio
+async def test_claude_image_reaches_the_cli_as_a_real_attachment(monkeypatch):
+    create = _claude_vision(monkeypatch, '{"claude-sub":["claude-opus-5-5"]}')
+    result = await proxy.jobs_submit(_image_request(_image_block()), Response(),
+                                     capability="chat:smart", ctx=_ctx(VISION_SCOPES))
+    assert result.job_id == 42
+    kwargs = create.await_args.kwargs
+    assert kwargs["capability"] == "agent:claude" and kwargs["model"] == "claude-opus-5-5"
+    [att] = kwargs["attachments"]
+    assert att["name"] == "image_1.png" and att["media_type"] == "image/png" and att["data_b64"]
+    assert "[attached image: inputs/image_1.png]" in kwargs["prompt"]
+    assert att["data_b64"] not in kwargs["prompt"]                 # bytes never go into the prompt
+    assert "vision" in next(m for m in subscription_models()
+                            if m.id == "claude-sub/claude-opus-5-5").capabilities
+
+
+@pytest.mark.asyncio
+async def test_claude_image_is_validated_before_enqueue(monkeypatch):
+    create = _claude_vision(monkeypatch, '{"claude-sub":["claude-opus-5-5"]}')
+    for block in (_image_block(media="image/bmp"),                        # type not allowed
+                  _image_block(fmt="JPEG"),                               # bytes do not match png
+                  _image_block(raw=b"\x89PNG\r\n\x1a\n" + b"x" * 64),     # undecodable
+                  _image_block(raw=b"\x89PNG" + b"0" * (25 * 1024 * 1024))):  # over MAX_BYTES
+        with pytest.raises(HTTPException) as exc:
+            await proxy.jobs_submit(_image_request(block), Response(),
+                                    capability="chat:smart", ctx=_ctx(VISION_SCOPES))
+        assert exc.value.status_code == 400
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_claude_image_needs_the_exact_model_in_the_vision_list(monkeypatch):
+    create = _claude_vision(monkeypatch, '{"claude-sub":["claude-opus-5-5"]}')
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(_image_request(_image_block(), "claude-sub/claude-sonnet-5-5"),
+                                Response(), capability="chat:smart", ctx=_ctx(VISION_SCOPES))
+    assert exc.value.status_code == 503 and "vision" in exc.value.detail
+    create.assert_not_awaited()
+
+
+def test_claude_vision_ids_must_be_verified_or_the_catalog_closes(monkeypatch):
+    _claude_vision(monkeypatch, '{"claude-sub":["claude-fable-5-1"]}')   # candidate, not verified
+    assert subscription_models() == []
+
 @pytest.mark.asyncio
 async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enqueue(monkeypatch):
     create = AsyncMock()
     monkeypatch.setattr(proxy, "create_run", create)
     monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
     monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
-    # image input stays Codex-only (400); Claude tools are refused while the switch is off (503)
+    # image input needs a vision-verified model (503 for Sonnet here); Claude tools are refused
+    # while the switch is off (503)
     for messages, tools, status in (
-        ([{"role": "user", "content": [{"type": "text", "text": "hi"}]}], None, 400),
+        ([{"role": "user", "content": [{"type": "text", "text": "hi"}, _image_block()]}], None, 503),
         ([{"role": "user", "content": "hi"}], [{"type": "function", "function": {
             "name": "f", "description": "d", "parameters": {"type": "object"}}}], 503),
     ):
@@ -168,7 +243,8 @@ async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enq
                                                   "model": "claude-sub/claude-sonnet-5-5",
                                                   **({"tools": tools} if tools else {})})
         with pytest.raises(HTTPException) as exc:
-            await proxy.jobs_submit(body, Response(), capability="chat:fast", ctx=_ctx())
+            await proxy.jobs_submit(body, Response(), capability="chat:fast",
+                                    ctx=_ctx(VISION_SCOPES))
         assert exc.value.status_code == status
     create.assert_not_awaited()
 

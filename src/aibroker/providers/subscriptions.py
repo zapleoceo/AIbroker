@@ -37,10 +37,10 @@ def _catalog() -> tuple[list[ModelSpec], frozenset[str]]:
         vision = _configured_ids("AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS")
         if any(set(ids) - set(data.get(provider, [])) for provider, ids in verified.items()):
             raise ValueError("verified models must be catalog candidates")
-        if set(vision) - {"codex-sub"} or any(
+        if set(vision) - set(PROVIDERS) or any(
             set(ids) - set(verified.get(provider, [])) for provider, ids in vision.items()
         ):
-            raise ValueError("input vision models must be verified Codex models")
+            raise ValueError("input vision models must be verified subscription models")
         models = []
         for provider, ids in data.items():
             for mid in ids:

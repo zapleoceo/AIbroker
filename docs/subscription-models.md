@@ -68,7 +68,7 @@ subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by
 `claude-sub`/`codex-sub`). `AGENT_SUBSCRIPTION_VERIFIED_MODELS` uses the same
 shape and must be a subset. Malformed or inconsistent input exposes no
 subscription models. `AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS` is an
-independent subset of verified Codex IDs; its default is empty. Only entries
+independent subset of verified subscription IDs (`codex-sub` or `claude-sub`); its default is empty. Only entries
 in that list gain the `vision` capability and image input in the catalog.
 The direct diagnostic agent route can be used to verify an input image before
 enabling its exact model ID. Compose uses the `default` sentinel when no override is
@@ -98,7 +98,7 @@ The implementation exposes configured candidates through `subscription_models()`
 pin lookup in `subscription_model()`, and the availability check in
 `subscription_model_verified()`. For a subscription job,
 `prompt_for_messages()` preserves text turns and roles;
-`subscription_messages()` converts verified Codex image blocks into bounded
+`subscription_messages()` converts image blocks of a vision-verified model into bounded
 temporary attachments without placing base64 bytes in the CLI prompt;
 `response_format_problem()` rejects unsupported formats before enqueue and
 `output_problem()` validates the final JSON. `live_files()` hides expired
@@ -116,13 +116,16 @@ client-tool path can be enabled separately with
 [subscription tool loop](subscription-tool-loop.md). Claude has the same path
 behind `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_ENABLED` and
 `AGENT_SUBSCRIPTION_CLAUDE_TOOLS_VERIFIED_MODELS`.
-Claude subscription jobs still reject image input and `vision`. A Codex model
-with separately verified vision accepts up to five embedded, single-frame PNG,
+A Codex or Claude model with separately verified vision (2026-10-28 for Claude,
+`VISION_PROVIDERS` in `providers/job_contract.py`) accepts up to five embedded, single-frame PNG,
 JPEG, WebP, or GIF images, each at most 5 MiB,
 10 MiB total, and 25 million pixels per image. Only `data:<type>;base64,...`
 URLs are accepted; remote URLs are not fetched. The server fully decodes each
 image, stores it as a temporary run attachment, passes the actual file through
-Codex CLI `--image`, and removes the workspace after the run. An image requires
+Codex CLI `--image` or, for Claude, names it in the prompt and allows only the scoped
+`Read(inputs/**)` tool to open it, and removes the workspace after the run. Live Claude canary
+2026-10-28 (claude-opus-5-5, Broker's argv shape): a 64x64 red PNG in `inputs/` was opened with
+Read (2 turns) and described as "red". An image requires
 the existing `llm:vision` scope even when sent on a chat or other non-vision
 capability; this change does not grant that scope to any project. A model-level
 live input-vision canary is required before adding an ID to the vision list;
