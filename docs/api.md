@@ -913,7 +913,7 @@ when the enabled model's support is unknown. Subscription routes report
 `claude-sub/claude-sonnet-5-5`); the rows of `GET /v1/models` are built per caller
 project (`catalog.listing(ctx.project.id)`). Codex subscription rows keep the global
 verified list. Only exact
-Codex IDs separately verified for input vision list image input on the
+Codex or Claude IDs separately verified for input vision (claude-sub since 2026-10-28) list image input on the
 `vision` lane, limited to embedded data URLs. The input-vision verified list
 defaults to empty. Any `image_url` block on `/v1/jobs` or `/v1/deep` requires `llm:vision`, not only
 for `vision`; `llm:agent` and the capability's usual scope are also required for subscription pins.

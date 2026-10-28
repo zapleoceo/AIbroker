@@ -235,7 +235,8 @@ run. The stop is logged with field names and sizes only (`_result_shape`).
 
 Input vision is separate from PNG generation. The deployed universal jobs
 route accepts bounded `image_url` `data:` blocks, writes actual image files,
-and passes them through Codex CLI `--image`, but every Codex model remains
+and passes them through Codex CLI `--image` (Claude: the file is named in the prompt and
+opened with the scoped `Read(inputs/**)`), but every Codex or Claude model remains
 unavailable for input vision until its exact ID is in
 `AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS`. That allowlist is empty by default.
 The production project 12 already has `llm:vision` and `llm:agent`; no new

@@ -78,6 +78,11 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
     }
 
 
+# Subscription providers whose CLI receives image input as real files (Codex `--image`, Claude a
+# scoped `Read(inputs/**)`); which exact models may use it is AGENT_SUBSCRIPTION_VISION_VERIFIED_MODELS.
+VISION_PROVIDERS = ("codex-sub", "claude-sub")
+
+
 def subscription_request_problem(body: _JobBody, capability: str, provider: str) -> str | None:
     """Reject controls that the Claude/Codex CLI route cannot apply."""
     if body.no_shell and provider != "codex-sub":
@@ -95,10 +100,10 @@ def subscription_request_problem(body: _JobBody, capability: str, provider: str)
             else m.role not in SUBSCRIPTION_ROLES or bool(m.tool_calls or m.tool_call_id))
            or not (isinstance(m.content, str | list) or
                    (with_tools and m.role == "assistant" and m.content is None and m.tool_calls))
-           or (isinstance(m.content, list) and provider != "codex-sub")
+           or (isinstance(m.content, list) and provider not in VISION_PROVIDERS)
            for m in body.messages):
         return "unsupported_for_subscription_model: tool history or image input"
-    if capability == "vision" and provider != "codex-sub":
+    if capability == "vision" and provider not in VISION_PROVIDERS:
         return "unsupported_for_subscription_model: vision"
     if problem := response_format_problem(body.response_format):
         return problem
