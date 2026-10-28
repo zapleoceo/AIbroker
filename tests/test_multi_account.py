@@ -329,14 +329,15 @@ def test_reset_parsing_tolerates_garbage_and_timezones():
 DISABLED = "Your organization has disabled Claude subscription access for Claude Code"
 
 
-def _pause(monkeypatch, seconds: float) -> None:
-    monkeypatch.setattr(accounts, "get_settings",
-                        lambda: SimpleNamespace(AGENT_ACCOUNT_DISABLED_PAUSE_S=seconds))
+def _pause(monkeypatch, seconds: float, excluded: str = "") -> None:
+    monkeypatch.setattr(accounts, "get_settings", lambda: SimpleNamespace(
+        AGENT_ACCOUNT_DISABLED_PAUSE_S=seconds, AGENT_CLAUDE_EXCLUDED_ACCOUNTS=excluded))
 
 
-async def _fail_disabled(pid: int, account: str, age: timedelta = timedelta()) -> None:
+async def _fail_disabled(pid: int, account: str, age: timedelta = timedelta(),
+                         message: str = DISABLED) -> None:
     rid = await _run(pid, account)
-    await append_event(rid, ev.RunFailed(error_class="cli_error", message=DISABLED))
+    await append_event(rid, ev.RunFailed(error_class="cli_error", message=message))
     if age:
         async with get_session() as s:
             for row in (await s.execute(select(AgentRunEventRow).where(
@@ -367,6 +368,31 @@ async def test_a_zero_pause_turns_the_skip_off(monkeypatch):
     await _fail_disabled(pid, "owner")
     assert await pick_account(("owner", "claude-2"), CAP) == "owner"
 
+
+REFRESH = ("Failed to refresh OAuth token: another Claude Code process is refreshing it or exited "
+           "mid-refresh")
+
+
+async def test_a_failed_oauth_refresh_pauses_the_login_like_a_disabled_one(monkeypatch):
+    _pause(monkeypatch, 3600)
+    pid, _ = await _project()
+    await _fail_disabled(pid, "owner", message=REFRESH)
+    await _run(pid, "claude-2", "busy")
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
+
+
+async def test_an_excluded_account_is_never_picked(monkeypatch):
+    _pause(monkeypatch, 3600, excluded=" owner , ")
+    pid, _ = await _project()
+    await _run(pid, "claude-2", "busy")                         # owner idle, claude-2 busy
+    assert await pick_account(("owner", "claude-2"), CAP) == "claude-2"
+    assert accounts.excluded_accounts() == frozenset({"owner"})
+    assert await pick_account(("owner",), CAP) is None           # a lone excluded candidate too
+
+
+def test_no_exclusions_by_default():
+    from aibroker.config import Settings
+    assert Settings.model_fields["AGENT_CLAUDE_EXCLUDED_ACCOUNTS"].default == ""
 
 def test_only_an_account_down_failure_with_a_timestamp_pauses(monkeypatch):
     _pause(monkeypatch, 600)
@@ -463,6 +489,17 @@ async def test_jobs_submit_follows_policy_order_then_skips_a_paused_account(monk
     assert await _account_of(second.json()["job_id"]) == "claude-2"
     assert await _account_of(first_id) == "owner"     # the parked run never moves
 
+
+async def test_jobs_submit_refuses_when_every_candidate_is_excluded(monkeypatch, _jobs_env):
+    _, plain = await _project()
+    _policy(monkeypatch, ["owner", "claude-2"])
+    _pause(monkeypatch, 3600, excluded="owner,claude-2")
+    r = _submit(plain)
+    assert r.status_code == 503 and "AGENT_CLAUDE_EXCLUDED_ACCOUNTS" in r.text
+    _pause(monkeypatch, 3600, excluded="owner")
+    ok = _submit(plain)
+    assert ok.status_code == 202, ok.text
+    assert await _account_of(ok.json()["job_id"]) == "claude-2"
 
 async def test_jobs_submit_without_policy_is_still_refused(monkeypatch, _jobs_env):
     _, plain = await _project()

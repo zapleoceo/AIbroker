@@ -597,13 +597,20 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
   (every such signal counts; lookback 8 days, so a weekly limit that resets days ahead still pauses the
   account; a deadline-expired wait keeps its reset in `reset_at`). If every
   candidate is paused, the one whose reset comes first is picked, and the job waits honestly there.
-- **Account-down pause** (`ACCOUNT_DOWN_CODES`, `_reset_of`; 2026-10-21): a `run.failed` whose `error_code` is
-  `subscription_disabled` ("organization has disabled Claude subscription access": the login cannot serve at all, it
-  is not a usage limit) pauses that account for `AGENT_ACCOUNT_DISABLED_PAUSE_S` (default 3600 s, `0` = off) from the
-  failure time, through the same `quota_resets` scan. Selection then sends new runs to the other login even when that
-  one is busier; the first run after the pause probes the account again. A re-login does not lift the pause
-  early: the account stays skipped until the hour runs out (lower the setting, or wait). Reason: prod 2026-10-19..20, `owner`
-  answered every run with that error (198 runs) while `claude-2` sat idle, because the tie-break kept picking `owner`.
+- **Account-down pause** (`ACCOUNT_DOWN_CODES`, `_reset_of`; 2026-10-21, `auth_refresh_failed` added 2026-10-28): a
+  `run.failed` whose `error_code` is `subscription_disabled` ("organization has disabled Claude subscription access") or
+  `auth_refresh_failed` ("Failed to refresh OAuth token") means the login cannot serve at all, which is not a usage
+  limit. It pauses that account for `AGENT_ACCOUNT_DISABLED_PAUSE_S` (default 3600 s, `0` = off) from the failure time,
+  through the same `quota_resets` scan. Selection then sends new runs to the other login even when that one is busier;
+  the first run after the pause probes the account again. A re-login does not lift the pause early: the account stays
+  skipped until the hour runs out (lower the setting, or wait). A one-off refresh race on a healthy login also pauses
+  it for the hour; if every candidate is paused, the one whose pause ends first is still picked. Reason: prod
+  2026-10-19..20, `owner` answered every run with that error (198 runs) while `claude-2` sat idle, because the
+  tie-break kept picking `owner`; 2026-10-27..28 the same login failed with the refresh error (job 588602).
+- **Excluded accounts** (`excluded_accounts`, `AGENT_CLAUDE_EXCLUDED_ACCOUNTS`, api, comma-separated, default empty;
+  2026-10-28): never candidates for a NEW `/v1/jobs` Claude run, whatever their load or pause. If the exclusion leaves a
+  project no candidate, the submit is refused with 503 (it never falls back to `owner`). Runs already created keep
+  their account; `/v1/agent/runs`, where the caller names the account, is not affected. Filling it is an owner decision.
 - A started run never changes account; a quota wait stays on the same account; there is no fallback to
   paid API. `codex-sub` stays on `owner`.
 - **Catalog:** `claude-sub/claude-opus-5-5` and `claude-sub/claude-haiku-5-5` are listed but
