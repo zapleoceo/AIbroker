@@ -209,8 +209,10 @@ def test_a_descriptor_that_differs_from_the_checked_file_is_refused(tmp_path, mo
     real_fstat = os.fstat
 
     def fake(fd):
+        # Every st_* field: the patch is on the shared `os` module, so pytest's own teardown
+        # (pytest 9.2 reads st_size) calls this too, not only images.py.
         st = real_fstat(fd)
-        fields = {k: getattr(st, k) for k in ("st_mode", "st_ino", "st_dev", "st_nlink")}
+        fields = {k: getattr(st, k) for k in dir(st) if k.startswith("st_")}
         return SimpleNamespace(**{**fields, **swap})
     monkeypatch.setattr("aibroker.agent.images.os.fstat", fake)
     refs = collect_out_images(str(tmp_path), **_CAPS)
