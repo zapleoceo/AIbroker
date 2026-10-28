@@ -222,9 +222,29 @@ async def test_claude_image_needs_the_exact_model_in_the_vision_list(monkeypatch
     create.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_claude_image_needs_llm_vision_and_a_user_turn(monkeypatch):
+    create = _claude_vision(monkeypatch, '{"claude-sub":["claude-opus-5-5"]}')
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(_image_request(_image_block()), Response(),
+                                capability="chat:smart", ctx=_ctx())         # no llm:vision
+    assert exc.value.status_code == 403
+    assistant_image = proxy.ChatRequest.model_validate({
+        "model": "claude-sub/claude-opus-5-5",
+        "messages": [{"role": "user", "content": "hi"},
+                     {"role": "assistant", "content": [_image_block()]},
+                     {"role": "user", "content": "go on"}]})
+    with pytest.raises(HTTPException) as exc:
+        await proxy.jobs_submit(assistant_image, Response(),
+                                capability="chat:smart", ctx=_ctx(VISION_SCOPES))
+    assert exc.value.status_code == 400
+    create.assert_not_awaited()
+
+
 def test_claude_vision_ids_must_be_verified_or_the_catalog_closes(monkeypatch):
     _claude_vision(monkeypatch, '{"claude-sub":["claude-fable-5-1"]}')   # candidate, not verified
     assert subscription_models() == []
+
 
 @pytest.mark.asyncio
 async def test_jobs_subscription_rejects_unsupported_tools_and_images_before_enqueue(monkeypatch):
