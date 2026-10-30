@@ -14,13 +14,17 @@ from PIL import Image
 
 from aibroker.agent.events import FileRef, RunCompleted
 from aibroker.agent.runs import append_event, create_run, get_run, record_usage
-from aibroker.agent.subscription_job import output_problem
+from aibroker.agent.subscription_job import output_problem, prompt_for_messages
 from aibroker.auth import generate_project_key, hash_project_key
 from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 from aibroker.main import app
 from aibroker.providers.catalog import UnknownModel, listing, resolve_pin
+from aibroker.providers.job_contract import (
+    SUBSCRIPTION_PROMPT_MAX_BYTES,
+    subscription_prompt_problem,
+)
 from aibroker.providers.subscriptions import subscription_models
 from aibroker.routes import proxy
 from tests.test_routes_proxy import _make_project
@@ -47,6 +51,62 @@ def test_catalog_keeps_route_identity_and_subscription_variable_price():
         resolve_pin(claude["id"], "chat:fast", ["groq"])
     with pytest.raises(UnknownModel):
         resolve_pin("claude-sonnet-5-5", "chat:fast", ["groq", "claude-sub"])
+
+
+def test_subscription_prompt_uses_serialized_utf8_budget():
+    # This is larger than the former 200k-character cap, including the JSON
+    # transcript wrapper that the CLI actually receives.
+    prompt = prompt_for_messages([{"role": "user", "content": "x" * 950_613}], None)
+    assert len(prompt) > 950_613
+    assert subscription_prompt_problem(prompt) is None
+    unicode_content = ("Маркетинг Київ — " * 60_000)[:950_613]
+    assert len(unicode_content) == 950_613
+    unicode_prompt = prompt_for_messages(
+        [{"role": "system", "content": "Use frozen inputs"},
+         {"role": "user", "content": unicode_content}], {"type": "json_object"})
+    assert 950_613 < len(unicode_prompt.encode("utf-8")) < SUBSCRIPTION_PROMPT_MAX_BYTES
+    assert subscription_prompt_problem(unicode_prompt) is None
+    assert subscription_prompt_problem("a" * SUBSCRIPTION_PROMPT_MAX_BYTES) is None
+    assert subscription_prompt_problem("a" * (SUBSCRIPTION_PROMPT_MAX_BYTES + 1))
+    assert subscription_prompt_problem("é" * (SUBSCRIPTION_PROMPT_MAX_BYTES // 2)) is None
+    assert subscription_prompt_problem("é" * (SUBSCRIPTION_PROMPT_MAX_BYTES // 2 + 1))
+    assert subscription_prompt_problem("\ud800") == "subscription prompt contains invalid Unicode"
+
+
+async def test_large_subscription_job_reaches_queue_without_paid_fallback(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_MODELS", "default")
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_VERIFIED_MODELS",
+                        '{"codex-sub":["gpt-6.1-sol"]}')
+    monkeypatch.setattr(get_settings(), "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
+    monkeypatch.setattr(proxy, "project_allowed", lambda _id: True)
+    monkeypatch.setattr(proxy, "policy_violation", lambda *_: None)
+    create = AsyncMock(return_value=(42, True))
+    monkeypatch.setattr(proxy, "create_run", create)
+    monkeypatch.setattr(proxy, "admit_request", AsyncMock())
+    plain, _ = await _make_project(["llm:chat", "llm:agent"])
+    headers = {"X-Project-Key": plain}
+    client = TestClient(app)
+    catalog = client.get("/v1/models", headers=headers)
+    route = next(row for row in catalog.json()["data"] if row["id"] == "codex-sub/gpt-6.1-sol")
+    assert route["job_request"]["max_prompt_chars"] is None
+    assert route["job_request"]["max_prompt_bytes"] == SUBSCRIPTION_PROMPT_MAX_BYTES
+    body = {"model": "codex-sub/gpt-6.1-sol",
+            "messages": [{"role": "user", "content": "x" * 950_613}]}
+    accepted = client.post("/v1/jobs?capability=chat:smart", headers=headers, json=body)
+    assert accepted.status_code == 202
+    assert create.await_count == 1
+    assert create.await_args.kwargs["model"] == "gpt-6.1-sol"
+    assert len(create.await_args.kwargs["prompt"]) > 950_613
+    too_large = {**body, "messages": [{"role": "user", "content": "x" * SUBSCRIPTION_PROMPT_MAX_BYTES}]}
+    rejected = client.post("/v1/jobs?capability=chat:smart", headers=headers, json=too_large)
+    assert rejected.status_code == 400
+    assert "UTF-8 bytes" in rejected.json()["detail"]
+    assert create.await_count == 1
+    invalid = {**body, "messages": [{"role": "user", "content": "\ud800"}]}
+    invalid_response = client.post("/v1/jobs?capability=chat:smart", headers=headers,
+                                   content=json.dumps(invalid).encode("ascii"))
+    assert invalid_response.status_code == 422  # JSON/request validation rejects it first.
+    assert create.await_count == 1
 
 
 async def test_http_catalog_contract_matches_subscription_job_validation(monkeypatch):

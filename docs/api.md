@@ -955,6 +955,15 @@ The catalog builds this field through `job_request_contract`. Subscription
 submission uses `subscription_request_problem` and
 `subscription_prompt_problem` to enforce the stated acceptance rules before
 enqueue.
+For subscription jobs, `max_prompt_chars` is `null`: Broker no longer applies
+the former 200,000-character limit. `max_prompt_bytes` is 3,000,000 UTF-8
+bytes for the assembled message prompt, including the serialized transcript
+and response format. Invalid Unicode is rejected before enqueue. The API proxy
+separately caps `/v1/jobs` requests at 28 MiB, including JSON escaping and
+attachments. Codex and Claude CLI runners can append attachment filenames
+after Broker checks this prompt size. Neither limit claims that a provider
+accepts the input within its context window. No paid fallback is enabled by
+this change.
 For subscription pins, `supports_tools` reports an exact-model callback
 attestation. `job_request.tools` and `job_request.tool_history` report whether
 Broker currently accepts those fields for this caller: the provider tools
