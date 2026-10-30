@@ -38,7 +38,7 @@ _KNOWN_METHODS = frozenset({
 })
 
 
-def _log_message(message: dict[str, Any], frame_bytes: int = 0) -> None:
+def _log_message(message: dict[str, Any], frame_bytes: int) -> None:
     """Diagnosis aid, logged before validation: a known method name and a bounded integer id
     only; anything else is a constant, never the peer's own text, params or results."""
     method = message.get("method")

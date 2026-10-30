@@ -31,15 +31,16 @@ def test_job_log_tag_never_echoes_trace_or_label_values(caplog, level):
 ])
 def test_app_server_debug_log_never_echoes_peer_method_or_id(caplog, message):
     with caplog.at_level(logging.DEBUG, logger="aibroker.agent.codex_app_server"):
-        cas._log_message(message)
+        cas._log_message(message, 123)
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert SENTINEL not in text and "SYNTHETICSECRET" not in text
-    assert "method=" in text and "id=other" in text
+    assert "method=" in text and "id=other frame_bytes=123" in text
 
 
 def test_app_server_debug_log_keeps_known_methods_and_small_ids(caplog):
     with caplog.at_level(logging.DEBUG, logger="aibroker.agent.codex_app_server"):
-        cas._log_message({"method": "turn/completed", "id": 3})
-        cas._log_message({"method": "something/new"})
+        cas._log_message({"method": "turn/completed", "id": 3}, 31)
+        cas._log_message({"method": "something/new"}, 32)
     text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "method=turn/completed id=3" in text and "method=other id=-" in text
+    assert "method=turn/completed id=3 frame_bytes=31" in text
+    assert "method=other id=- frame_bytes=32" in text
