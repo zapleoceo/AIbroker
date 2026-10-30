@@ -957,12 +957,13 @@ submission uses `subscription_request_problem` and
 enqueue.
 For subscription jobs, `max_prompt_chars` is `null`: Broker no longer applies
 the former 200,000-character limit. `max_prompt_bytes` is 3,000,000 UTF-8
-bytes for the fully serialized CLI prompt, including the message transcript
-and response format. This is a resource guard; the API proxy separately caps
-the serialized HTTP request at 4 MiB, including any JSON escaping. It is not
-a claim about a model's context window. A provider may still reject or
-truncate a request under its own limits; no paid fallback is enabled by this
-change.
+bytes for the assembled message prompt, including the serialized transcript
+and response format. Invalid Unicode is rejected before enqueue. The API proxy
+separately caps `/v1/jobs` requests at 28 MiB, including JSON escaping and
+attachments. Codex and Claude CLI runners can append attachment filenames
+after Broker checks this prompt size. Neither limit claims that a provider
+accepts the input within its context window. No paid fallback is enabled by
+this change.
 For subscription pins, `supports_tools` reports an exact-model callback
 attestation. `job_request.tools` and `job_request.tool_history` report whether
 Broker currently accepts those fields for this caller: the provider tools

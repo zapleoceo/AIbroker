@@ -59,10 +59,18 @@ def test_subscription_prompt_uses_serialized_utf8_budget():
     prompt = prompt_for_messages([{"role": "user", "content": "x" * 950_613}], None)
     assert len(prompt) > 950_613
     assert subscription_prompt_problem(prompt) is None
+    unicode_content = ("Маркетинг Київ — " * 60_000)[:950_613]
+    assert len(unicode_content) == 950_613
+    unicode_prompt = prompt_for_messages(
+        [{"role": "system", "content": "Use frozen inputs"},
+         {"role": "user", "content": unicode_content}], {"type": "json_object"})
+    assert 950_613 < len(unicode_prompt.encode("utf-8")) < SUBSCRIPTION_PROMPT_MAX_BYTES
+    assert subscription_prompt_problem(unicode_prompt) is None
     assert subscription_prompt_problem("a" * SUBSCRIPTION_PROMPT_MAX_BYTES) is None
     assert subscription_prompt_problem("a" * (SUBSCRIPTION_PROMPT_MAX_BYTES + 1))
     assert subscription_prompt_problem("é" * (SUBSCRIPTION_PROMPT_MAX_BYTES // 2)) is None
     assert subscription_prompt_problem("é" * (SUBSCRIPTION_PROMPT_MAX_BYTES // 2 + 1))
+    assert subscription_prompt_problem("\ud800") == "subscription prompt contains invalid Unicode"
 
 
 async def test_large_subscription_job_reaches_queue_without_paid_fallback(monkeypatch):
@@ -93,6 +101,11 @@ async def test_large_subscription_job_reaches_queue_without_paid_fallback(monkey
     rejected = client.post("/v1/jobs?capability=chat:smart", headers=headers, json=too_large)
     assert rejected.status_code == 400
     assert "UTF-8 bytes" in rejected.json()["detail"]
+    assert create.await_count == 1
+    invalid = {**body, "messages": [{"role": "user", "content": "\ud800"}]}
+    invalid_response = client.post("/v1/jobs?capability=chat:smart", headers=headers,
+                                   content=json.dumps(invalid).encode("ascii"))
+    assert invalid_response.status_code == 422  # JSON/request validation rejects it first.
     assert create.await_count == 1
 
 
