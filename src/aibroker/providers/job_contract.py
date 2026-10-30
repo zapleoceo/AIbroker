@@ -13,7 +13,11 @@ JOB_MAX_TOKENS_MIN = 1
 JOB_MAX_TOKENS_MAX = 16384
 JOB_TEMPERATURE_MIN = 0.0
 JOB_TEMPERATURE_MAX = 2.0
-SUBSCRIPTION_PROMPT_MAX_CHARS = 200_000
+# Bound the serialized CLI input by transport resources, not a character count that
+# rejects valid multi-message jobs before the provider can apply its own context limit.
+# The API proxy separately caps the HTTP request at 4 MiB. JSON escaping can
+# expand that request, so both independent resource guards remain in effect.
+SUBSCRIPTION_PROMPT_MAX_BYTES = 3_000_000
 SUBSCRIPTION_ROLES = ("system", "user", "assistant")
 SUBSCRIPTION_RESPONSE_FORMATS = ("json_object", "json_schema")
 JOB_CAPABILITIES = frozenset({
@@ -58,7 +62,8 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
             "stream": False,
             "response_format_types": list(SUBSCRIPTION_RESPONSE_FORMATS),
             "json_schema_refs": False,
-            "max_prompt_chars": SUBSCRIPTION_PROMPT_MAX_CHARS,
+            "max_prompt_chars": None,
+            "max_prompt_bytes": SUBSCRIPTION_PROMPT_MAX_BYTES,
         }
     return {
         "max_tokens": {"default": DEFAULT_MAX_TOKENS,
@@ -75,6 +80,7 @@ def job_request_contract(spec: ModelSpec, tools_supported: bool | None) -> dict[
         "response_format_types": None,
         "json_schema_refs": None,
         "max_prompt_chars": None,
+        "max_prompt_bytes": None,
     }
 
 
@@ -113,5 +119,5 @@ def subscription_request_problem(body: _JobBody, capability: str, provider: str)
 
 
 def subscription_prompt_problem(prompt: str) -> str | None:
-    return (f"subscription prompt exceeds {SUBSCRIPTION_PROMPT_MAX_CHARS} characters"
-            if len(prompt) > SUBSCRIPTION_PROMPT_MAX_CHARS else None)
+    return (f"subscription prompt exceeds {SUBSCRIPTION_PROMPT_MAX_BYTES} UTF-8 bytes"
+            if len(prompt.encode("utf-8")) > SUBSCRIPTION_PROMPT_MAX_BYTES else None)
