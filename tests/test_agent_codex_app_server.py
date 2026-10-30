@@ -4,13 +4,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from aibroker.agent import events as ev
 from aibroker.agent.adapter import AgentRunSpec
 from aibroker.agent.client_tools import ClientToolConflict
-from aibroker.agent.codex_app_server import _is_response, run_tool_turn
+from aibroker.agent.codex_app_server import (
+    MAX_APP_SERVER_FRAME_BYTES,
+    _is_response,
+    _read_message,
+    run_tool_turn,
+)
 
 TOOL = {"type": "function", "function": {"name": "lookup", "description": "Find an id",
         "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}}}}
@@ -34,6 +40,22 @@ class _Reader:
 
     def put(self, value):
         self.queue.put_nowait((json.dumps(value) + "\n").encode())
+
+
+class _RealReader(asyncio.StreamReader):
+    def __init__(self):
+        super().__init__(limit=MAX_APP_SERVER_FRAME_BYTES)
+
+    def put(self, value):
+        if value.get("method") == "item/tool/call":
+            self._feed_chunks({"method": "item/updated", "params": {
+                "item": {"text": "x" * (1 << 20) + "вітаю 🌍"}}})
+        self._feed_chunks(value)
+
+    def _feed_chunks(self, value):
+        frame = (json.dumps(value, ensure_ascii=False) + "\n").encode()
+        for offset in range(0, len(frame), 65537):
+            self.feed_data(frame[offset:offset + 65537])
 
 
 class _Writer:
@@ -125,6 +147,7 @@ async def test_dynamic_tool_callback_waits_for_caller_then_completes(monkeypatch
     async def spawn(*args, **kwargs):
         assert args[:2] == ("codex", "app-server")
         assert kwargs["env"] == {"CODEX_HOME": str(home)}
+        assert kwargs["limit"] == MAX_APP_SERVER_FRAME_BYTES
         return process
     async def publish(run_id, call_id, name, arguments, fences):
         assert (run_id, call_id, name, arguments) == (42, "call-1", "lookup", {"id": 7})
@@ -142,6 +165,73 @@ async def test_dynamic_tool_callback_waits_for_caller_then_completes(monkeypatch
     assert process.stdin.sent[0]["params"]["capabilities"]["experimentalApi"] is True
     assert process.stdin.sent[2]["params"]["permissions"] == "broker"
     assert process.stdin.sent[-1]["result"]["contentItems"][0]["text"] == '{"found":7}'
+
+
+async def test_real_streamreader_accepts_chunked_large_jsonl_and_unicode():
+    frame = (json.dumps({"method": "item/updated", "params": {
+        "text": "x" * (1 << 20) + "привіт 🌍"}}, ensure_ascii=False) + "\n").encode()
+    assert len(frame) > 1 << 20
+    old_reader = asyncio.StreamReader(limit=1 << 20)
+    old_reader.feed_data(frame[:-1])
+    with pytest.raises(ValueError, match="chunk exceed the limit"):
+        await old_reader.readline()
+    reader = asyncio.StreamReader(limit=MAX_APP_SERVER_FRAME_BYTES)
+    for offset in range(0, len(frame), 65537):
+        reader.feed_data(frame[offset:offset + 65537])
+    reader.feed_data(b'{"method":"turn/completed"}\n')
+    reader.feed_eof()
+    first = await _read_message(reader, "turn")
+    assert first["params"]["text"].endswith("привіт 🌍")
+    assert (await _read_message(reader, "turn"))["method"] == "turn/completed"
+    assert await _read_message(reader, "turn") is None
+
+
+async def test_tool_turn_with_real_chunked_streamreader_and_fake_cli(monkeypatch, tmp_path):
+    run, home = _run(tmp_path)
+    process = _Process()
+    process.stdout = _RealReader()
+    process.stdin = _Writer(process.stdout)
+    async def spawn(*args, **kwargs):
+        assert kwargs["limit"] == MAX_APP_SERVER_FRAME_BYTES
+        return process
+    async def take(*args):
+        return True, '{"found":7}'
+    async def publish(*args):
+        return None
+    monkeypatch.setattr("aibroker.agent.codex_app_server.permission_overrides", lambda _: [])
+    monkeypatch.setattr("aibroker.agent.codex_app_server.get_settings", lambda: SimpleNamespace(
+        AGENT_TOOL_ARG_RETRIES=0, AGENT_TOOL_REQUIRED_REMINDERS=0))
+    monkeypatch.setattr("aibroker.agent.codex_app_server.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.publish_call", publish)
+    monkeypatch.setattr("aibroker.agent.codex_app_server.take_result", take)
+    events = [item async for item in run_tool_turn(_Adapter(home), run)]
+    assert events[-1].type == "run.completed"
+    assert [item.type for item in events].count("tool.call") == 1
+
+
+@pytest.mark.parametrize(("frame", "expected"), [
+    (b'{"id":1}', "without delimiter"),
+    (b'{"id":}\n', "invalid JSON"),
+    (b'[]\n', "not an object"),
+    (b'{"id":"\xff"}\n', "invalid JSON"),
+])
+async def test_real_streamreader_rejects_invalid_frames_without_contents(frame, expected):
+    reader = asyncio.StreamReader(limit=MAX_APP_SERVER_FRAME_BYTES)
+    reader.feed_data(frame)
+    reader.feed_eof()
+    with pytest.raises(ClientToolConflict, match=expected) as exc:
+        await _read_message(reader, "turn")
+    assert "\xff" not in str(exc.value)
+
+
+async def test_real_streamreader_rejects_oversize_without_payload(monkeypatch):
+    monkeypatch.setattr("aibroker.agent.codex_app_server.MAX_APP_SERVER_FRAME_BYTES", 128)
+    reader = asyncio.StreamReader(limit=128)
+    reader.feed_data((json.dumps({"secret": "x" * 150}) + "\n").encode())
+    reader.feed_eof()
+    with pytest.raises(ClientToolConflict, match="exceeds 128 bytes") as exc:
+        await _read_message(reader, "turn")
+    assert "secret" not in str(exc.value)
 
 
 async def test_unapproved_server_request_fails_closed(monkeypatch, tmp_path):

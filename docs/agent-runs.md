@@ -55,6 +55,17 @@ the pinned 0.162.1 protocol. A structured worker log line correlates these
 non-secret counts with `job_id` and `run_id`, without prompt or credentials.
 `cost_usd` remains `null` when no price is confirmed.
 
+Codex App Server stdout is newline-delimited JSON. Its Python subprocess
+reader has a **20 MiB per-frame hard limit**. A real `asyncio.StreamReader`
+with the former 1 MiB limit reproduces `Separator is not found, and chunk
+exceed the limit` on a valid frame. Broker job 593923 reported that error;
+its exact frame and method were not retained. This bound allows JSON escaping
+of the Broker's
+3 MB UTF-8 prompt budget while rejecting oversized, malformed, or unterminated
+frames. The error reports the phase and size limit, never frame contents; debug
+logs record only an allowlisted method, bounded numeric id, and frame byte count.
+The bound is a transport limit, not a model context or subscription quota.
+
 ## Legal / scope note
 
 Owner-only, personal-subscription use. This is **not a product backend**: it must not serve
