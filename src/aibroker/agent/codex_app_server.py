@@ -26,6 +26,10 @@ log = logging.getLogger(__name__)
 # After a terminal client result the turn must be confirmed stopped (turn/completed) within this.
 TERMINAL_STOP_S = 30.0
 _INTERRUPT = 1000          # our turn/interrupt request id: above every turn/start id (3..6)
+# The App Server sends one JSON object per line. A 3 MB UTF-8 prompt may expand
+# several-fold when escaped into JSON, and the server may echo it in a frame.
+# Keep a hard bound rather than relying on StreamReader's 1 MiB default.
+MAX_APP_SERVER_FRAME_BYTES = 20 << 20
 
 
 _KNOWN_METHODS = frozenset({
@@ -34,15 +38,41 @@ _KNOWN_METHODS = frozenset({
 })
 
 
-def _log_message(message: dict[str, Any]) -> None:
+def _log_message(message: dict[str, Any], frame_bytes: int) -> None:
     """Diagnosis aid, logged before validation: a known method name and a bounded integer id
     only; anything else is a constant, never the peer's own text, params or results."""
     method = message.get("method")
-    shown = "-" if method is None else method if method in _KNOWN_METHODS else "other"
+    shown = "-" if method is None else (
+        method if isinstance(method, str) and method in _KNOWN_METHODS else "other")
     msg_id = message.get("id")
     shown_id = msg_id if type(msg_id) is int and 0 <= msg_id < 1_000_000 else \
         ("-" if msg_id is None else "other")
-    log.debug("app-server message method=%s id=%s", shown, shown_id)
+    log.debug("app-server message method=%s id=%s frame_bytes=%d",
+              shown, shown_id, frame_bytes)
+
+
+async def _read_message(reader: asyncio.StreamReader, phase: str) -> dict[str, Any] | None:
+    """Read one bounded JSONL frame without exposing its contents in failures or logs."""
+    try:
+        raw = await reader.readline()
+    except ValueError as exc:
+        raise ClientToolConflict(f"App Server {phase} frame exceeds "
+                                 f"{MAX_APP_SERVER_FRAME_BYTES} bytes") from exc
+    if not raw:
+        return None
+    if len(raw) > MAX_APP_SERVER_FRAME_BYTES:
+        raise ClientToolConflict(f"App Server {phase} frame exceeds "
+                                 f"{MAX_APP_SERVER_FRAME_BYTES} bytes")
+    if not raw.endswith(b"\n"):
+        raise ClientToolConflict(f"App Server {phase} frame ended without delimiter")
+    try:
+        message = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ClientToolConflict(f"App Server {phase} frame is invalid JSON") from exc
+    if not isinstance(message, dict):
+        raise ClientToolConflict(f"App Server {phase} frame is not an object")
+    _log_message(message, len(raw))
+    return message
 
 
 def _is_response(message: dict[str, Any], expected: int) -> bool:
@@ -106,7 +136,8 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
     proc = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, cwd=run.workspace,
-        env=adapter.process_env(run), limit=1 << 20, start_new_session=True)
+        env=adapter.process_env(run), limit=MAX_APP_SERVER_FRAME_BYTES,
+        start_new_session=True)
     adapter._proc = proc
     stderr_task = asyncio.create_task(adapter._drain_stderr(proc))
     assert proc.stdin is not None and proc.stdout is not None
@@ -116,9 +147,7 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         await proc.stdin.drain()
 
     async def read_response(expected: int) -> dict[str, Any]:
-        while raw := await proc.stdout.readline():
-            message = json.loads(raw)
-            _log_message(message)
+        while message := await _read_message(proc.stdout, "handshake"):
             if _is_response(message, expected):
                 if message.get("error") or not isinstance(message.get("result"), dict):
                     raise ClientToolConflict("App Server refused a required protocol request")
@@ -166,22 +195,20 @@ async def run_tool_turn(adapter: Any, run: AgentRunSpec) -> AsyncIterator[Stream
         interrupt_confirmed = False
         while True:
             if stop_deadline is None:
-                raw = await proc.stdout.readline()
+                message = await _read_message(proc.stdout, "turn")
             else:
                 remaining = stop_deadline - loop.time()
                 if remaining <= 0:
                     raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
                                              "after the terminal result")
                 try:
-                    raw = await asyncio.wait_for(proc.stdout.readline(),
-                                                 remaining)
+                    message = await asyncio.wait_for(_read_message(proc.stdout, "turn"),
+                                                     remaining)
                 except TimeoutError:
                     raise ClientToolConflict("terminal_stop_unconfirmed: the turn did not stop "
                                              "after the terminal result") from None
-            if not raw:
+            if message is None:
                 break
-            message = json.loads(raw)
-            _log_message(message)
             if _is_response(message, _INTERRUPT):
                 if (stop_deadline is None or "result" not in message
                         or "error" in message):
