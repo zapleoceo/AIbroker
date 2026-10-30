@@ -38,11 +38,12 @@ _KNOWN_METHODS = frozenset({
 })
 
 
-def _log_message(message: dict[str, Any], frame_bytes: int) -> None:
+def _log_message(message: dict[str, Any], frame_bytes: int = 0) -> None:
     """Diagnosis aid, logged before validation: a known method name and a bounded integer id
     only; anything else is a constant, never the peer's own text, params or results."""
     method = message.get("method")
-    shown = "-" if method is None else method if method in _KNOWN_METHODS else "other"
+    shown = "-" if method is None else (
+        method if isinstance(method, str) and method in _KNOWN_METHODS else "other")
     msg_id = message.get("id")
     shown_id = msg_id if type(msg_id) is int and 0 <= msg_id < 1_000_000 else \
         ("-" if msg_id is None else "other")

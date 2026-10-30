@@ -234,6 +234,15 @@ async def test_real_streamreader_rejects_oversize_without_payload(monkeypatch):
     assert "secret" not in str(exc.value)
 
 
+async def test_real_streamreader_nonstring_method_is_safely_logged(caplog):
+    reader = asyncio.StreamReader(limit=MAX_APP_SERVER_FRAME_BYTES)
+    reader.feed_data(b'{"id":1,"method":[]}\n')
+    reader.feed_eof()
+    with caplog.at_level(logging.DEBUG, logger="aibroker.agent.codex_app_server"):
+        assert (await _read_message(reader, "turn"))["method"] == []
+    assert "method=other id=1" in caplog.text
+
+
 async def test_unapproved_server_request_fails_closed(monkeypatch, tmp_path):
     run, home = _run(tmp_path)
     process = _Process(unexpected=True)
