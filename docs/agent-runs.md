@@ -64,6 +64,8 @@ of the Broker's
 3 MB UTF-8 prompt budget while rejecting oversized, malformed, or unterminated
 frames. The error reports the phase and size limit, never frame contents; debug
 logs record only an allowlisted method, bounded numeric id, and frame byte count.
+Frames rejected before JSON parsing have no trusted method or id to log; their
+diagnostic stays at the transport phase and byte limit.
 The bound is a transport limit, not a model context or subscription quota.
 
 ## Legal / scope note
