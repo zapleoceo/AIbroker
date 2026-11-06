@@ -76,11 +76,17 @@ provided. The default verified list contains only the completed Claude Sonnet
 smoke model; other candidates remain unavailable until confirmed by a live run. The default Claude
 candidates are `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-haiku-5-5`; the last two are listed
 with `available: false` until a live check. Fable is not listed.
-The default Codex candidate list contains the seven picker-visible exact IDs
-returned by the owner's Codex App Server `model/list` on 2026-10-12:
-`gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`,
-`gpt-5.6-terra`, and `gpt-5.6-luna`. The response marked all seven
-`hidden: false`. Hidden internal and legacy entries are not Broker candidates.
+The default Codex candidate list contains the eight picker-visible exact IDs
+of the owner's Codex account: `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6.1-terra`, `gpt-6-sol`,
+`gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`. Seven came from the Codex App
+Server `model/list` on 2026-10-12 (`hidden: false`). `gpt-6.1-terra` was added on 2026-11-06 from
+the Codex CLI 0.162.1 model cache of the same login (`$CODEX_HOME/models_cache.json`, fetched
+2026-11-06T19:43Z, `visibility: list`), after live checks on prod: `codex exec -m gpt-6.1-terra`
+answered "pong" and, with `--image=`, described a yellow PNG as "yellow"; Broker job 605181 (text)
+and 605183 (client tool `get_word` round-trip, first as a project-12 canary) completed. To find new
+models later, read only the `slug` / `visibility` fields of that cache in the `agent-worker-codex`
+container. Hidden internal and legacy entries (`visibility: hide`, e.g. `gpt-reserve`,
+`codex-auto-review`) are not Broker candidates.
 Account-aware discovery supports adding a candidate; it does not prove a run
 will complete. Add each exact ID to the verified list only after a successful
 live subscription run. Claude Code has no documented read-only model-list CLI,
