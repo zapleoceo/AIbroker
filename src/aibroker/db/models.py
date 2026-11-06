@@ -59,6 +59,13 @@ class ProjectRow(Base):
     signup_ip: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Agent access edited on the dashboard (migration 026; agent/project_access.py).
+    agent_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_expr.false(), nullable=False)
+    agent_models: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'"), nullable=False)
+    agent_accounts: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False

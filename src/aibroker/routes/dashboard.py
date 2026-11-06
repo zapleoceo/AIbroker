@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 
+from aibroker.agent.project_access import refresh_access
 from aibroker.auth import client_ip, generate_project_key, hash_project_key
 from aibroker.auth_session import (
     COOKIE_NAME,
@@ -30,6 +31,7 @@ from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.auto_discover import discover_and_store
 from aibroker.providers.health_probes import probe
 from aibroker.routes import dashboard_pages
+from aibroker.routes.dashboard_agent_access import agent_form_values
 from aibroker.routes.dashboard_assets import _LONG_CACHE
 from aibroker.routes.dashboard_scopes import (
     _is_known_provider,
@@ -421,6 +423,35 @@ async def dash_edit_project(
                           "total_request_cap": req_cap if req_cap_present else "unchanged"},
                 ip=client_ip(request))
     return _back(next, f"Project {name} updated")
+
+
+@router.post("/dashboard/projects/{project_id}/agent")
+async def dash_project_agent(
+    project_id: int,
+    request: Request,
+    agent_enabled: str = Form(""),
+    agent_models: Annotated[list[str] | None, Form()] = None,
+    agent_accounts: Annotated[list[str] | None, Form()] = None,
+    next: str = Form(""),
+    _: OwnerSession = Depends(require_owner_session),
+) -> RedirectResponse:
+    """Agent access from the Settings tab checkboxes; every process picks it up within
+    project_access.REFRESH_S, this one at once (no container restart)."""
+    enabled, models, accounts = agent_form_values(agent_enabled, agent_models, agent_accounts)
+    async with get_session() as s:
+        row = await s.get(ProjectRow, project_id)
+        if not row:
+            return _back(next, "!Project not found")
+        row.agent_enabled, row.agent_models, row.agent_accounts = enabled, models, accounts
+        name = row.name
+    await refresh_access()
+    await audit(actor="dashboard", action="project.agent", target=name,
+                metadata={"enabled": enabled, "models": models, "accounts": accounts},
+                ip=client_ip(request))
+    if enabled and not (models and accounts):
+        return _back(next, f"!Agent runs of {name} allowed, but no model or account is ticked: "
+                           "requests get 403 agent_policy_missing unless the env policy covers it")
+    return _back(next, f"Agent access of {name} updated")
 
 
 @router.post("/dashboard/projects/{project_id}/delete")

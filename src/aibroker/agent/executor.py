@@ -31,6 +31,7 @@ from aibroker.agent.constants import project_allowed
 from aibroker.agent.images import collect_out_images
 from aibroker.agent.lock import Lease, StaleLease, check_fence, session_lock
 from aibroker.agent.policy import policy_violation
+from aibroker.agent.project_access import refresh_access
 from aibroker.agent.registry import make_adapter
 from aibroker.agent.runs import (
     RunConflict,
@@ -118,6 +119,17 @@ async def _stop_adapter(adapter: AgentCLI, grace_s: float) -> None:
         await asyncio.wait_for(adapter.cancel(), timeout=grace_s)
 
 
+def _access_problem(run: AgentRunRow) -> tuple[str, str] | None:
+    """(error_class, message) when the project may no longer run this agent run, else None."""
+    if not project_allowed(run.project_id):
+        return ("project_not_allowed",
+                "project is not allowed agent runs (dashboard or AGENT_ALLOWED_PROJECT_IDS)")
+    violation = policy_violation(run.project_id, run.model, run.account_id, run.capability)
+    if violation:
+        return violation, "outside the project's agent policy (dashboard or AGENT_PROJECT_POLICY)"
+    return None
+
+
 async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
     """Run one claimed run -> its outcome, or None when it was put back in the queue
     (resume session busy)."""
@@ -139,14 +151,17 @@ async def execute_run(run_id: int, cfg: ExecConfig) -> str | None:
         return await _finish(run_id, ev.RunFailed(
             error_class="route_disabled", message="client tools are not verified"), {})
     totals: dict[str, int | None] = {}
-    if not project_allowed(run.project_id):    # removed from the allowlist while queued
-        return await _finish(run_id, ev.RunFailed(
-            error_class="project_not_allowed",
-            message="project is not in AGENT_ALLOWED_PROJECT_IDS"), totals)
-    violation = policy_violation(run.project_id, run.model, run.account_id, run.capability)
-    if violation:                              # the policy changed while the run was queued
-        return await _finish(run_id, ev.RunFailed(
-            error_class=violation, message="outside the project's AGENT_PROJECT_POLICY"), totals)
+    problem = _access_problem(run)          # access removed while the run was queued
+    if problem is not None:
+        # The dashboard snapshot can be REFRESH_S old (a box ticked a moment ago): confirm against
+        # the database before a terminal failure.
+        try:
+            await refresh_access()
+        except Exception:  # noqa: BLE001 - decide on the snapshot we have
+            log.exception("agent access refresh failed before refusing run %s", run_id)
+        problem = _access_problem(run)
+    if problem is not None:
+        return await _finish(run_id, ev.RunFailed(error_class=problem[0], message=problem[1]), totals)
     if _now() >= job.created_at + timedelta(seconds=float(req.get("deadline_s", 21600))):
         return await _finish(run_id, ev.RunTimedOut(limit="deadline"), totals)
     if run.cancel_requested:

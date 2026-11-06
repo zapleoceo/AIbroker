@@ -26,6 +26,7 @@ from aibroker.routes import dashboard_queries as q
 from aibroker.routes import dashboard_requests as rq
 from aibroker.routes import dashboard_views as views
 from aibroker.routes.dashboard_agent import project_breakdown_with_agents
+from aibroker.routes.dashboard_agent_access import agent_view
 from aibroker.routes.dashboard_assets import ASSETS_VERSION
 from aibroker.routes.dashboard_data import (
     _fetch_keys,
@@ -415,6 +416,7 @@ async def render_project_detail(request: Request, project_id: int, *,
         today_spend=spent_today, cap=cap,
         cap_pct=min(100, int(spent_today / cap * 100)) if cap else None,
         scope_boxes=_scope_checkboxes(project.allowed_scopes, "allowed_scopes", project=True),
+        agent=agent_view(project),
     )
 
 

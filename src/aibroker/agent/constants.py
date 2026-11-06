@@ -8,7 +8,8 @@ OWNER_ONLY_SCOPES = frozenset({AGENT_SCOPE})
 
 
 class AgentProjectNotAllowed(Exception):
-    """The project is not in AGENT_ALLOWED_PROJECT_IDS (HTTP 403 agent_project_not_allowed)."""
+    """The project is neither in AGENT_ALLOWED_PROJECT_IDS nor allowed on the dashboard
+    (HTTP 403 agent_project_not_allowed)."""
 
 
 def allowed_project_ids() -> frozenset[int]:
@@ -24,4 +25,10 @@ def allowed_project_ids() -> frozenset[int]:
 
 
 def project_allowed(project_id: int) -> bool:
-    return project_id in allowed_project_ids()
+    """In AGENT_ALLOWED_PROJECT_IDS, or "agent runs allowed" ticked on the dashboard
+    (agent/project_access.py; a lazy import keeps this module free of the database layer)."""
+    if project_id in allowed_project_ids():
+        return True
+    from aibroker.agent.project_access import access_for
+    access = access_for(project_id)
+    return access is not None and access.enabled
