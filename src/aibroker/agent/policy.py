@@ -5,6 +5,8 @@ re-checked by the worker before a run starts. The project cap stays plain metada
 
 Setting (JSON in the environment):
     {"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}
+A project's models and accounts ticked on the dashboard (agent/project_access.py) replace its env
+entry; the env entry stays the fallback.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from aibroker.agent.project_access import access_for
 from aibroker.config import get_settings
 from aibroker.providers.subscriptions import PROVIDERS, subscription_models
 
@@ -81,10 +84,20 @@ def _parse(raw: str) -> dict[int, ProjectPolicy] | None:
         return None
 
 
+def env_policy_for(project_id: int) -> ProjectPolicy | None:
+    """The project's AGENT_PROJECT_POLICY entry alone (None: no entry or malformed setting)."""
+    return (_parse(get_settings().AGENT_PROJECT_POLICY) or {}).get(project_id)
+
+
 def policy_for(project_id: int) -> ProjectPolicy | None:
-    """The project's usable policy, or None (no entry, empty models/accounts, malformed setting)."""
-    table = _parse(get_settings().AGENT_PROJECT_POLICY)
-    policy = (table or {}).get(project_id)
+    """The project's usable policy, or None (no entry, empty models/accounts, malformed setting).
+    A dashboard policy (models AND accounts ticked, agent/project_access.py) replaces the
+    project's AGENT_PROJECT_POLICY entry; otherwise the env entry applies."""
+    access = access_for(project_id)
+    if access is not None and access.has_policy:
+        return ProjectPolicy(models=frozenset(access.models), accounts=frozenset(access.accounts),
+                             account_order=access.accounts)
+    policy = env_policy_for(project_id)
     return policy if policy is not None and policy.models and policy.accounts else None
 
 

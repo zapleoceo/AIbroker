@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS projects (
   signup_ip VARCHAR(64),
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   notes TEXT NOT NULL DEFAULT '',
+  agent_enabled BOOLEAN NOT NULL DEFAULT FALSE,     -- 026: dashboard agent access
+  agent_models JSONB NOT NULL DEFAULT '[]'::jsonb,  -- 026: bare model ids or "*"
+  agent_accounts JSONB NOT NULL DEFAULT '[]'::jsonb, -- 026: account labels, preference order
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   updated_at TIMESTAMP NOT NULL DEFAULT now()
 );

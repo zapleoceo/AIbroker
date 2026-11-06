@@ -8,6 +8,7 @@ import ctypes
 import logging
 import signal
 
+from aibroker.agent.project_access import access_refresh_loop, refresh_access
 from aibroker.agent.rpc import start_worker_rpc, stop_worker_rpc
 from aibroker.agent.worker import agent_worker_loop, worker_capabilities
 from aibroker.db import close_engine, init_engine
@@ -46,9 +47,16 @@ async def run_worker() -> None:
             rpc = await start_worker_rpc(caps[0], wake)
         except (OSError, RuntimeError):
             log.exception("worker RPC unavailable; database polling remains active")
+    # dashboard agent access: loaded before the first claim, then re-read every few seconds
+    try:
+        await refresh_access()
+    except Exception:  # noqa: BLE001 - the loop below retries; until then dashboard projects wait
+        log.exception("agent access load failed at start-up")
+    access = asyncio.create_task(access_refresh_loop(stop))
     try:
         await agent_worker_loop(stop, wake)
     finally:
+        access.cancel()
         if len(caps) == 1:
             await stop_worker_rpc(rpc, caps[0])
         await close_engine()

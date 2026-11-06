@@ -326,6 +326,23 @@ the deploy but do not honour priority. Rollback: `CREATE INDEX CONCURRENTLY IF N
 deep_jobs (status, run_after, created_at)`, `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order`, then drop the column. Set
 `AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
 
+### Agent access on the dashboard: migration 026 (2026-11-06)
+
+Migration 026 (`026_project_agent_settings.sql`) adds `projects.agent_enabled BOOLEAN NOT NULL DEFAULT FALSE`,
+`agent_models` and `agent_accounts` (`JSONB NOT NULL DEFAULT '[]'`); constant defaults, no table rewrite, one
+transaction with `lock_timeout = 5s` (on `lock timeout` re-run it, it is idempotent). Apply it BEFORE deploying the
+code (the ORM model names the columns):
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/026_project_agent_settings.sql
+```
+
+`infra/sql/init.sql` mirrors the columns. After the deploy, agent access is ticked on the project Settings tab
+(see [agent-runs.md](agent-runs.md), "Dashboard checkboxes") and reaches api and workers within 5 s, no restart.
+`AGENT_ALLOWED_PROJECT_IDS` / `AGENT_PROJECT_POLICY` keep working as before (union / fallback). Rollback: deploy the
+previous code first, then `ALTER TABLE projects DROP COLUMN agent_enabled, DROP COLUMN agent_models,
+DROP COLUMN agent_accounts`.
+
 ### Agent file bytes in a table: migration 025 (2026-10-22)
 
 Measured 2026-10-22: `deep_jobs` TOAST 1.44 GB, of which `result_meta.files[].content_b64` is ~706 MB of base64 PNG
@@ -442,6 +459,9 @@ lost) until the idle pgbouncer server backends were terminated.
   pgbouncer's server connections. Do not read the postgres admin password for pgbouncer's console.
 
 ## Agent runs: operator step before deploying the allowlist
+
+Since migration 026 (2026-11-06) the same two gates can be ticked per project on the dashboard Settings tab
+without a restart; the env settings below remain a union (allowlist) and a fallback (policy).
 
 Agent runs are fail-closed behind `AGENT_ALLOWED_PROJECT_IDS` (comma-separated project ids,
 read by BOTH the `api` and the `agent-worker` service from the compose `.env`). Empty or unset

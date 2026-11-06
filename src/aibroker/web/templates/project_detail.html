@@ -224,5 +224,32 @@
     </div>
   </section>
 </div>
+<section class="card card-pad stack" id="agent-access">
+  <h2>{{ t("Agent runs (Claude / Codex subscription)", "Агенты (Claude / Codex по подписке)") }}</h2>
+  <p class="muted">{{ t("Applied within a few seconds, no restart. An agent request also needs the llm:agent scope above.", "Применяется за несколько секунд, без перезапуска. Для запроса к агенту также нужно право llm:agent выше.") }}
+    {% if not agent.has_scope %}<span class="pill rsv">{{ t("llm:agent is not granted", "llm:agent не выдано") }}</span>{% endif %}</p>
+  <form method="post" action="/dashboard/projects/{{ project.id }}/agent" class="stack">
+    <input type="hidden" name="next" value="/dashboard/projects/{{ project.id }}?tab=settings">
+    <label class="scope-cb"><input type="checkbox" name="agent_enabled" value="1"{% if agent.enabled %} checked{% endif %}>
+      {{ t("Allow agent runs for this project", "Разрешить агентные запуски этому проекту") }}</label>
+    <div class="field"><span class="lbl" id="ag-models">{{ t("Models", "Модели") }}</span>
+      <div class="scope-grid" role="group" aria-labelledby="ag-models">
+        <label class="scope-cb"><input type="checkbox" name="agent_models" value="*"{% if agent.all_models %} checked{% endif %}> {{ t("all subscription models (*)", "все модели подписки (*)") }}</label>
+        {% for md in agent.models %}<label class="scope-cb"><input type="checkbox" name="agent_models" value="{{ md.value }}"{% if md.checked %} checked{% endif %}> {{ md.label }}</label>{% endfor %}
+      </div></div>
+    <div class="field"><span class="lbl" id="ag-accounts">{{ t("Accounts", "Аккаунты") }}</span>
+      <div class="scope-grid" role="group" aria-labelledby="ag-accounts">
+        {% for ac in agent.accounts %}<label class="scope-cb"><input type="checkbox" name="agent_accounts" value="{{ ac.value }}"{% if ac.checked %} checked{% endif %}> {{ ac.value }}</label>{% endfor %}
+      </div>
+      <small>{{ t("Claude picks the least busy ticked account (in this order on a tie). Codex always runs as owner, so tick owner for Codex.", "Claude берёт наименее занятый отмеченный аккаунт (при равенстве — в этом порядке). Codex всегда работает как owner, для Codex отметьте owner.") }}</small></div>
+    {% if agent.env_allowed or agent.env_policy %}
+    <p class="muted">{{ t("Also set in the server env (.env):", "Также задано в .env сервера:") }}
+      {% if agent.env_allowed %}<span class="pill on">AGENT_ALLOWED_PROJECT_IDS</span>{% endif %}
+      {% if agent.env_policy %}<span class="pill">AGENT_PROJECT_POLICY: {{ agent.env_policy.models|join(", ") }} · {{ agent.env_policy.accounts|join(", ") }}</span>{% endif %}
+      {{ t("The env allowlist admits the project even if the box is clear; ticked models and accounts replace the env policy.", "Список из .env пропускает проект даже без галочки; отмеченные модели и аккаунты заменяют политику из .env.") }}</p>
+    {% endif %}
+    <div class="row"><button type="submit" class="btn btn-primary">{{ t("Save agent access", "Сохранить доступ агентов") }}</button></div>
+  </form>
+</section>
 {% endif %}
 {% endblock %}

@@ -15,6 +15,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from aibroker import __version__
 from aibroker.agent.constants import AgentProjectNotAllowed
 from aibroker.agent.policy import AgentPolicyViolation
+from aibroker.agent.project_access import access_refresh_loop
 from aibroker.agent.worker import agent_worker_loop
 from aibroker.config import get_settings
 from aibroker.db import close_engine, init_engine
@@ -63,6 +64,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
     # `running` is re-queued by the next worker (see services/job_queue.py).
     stop = asyncio.Event()
     dispatcher = asyncio.create_task(dispatcher_loop(stop))
+    # dashboard agent access (projects.agent_*), re-read every few seconds in each web worker
+    access = asyncio.create_task(access_refresh_loop(stop))
     agent_worker = (asyncio.create_task(agent_worker_loop(stop))
                     if get_settings().AGENT_WORKER_ENABLED else None)
     log.info("aibroker started", host=get_settings().PUBLIC_HOST)
@@ -84,6 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
                 await asyncio.wait_for(agent_worker, timeout=30)
             except (TimeoutError, asyncio.CancelledError):
                 agent_worker.cancel()
+        access.cancel()
         await close_engine()
 
 
