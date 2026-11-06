@@ -10,13 +10,18 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from aibroker.agent import events as ev
 from aibroker.agent import policy as pol
 from aibroker.agent import project_access as pa
 from aibroker.agent.constants import project_allowed
+from aibroker.agent.executor import ExecConfig, execute_run
+from aibroker.agent.fake import FakeAgentCLI
 from aibroker.agent.policy import policy_for, policy_violation
+from aibroker.agent.registry import clear_adapters, register_adapter
+from aibroker.agent.runs import create_run
 from aibroker.config import get_settings
 from aibroker.db import get_session
-from aibroker.db.models import ProjectRow
+from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.main import app
 from tests import dash_seed as ds
 
@@ -99,6 +104,27 @@ async def test_a_failed_refresh_keeps_the_last_snapshot(monkeypatch):
     assert project_allowed(9708)
 
 
+async def test_worker_rereads_the_table_before_refusing_a_freshly_ticked_project(tmp_path):
+    # The box was ticked a moment ago: this worker's snapshot is still empty (fixture) and the
+    # env allowlist is empty. The run must start, not fail with project_not_allowed.
+    await _project(9709, agent_enabled=True, agent_models=["claude-sonnet-5-5"],
+                   agent_accounts=["owner"])
+    rid, _ = await create_run(
+        project=SimpleNamespace(id=9709), capability="agent:claude", prompt="p", task_id="t",
+        account_id="owner", session_id=None, idempotency_key=None, wall_timeout_s=30,
+        idle_timeout_s=30, allowed_tools=[], model="claude-sonnet-5-5")
+    async with get_session() as s:
+        (await s.get(DeepJobRow, rid)).status = "running"
+    clear_adapters()
+    fake = FakeAgentCLI([ev.RunCompleted(final_text="ok")])
+    register_adapter("agent:claude", lambda: fake)
+    try:
+        cfg = ExecConfig(workspace_root=str(tmp_path), env={}, paid_continuation_verified_off=True)
+        assert await execute_run(rid, cfg) == "completed"
+    finally:
+        clear_adapters()
+
+
 def test_form_values_keep_only_known_models_and_accounts_in_preference_order():
     known = ["claude-opus-5-5", "gpt-6.1-sol"]
     assert pa.clean_models(["gpt-6.1-sol", "evil", "*", "gpt-6.1-sol"], known) == ("gpt-6.1-sol", "*")
@@ -143,6 +169,12 @@ def test_allowed_without_models_or_accounts_warns():
 
 
 def test_saving_needs_the_owner_session():
+    ds.seed(ds.project(1, "stepan"))
     r = client.post("/dashboard/projects/1/agent", follow_redirects=False,
                     data={"agent_enabled": "1"})
-    assert r.status_code in (303, 401, 403)
+    assert r.status_code == 401
+
+    async def enabled():
+        async with get_session() as s:
+            return (await s.get(ProjectRow, 1)).agent_enabled
+    assert ds.run(enabled()) is False

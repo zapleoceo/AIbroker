@@ -98,7 +98,9 @@ re-read every `REFRESH_S` (5 s), and the saving process refreshes at once. Rules
 project with the box clear; the card shows that). `policy_for` = the dashboard policy when both models
 and accounts are ticked (`AgentAccess.has_policy`), else the env `AGENT_PROJECT_POLICY` entry
 (`env_policy_for`). Until the first refresh the snapshot is empty (fail closed); a failed refresh keeps
-the last snapshot. The `llm:agent` scope is still required and is granted in the scopes above.
+the last snapshot. Before refusing a queued run (`_access_problem` in the executor) the worker re-reads the
+table once, so a box ticked a moment ago never fails a run on a stale snapshot. The `llm:agent` scope is still
+required and is granted in the scopes above.
 
 The same checks run on every read of an `agent:*` job, through `GET /v1/jobs/{id}` and
 `GET /v1/deep/{id}`. A project that lost `llm:agent`, left the allowlist, or no longer matches
@@ -106,8 +108,8 @@ The same checks run on every read of an `agent:*` job, through `GET /v1/jobs/{id
 `AGENT_PROJECT_POLICY` against the run's stored model, account and capability, so a removed policy
 closes the run's output (403 `agent_policy_missing`, `model_not_allowed`, `account_not_allowed`).
 
-**Per-project policy (fail-closed, narrowing only).** `AGENT_PROJECT_POLICY` is JSON in the environment
-(a dashboard policy, above, replaces a project's entry),
+**Per-project policy (fail-closed).** `AGENT_PROJECT_POLICY` is JSON in the environment
+(a dashboard policy, above, replaces a project's entry and may be wider or narrower),
 e.g. `{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}` (`ProjectPolicy`, `policy_for`,
 `policy_violation` in `aibroker.agent.policy`). On `POST /v1/agent/runs`, after the scope and project
 allowlist checks, a request is refused with 403 `{"error": ...}` (`AgentPolicyViolation`) when:
