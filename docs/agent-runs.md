@@ -90,8 +90,9 @@ deploying this change, otherwise the owner test project is locked out (by design
 dashboard project page, Settings tab, card "Agent runs": "allow agent runs" (`projects.agent_enabled`),
 the subscription models (`agent_models`, bare ids or `*`) and the accounts (`agent_accounts`, offered
 in `KNOWN_ACCOUNTS` order, which is the selection preference). `POST /dashboard/projects/{id}/agent`
-(`dash_project_agent`, values cleaned by `agent_form_values`; the card is `agent_view` in
-`routes/dashboard_agent_access.py`). No restart: every process (both api workers, each agent worker)
+(`dash_project_agent`, values cleaned by `agent_form_values`: models by `clean_models` against
+`known_models()` (the subscription catalog, bare ids) plus `*`, accounts by `clean_accounts` in
+`KNOWN_ACCOUNTS` order; the card is `agent_view` in `routes/dashboard_agent_access.py`). No restart: every process (both api workers, each agent worker)
 keeps a snapshot (`aibroker.agent.project_access`: `refresh_access`, `access_refresh_loop`, `access_for`)
 re-read every `REFRESH_S` (5 s), and the saving process refreshes at once. Rules:
 `project_allowed` = in `AGENT_ALLOWED_PROJECT_IDS` OR the box is ticked (the env list still admits a
