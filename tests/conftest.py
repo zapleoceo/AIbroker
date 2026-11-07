@@ -226,3 +226,10 @@ def serialized_db(monkeypatch):
     monkeypatch.setattr(executor, "get_session", locked_session)
     for name in ("append_event", "record_usage", "requeue_run", "park_for_quota"):
         monkeypatch.setattr(executor, name, locked(getattr(executor, name)))
+
+
+@pytest.fixture(autouse=True)
+def _loaded_agent_snapshot(monkeypatch):
+    """Most unit tests model a completed startup; startup-failure tests override None."""
+    from aibroker.agent import project_access
+    monkeypatch.setattr(project_access, "_snapshot", {})

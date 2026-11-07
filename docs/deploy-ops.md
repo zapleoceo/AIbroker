@@ -272,10 +272,12 @@ idempotent: it creates the project on the first run and then re-asserts the scop
 `llm:deep`, `llm:agent`) and the two money caps, without rotating anything. Until it has run, `POST /ask2many/api/requests`
 returns `503`.
 
-Subscription models on the page need server env that the script does not set (it is not in the repo).
-Before they can run: add the `model-compare` project's numeric id to `AGENT_ALLOWED_PROJECT_IDS`; add an entry for
-that id to `AGENT_PROJECT_POLICY` allowing the `claude-sub` and `codex-sub` models and accounts it should use; and configure the
-subscription catalog, the verified models and `AGENT_SUBSCRIPTION_CODEX_ENABLED` as for any subscription client.
+Subscription models on the page need access settings that the script does not set.
+For legacy env-managed access, add the `model-compare` project's numeric id to `AGENT_ALLOWED_PROJECT_IDS`
+and its approved models/accounts to `AGENT_PROJECT_POLICY`; a legacy dashboard policy can override the env entry.
+For a converted `accounts-v1` project, only the confirmed dashboard enable/account choices apply, with no env fallback.
+In either mode, configure the subscription catalog, verified models and `AGENT_SUBSCRIPTION_CODEX_ENABLED`
+as for any subscription client. Do not convert the project merely as part of deployment.
 `codex-sub` is enabled by the owner's decision of 15.10: its agent runs in the separate container
 `aibroker-agent-worker-codex`, and the shell of `codex exec` stays (sandbox `workspace-write`, approval never,
 `allowed_tools=[]` does not switch it off); the owner accepted that. Subscription jobs cost $0, so the money caps (0)
@@ -337,11 +339,60 @@ code (the ORM model names the columns):
 docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/026_project_agent_settings.sql
 ```
 
-`infra/sql/init.sql` mirrors the columns. After the deploy, agent access is ticked on the project Settings tab
-(see [agent-runs.md](agent-runs.md), "Dashboard checkboxes") and reaches api and workers within 5 s, no restart.
-`AGENT_ALLOWED_PROJECT_IDS` / `AGENT_PROJECT_POLICY` keep working as before (union / fallback). Rollback: deploy the
-previous code first, then `ALTER TABLE projects DROP COLUMN agent_enabled, DROP COLUMN agent_models,
-DROP COLUMN agent_accounts`.
+`infra/sql/init.sql` mirrors the columns. With successful snapshot refreshes, access changes reach API
+and workers within 5 s, without a restart. Legacy projects retain env allowlist union and policy fallback.
+The current Settings form uses `accounts-v1` and is locked by default; conversion is a separate,
+confirmed access change, not part of migration 026. Converted policies override both env gates.
+See [agent-runs.md](agent-runs.md#legal--scope-note) and the account-only rollout precautions below.
+
+Rollback is not "deploy old code and drop the columns": those columns may contain the authoritative
+access policy, including explicit denials. Block agent requests and access writes, stop/drain workers,
+and review an approved replacement policy before any incompatible code rollback. Keep the columns
+and stored policies intact. Retiring them is a separate schema/data-removal decision after no reader
+or writer depends on them and policy preservation has been verified.
+
+### Account-only policy rollout precautions
+
+This draft needs migration 026's columns but no additional schema migration. It versions the
+existing JSON policy with `@accounts-v1`; explicit empty accounts use the reserved `@none` sentinel.
+Do not convert projects or change live grants during deployment. Each conversion requires a separate
+review and confirmed Settings save, including approval to remove that project's model restrictions.
+
+1. Keep `AGENT_ACCOUNT_ONLY_UI_ENABLED=false` (the Settings and compose default) while upgrading.
+   It disables the rendered form and rejects `accounts-v1` POSTs. It does not revoke existing
+   agent access, revert a converted policy or block compatible legacy POSTs for unconverted projects.
+2. Upgrade every API process and all agent workers, including stopped workers before any later start.
+   Verify the deployed policy version and a successful access-snapshot load in each serving process.
+   A new process refuses all agent access until its first successful load; subsequent failures retain
+   its last good snapshot. The flag is a manual rollout gate, not an automatic fleet-version check.
+3. Only after these checks may an operator enable the flag on the API and recreate the API service
+   with the changed environment. Then review and confirm each project's account selection separately.
+   Successful refreshes propagate the saved policy to other processes within `REFRESH_S` (5 s);
+   the saving process refreshes immediately. Do not claim instantaneous fleet-wide revocation.
+
+**Stale forms versus mixed versions.** The upgraded `dash_project_agent` takes
+`SELECT FOR UPDATE` before reading the project marker in both save modes. Concurrent legacy saves
+therefore either commit before conversion or see its marker and fail without overwriting it.
+This does not protect against an old API binary: it ignores the new fields and marker check and can
+erase `@accounts-v1`, reopening env fallback. Old workers can also act on an unloaded/stale snapshot;
+they lack the new startup gate. A refreshed old process rejects the unknown marker only after loading
+the converted row, with nonempty accounts (including `@none` for empty selection). Never rewrite
+that sentinel to `[]`. Mixed versions are an access-control hazard, not only an availability issue;
+do not permit old APIs to serve the form or write access, or old workers to serve converted projects.
+
+**Rollback.** Turning the flag off locks account-only editing but leaves converted policy enforced.
+Before any incompatible binary rollback, block agent requests and dashboard access writes,
+stop/drain all agent workers, and obtain approval for a safe replacement policy. Do not serve
+account-only projects with old code. Keep the marker, sentinel and migration 026 columns intact
+until the replacement is approved and verified; clearing or dropping them can restore env access.
+
+Documentation review under `CLAUDE.md`, the fresh-fetch docs gate, full quality gates and deployment
+approval remain required. `tests/test_account_policy_concurrency.py` exercises the PostgreSQL row lock
+and stale-form rejection for selected-account and empty-deny conversions. These cases skip SQLite;
+a local skip or the unit assertion of `with_for_update=True` is not a PostgreSQL concurrency pass.
+Run them in the isolated `*_test` PostgreSQL CI database before accepting the change. This draft's
+local check skipped them, and browser visual acceptance remains unverified because the browser did
+not load the UI. Offline tests establish neither live account availability nor production execution.
 
 ### Agent file bytes in a table: migration 025 (2026-10-22)
 
@@ -458,23 +509,27 @@ lost) until the idle pgbouncer server backends were terminated.
   No API restart is needed; a restart does not help, because the stale statements live in
   pgbouncer's server connections. Do not read the postgres admin password for pgbouncer's console.
 
-## Agent runs: operator step before deploying the allowlist
+## Agent runs: legacy env setup and effective access
 
-Since migration 026 (2026-11-06) the same two gates can be ticked per project on the dashboard Settings tab
-without a restart; the env settings below remain a union (allowlist) and a fallback (policy).
+Since migration 026 (2026-11-06), legacy dashboard grants can supplement the env allowlist and
+replace the env model/account policy. The current account-only Settings form is disabled until
+`AGENT_ACCOUNT_ONLY_UI_ENABLED` is explicitly enabled after full-fleet rollout. Existing policy
+is preserved until a confirmed save. Once converted to `accounts-v1`, the project's dashboard
+setting overrides both env gates, including explicit disable or no accounts selected.
 
-Agent runs are fail-closed behind `AGENT_ALLOWED_PROJECT_IDS` (comma-separated project ids,
-read by BOTH the `api` and the `agent-worker` service from the compose `.env`). Empty or unset
-= every `/v1/agent/runs` call gets 403 `agent_project_not_allowed`. **Before deploying the
-commit that introduces it, add `AGENT_ALLOWED_PROJECT_IDS=11` to `.env`**, otherwise the owner
-test project (`owner-agent-test`) is locked out.
+For an approved legacy project managed through env, configure both gates in the compose `.env`
+(read by API and agent workers): `AGENT_ALLOWED_PROJECT_IDS` is comma-separated project ids and
+`AGENT_PROJECT_POLICY` is JSON with its allowed bare model ids and accounts. The original owner-test
+setup used `AGENT_ALLOWED_PROJECT_IDS=11` and
+`AGENT_PROJECT_POLICY='{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}'`.
+These are legacy setup examples, not instructions to change or convert live project access during deploy.
 
-Second fail-closed gate, same deploy: `AGENT_PROJECT_POLICY` (JSON, read by `api` and `agent-worker`)
-must list the exact model and account of every project that may run agents, otherwise creates get 403
-`agent_policy_missing`. **Before deploying, add to `.env` (single-quoted so the JSON survives):**
-`AGENT_PROJECT_POLICY='{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}'`. See [agent-runs.md](agent-runs.md).
+An empty env allowlist denies env-only access but not a legacy dashboard grant. A missing/empty env
+policy refuses a legacy project only when it has no usable dashboard policy. Every mode fails closed
+until the process has loaded its first access snapshot; later refresh failures retain the last good
+snapshot. See [agent-runs.md](agent-runs.md#legal--scope-note) for effective policy and error codes.
 
-For the separately approved Orchestra project 12, `"models": ["*"]` allows
+For the separately approved legacy env policy of Orchestra project 12, `"models": ["*"]` allows
 only candidate ids of the requested subscription provider; keep its
 `"accounts": ["owner"]` and every other project entry unchanged. This does
 not mark a candidate verified for ordinary jobs, change scope or budget, or
@@ -1040,6 +1095,7 @@ docker compose up -d
 | `OWNER_TELEGRAM_ID` | only this Telegram user can log into dashboard |
 | `GLOBAL_DAILY_CAP_USD` | global daily spend cap |
 | `SIGNUP_ENABLED` | kill switch for `POST /v1/signup` (default `true`) |
+| `AGENT_ACCOUNT_ONLY_UI_ENABLED` | api (default `false`, also the compose default): enables account-only Settings saves only after full-fleet rollout; does not convert projects, disable agent execution or revert stored policy. See [rollout precautions](#account-only-policy-rollout-precautions) |
 | `SIGNUP_PER_IP_PER_DAY` / `SIGNUP_PER_DAY` | self-signup rate limits (defaults 3 / 50, rolling 24h) |
 | `SIGNUP_REQUEST_CAP` | lifetime request cap given to a new self-signup project (default 100) |
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
@@ -1109,3 +1165,40 @@ A manual dump is only an optional pre-migration snapshot:
 ```
 ssh hetzner-root "docker exec aibroker-postgres pg_dump -U aibroker aibroker | gzip > /var/backups/aibroker-$(date +%F).sql.gz"
 ```
+
+
+### Collecting snapshot readiness evidence
+
+Before enabling account-only editing, inventory every currently serving API process and agent
+worker, including their container identity, current PID and immutable image ID/digest tied to
+the reviewed commit. Do not start owner-stopped workers; verify them before any future start.
+The code-defined `policy_revision=accounts-v1` proves supported semantics, not an exact Git SHA.
+An environment variable claiming a revision is not image provenance.
+
+Collect the existing container logs for that inventory and parse `agent_access_snapshot` JSON
+from the `aibroker.agent.project_access` logger. A typical read-only collection for the known
+compose deployment is `docker compose --profile agent logs --since 30s --timestamps api
+agent-worker agent-worker-claude2 agent-worker-codex`; match container and process identity
+against the live inventory rather than assuming those service names cover every process.
+Keep INFO logging available for success evidence. Do not expose logs through a new public route.
+
+For each serving process require the latest event to have `schema=1`,
+`policy_revision=accounts-v1`, matching `pid` and `process_id`, `snapshot_loaded=true`,
+`last_refresh_ok=true`, positive `generation`, and a `last_success_at` no more
+than 15 seconds (three `REFRESH_S` intervals) old at the actual check, not in the future. Check
+`observed_at` likewise, account for clock disagreement, and reject a newer failure event.
+Fresh failed refreshes are not current readiness even if an older snapshot remains usable.
+Repeated success events use one process identity and increasing successful generations; a new
+PID creates a new identity with generation reset. A successful empty snapshot is valid loading.
+
+Truncated, missing, suppressed or older logs, clock disagreement, or incomplete process/image
+inventory leave readiness unverified. No event from a stopped/restarted PID is evidence for its
+replacement. A standalone Python import or `docker exec` check creates another process and
+cannot prove the serving process loaded its snapshot. Neither `/healthz`, generic startup
+messages nor worker RPC `ready_for_queue` is a snapshot readiness assertion. Existing RPC and
+authorization behavior are unchanged. Logging occurs after each completed refresh attempt,
+including startup and the normal five-second loop; a hung attempt produces no fresh evidence.
+
+This evidence does not enable the feature or guarantee instantaneous revocation. Keep
+`AGENT_ACCOUNT_ONLY_UI_ENABLED=false` until the whole serving fleet is verified, and confirm
+the effective host/container value rather than inferring it from the repository default.

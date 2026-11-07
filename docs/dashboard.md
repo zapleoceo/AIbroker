@@ -132,3 +132,36 @@ Raising the cap takes effect on the next request (`admit_request` re-reads the l
 - **Plurals.** `plural_en` / `plural_ru` (web/format.py) and the `tn()` template global give
   "1 error / 2 errors" and "1 ошибка / 2 ошибки / 5 ошибок".
 - **Request drawer.** `request_attempts` groups by `usage_log.request_id` (migration 015) and falls back to the timing inference only for rows with a NULL id.
+
+
+### Subscription account selection (account-only draft)
+
+The Agent runs card renders subscription account choices, not model checkboxes. Saving
+is locked by default until `AGENT_ACCOUNT_ONLY_UI_ENABLED` is enabled after fleet rollout.
+Each checkbox identifies both provider and worker account ID: `claude-sub/claude-2`,
+`claude-sub/owner`, or `codex-sub/owner`. Labels show the actual worker ID and the
+subscription type; they do not infer a person's name or claim that the login is healthy.
+The inventory matches the currently supported worker topology, not live discovery.
+
+Existing dashboard and env policies remain unchanged merely by opening Settings or
+upgrading. To replace one, select the required accounts, explicitly confirm the
+access change (including removal of project model restrictions), and save. No accounts
+are silently preselected when converting a legacy policy. The previous models/accounts
+are displayed for comparison. Every account-only save requires the confirmation field
+on the server as well as in the browser. Unknown accounts and stale legacy forms on an
+already converted project are rejected without writing. Both save modes take a PostgreSQL
+`SELECT FOR UPDATE` row lock before reading the policy marker, so a concurrent legacy save
+cannot erase a completed conversion. This guarantee requires the upgraded handler; an old
+API can still erase the marker. See [rollout precautions](deploy-ops.md#account-only-policy-rollout-precautions).
+
+Selected accounts may use every model in their provider's subscription catalog;
+provider verification, global switches, request validation, tool gates, project scopes
+and budgets remain in force. Clearing every account denies access, without env fallback.
+Turning off Agent runs overrides the env allowlist for that converted project. A project
+still needs `llm:agent`; this form never grants it or changes a budget.
+
+While the rollout switch is off, the form is disabled and the server rejects account-only
+saves; it does not restore model checkboxes or change an existing stored policy. Legacy
+POSTs remain compatible only for unconverted projects. Turning the switch off later locks
+editing, not execution: converted policies remain enforced. Only enable it after all
+API/worker processes are upgraded and have loaded their snapshots.

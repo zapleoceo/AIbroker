@@ -31,6 +31,7 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
     monkeypatch.setattr(pa, "_snapshot", {})
+    monkeypatch.setattr(get_settings(), "AGENT_ACCOUNT_ONLY_UI_ENABLED", True)
     monkeypatch.setattr(get_settings(), "AGENT_ALLOWED_PROJECT_IDS", "")
     _env_policy(monkeypatch, {})
 
@@ -139,8 +140,10 @@ def test_settings_tab_shows_the_agent_card_with_current_boxes():
     body = ds.get(client, "/dashboard/projects/1", params={"tab": "settings"}).text
     assert 'action="/dashboard/projects/1/agent"' in body
     assert 'name="agent_enabled" value="1" checked' in body
-    assert 'name="agent_accounts" value="owner" checked' in body
-    assert 'name="agent_accounts" value="claude-2">' in body
+    assert 'name="agent_accounts" value="codex-sub/owner"' in body
+    assert 'name="agent_accounts" value="claude-sub/claude-2">' in body
+    assert 'name="agent_models"' not in body
+    assert "Claude Code subscription" in body and "Codex subscription" in body
     assert "llm:agent" in body                               # the scope warning is shown
 
 
@@ -178,3 +181,136 @@ def test_saving_needs_the_owner_session():
         async with get_session() as s:
             return (await s.get(ProjectRow, 1)).agent_enabled
     assert ds.run(enabled()) is False
+
+
+
+async def test_account_only_empty_does_not_fall_back_to_env(monkeypatch):
+    _env_policy(monkeypatch, {"9710": {"models": ["*"], "accounts": ["owner"]}})
+    await _project(9710, agent_enabled=True, agent_models=["@accounts-v1"], agent_accounts=[])
+    await pa.refresh_access()
+    assert policy_violation(9710, "claude-sonnet-5-5", "owner", "agent:claude") == "account_not_allowed"
+
+
+async def test_account_only_owner_is_provider_scoped_and_allows_catalog_models():
+    await _project(9711, agent_enabled=True, agent_models=["@accounts-v1"],
+                   agent_accounts=["codex-sub/owner"])
+    await pa.refresh_access()
+    assert policy_violation(9711, "gpt-6.1-sol", "owner", "agent:codex") is None
+    assert policy_violation(9711, "claude-sonnet-5-5", "owner", "agent:claude") == "account_not_allowed"
+    assert policy_violation(9711, "unknown", "owner", "agent:codex") == "model_not_allowed"
+    assert policy_violation(9711, "*", "owner", "agent:codex") == "model_not_allowed"
+    assert policy_for(9711).ordered_accounts("agent:claude") == ()
+
+
+async def test_explicit_disable_overrides_env_allowlist(monkeypatch):
+    monkeypatch.setattr(get_settings(), "AGENT_ALLOWED_PROJECT_IDS", "9712")
+    await _project(9712, agent_enabled=False, agent_models=["@accounts-v1"],
+                   agent_accounts=["claude-sub/owner"])
+    await pa.refresh_access()
+    assert not project_allowed(9712)
+
+
+def test_account_only_save_requires_confirmation_and_preserves_legacy():
+    ds.seed(ds.project(1, "stepan", agent_models=["claude-sonnet-5-5"], agent_accounts=["owner"]))
+    r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
+                    data={"agent_enabled": "1", "agent_access_mode": "accounts-v1",
+                          "agent_accounts": ["codex-sub/owner"]})
+    assert "Confirm" in r.headers["location"]
+
+    async def stored():
+        async with get_session() as s:
+            row = await s.get(ProjectRow, 1)
+            return row.agent_models, row.agent_accounts
+    assert ds.run(stored()) == (["claude-sonnet-5-5"], ["owner"])
+
+
+def test_confirmed_account_only_save_keeps_scopes_and_budget():
+    ds.seed(ds.project(1, "stepan", allowed_scopes=["llm:chat"], daily_cost_cap_usd=3))
+    r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
+                    data={"agent_enabled": "1", "agent_access_mode": "accounts-v1",
+                          "confirm_account_access": "1", "agent_accounts": ["codex-sub/owner"]})
+    assert "updated" in r.headers["location"]
+
+    async def stored():
+        async with get_session() as s:
+            row = await s.get(ProjectRow, 1)
+            return row.agent_models, row.agent_accounts, row.allowed_scopes, row.daily_cost_cap_usd
+    models, accounts, scopes, cap = ds.run(stored())
+    assert models == ["@accounts-v1"] and accounts == ["codex-sub/owner"]
+    assert scopes == ["llm:chat"] and cap == 3
+
+
+def test_account_only_empty_save_is_persisted_and_stale_legacy_form_is_refused():
+    ds.seed(ds.project(1, "stepan", agent_enabled=True, agent_models=["@accounts-v1"],
+                       agent_accounts=["codex-sub/owner"]))
+    r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
+                    data={"agent_enabled": "1", "agent_access_mode": "accounts-v1",
+                          "confirm_account_access": "1"})
+    assert "access+denied" in r.headers["location"] or "access%20denied" in r.headers["location"]
+    assert pa.access_for(1).account_only and pa.access_for(1).accounts == ("@none",)
+    r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
+                    data={"agent_enabled": "1", "agent_models": ["*"], "agent_accounts": ["owner"]})
+    assert "Reload" in r.headers["location"]
+    assert pa.access_for(1).account_only and pa.access_for(1).accounts == ("@none",)
+
+
+async def test_unloaded_snapshot_blocks_env_and_failed_initial_refresh(monkeypatch):
+    monkeypatch.setattr(pa, "_snapshot", None)
+    monkeypatch.setattr(get_settings(), "AGENT_ALLOWED_PROJECT_IDS", "9713")
+    _env_policy(monkeypatch, {"9713": {"models": ["*"], "accounts": ["owner"]}})
+    assert not project_allowed(9713)
+    assert policy_for(9713) is None
+    async def boom():
+        raise RuntimeError("db down")
+    monkeypatch.setattr(pa, "refresh_access", boom)
+    stop = asyncio.Event()
+    task = asyncio.create_task(pa.access_refresh_loop(stop, interval=0.01))
+    await asyncio.sleep(0.03)
+    stop.set()
+    await task
+    assert not pa.snapshot_loaded()
+    assert not project_allowed(9713) and policy_for(9713) is None
+
+
+def test_serialized_empty_override_is_fail_closed_for_legacy_policy():
+    # Legacy policy_for applies env only when models or accounts are empty.
+    legacy_access = pa.AgentAccess(False, ("@accounts-v1",), ("@none",))
+    assert legacy_access.has_policy
+    legacy_policy = pol.ProjectPolicy(frozenset(legacy_access.models),
+                                      frozenset(legacy_access.accounts))
+    assert not legacy_policy.allows_model("gpt-6.1-sol")
+    assert not legacy_policy.allows_candidate("gpt-6.1-sol", "agent:codex")
+
+
+def test_account_only_save_is_locked_until_rollout_enabled(monkeypatch):
+    ds.seed(ds.project(1, "stepan"))
+    monkeypatch.setattr(get_settings(), "AGENT_ACCOUNT_ONLY_UI_ENABLED", False)
+    r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
+                    data={"agent_enabled": "1", "agent_access_mode": "accounts-v1",
+                          "confirm_account_access": "1", "agent_accounts": ["codex-sub/owner"]})
+    assert "rollout" in r.headers["location"]
+    assert pa.access_for(1) is None
+
+
+@pytest.mark.parametrize("mode", ["", "accounts-v1"])
+def test_agent_save_locks_policy_row_before_reading_marker(monkeypatch, mode):
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    ds.seed(ds.project(1, "stepan"))
+    original = AsyncSession.get
+    locks = []
+
+    async def checked_get(self, entity, ident, **kwargs):
+        if entity is ProjectRow and ident == 1:
+            locks.append(kwargs.get("with_for_update"))
+        return await original(self, entity, ident, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", checked_get)
+    data = {"agent_enabled": "1", "agent_accounts": ["owner"], "agent_models": ["*"]}
+    if mode:
+        data.update(agent_access_mode=mode, confirm_account_access="1",
+                    agent_accounts=["codex-sub/owner"])
+    response = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(),
+                           follow_redirects=False, data=data)
+    assert "updated" in response.headers["location"]
+    assert locks == [True]

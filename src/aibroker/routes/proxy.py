@@ -862,7 +862,7 @@ async def jobs_submit(
         account_id = "owner"      # Codex has a single login; only Claude rotates accounts
         policy = policy_for(ctx.project.id)
         if policy is not None and subscription.provider == "claude-sub":
-            candidates = policy.ordered_accounts()
+            candidates = policy.ordered_accounts(PROVIDERS[subscription.provider])
             picked = await pick_account(candidates, PROVIDERS[subscription.provider])
             if picked is None and candidates:
                 raise HTTPException(503, "every Claude account of this project is excluded "
