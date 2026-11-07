@@ -7,10 +7,11 @@ both api workers and every agent worker refresh it every REFRESH_S seconds
 (`access_refresh_loop`), and a dashboard save refreshes its own process at once. A change therefore
 reaches every process within REFRESH_S, with no container restart.
 
-The env settings stay a fallback: AGENT_ALLOWED_PROJECT_IDS still admits a project, and
-AGENT_PROJECT_POLICY still applies to a project whose dashboard policy is empty. Until the first
-refresh the snapshot is empty, so a dashboard-only project is refused (fail closed); a failed
-refresh keeps the last snapshot.
+Before the first successful snapshot load every agent policy fails closed.
+Account-only overrides also replace the env allowlist and never fall back to env.
+For untouched legacy projects the env settings stay a fallback: AGENT_ALLOWED_PROJECT_IDS still admits a project, and
+AGENT_PROJECT_POLICY still applies to a project whose dashboard policy is empty.
+After a successful load, a failed refresh keeps the last snapshot.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
+from aibroker.agent.account_choices import ACCOUNT_ONLY
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 
@@ -41,16 +43,24 @@ class AgentAccess:
     accounts: tuple[str, ...]
 
     @property
+    def account_only(self) -> bool:
+        return self.models == (ACCOUNT_ONLY,)
+
+    @property
     def has_policy(self) -> bool:
         return bool(self.models and self.accounts)
 
 
-_snapshot: dict[int, AgentAccess] = {}
+_snapshot: dict[int, AgentAccess] | None = None
+
+
+def snapshot_loaded() -> bool:
+    return _snapshot is not None
 
 
 def access_for(project_id: int) -> AgentAccess | None:
     """The dashboard access of a project, or None when it has none set."""
-    return _snapshot.get(project_id)
+    return (_snapshot or {}).get(project_id)
 
 
 def _strings(values: object) -> tuple[str, ...]:

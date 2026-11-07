@@ -228,27 +228,29 @@
   <h2>{{ t("Agent runs (Claude / Codex subscription)", "Агенты (Claude / Codex по подписке)") }}</h2>
   <p class="muted">{{ t("Applied within a few seconds, no restart. An agent request also needs the llm:agent scope above.", "Применяется за несколько секунд, без перезапуска. Для запроса к агенту также нужно право llm:agent выше.") }}
     {% if not agent.has_scope %}<span class="pill rsv">{{ t("llm:agent is not granted", "llm:agent не выдано") }}</span>{% endif %}</p>
+  {% if not agent.account_ui_enabled %}
+  <p role="alert">{{ t("Account selection is locked until all API and agent workers are upgraded. Existing access is unchanged.", "Выбор аккаунтов заблокирован до обновления всех API и агентных воркеров. Текущий доступ не изменён.") }}</p>
+  {% endif %}
   <form method="post" action="/dashboard/projects/{{ project.id }}/agent" class="stack">
+    <fieldset class="stack"{% if not agent.account_ui_enabled %} disabled{% endif %}>
     <input type="hidden" name="next" value="/dashboard/projects/{{ project.id }}?tab=settings">
     <label class="scope-cb"><input type="checkbox" name="agent_enabled" value="1"{% if agent.enabled %} checked{% endif %}>
       {{ t("Allow agent runs for this project", "Разрешить агентные запуски этому проекту") }}</label>
-    <div class="field"><span class="lbl" id="ag-models">{{ t("Models", "Модели") }}</span>
-      <div class="scope-grid" role="group" aria-labelledby="ag-models">
-        <label class="scope-cb"><input type="checkbox" name="agent_models" value="*"{% if agent.all_models %} checked{% endif %}> {{ t("all subscription models (*)", "все модели подписки (*)") }}</label>
-        {% for md in agent.models %}<label class="scope-cb"><input type="checkbox" name="agent_models" value="{{ md.value }}"{% if md.checked %} checked{% endif %}> {{ md.label }}</label>{% endfor %}
-      </div></div>
-    <div class="field"><span class="lbl" id="ag-accounts">{{ t("Accounts", "Аккаунты") }}</span>
-      <div class="scope-grid" role="group" aria-labelledby="ag-accounts">
-        {% for ac in agent.accounts %}<label class="scope-cb"><input type="checkbox" name="agent_accounts" value="{{ ac.value }}"{% if ac.checked %} checked{% endif %}> {{ ac.value }}</label>{% endfor %}
-      </div>
-      <small>{{ t("Claude picks the least busy ticked account (in this order on a tie). Codex always runs as owner, so tick owner for Codex.", "Claude берёт наименее занятый отмеченный аккаунт (при равенстве — в этом порядке). Codex всегда работает как owner, для Codex отметьте owner.") }}</small></div>
-    {% if agent.env_allowed or agent.env_policy %}
-    <p class="muted">{{ t("Also set in the server env (.env):", "Также задано в .env сервера:") }}
-      {% if agent.env_allowed %}<span class="pill on">AGENT_ALLOWED_PROJECT_IDS</span>{% endif %}
-      {% if agent.env_policy %}<span class="pill">AGENT_PROJECT_POLICY: {{ agent.env_policy.models|join(", ") }} · {{ agent.env_policy.accounts|join(", ") }}</span>{% endif %}
-      {{ t("The env allowlist admits the project even if the box is clear; ticked models and accounts replace the env policy.", "Список из .env пропускает проект даже без галочки; отмеченные модели и аккаунты заменяют политику из .env.") }}</p>
+    <input type="hidden" name="agent_access_mode" value="accounts-v1">
+    {% if not agent.account_only %}
+    <p class="muted">{{ t("Existing access stays unchanged until you confirm and save. Select the accounts below to replace the current model restrictions and server policy.", "Текущий доступ не изменится до подтверждения и сохранения. Выберите аккаунты ниже, чтобы заменить ограничения моделей и политику сервера.") }}</p>
+    <p class="muted">{{ t("Current models / accounts:", "Текущие модели / аккаунты:") }} {{ agent.legacy_models|join(", ") }} · {{ agent.legacy_accounts|join(", ") }}{% if agent.env_policy %} · env: {{ agent.env_policy.models|join(", ") }} / {{ agent.env_policy.accounts|join(", ") }}{% endif %}</p>
     {% endif %}
+    <div class="field"><span class="lbl" id="ag-accounts">{{ t("Subscription accounts", "Аккаунты подписки") }}</span>
+      <div class="scope-grid" role="group" aria-labelledby="ag-accounts">
+        {% for ac in agent.account_choices %}<label class="scope-cb"><input type="checkbox" name="agent_accounts" value="{{ ac.value }}"{% if ac.checked %} checked{% endif %}> {{ ac.label }} · {{ ac.kind }}</label>{% endfor %}
+      </div>
+      <small>{{ t("Configured worker IDs, not a live login health check. Claude and Codex owner are separate accounts. No selection denies all accounts, without server-policy fallback.", "Настроенные ID воркеров, без проверки состояния входа. owner Claude и owner Codex — разные аккаунты. Пустой выбор запрещает все аккаунты без возврата к политике сервера.") }}</small></div>
+    <p class="muted">{{ t("Selected accounts can use every model in the subscription catalog, subject to provider availability and verification. Project scopes and budgets are unchanged. Turning off agent runs overrides the server allowlist.", "Выбранным аккаунтам доступны все модели каталога подписок с учётом доступности и проверки у провайдера. Права и бюджеты проекта не меняются. Отключение запусков имеет приоритет над списком разрешений сервера.") }}</p>
+    <label class="scope-cb"><input type="checkbox" name="confirm_account_access" value="1" required>
+      {{ t("I confirm this account access change and removal of project model restrictions.", "Подтверждаю изменение доступа к аккаунтам и снятие ограничений моделей проекта.") }}</label>
     <div class="row"><button type="submit" class="btn btn-primary">{{ t("Save agent access", "Сохранить доступ агентов") }}</button></div>
+    </fieldset>
   </form>
 </section>
 {% endif %}

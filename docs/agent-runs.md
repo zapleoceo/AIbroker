@@ -76,60 +76,105 @@ third parties or be offered as a service. Access needs the `llm:agent` scope
 (`aibroker.agent.constants`) and is stripped from `SIGNUP_DEFAULT_SCOPES`, so self-signup
 can never grant it. Capabilities: `agent:codex`, `agent:claude` (`AGENT_CAPABILITIES`).
 
-**Server-side allowlist (fail-closed).** The scope alone is not enough: the project id must also
-be in `AGENT_ALLOWED_PROJECT_IDS` (comma-separated integers; `allowed_project_ids`,
-`project_allowed`). Empty or unset means NOBODY: every `/v1/agent/runs` endpoint (create, get,
-events, cancel) answers 403 `{"error": "agent_project_not_allowed"}` (`AgentProjectNotAllowed`)
-right after the scope check, even with `llm:agent`. The worker re-checks before it starts a
-run: a queued run of a project removed from the list fails with `run.failed
-project_not_allowed` - no CLI start, no `billing.attested`. Compose passes the variable to both
-`api` and `agent-worker`; the operator sets `AGENT_ALLOWED_PROJECT_IDS=11` in `.env` BEFORE
-deploying this change, otherwise the owner test project is locked out (by design).
+**Server-side project gate (fail-closed).** The scope alone is not enough: `project_allowed`
+(`aibroker.agent.constants`) must also admit the project. Before the first successful access-snapshot
+load, every project is refused, including env-listed projects. After loading:
 
-**Dashboard checkboxes (2026-11-06, migration 026).** The owner can also grant agent access on the
-dashboard project page, Settings tab, card "Agent runs": "allow agent runs" (`projects.agent_enabled`),
-the subscription models (`agent_models`, bare ids or `*`) and the accounts (`agent_accounts`, offered
-in `KNOWN_ACCOUNTS` order, which is the selection preference). `POST /dashboard/projects/{id}/agent`
-(`dash_project_agent`, values cleaned by `agent_form_values`: models by `clean_models` against
-`known_models()` (the subscription catalog, bare ids) plus `*`, accounts by `clean_accounts` in
-`KNOWN_ACCOUNTS` order; the card is `agent_view` in `routes/dashboard_agent_access.py`). No restart: every process (both api workers, each agent worker)
-keeps a snapshot (`aibroker.agent.project_access`: `refresh_access`, `access_refresh_loop`, `access_for`)
-re-read every `REFRESH_S` (5 s), and the saving process refreshes at once. Rules:
-`project_allowed` = in `AGENT_ALLOWED_PROJECT_IDS` OR the box is ticked (the env list still admits a
-project with the box clear; the card shows that). `policy_for` = the dashboard policy when both models
-and accounts are ticked (`AgentAccess.has_policy`), else the env `AGENT_PROJECT_POLICY` entry
-(`env_policy_for`). Until the first refresh the snapshot is empty (fail closed); a failed refresh keeps
-the last snapshot. Before refusing a queued run (`_access_problem` in the executor) the worker re-reads the
-table once, so a box ticked a moment ago never fails a run on a stale snapshot. The `llm:agent` scope is still
-required and is granted in the scopes above.
+- **Legacy mode** (no `@accounts-v1` marker): the project id is in `AGENT_ALLOWED_PROJECT_IDS`
+  (comma-separated integers, parsed by `allowed_project_ids`) OR `projects.agent_enabled` is true.
+  An empty env list denies env-only access, not an explicit dashboard grant; clearing the legacy
+  dashboard box does not revoke an env allowlist entry.
+- **Account-only mode** (`AgentAccess.account_only`): only `projects.agent_enabled` decides.
+  Explicit disable overrides the env allowlist, and neither gate falls back to env.
 
-The same checks run on every read of an `agent:*` job, through `GET /v1/jobs/{id}` and
-`GET /v1/deep/{id}`. A project that lost `llm:agent`, left the allowlist, or no longer matches
-`AGENT_PROJECT_POLICY` gets 403 for previously created results too. `GET /v1/agent/runs/{id}` and `/events` re-check
-`AGENT_PROJECT_POLICY` against the run's stored model, account and capability, so a removed policy
-closes the run's output (403 `agent_policy_missing`, `model_not_allowed`, `account_not_allowed`).
+A refused `/v1/agent/runs` request (create, get, events, cancel) gets 403
+`{"error": "agent_project_not_allowed"}` (`AgentProjectNotAllowed`) after the scope check.
+The worker re-checks before starting a queued run; refusal is `run.failed project_not_allowed`,
+with no CLI start or `billing.attested`. Compose passes the legacy env settings to API and workers.
 
-**Per-project policy (fail-closed).** `AGENT_PROJECT_POLICY` is JSON in the environment
-(a dashboard policy, above, replaces a project's entry and may be wider or narrower),
-e.g. `{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}` (`ProjectPolicy`, `policy_for`,
-`policy_violation` in `aibroker.agent.policy`). On `POST /v1/agent/runs`, after the scope and project
-allowlist checks, a request is refused with 403 `{"error": ...}` (`AgentPolicyViolation`) when:
-the project has no entry or an empty `models` / `accounts` list - `agent_policy_missing`; the request's
-`model` is absent or not EXACTLY one of the project's models (no prefix match, no implicit default,
-`latest` only if listed) - `model_not_allowed`; the `account_id` is not listed - `account_not_allowed`.
-For Claude, the `accounts` order is also the preference order of `/v1/jobs` account selection
-(see [Multiple Claude subscription accounts](#multiple-claude-subscription-accounts)).
-For a project explicitly configured with `"models": ["*"]`, the wildcard admits only
-model ids listed as candidates for the requested Claude or Codex subscription
-provider. Exact model entries retain their previous policy behavior. The
-wildcard does not mark a model verified, grant tools or vision, change the
-project's account allowlist, or override the ordinary jobs route's availability
-check. Keep this policy entry limited to the project the owner approved.
-A malformed setting refuses every project (`agent_policy_missing`) and logs one clear error. The worker
-re-checks the same policy before it starts a queued run (`run.failed` with the same code, no CLI start,
-no `billing.attested`). The CLI model catalog stays an additional check when it is readable; when it is
-not, the already-enforced allowlist decides - the id is never passed through unchecked. The project's
-daily cap stays plain metadata (no run quota). Compose passes the variable to `api` and `agent-worker`.
+**Dashboard account selection (migration 026).** The Settings tab's "Agent runs" card
+(`agent_view` in `routes/dashboard_agent_access.py`) now offers subscription accounts, not model
+checkboxes. `AGENT_ACCOUNT_ONLY_UI_ENABLED` defaults false: the form is disabled and
+`POST /dashboard/projects/{id}/agent` (`dash_project_agent`) refuses `accounts-v1` saves until rollout
+is explicitly enabled. Opening Settings or upgrading does not convert existing policies.
+See [dashboard.md](dashboard.md#subscription-account-selection-account-only-draft) for the form and
+[deploy-ops.md](deploy-ops.md#account-only-policy-rollout-precautions) before enabling it.
+
+**Legacy model/account policy.** Before conversion, the stored `agent_models` (bare ids or `*`)
+and `agent_accounts` remain effective. `policy_for` uses this dashboard policy when both lists are
+nonempty (`AgentAccess.has_policy`), otherwise the project's `AGENT_PROJECT_POLICY` entry
+(`env_policy_for`). The legacy POST without `agent_access_mode` remains compatible only for
+unconverted projects. `agent_form_values` uses `clean_models` against `known_models()` (subscription
+catalog bare ids) plus `ALL_MODELS` (`*`), and `clean_accounts` in `KNOWN_ACCOUNTS` order
+(`claude-2`, `owner`, the legacy selection preference). These are compatibility rules, not model
+checkboxes in the new UI.
+
+**Snapshot propagation.** Every API process and agent worker keeps a snapshot
+(`aibroker.agent.project_access`: `AgentAccess`, `refresh_access`, `access_refresh_loop`, `access_for`),
+refreshed every `REFRESH_S` (5 s); the saving API process refreshes immediately. `snapshot_loaded`
+distinguishes the initial `None` from a successfully loaded empty table. Both `project_allowed`
+and `policy_for` fail closed until a successful load; later failures retain the last good snapshot.
+With successful refreshes, changes propagate within the refresh interval without a restart. Before
+refusing a queued run, `_access_problem` in the executor is retried after one table refresh to avoid
+rejecting a fresh grant on a stale snapshot. This is not an immediate fleet-wide revocation barrier.
+The `llm:agent` scope is still required and is granted separately in project scopes.
+
+The same effective project and policy checks run on reads of `agent:*` jobs through
+`GET /v1/jobs/{id}` and `GET /v1/deep/{id}`. `GET /v1/agent/runs/{id}` and `/events` also
+re-check the effective policy against the run's stored model, bare account id and capability.
+Revocation applies to previously created results too, subject to snapshot propagation.
+
+**Per-project policy (fail-closed).** `ProjectPolicy`, `policy_for` and `policy_violation`
+(`aibroker.agent.policy`) resolve dashboard overrides first and env policy only in legacy mode.
+The legacy env format is `AGENT_PROJECT_POLICY='{"11": {"models": ["claude-sonnet-5-5"], "accounts": ["owner"]}}'`.
+After the scope and project checks, `POST /v1/agent/runs` returns 403 `{"error": ...}`
+(`AgentPolicyViolation`) for:
+
+- No effective policy (including empty legacy lists without a usable env fallback): `agent_policy_missing`.
+  An unloaded snapshot is refused earlier by the project gate as `agent_project_not_allowed`.
+- A missing or disallowed model: `model_not_allowed`. Legacy exact entries require an exact bare
+  model id, with no prefix match or implicit default. An explicit legacy `"models": ["*"]`, or
+  account-only mode, admits only catalog candidates of the requested subscription provider,
+  not arbitrary model strings. The literal `*` is not a request model and fails input validation.
+- An account outside the effective policy for that capability: `account_not_allowed`. Account-only
+  mode with no selected account denies access rather than falling back to env.
+
+Malformed env JSON logs one clear error and supplies no usable env policy; an explicit dashboard
+policy is independent of it. The worker re-checks before starting a queued run (`run.failed` with
+the same policy code, no CLI start or `billing.attested`). The CLI model catalog is an additional
+check when readable; an unreadable catalog never bypasses the effective policy. Provider verification,
+global switches, tools/vision gates and ordinary jobs route availability still apply. Policy changes
+never grant scopes, change budgets or permit API-billed fallback. The agent run daily cap remains metadata.
+
+### Provider-qualified account-only policy
+
+The form posts `agent_access_mode=accounts-v1` and requires `confirm_account_access=1` on every
+save, including disable and clearing the selection. It writes `agent_models=["@accounts-v1"]`
+(`ACCOUNT_ONLY`) and provider-qualified account values to the existing columns. This marker is a
+policy version, not a model id; the legacy model form does not accept it. Conversion explicitly
+removes project model restrictions; there is no automatic data migration or legacy preselection.
+
+`aibroker.agent.account_choices` defines `AccountChoice` (provider, worker account id, subscription
+kind; `value` combines provider/id) and ordered `ACCOUNT_CHOICES`: `claude-sub/claude-2`,
+`claude-sub/owner`, `codex-sub/owner`. `clean_account_choices` rejects unknown/unqualified values,
+deduplicates them and preserves inventory order. The inventory describes supported worker topology,
+not live login health. `account_ids` uses `CAPABILITY_PROVIDER` to select only the requested provider
+and return its bare worker ids. `ProjectPolicy.ordered_accounts(capability)` uses this mapping in
+account-only mode; `owner` for Claude cannot authorize Codex. `/v1/agent/runs` still takes the bare
+`account_id` together with its capability, while `/v1/jobs` chooses within that provider's accounts.
+
+An empty selection is stored as `agent_accounts=["@none"]` (`NO_ACCOUNTS`), not `[]`. The sentinel
+is neither a checkbox value nor a real account. It keeps the legacy policy nonempty, so an old
+process **that has loaded the converted row** rejects the unknown model marker rather than falling
+back to env. This is not protection against an old process with an unloaded or stale snapshot.
+
+For both legacy and account-only saves, `dash_project_agent` reads the row with
+`SELECT FOR UPDATE` (`AsyncSession.get(..., with_for_update=True)`) before checking its marker.
+On PostgreSQL, the lock lasts through the update transaction: a concurrent legacy save either
+commits first, before conversion, or observes the converted marker and is refused with "Reload
+Settings before changing account access". It cannot overwrite a conversion through a stale read.
+This protects saves handled by the upgraded route, not old API binaries that omit the marker check.
+Mixed fleets remain unsafe for conversion; see the rollout precautions linked above.
 
 **Internal worker RPC.** The API and each subscription worker share only that
 worker's named Unix-socket volume. The socket directory is uid 10001 mode
@@ -506,9 +551,12 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 4. Only after step 2, set `AGENT_PAID_CONTINUATION_VERIFIED_OFF=true` in the compose `.env`.
    Until then `autonomous` / `exam` runs are refused (`billing_mode_refused`); a single manual
    run needs `run_mode: "manual"` plus `accept_paid_continuation_risk: true` in the request.
-5. Set `AGENT_ALLOWED_PROJECT_IDS` (e.g. `11`) in the compose `.env` (empty = nobody may use agent runs).
-   Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`; grant a project the
-   `llm:agent` scope through the admin API.
+5. For legacy env-managed access, set `AGENT_ALLOWED_PROJECT_IDS` (e.g. `11`) and the matching
+   `AGENT_PROJECT_POLICY` model/account entry in the compose `.env`. A legacy dashboard grant can
+   replace these; for a converted project, only its confirmed account-only settings apply.
+   Keep `AGENT_ACCOUNT_ONLY_UI_ENABLED=false` until the full-fleet rollout checks pass.
+   Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`;
+   grant the project `llm:agent` separately through the admin API.
 
 6. **Enabling the worker only, with the owner's confirmation** - attach pgbouncer (the ONLY
    database endpoint the worker uses) to the worker network without restarting it (compose
@@ -619,9 +667,11 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
   mode=polling only (RPC dir read-only / not mounted)` instead of an ERROR with a traceback. Instant wake
   stays off; other errors (any other errno, wrong owner/mode) still propagate to the ERROR path in
   `run_worker`.
-- **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts()`):
-  `/v1/jobs` `claude-sub` takes the candidates = the accounts in `AGENT_PROJECT_POLICY` for the project, in
-  listed order, and among those without an active quota pause picks the one with the fewest
+- **Account selection** (`aibroker.agent.accounts`: `pick_account`, `quota_resets`; `ProjectPolicy.ordered_accounts(capability)`):
+  `/v1/jobs` `claude-sub` takes candidates from the project's effective policy. Account-only mode
+  filters qualified choices to `agent:claude` and returns bare ids in inventory order; legacy mode
+  uses the dashboard list, or the env `AGENT_PROJECT_POLICY` list, in its stored order.
+  Among candidates without an active quota pause it picks the one with the fewest
   unfinished runs (`unfinished_runs`: pending, queued or running; ties keep the listed order, 2026-10-17).
   A pause is the latest
   `run.waiting_quota` / `run.failed quota_exhausted` signal whose stored reset time is still in the future
@@ -660,8 +710,10 @@ email, no token): `ClaudeCLI` reads only `authMethod` / `apiProvider` from the p
    OFF (or capped at 0) for this seat. Only then set `AGENT_CLAUDE2_PAID_CONTINUATION_VERIFIED_OFF=true`
    in the compose `.env`. Until then `autonomous` / `exam` runs on `claude-2` are refused.
 5. `docker compose --profile agent up -d agent-worker-claude2` (first start is manual; deploy does not start it).
-6. Add `"claude-2"` to the project's `accounts` in `AGENT_PROJECT_POLICY`, for example
-   `"accounts": ["owner", "claude-2"]`.
+6. Grant this account through the project's effective policy: for a converted project select
+   `claude-sub/claude-2` and confirm the account-only save in Settings. For a legacy env-managed
+   project, add `"claude-2"` to `AGENT_PROJECT_POLICY`, for example `"accounts": ["owner", "claude-2"]`.
+   An existing legacy dashboard policy overrides that env entry.
 
 ### Rollback
 

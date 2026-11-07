@@ -37,9 +37,11 @@ your weekly limit - resets Oct 15, 8pm (UTC)") is such a wait: the job stays pen
 stated reset, or ends `failed` with `error_message` `quota_exhausted: <limit wording> (reset ... is past the job
 deadline)` if the request deadline (`deadline_s`, default 6 h) falls first.
 
-For `claude-sub`, the account is chosen once at submit: the first account listed for the project in
-`AGENT_PROJECT_POLICY` without an active quota pause, otherwise the one whose pause ends first. The
-poll response reports it as `account_id`. A started run never changes account; see
+For `claude-sub`, the account is chosen once at submit from the project's effective policy:
+provider-filtered account-only choices, or the legacy dashboard/env account list. Among eligible
+accounts without an active quota pause, the least busy is picked; ties keep policy order. If all
+are paused, the one whose pause ends first is picked. The poll response reports the bare worker id
+as `account_id`. A started run never changes account; see
 [agent-runs.md](agent-runs.md#multiple-claude-subscription-accounts).
 
 Codex subscription requests are no longer serialized across the broker. They run concurrently up to
@@ -59,9 +61,14 @@ only for separately verified vision model IDs. JSON schemas cannot contain
 references. These values come from
 the same constants and validator used by `POST /v1/jobs`.
 
-Access requires the capability's existing scope plus `llm:agent`, the server
-project allowlist, and the exact CLI model and an account in
-`AGENT_PROJECT_POLICY` (`owner` for Codex; for Claude, any listed account, chosen at submit). The worker rechecks these, and `GET /v1/jobs/{id}` and
+Access requires the capability's existing scope plus `llm:agent`, the effective project gate,
+and a permitted CLI model/account pair. Legacy projects use the env allowlist OR dashboard enable,
+with a nonempty dashboard model/account policy overriding `AGENT_PROJECT_POLICY`. Converted
+`accounts-v1` projects use only their dashboard enable/account selection: disable or no selected
+accounts never falls back to env. Their selected accounts admit provider catalog candidates, still
+subject to ordinary route verification and feature gates. `claude-sub/owner` and `codex-sub/owner`
+are separate grants; the worker receives the bare account id for the matching capability. All
+projects fail closed until the first successful access-snapshot load. The worker rechecks these, and `GET /v1/jobs/{id}` and
 `GET /v1/deep/{id}` recheck them on every read, as do the agent run reads
 (`/v1/agent/runs/{id}` and `/events`). The configured list of
 subscription candidates is `AGENT_SUBSCRIPTION_MODELS` (JSON object keyed by

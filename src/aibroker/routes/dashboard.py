@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 
+from aibroker.agent.account_choices import ACCOUNT_ONLY, NO_ACCOUNTS, clean_account_choices
 from aibroker.agent.project_access import refresh_access
 from aibroker.auth import client_ip, generate_project_key, hash_project_key
 from aibroker.auth_session import (
@@ -432,22 +433,45 @@ async def dash_project_agent(
     agent_enabled: str = Form(""),
     agent_models: Annotated[list[str] | None, Form()] = None,
     agent_accounts: Annotated[list[str] | None, Form()] = None,
+    agent_access_mode: str = Form(""),
+    confirm_account_access: str = Form(""),
     next: str = Form(""),
     _: OwnerSession = Depends(require_owner_session),
 ) -> RedirectResponse:
     """Agent access from the Settings tab checkboxes; every process picks it up within
     project_access.REFRESH_S, this one at once (no container restart)."""
-    enabled, models, accounts = agent_form_values(agent_enabled, agent_models, agent_accounts)
+    if agent_access_mode == "accounts-v1":
+        if not get_settings().AGENT_ACCOUNT_ONLY_UI_ENABLED:
+            return _back(next, "!Account-only access is not enabled: finish the worker rollout first")
+        if confirm_account_access != "1":
+            return _back(next, "!Confirm the account access change before saving")
+        try:
+            accounts = list(clean_account_choices(agent_accounts or []))
+        except ValueError as exc:
+            return _back(next, f"!{exc}")
+        enabled, models = bool(agent_enabled), [ACCOUNT_ONLY]
+        # Old workers must also see a nonempty policy and reject the unknown model
+        # marker, rather than falling back to a permissive env entry.
+        accounts = accounts or [NO_ACCOUNTS]
+    elif agent_access_mode:
+        return _back(next, "!Unknown agent access mode")
+    else:
+        enabled, models, accounts = agent_form_values(agent_enabled, agent_models, agent_accounts)
     async with get_session() as s:
-        row = await s.get(ProjectRow, project_id)
+        # Serialize conversion with stale legacy forms; the marker must never be erased.
+        row = await s.get(ProjectRow, project_id, with_for_update=True)
         if not row:
             return _back(next, "!Project not found")
+        if row.agent_models == [ACCOUNT_ONLY] and agent_access_mode != "accounts-v1":
+            return _back(next, "!Reload Settings before changing account access")
         row.agent_enabled, row.agent_models, row.agent_accounts = enabled, models, accounts
         name = row.name
     await refresh_access()
     await audit(actor="dashboard", action="project.agent", target=name,
                 metadata={"enabled": enabled, "models": models, "accounts": accounts},
                 ip=client_ip(request))
+    if agent_access_mode == "accounts-v1" and accounts == [NO_ACCOUNTS]:
+        return _back(next, f"Agent access of {name} updated: no accounts selected; access denied")
     if enabled and not (models and accounts):
         return _back(next, f"!Agent runs of {name} allowed, but no model or account is ticked: "
                            "requests get 403 agent_policy_missing unless the env policy covers it")

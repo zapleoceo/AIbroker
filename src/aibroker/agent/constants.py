@@ -27,8 +27,10 @@ def allowed_project_ids() -> frozenset[int]:
 def project_allowed(project_id: int) -> bool:
     """In AGENT_ALLOWED_PROJECT_IDS, or "agent runs allowed" ticked on the dashboard
     (agent/project_access.py; a lazy import keeps this module free of the database layer)."""
-    if project_id in allowed_project_ids():
-        return True
-    from aibroker.agent.project_access import access_for
+    from aibroker.agent.project_access import access_for, snapshot_loaded
+    if not snapshot_loaded():
+        return False
     access = access_for(project_id)
-    return access is not None and access.enabled
+    if access is not None and access.account_only:
+        return access.enabled
+    return project_id in allowed_project_ids() or (access is not None and access.enabled)
