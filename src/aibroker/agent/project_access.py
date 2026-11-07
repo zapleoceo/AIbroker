@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -52,6 +56,44 @@ class AgentAccess:
 
 
 _snapshot: dict[int, AgentAccess] | None = None
+POLICY_REVISION = "accounts-v1"
+_evidence_pid: int | None = None
+_evidence_instance: str | None = None
+_evidence_generation = 0
+_evidence_last_success: str | None = None
+
+
+def _log_refresh(success: bool) -> None:
+    """Evidence is best effort and must never affect snapshot publication or refresh errors."""
+    global _evidence_pid, _evidence_instance, _evidence_generation, _evidence_last_success
+    try:
+        pid = os.getpid()
+        if _evidence_pid != pid:
+            instance = str(uuid.uuid4())
+            _evidence_pid = pid
+            _evidence_instance = instance
+            _evidence_generation = 0
+            _evidence_last_success = None
+        observed_at = datetime.now(UTC).isoformat()
+        if success:
+            _evidence_generation += 1
+            _evidence_last_success = observed_at
+        payload = {
+            "event": "agent_access_snapshot",
+            "schema": 1,
+            "policy_revision": POLICY_REVISION,
+            "pid": pid,
+            "process_id": _evidence_instance,
+            "observed_at": observed_at,
+            "snapshot_loaded": snapshot_loaded(),
+            "last_refresh_ok": success,
+            "generation": _evidence_generation,
+            "last_success_at": _evidence_last_success,
+        }
+        log.log(logging.INFO if success else logging.WARNING,
+                "%s", json.dumps(payload, separators=(",", ":")))
+    except Exception:  # noqa: BLE001 - telemetry cannot change access or mask the original error
+        pass
 
 
 def snapshot_loaded() -> bool:
@@ -73,16 +115,21 @@ async def refresh_access() -> None:
     """Reload the snapshot from projects; only rows with some agent setting are kept (the table
     holds tens of projects, so it is read whole instead of filtering JSON in SQL)."""
     global _snapshot
-    async with get_session() as s:
-        rows = (await s.execute(
-            select(ProjectRow.id, ProjectRow.agent_enabled, ProjectRow.agent_models,
-                   ProjectRow.agent_accounts))).all()
-    fresh = {}
-    for pid, enabled, models, accounts in rows:
-        access = AgentAccess(bool(enabled), _strings(models), _strings(accounts))
-        if access.enabled or access.models or access.accounts:
-            fresh[pid] = access
-    _snapshot = fresh
+    try:
+        async with get_session() as s:
+            rows = (await s.execute(
+                select(ProjectRow.id, ProjectRow.agent_enabled, ProjectRow.agent_models,
+                       ProjectRow.agent_accounts))).all()
+        fresh = {}
+        for pid, enabled, models, accounts in rows:
+            access = AgentAccess(bool(enabled), _strings(models), _strings(accounts))
+            if access.enabled or access.models or access.accounts:
+                fresh[pid] = access
+        _snapshot = fresh
+    except Exception:
+        _log_refresh(False)
+        raise
+    _log_refresh(True)
 
 
 async def access_refresh_loop(stop: asyncio.Event, interval: float = REFRESH_S) -> None:

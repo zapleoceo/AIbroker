@@ -119,6 +119,19 @@ refusing a queued run, `_access_problem` in the executor is retried after one ta
 rejecting a fresh grant on a stale snapshot. This is not an immediate fleet-wide revocation barrier.
 The `llm:agent` scope is still required and is granted separately in project scopes.
 
+**Per-process readiness evidence.** Every completed `refresh_access` attempt emits an
+`agent_access_snapshot` JSON log event (INFO on success, WARNING on failure). The existing
+refresh loop attempts this every 5 s; startup and explicit refreshes emit it too. Fields are
+`schema=1`, `policy_revision=accounts-v1`, `pid`, `process_id`, `observed_at`,
+`snapshot_loaded`, `last_refresh_ok`, `generation`, and `last_success_at`.
+The process identity is created in that process and resets after a PID change/fork. Success
+is recorded only after assigning the snapshot, including a successfully loaded empty table.
+A failed attempt retains the last successful snapshot, timestamp and generation. Telemetry
+failure never changes authorization or masks the original refresh error; missing evidence
+therefore means unverified, not ready. The payload contains no policy contents, project IDs or account IDs.
+These logs are operational evidence, not a new authorization gate or automatic fleet barrier.
+See [per-process collection](deploy-ops.md#collecting-snapshot-readiness-evidence) before enable.
+
 The same effective project and policy checks run on reads of `agent:*` jobs through
 `GET /v1/jobs/{id}` and `GET /v1/deep/{id}`. `GET /v1/agent/runs/{id}` and `/events` also
 re-check the effective policy against the run's stored model, bare account id and capability.

@@ -1165,3 +1165,40 @@ A manual dump is only an optional pre-migration snapshot:
 ```
 ssh hetzner-root "docker exec aibroker-postgres pg_dump -U aibroker aibroker | gzip > /var/backups/aibroker-$(date +%F).sql.gz"
 ```
+
+
+### Collecting snapshot readiness evidence
+
+Before enabling account-only editing, inventory every currently serving API process and agent
+worker, including their container identity, current PID and immutable image ID/digest tied to
+the reviewed commit. Do not start owner-stopped workers; verify them before any future start.
+The code-defined `policy_revision=accounts-v1` proves supported semantics, not an exact Git SHA.
+An environment variable claiming a revision is not image provenance.
+
+Collect the existing container logs for that inventory and parse `agent_access_snapshot` JSON
+from the `aibroker.agent.project_access` logger. A typical read-only collection for the known
+compose deployment is `docker compose --profile agent logs --since 30s --timestamps api
+agent-worker agent-worker-claude2 agent-worker-codex`; match container and process identity
+against the live inventory rather than assuming those service names cover every process.
+Keep INFO logging available for success evidence. Do not expose logs through a new public route.
+
+For each serving process require the latest event to have `schema=1`,
+`policy_revision=accounts-v1`, matching `pid` and `process_id`, `snapshot_loaded=true`,
+`last_refresh_ok=true`, positive `generation`, and a `last_success_at` no more
+than 15 seconds (three `REFRESH_S` intervals) old at the actual check, not in the future. Check
+`observed_at` likewise, account for clock disagreement, and reject a newer failure event.
+Fresh failed refreshes are not current readiness even if an older snapshot remains usable.
+Repeated success events use one process identity and increasing successful generations; a new
+PID creates a new identity with generation reset. A successful empty snapshot is valid loading.
+
+Truncated, missing, suppressed or older logs, clock disagreement, or incomplete process/image
+inventory leave readiness unverified. No event from a stopped/restarted PID is evidence for its
+replacement. A standalone Python import or `docker exec` check creates another process and
+cannot prove the serving process loaded its snapshot. Neither `/healthz`, generic startup
+messages nor worker RPC `ready_for_queue` is a snapshot readiness assertion. Existing RPC and
+authorization behavior are unchanged. Logging occurs after each completed refresh attempt,
+including startup and the normal five-second loop; a hung attempt produces no fresh evidence.
+
+This evidence does not enable the feature or guarantee instantaneous revocation. Keep
+`AGENT_ACCOUNT_ONLY_UI_ENABLED=false` until the whole serving fleet is verified, and confirm
+the effective host/container value rather than inferring it from the repository default.
