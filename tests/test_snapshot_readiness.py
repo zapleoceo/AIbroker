@@ -203,7 +203,7 @@ async def test_refresh_loop_failure_and_recovery_without_sleep(evidence):
                 raise TimeoutError
 
     await pa.access_refresh_loop(ControlledStop())
-    failed, recovered = [event for event, _ in evidence.events]
+    failed, recovered = (event for event, _ in evidence.events)
     assert not failed["snapshot_loaded"] and not failed["last_refresh_ok"]
     assert failed["generation"] == 0 and failed["last_success_at"] is None
     assert recovered["snapshot_loaded"] and recovered["last_refresh_ok"]
