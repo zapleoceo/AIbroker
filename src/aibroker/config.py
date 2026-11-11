@@ -209,6 +209,12 @@ class Settings(BaseSettings):
     # How long new-run selection skips a Claude account after a run on it failed with
     # `subscription_disabled` (the organization turned off subscription access; agent/accounts.py).
     AGENT_ACCOUNT_DISABLED_PAUSE_S: float = 3600.0
+    # Login health + dashboard re-login (docs/subscription-logins.md). Each subscription worker
+    # asks its own CLI every AGENT_LOGIN_PROBE_S whether it is signed in; a dashboard re-login
+    # waits AGENT_LOGIN_CODE_WAIT_S for the owner to paste the Claude code.
+    AGENT_LOGIN_ENABLED: bool = True
+    AGENT_LOGIN_PROBE_S: float = 300.0
+    AGENT_LOGIN_CODE_WAIT_S: float = 600.0
     # Claude accounts never picked for NEW /v1/jobs runs (comma-separated account ids, empty = none),
     # e.g. a login that is known broken until the owner signs in again (agent/accounts.py).
     AGENT_CLAUDE_EXCLUDED_ACCOUNTS: str = ""

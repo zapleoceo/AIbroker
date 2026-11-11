@@ -219,6 +219,16 @@ Code reference for the compare page. Service and route modules are in `src/aibro
 - `search_history`: newest-first page of requests, with an optional case-insensitive substring match on the prompt (`src/aibroker/services/compare.py`).
 - `usage_totals`: sums `tokens_in`, `tokens_out` and `cost_usd` over the finished (`done`, `truncated`) results that reported them, counts the unknown ones (`tokens_unknown`, `cost_unknown`), and counts subscription results in `subscription` without pricing them (`src/aibroker/services/compare.py`).
 
+### `agent_login_status` and `agent_login_sessions` (migration 027)
+
+`agent_login_status` (`AgentLoginStatusRow`): one row per subscription worker slot, PK
+`(provider, account_id)`, written only by that worker from its own CLI: `logged_in`, the last
+known `email` (kept while logged out), `plan`, `detail`, `checked_at`, and `changed_at` (moves
+only when `logged_in` flips). `agent_login_sessions` (`AgentLoginSessionRow`): one row per
+dashboard re-login with a compare-and-swap `state`, the vendor `verify_url`, the Codex
+`user_code`, the worker's one-time `public_key`, and `code_sealed` (the Claude code sealed to
+that key, cleared on use). See [subscription-logins.md](subscription-logins.md).
+
 ## Migrations
 
 Hand-applied idempotent `psql` files in `infra/sql/migrations/` — there is

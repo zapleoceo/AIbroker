@@ -8,6 +8,7 @@ import ctypes
 import logging
 import signal
 
+from aibroker.agent.login_worker import login_loop
 from aibroker.agent.project_access import access_refresh_loop, refresh_access
 from aibroker.agent.rpc import start_worker_rpc, stop_worker_rpc
 from aibroker.agent.worker import agent_worker_loop, worker_capabilities
@@ -53,10 +54,13 @@ async def run_worker() -> None:
     except Exception:  # noqa: BLE001 - the loop below retries; until then dashboard projects wait
         log.exception("agent access load failed at start-up")
     access = asyncio.create_task(access_refresh_loop(stop))
+    # login health + dashboard re-login: separate task, so a sign-in never blocks a run
+    login = asyncio.create_task(login_loop(stop, caps))
     try:
         await agent_worker_loop(stop, wake)
     finally:
         access.cancel()
+        login.cancel()
         if len(caps) == 1:
             await stop_worker_rpc(rpc, caps[0])
         await close_engine()

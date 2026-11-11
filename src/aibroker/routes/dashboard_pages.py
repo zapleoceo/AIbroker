@@ -56,6 +56,8 @@ NAV: list[dict[str, Any]] = [
      "en": "Projects", "ru": "Проекты"},
     {"key": "providers", "href": "/dashboard/providers", "icon": "key", "primary": True,
      "en": "Providers", "ru": "Провайдеры"},
+    {"key": "subscriptions", "href": "/dashboard/subscriptions", "icon": "power",
+     "primary": True, "en": "Subscriptions", "ru": "Подписки"},
     {"key": "audit", "href": "/dashboard/audit", "icon": "shield", "primary": False,
      "en": "Audit log", "ru": "Аудит"},
     {"key": "settings", "href": "/dashboard/settings", "icon": "sliders", "primary": False,
