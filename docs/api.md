@@ -36,7 +36,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
   `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
 - **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
   not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
-  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/transcribe` and
+  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
   (`GET /v1/jobs/{id}`), `/v1/models` and requests rejected for scope or body errors are free.
   A request counts once admitted, even if the provider then fails. Default scopes are `llm:chat` and
@@ -179,6 +179,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
+| `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
@@ -276,7 +277,7 @@ A transcription job runs under a finish-by budget: it stops starting new attempt
 `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
 `chat:deep`, `prefilter`, `structured`, `translate`, `vision`. (`transcription`
 goes through `/v1/transcribe/jobs`, `embedding` through `/v1/embed`, `decision`
-through `/v1/decisions`.)
+through `/v1/decisions`, `speech` through `/v1/speech`.)
 
 `chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
 Claude Sonnet leads the chain on its own daily cap (chain: anthropic → gemini →
@@ -393,7 +394,7 @@ GET /v1/jobs/123
 Every poll body also carries `trace_id` and `labels` (see below), and `cancel_requested: true` while a
 cancel is pending on a running job.
 
-**Caps apply to `/v1/embed`, `/v1/transcribe` and `/v1/decisions` too (2026-09-07).** Until
+**Caps apply to `/v1/embed`, `/v1/transcribe` and `/v1/decisions` too (2026-09-07), and to `/v1/speech` (2026-11-11).** Until
 then the cost guard had exactly one caller — the chat path — so a project could
 spend past its daily cap through embeddings or transcription, and a PAID
 whisper key was always booked at $0.00 (its own cap was decorative). Both
@@ -697,6 +698,34 @@ reservation sized by `estimate_tokens`, rotation; all keys failing raises
 raises `DecisionHTTPError` carrying the provider body on non-2xx. Success
 returns a `DecisionOutcome` (answers, cost, latency, key label).
 
+### `/v1/speech` — text to speech (2026-11-11)
+
+Synchronous text → audio. Gemini TTS: `gemini/gemini-3.8-flash-tts` (default), called raw over
+`generateContent` with `responseModalities: ["AUDIO"]` and one of the 30 Gemini prebuilt voices. Chain:
+`gemini` only (`chains.CAPABILITY_CHAINS["speech"]`). Scope `llm:speech`.
+
+```json
+POST /v1/speech
+{"text": "Доброе утро! Сегодня без сюрпризов.", "voice": "Kore",
+ "style": "warm, unhurried", "workflow": "persona-voice"}
+```
+
+- `text` (required): 1–5000 characters, not blank.
+- `voice`: one of the 30 prebuilt voices (`SPEECH_VOICES` in `routes/proxy.py`); default `Kore`. An unknown voice is `422`.
+- `style` (optional): a delivery hint of at most 300 characters, sent to the model as `style: text`.
+- `model` (optional): a pin, as for the other lanes. Must be a speech model: `gemini/gemini-3.8-flash-tts` or the cheaper `gemini/gemini-3.8-flash-lite-tts`; a pin to a model that does not serve speech is `400`.
+- `workflow` (optional): the usual tag.
+
+Response: `{audio_base64, mime_type, voice, audio_s, provider, model, model_served, tokens_in, tokens_out,
+cost_usd, latency_ms, key_label, request_id}`. `mime_type` is `audio/wav` (24 kHz mono 16-bit PCM, verified
+live 2026-11-11); `audio_s` is the duration in seconds.
+
+- **Paid keys only.** The lane rotates gemini keys with `tier='paid'` and scope `llm:speech` (`run_speech`). A free key is never picked.
+- **Caps apply.** The reservation goes through `run_attempt` like the other lanes. A spent project or global daily cap returns `502` with the cap message (not `503`).
+- **Price.** `gemini-3.8-flash-tts`: $0.50 per million text tokens in, $9.00 per million audio tokens out (25 audio tokens per second, about $0.0135 per minute of speech). Google list price through 2026-12-31; it doubles from 2027-01-01. The lite model is $0.50 / $6.00 per million (about $0.009 per minute). See [pricing.md](pricing.md).
+- **Timeout.** `GEMINI_TTS_TIMEOUT_S` (default 60 s).
+- **Errors.** `403` without `llm:speech`; `422` invalid body or unknown voice; `400` pinned model that does not serve speech; `503` no paid key carries `llm:speech`; `502` every key failed, or a spent cap.
+
 ### Vision (`?capability=vision`)
 
 Submitted through the generic async job endpoints
@@ -800,6 +829,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/embed` | `llm:embed` |
 | `/v1/transcribe` | `llm:audio` |
 | `/v1/decisions` | `llm:decision` |
+| `/v1/speech` | `llm:speech` |
 
 ## Admin (X-Admin-Key required)
 
@@ -830,7 +860,7 @@ shows `model_served` when present, with the routing name in the cell tooltip.
 
 ## Pinning a model (exact, 2026-10-03)
 
-`model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`)
+`model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`)
 pins **exactly that model**. Valid values are the ids and names listed by
 `GET /v1/models` (below): a routing id (`"gemini/gemini-2.5-flash"`) or a bare
 canonical name (`"gpt-oss-120b"`, which several providers serve).
@@ -903,7 +933,7 @@ Non-subscription rows have neither field. See [subscription-models.md](subscript
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription, and
-`["text"]` for chat and embedding. It is `null` when the lane does not define
+`["text"]` for chat, embedding and speech. It is `null` when the lane does not define
 one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
@@ -923,7 +953,7 @@ a chat capability and cannot be combined with `response_format`.
 subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
-routes, `null` otherwise.
+routes, `["audio"]` for speech routes, `null` otherwise.
 
 `POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
 without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code

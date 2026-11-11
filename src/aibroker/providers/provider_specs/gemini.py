@@ -17,7 +17,8 @@ GEMINI_CHAT_LANES = ("chat:fast", "chat:smart", "chat:sales", "chat:code",
 SPEC = build_provider(
     "gemini", rank=30, max_keys=3, cooldown_base_s=60, adapter=_GeminiAdapter(),
     native_tools=True,
-    transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport"},
+    transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport",
+                         "gemini_tts": "aibroker.providers.gemini_tts:GeminiTtsTransport"},
     quota=Quota(req_per_day=1_500, doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
     # Free-quota providers (gemini 20/day/model, cohere 1000/month, mistral monthly,
     # openrouter :free ~50/day) probe via free unmetered key-list endpoints, never a
@@ -35,11 +36,25 @@ SPEC = build_provider(
               "vision": "gemini/gemini-2.5-flash",
               "prefilter": "gemini/gemini-2.5-flash-lite",
               "translate": "gemini/gemini-2.5-flash-lite",
-              "transcription": "gemini/gemini-3.5-transcribe"},
+              "transcription": "gemini/gemini-3.5-transcribe",
+              "speech": "gemini/gemini-3.8-flash-tts"},
     rotation={**dict.fromkeys(GEMINI_CHAT_LANES, GEMINI_CHAT_ROTATION),
               "vision": GEMINI_VISION_ROTATION},
     model_meta={   # dedicated ASR model needs raw generateContent (not litellm)
         "gemini/gemini-3.5-transcribe": {
             "transport": "gemini_asr", "pricing": "per_minute", "usd_per_minute": 0.005},
+        # Text-to-speech (/v1/speech, paid keys only). Standard-tier list price
+        # through 2026-12-31 (doubles on 2027-01-01): text in / audio out per 1M
+        # tokens, 25 audio tokens per second -> ~$0.0135 per minute of speech.
+        "gemini/gemini-3.8-flash-tts": {
+            "transport": "gemini_tts", "pricing": "override", "register": False,
+            "input_usd_per_mtok": 0.50, "output_usd_per_mtok": 9.00,
+            "note": "Gemini TTS; live-verified 2026-11-11 (audio/wav 24 kHz mono)"},
+        # Cheaper pin for the same lane (~$0.009 per minute of speech).
+        "gemini/gemini-3.8-flash-lite-tts": {
+            "transport": "gemini_tts", "pricing": "override", "register": False,
+            "capabilities": ("speech",),
+            "input_usd_per_mtok": 0.50, "output_usd_per_mtok": 6.00,
+            "note": "Gemini TTS lite; pin with model=gemini-3.8-flash-lite-tts"},
     },
 )

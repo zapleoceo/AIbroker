@@ -37,7 +37,7 @@ src/aibroker/
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
     transport.py       Chat/Embed/Transcribe/Decide Protocols + registered dispatch
     litellm_client.py  litellm chat/embed/whisper transport
-    local_vision.py / gemini_asr.py   raw-HTTP transports
+    local_vision.py / gemini_asr.py / gemini_tts.py   raw-HTTP transports
     cost.py            pricing (litellm map + registry overrides, per-minute audio)
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)

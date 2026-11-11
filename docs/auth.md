@@ -46,6 +46,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:deep` | `/v1/deep` — deep-reasoning models |
 | `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs`. Re-checked on every read of an `agent:*` job and of `/v1/agent/runs` results, so revoking it closes existing results |
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
+| `llm:speech` | `/v1/speech` (`capability=speech`) — Gemini text → speech; paid gemini keys only |
 
 Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
 `dashboard_scopes._KNOWN_SCOPES` (provider key forms), and this table.

@@ -16,6 +16,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | Embeddings | Same map, input tokens only. |
 | Whisper-style ASR | Per audio minute from `ModelSpec.usd_per_minute` (provider registry) x duration. Groq bills at least 10 s per request (`MIN_BILLED_AUDIO_S`). |
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
+| Gemini TTS (`speech`) | Token price: text tokens in at the text rate, audio tokens out at the audio output rate (`providers/gemini_tts.py` `tts_cost`). See Gemini audio. |
 | `local/*` (Qwen3-VL) | Free, no external bill. |
 
 The usage write after a successful paid call runs as its own tracked task behind `asyncio.shield` (`services/attempt.py`). The provider has already billed, so the ledger row lands even if the client disconnects: the cancel is raised at once and does not wait for the write, which completes in the background. A failed background write is logged with `log.error` (key, project, model).
@@ -43,6 +44,8 @@ The usage write after a successful paid call runs as its own tracked task behind
   `input_cost_per_audio_token` from LiteLLM's map, else `AUDIO_INPUT_USD_PER_M`:
   2.5-flash $1.00/M, 2.5-flash-lite $0.30/M, 3.1-flash-lite $0.50/M. The pre-call
   reservation (`estimate_transcription_cost`) assumes 32 audio tokens/s.
+
+* Gemini TTS (`gemini/gemini-3.8-flash-tts`, `speech`, raw `generateContent` with `responseModalities: ["AUDIO"]`, 2026-11-11): $0.50/M text tokens in + $9.00/M audio tokens out. Audio is 25 tokens per second, about $0.0135 per minute of speech. Google list price through 2026-12-31; it doubles from 2027-01-01 to $1.00 in / $18.00 out per M. `gemini/gemini-3.8-flash-lite-tts` is $0.50 / $6.00 per M (about $0.009 per minute). The pre-call reservation (`estimate_speech_cost`) is estimated from the text length; the booked cost comes from the reported token counts.
 
 ## Models we register ourselves (`litellm.register_model`)
 

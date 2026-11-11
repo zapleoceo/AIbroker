@@ -34,6 +34,7 @@ Capability = Literal[
     "prefilter",
     "translate",
     "decision",
+    "speech",
 ]
 
 
@@ -70,6 +71,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "embedding": ["voyage", "cohere"],
     # Typed decisions: OpenRouter is the only host, PAID keys only (see run_decision).
     "decision": ["openrouter"],
+    # Text-to-speech: Gemini TTS on PAID keys only (see run_speech).
+    "speech": ["gemini"],
 }
 
 
@@ -93,6 +96,9 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "embedding": "llm:embed",
     # Its own scope: the lane is paid and a project must opt in explicitly.
     "decision": "llm:decision",
+    # Paid lane, explicit opt-in per project AND per key: only keys carrying
+    # llm:speech are ever picked, so a free pool key never serves it.
+    "speech": "llm:speech",
 }
 
 

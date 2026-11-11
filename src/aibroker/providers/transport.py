@@ -8,6 +8,7 @@ dispatch through it, so no caller special-cases a provider.
 
 Return convention for every method: `(payload, meta)` where meta carries at least
 model, model_served, tokens_in, tokens_out, cost_usd, latency_ms.
+`synthesize` (text -> speech) returns audio bytes as its payload.
 """
 from __future__ import annotations
 
@@ -33,6 +34,12 @@ class EmbedTransport(Protocol):
 class TranscribeTransport(Protocol):
     async def transcribe(self, *, model: str, audio: bytes, filename: str,
                          api_key: str) -> tuple[str, dict[str, Any]]: ...
+
+
+@runtime_checkable
+class SpeechTransport(Protocol):
+    async def synthesize(self, *, model: str, text: str, voice: str, style: str | None,
+                         api_key: str) -> tuple[bytes, dict[str, Any]]: ...
 
 
 @runtime_checkable
@@ -110,6 +117,13 @@ async def transcribe(*, model: str, audio: bytes, filename: str,
     extension so the format is inferred."""
     return await transport_for(model).transcribe(
         model=model, audio=audio, filename=filename, api_key=api_key)
+
+
+async def synthesize(*, model: str, text: str, voice: str, style: str | None,
+                     api_key: str) -> tuple[bytes, dict[str, Any]]:
+    """Text -> audio bytes through the model's transport (meta carries mime_type)."""
+    return await transport_for(model).synthesize(
+        model=model, text=text, voice=voice, style=style, api_key=api_key)
 
 
 async def decide(*, model: str, state: str, questions: dict[str, Any],

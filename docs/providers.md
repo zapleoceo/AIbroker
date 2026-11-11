@@ -202,6 +202,12 @@ what it showed before. The value is stored per call in `usage_log.model_served`
 returned to clients as `model_served`, and shown in the logs table with the
 routing name in the tooltip.
 
+## Gemini text-to-speech (speech, 2026-11-11)
+
+`gemini` is the only provider in the `speech` chain. Default model `gemini/gemini-3.8-flash-tts`, the newest non-preview TTS model in the `ListModels` of our keys on 2026-11-11; `gemini/gemini-3.8-flash-lite-tts` is pinnable with `model` as the cheaper option. Transport `gemini_tts` (`providers/gemini_tts.py`, raw HTTP, not LiteLLM): `generateContent` with `responseModalities: ["AUDIO"]` and `speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`; the output is WAV, 24 kHz mono 16-bit PCM (verified live 2026-11-11). Paid keys only; the decision is recorded in [history/provider-choices.md](history/provider-choices.md).
+
+**Not live until the owner approves** (not part of the code change): add scope `llm:speech` to the paid gemini key labelled `demoniwwwe` and to the consuming project (SIM), optionally with a daily cost cap on that key. Until then `/v1/speech` returns `503`.
+
 ## Adding a new provider
 
 One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).
