@@ -855,6 +855,9 @@ start, the run fails; nothing bypasses it).
 - **Auth state** lives in the named volume `agent_codex_auth` (`CODEX_HOME=/home/app/codex-state`; Codex
   refreshes `auth.json`, so it stays writable). Rollback is stopping the worker, not deleting the volume.
 
+Since 2026-11-12 the usual way is **Dashboard → Subscriptions → Sign in again**
+([subscription-logins.md](subscription-logins.md)): browser flow, no device-code setting needed,
+and the working login is only replaced after a successful sign-in. Manual fallback:
 Owner login handoff for Codex (once, interactive, after the Claude steps): enable **device code
 authorization** in the ChatGPT security settings first, then
 `docker compose --profile agent run --rm agent-worker-codex codex login --device-auth -c cli_auth_credentials_store="file" -c forced_login_method="chatgpt"`

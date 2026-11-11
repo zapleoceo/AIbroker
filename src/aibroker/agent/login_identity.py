@@ -9,22 +9,28 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 APP_LABEL = {"claude-sub": "Claude Code", "codex-sub": "Codex"}
 _NAME_PREFIX = {"claude-sub": "CLD", "codex-sub": "GPT"}
 _NAME_LETTERS = 4
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _URL = re.compile(r"https://[^\s\x1b'\"<>]+")
-# Codex device code, e.g. "CH0D-X5NDU" (codex-cli 0.162.1, "expires in 15 minutes").
-_DEVICE_CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4,6}\b")
+# `codex login` (browser flow) listens here inside the worker; the owner's browser is sent to
+# this address after sign-in and cannot reach it, so its full address is pasted instead.
+CODEX_CALLBACK_PORT = 1455
+CODEX_CALLBACK_PATH = "/auth/callback"
 
 
 @dataclass(frozen=True)
 class LoginReport:
+    """`failed`: the CLI could not be asked at all (timeout, no answer). That says nothing about
+    the login, so it is never stored as "logged out" - no false alert."""
     logged_in: bool
     email: str | None = None
     plan: str | None = None
     detail: str | None = None
+    failed: bool = False
 
 
 def display_name(provider: str, email: str | None, account_id: str) -> str:
@@ -82,6 +88,16 @@ def parse_login_url(output: str) -> str | None:
     return None
 
 
-def parse_device_code(output: str) -> str | None:
-    match = _DEVICE_CODE.search(strip_ansi(output))
-    return match.group(0) if match else None
+def codex_callback(pasted: str) -> str | None:
+    """The local callback to replay inside the worker, rebuilt from the pasted address: only
+    http on 127.0.0.1/localhost:1455 and the callback path pass, and only its query is kept,
+    so a pasted address can never point the worker at another host. None when it does not fit."""
+    try:
+        parts = urlsplit(pasted.strip())
+    except ValueError:
+        return None
+    if (parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost")
+            or parts.port != CODEX_CALLBACK_PORT or parts.path != CODEX_CALLBACK_PATH
+            or "code=" not in parts.query):
+        return None
+    return f"http://127.0.0.1:{CODEX_CALLBACK_PORT}{CODEX_CALLBACK_PATH}?{parts.query}"

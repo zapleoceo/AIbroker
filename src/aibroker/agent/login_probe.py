@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 from collections.abc import Mapping
 from typing import Any
 
@@ -29,30 +30,37 @@ def codex_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def codex_overrides() -> list[str]:
-    """`-c` pairs that make a login/probe use the same file credential store as the runs."""
+    """`-c` pairs that make a login/probe use the runs' file credential store and ChatGPT-only
+    login (never an API key)."""
     out: list[str] = []
     for override in CONFIG_OVERRIDES:
-        if override.startswith("cli_auth_credentials_store"):
+        if override.startswith(("cli_auth_credentials_store", "forced_login_method")):
             out += ["-c", override]
     return out
 
 
-async def _kill(proc: asyncio.subprocess.Process) -> None:
+async def kill_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill the CLI and everything it spawned. `codex app-server` starts helpers that inherit our
+    pipes; killing only the main pid left them open, so `wait()` never returned (prod
+    2026-11-11: every Codex probe hit the timeout although the answer came in < 1 s)."""
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError, AttributeError):
+        os.killpg(proc.pid, signal.SIGKILL)   # AttributeError: no process groups on Windows
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
     with contextlib.suppress(Exception):
-        await proc.wait()
+        await asyncio.wait_for(proc.wait(), 5)
 
 
 async def probe_claude(binary: str = "claude") -> LoginReport:
     proc = await asyncio.create_subprocess_exec(
         binary, "auth", "status", stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=cli_env())
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=cli_env(),
+        start_new_session=True)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT_S)
     except TimeoutError:
-        await _kill(proc)
-        return LoginReport(False, detail="`claude auth status` timed out")
+        await kill_group(proc)
+        return LoginReport(False, detail="`claude auth status` timed out", failed=True)
     return parse_claude_status(out.decode(errors="replace"))
 
 
@@ -75,18 +83,20 @@ async def _codex_account(binary: str) -> dict[str, Any] | None:
                     return result if isinstance(result, dict) else None
         return None
     finally:
-        await _kill(proc)
+        await kill_group(proc)
 
 
 async def probe_codex(binary: str = "codex") -> LoginReport:
     try:
         result = await asyncio.wait_for(_codex_account(binary), timeout=PROBE_TIMEOUT_S)
     except TimeoutError:
-        return LoginReport(False, detail="`codex app-server` account/read timed out")
+        return LoginReport(False, detail="`codex app-server` account/read timed out", failed=True)
     except OSError as exc:
-        return LoginReport(False, detail=f"codex not runnable: {exc.__class__.__name__}")
+        return LoginReport(False, detail=f"codex not runnable: {exc.__class__.__name__}",
+                           failed=True)
     if result is None:
-        return LoginReport(False, detail="`codex app-server` gave no account/read answer")
+        return LoginReport(False, detail="`codex app-server` gave no account/read answer",
+                           failed=True)
     return parse_codex_account(result)
 
 

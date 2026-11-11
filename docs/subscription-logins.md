@@ -44,7 +44,13 @@ Both use the same minimal environment as a real run (`cli_env()`, `codex_env()`;
 no broker secret) and the run's file credential store (`codex_overrides()`).
 `probe()` dispatches by provider; a probe that hangs past 40 s reports "timed out".
 Every parser returns a `LoginReport` (`logged_in`, `email`, `plan`, `detail`); CLI output is
-passed through `strip_ansi()` first, because Codex colours its link and device code.
+passed through `strip_ansi()` first, because Codex colours its output. A probe that cannot
+ask the CLI at all (timeout, no answer) returns `failed=True`; `record_status()` then writes
+nothing, so the row ages into `stale` and never sends a false "dropped" alert.
+`kill_group()` ends a probe or a sign-in by killing the CLI's whole process group:
+`codex app-server` starts helpers that inherit our pipes, and killing only the main pid
+left `wait()` hanging, so every Codex probe hit the 40 s timeout although the answer came
+in under a second (prod 2026-11-11).
 
 `record_status()` (`agent/login_status.py`) upserts `agent_login_status`
 (`AgentLoginStatusRow`, migration 027; primary key `(provider, account_id)`).
@@ -121,26 +127,39 @@ links) and waits for the code on stdin. The owner opens the link, signs in to th
 slot should use, and pastes the code into the dashboard. The panel stops polling while the
 code box is open, so a refresh never wipes a half-pasted code.
 
-**Codex** — `codex login --device-auth` prints a link and a one-time code
-(`parse_device_code()`, e.g. `CH0D-X5NDU`, valid 15 minutes). The owner opens the link,
-signs in to ChatGPT and types the code; the CLI finishes by itself. Nothing secret crosses the
-dashboard.
+**Codex** — `codex login` (browser flow, NOT `--device-auth`, which needs device-code sign-in
+enabled in the ChatGPT security settings first) prints a sign-in link and listens on
+`127.0.0.1:1455` inside the worker. The owner signs in; the browser is then sent to
+`http://127.0.0.1:1455/auth/callback?code=...` and cannot open it - expected. The owner
+pastes that full address; `codex_callback()` accepts only http on `127.0.0.1`/`localhost`
+port 1455 with the callback path and a `code`, and rebuilds the address from its query, so a
+pasted line can never point the worker at another host. The worker replays it locally and
+the CLI finishes.
+
+The Codex sign-in runs in a STAGING home (`$CODEX_HOME/.login-<session>`), and the new
+`auth.json` replaces the live one (atomic rename, mode 600) only after the CLI succeeded.
+Running `codex login` straight in the live home deleted the working login as soon as the
+sign-in started (prod 2026-11-11 16:48: a cancelled re-login left Codex logged out). A
+cancelled, expired or failed sign-in now leaves the working login untouched; the staging
+home is always removed.
 
 Time limits: the link must appear within 45 s, the Claude code within
-`AGENT_LOGIN_CODE_WAIT_S` (600 s), the Codex device sign-in within 15 min, the CLI must exit
+`AGENT_LOGIN_CODE_WAIT_S` (600 s) for both apps, the CLI must exit
 within 120 s of receiving the code. Each outcome ends in a terminal state with a message;
 the CLI output tail is shown on failure with the code replaced by `***`.
 
-### Why the Claude code is sealed, not Fernet-encrypted
+### Why the pasted line is sealed, not Fernet-encrypted
 
 Workers deliberately run with a placeholder `TOKEN_SECRET` (docker-compose.yml): a compromised
 worker must not be able to decrypt the API keys. So the code is sealed per login instead
 (`agent/login_seal.py`): the worker makes a fresh RSA-2048 key with `new_key()` and publishes
 only `public_pem()` on the session row; `submit_code()` encrypts the pasted code with `seal()`
-(OAEP-SHA256); the worker opens it with `unseal()`. The private key exists only in that worker
+(a one-time AES-256-GCM key encrypts the text, RSA-OAEP-SHA256 wraps that key, because a
+Codex callback address is longer than plain RSA can carry; up to 4096 bytes); the worker
+opens it with `unseal()`. The private key exists only in that worker
 process's memory, so neither the database nor its readers can recover the code. `take_code()`
 clears `code_sealed` in the same update that hands it over, and `finish()` clears the public
-key, the device code and any sealed code. The code is never logged or audited; the audit log
+key and any sealed code. The code is never logged or audited; the audit log
 records only `subscription.relogin`, `subscription.relogin.code` (with `ok=`) and
 `subscription.relogin.cancel`.
 

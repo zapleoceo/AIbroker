@@ -39,7 +39,11 @@ async def login_step(provider: str, account_id: str, probe_due: bool) -> bool:
                         await known_email(provider, account_id))
         return True
     if probe_due:
-        await record_status(provider, account_id, await probe(provider))
+        report = await probe(provider)
+        if report.failed:
+            log.warning("login check of %s/%s could not ask the CLI: %s",
+                        provider, account_id, report.detail)
+        await record_status(provider, account_id, report)
         return True
     return False
 
