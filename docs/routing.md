@@ -952,6 +952,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `vision` | **local** → gemini → sambanova → openrouter → deepseek → openai | `llm:vision` | **2026-09-12:** sambanova (free gemma-4-31B-it, verified on a real inline image) is a second free cloud pool after gemini; **deepseek-flash** (V4.1, native vision, ~$0.0002/image off-peak) is the paid tail — the first paid vision provider that actually holds keys (openai never had one). gemini now ROTATES vision across 2.5-flash / 3.5-flash-lite / 3.5-flash / 3.1-flash-lite (per-model free buckets). local leads since 2026-08-31. anthropic dropped 2026-07-01: 400 "Unable to download the file" on Vera's image URLs (~1.4k/wk). Re-add once images are passed as base64. cloudflare tried and pulled same day 2026-07-04, see below. |
 | `transcription` | **gemini** → groq → openai | `llm:audio` | **Reordered 2026-10-04 after a 15-clip bake-off on real voice notes (owner decision): gemini (`gemini-3.5-transcribe`) first, groq fallback; the self-hosted whisper was removed entirely** (chain item, service, provider, settings, proofreading pass). Numbers: gemini 1-3.4 s, 15/15 ok, most faithful / verbatim; groq `whisper-large-v3-turbo` 0.2-0.7 s but it normalizes surzhyk / Ukrainian speech into literary Ukrainian and made meaning errors; self-hosted faster-whisper 16-84 s, worst quality, one 180 s timeout. **Privacy:** on the gemini free tier Google may use submitted audio to improve its products; the paid tier ($0.005/min) does not. Earlier history: the self-hosted whisper led the chain on 2026-07-18 and was moved behind groq on 2026-07-26 after measuring 131-168 s per transcription with 35 timeouts vs 23 successes (groq 753-1150 ms), then behind gemini earlier on 2026-10-04 before its removal. `/v1/transcribe` route. |
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
+| `speech` | gemini (`gemini-3.8-flash-tts`; `gemini-3.8-flash-lite-tts` via a `model` pin) | `llm:speech` | **New 2026-11-11 (owner: persona voice on the newest Google TTS).** Text → speech, `POST /v1/speech` (sync, not a `/v1/jobs` capability). **Paid gemini keys only** (`run_speech`, `require_tier="paid"`); a free key is never picked. Single-provider chain, no fallback. `providers/gemini_tts.py`. See `docs/api.md`. |
 | `decision` | openrouter | `llm:decision` | Typed decision model (TypeSafe Jev) — **paid openrouter keys only**, `POST /v1/decisions` (not a `/v1/jobs` capability; see `docs/api.md`). `run_decision` reserves against the project and global caps. Jev is primary; on a Jev failure or a cap block (caller did not pin `model`), Inception Mercury Decide (`mercury-decide:free`, $0) answers on the same key, unreserved — owner decision 2026-10-03, because in a 2026-10-03 series on real Vera events (mean of 4 runs, 126 + 42 calls) it matched Jev on project (69% vs 66%) but was clearly weaker on importance (exact 30% vs 53%) and slightly on needs_action (76% vs 80%), so it is never the primary. |
 
 `chain_for(cap)` raises `ValueError` on an unknown capability; the proxy rejects
@@ -1474,7 +1475,7 @@ apply on these lanes exactly as on chat — until then `reserve_cost` had a
 single caller in the chat path and a paid embed or whisper key was gated only
 by its own per-key cap. Whisper is priced per audio minute
 (`estimate_transcription_cost` before the call, `whisper_cost` after). Free
-keys still cost $0 and are exempt inside `reserve_cost`.
+keys still cost $0 and are exempt inside `reserve_cost`. **Speech (2026-11-11):** `run_speech` reserves the same way through `run_attempt`, with `estimate_speech_cost` before the call and the billed `tts_cost` after.
 
 **Daily counters that never reset (2026-07-03, found while fixing the above).**
 `api_keys.daily_used`/`daily_cost_used_usd` were never actually reset day to
@@ -2117,7 +2118,7 @@ Fixes from the project review; each is pinned by a regression test.
   400) when the model's provider prefix differs from `?provider=`, as chat does.
 - **Hard timeouts**: `EMBED_TIMEOUT_S`, `TRANSCRIBE_TIMEOUT_S`,
   `GEMINI_ASR_TIMEOUT_S` (`asyncio.wait_for` on embed, whisper, chat
-  transcription and gemini ASR).
+  transcription and gemini ASR), and `GEMINI_TTS_TIMEOUT_S` (60 s default) for the gemini TTS call.
 - **Response cache key** includes `response_format`, `tools`, `tool_choice`.
 - **Reservations** are released on every exit (decrypt failure, cancellation):
   `_release_reservation` is shielded and never raises.

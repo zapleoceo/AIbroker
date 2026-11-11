@@ -139,7 +139,7 @@ One provider = one registry entry; one attempt = one template. Design note:
 routes/proxy.py            thin: auth → scope → validate pin (400) → delegate; GET /v1/models
   │
 services/llm_service.py    the WALKS: run_chat (chain / pinned steps / affine leg),
-  │                        run_embed, run_decision, run_transcribe
+  │                        run_embed, run_decision, run_transcribe, run_speech
   ▼
 services/attempt.py        ONE key attempt: reserve → decrypt → call → release → gate →
   │                        record usage (+request_id) → re-pin affinity; one error path
@@ -149,6 +149,7 @@ services/attempt.py        ONE key attempt: reserve → decrypt → call → rel
   │    ├─ litellm_client.py        litellm chat / embed / whisper / chat-audio
   │    ├─ local_vision.py          self-hosted Qwen3-VL (raw HTTP)
   │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
+  │    ├─ gemini_tts.py            gemini-3.8-flash-tts (raw HTTP, /v1/speech)
   │    └─ decisions.py             OpenRouter decisions endpoint
   ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
   │    └─ providers/provider_specs/       one provider definition per module
@@ -209,10 +210,10 @@ claimed chat job:
      key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
    - `transport.call_llm` dispatches through the model's transport (litellm for
-     most providers, raw HTTP for `local` vision/gemini-ASR), applying the provider's
+     most providers, raw HTTP for `local` vision, gemini-ASR and gemini-TTS), applying the provider's
      **adapter** first (see below). Steps reserve → call → release → gate →
      record → affinity are ONE template, `services/attempt.run_attempt`, shared
-     by chat, vision, embedding, transcription and decisions.
+     by chat, vision, embedding, transcription, decisions and speech.
    - `classify_provider_error`: 429 → cooldown (provider-signal first: the
      retry-after hint, then UTC midnight for daily quotas, then per-provider
      adaptive backoff — `routing/cooldown.py`); 401/403 → mark dead.
@@ -642,7 +643,7 @@ symbols are documented):
 - **Transports** (`providers/transport.py`): `transport_for`; implementations
   `LiteLLMTransport`, `LiteLLMChatAudioTransport` (`litellm_client.py`, with the functions
   `litellm_chat`, `litellm_embed`, `litellm_whisper`), `LocalVisionTransport`,
-  `GeminiAsrTransport`, `OpenRouterDecisions`.
+  `GeminiAsrTransport`, `GeminiTtsTransport`, `OpenRouterDecisions`.
 - **Cost / cache** : `register_price_overrides` (`providers/cost.py`), `cache_key_for`,
   `apply_cache_key` (`providers/prompt_cache.py`).
 - **Attempt template** (`services/attempt.py`): `Flow` (verdict of one attempt),

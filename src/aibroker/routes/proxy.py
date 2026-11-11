@@ -96,6 +96,7 @@ from aibroker.services.llm_service import (
     run_transcribe,
 )
 from aibroker.services.request_cap import admit_request
+from aibroker.services.speech_service import SpeechFailed, run_speech
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.vision_payload import inline_image_problem
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
@@ -446,6 +447,91 @@ async def transcribe_endpoint(
     return TranscribeResponse(
         text=outcome.text, provider=outcome.provider, model=outcome.model,
         model_served=outcome.model_served,
+        cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
+        key_label=outcome.key_label, request_id=outcome.request_id,
+    )
+
+
+# ─── speech — text → audio (Gemini TTS, paid keys only) ────────────────────
+
+# Gemini TTS prebuilt voices (https://ai.google.dev/gemini-api/docs/speech-generation).
+SPEECH_VOICES = frozenset({
+    "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe",
+    "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome",
+    "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux",
+    "Pulcherrima", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager",
+    "Sulafat",
+})
+SPEECH_MAX_CHARS = 5000
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=SPEECH_MAX_CHARS)
+    voice: str = Field("Kore", description="Gemini prebuilt voice name, e.g. Kore, Aoede.")
+    style: str | None = Field(None, max_length=300,
+                              description="Delivery hint, e.g. 'warmly, calm pace'.")
+    model: str | None = Field(None, description="override the lane model "
+                                                "(gemini-3.8-flash-tts by default)")
+    workflow: str | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _nonblank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("text must not be blank")
+        return v
+
+    @field_validator("voice")
+    @classmethod
+    def _known_voice(cls, v: str) -> str:
+        if v not in SPEECH_VOICES:
+            raise ValueError(f"unknown voice {v!r}; one of: {', '.join(sorted(SPEECH_VOICES))}")
+        return v
+
+
+class SpeechResponse(BaseModel):
+    audio_base64: str
+    mime_type: str
+    voice: str
+    audio_s: float
+    provider: str
+    model: str
+    model_served: str | None = None
+    tokens_in: int
+    tokens_out: int
+    cost_usd: float
+    latency_ms: int
+    key_label: str
+    request_id: int = Field(description="usage_log.id for this call.")
+
+
+@router.post("/speech", response_model=SpeechResponse)
+async def speech_endpoint(
+    body: SpeechRequest,
+    ctx: ProjectCtx = Depends(require_project),
+) -> SpeechResponse:
+    """Text → speech, SYNCHRONOUS (a voice note renders in seconds). Gemini TTS
+    on paid keys carrying `llm:speech` only; audio comes back base64 (WAV)."""
+    _require_capability_scope(ctx, scope_for("speech"))
+    _validate_pin(body.model, "speech")
+    await admit_request(ctx.project)
+    try:
+        outcome = await run_speech(
+            project=ctx.project, text=body.text, voice=body.voice, style=body.style,
+            model=body.model, workflow=body.workflow,
+        )
+    except SpeechFailed as e:
+        raise HTTPException(502, f"speech failed: {e}") from e
+    if outcome is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="no paid gemini key carries llm:speech",
+        )
+    return SpeechResponse(
+        audio_base64=base64.b64encode(outcome.audio).decode(), mime_type=outcome.mime_type,
+        voice=outcome.voice, audio_s=outcome.audio_s, provider=outcome.provider,
+        model=outcome.model, model_served=outcome.model_served,
+        tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
         cost_usd=outcome.cost_usd, latency_ms=outcome.latency_ms,
         key_label=outcome.key_label, request_id=outcome.request_id,
     )

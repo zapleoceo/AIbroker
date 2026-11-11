@@ -95,6 +95,7 @@ one-line rationale per entry; the evidence is here. Entries are grouped by subje
 - **2026-09-23 decision lane** (TypeSafe Jev): OpenRouter is the only host; served
   on PAID keys only so spend lands on the prepaid account. A $0 free-tier key is NOT
   refused (200 OK, cost booked), so this is a routing choice, not an error workaround.
+- **2026-11-11 speech lane** (`gemini-3.8-flash-tts`, `POST /v1/speech`): the owner asked for the persona voice via the newest Google TTS on the paid account. Model: `gemini/gemini-3.8-flash-tts`, the newest non-preview TTS in the `ListModels` of our keys on 2026-11-11; `gemini-3.8-flash-lite-tts` is pinnable (`model`) as the cheaper option ($0.50 / $6.00 per M vs $0.50 / $9.00). Served on PAID gemini keys only, behind its own scope `llm:speech` (not in the default scopes), so the spend lands on the prepaid account and a free pool key never answers it. Single-provider chain (`["gemini"]`): no fallback.
 
 ## JSON reliability
 

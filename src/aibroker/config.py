@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     # fallback). Typical is ~1 s; the ceiling covers a 25 MB upload.
     TRANSCRIBE_TIMEOUT_S: float = 120.0
     GEMINI_ASR_TIMEOUT_S: float = 60.0
+    # Gemini TTS (/v1/speech): a voice note of a few sentences renders in ~3-10 s.
+    GEMINI_TTS_TIMEOUT_S: float = 60.0
 
     # How long a request family stays pinned to the (provider, model, key) whose
     # provider-side prompt cache is warm (routing/affinity.py). Default 2h.
