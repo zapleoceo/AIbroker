@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 LINK_WAIT_S = 45.0          # the CLI prints its link within seconds
 EXIT_WAIT_S = 120.0         # code exchange + writing the credentials
 CALLBACK_TIMEOUT_S = 30.0
+MAX_LOCAL_REDIRECTS = 3
+SETTLE_S = 1.0
 POLL_S = 1.0
 _STEPS = {
     "claude-sub": "open the link, sign in, then paste the code here",
@@ -141,13 +143,42 @@ async def _claude(session_id: int, email: str | None) -> str | None:
 
 
 async def _replay_callback(url: str) -> str | None:
-    """GET the pasted callback against the CLI's local listener. -> an error text, or None."""
+    """GET the pasted callback against the CLI's local listener, then follow its redirects on
+    that SAME listener. `codex login` saves auth.json, answers 302 to its own /success page and
+    exits only once /success is requested (codex-rs/login/src/server.rs); not following it left
+    the CLI waiting forever (prod 2026-11-11 session 4). -> an error text, or None."""
+    origin = httpx.URL(url)
     try:
         async with httpx.AsyncClient(timeout=CALLBACK_TIMEOUT_S, trust_env=False) as client:
-            await client.get(url)
+            response = await client.get(url)
+            for _ in range(MAX_LOCAL_REDIRECTS):
+                if not response.is_redirect:
+                    break
+                target = origin.join(response.headers.get("location", ""))
+                if (target.host, target.port) != (origin.host, origin.port):
+                    break           # a redirect off the local listener is never followed
+                response = await client.get(target)
     except httpx.HTTPError as exc:
         return f"the local sign-in listener did not answer: {exc.__class__.__name__}"
     return None
+
+
+async def _await_credentials(out: _Output, staging: Path, session_id: int) -> str | None:
+    """After the callback: wait until the CLI exits OR its auth.json is written (it is saved
+    before the 302, so a CLI still waiting for /success must not cost the sign-in).
+    -> None when ready to install, else why not."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + EXIT_WAIT_S
+    while loop.time() < deadline:
+        if out.proc.returncode is not None:
+            return None
+        if (staging / "auth.json").is_file():
+            await asyncio.sleep(SETTLE_S)      # the 302 follows the completed write; be safe
+            return None
+        if await _cancelled(session_id):
+            return "cancelled"
+        await asyncio.sleep(POLL_S)
+    return f"the CLI did not finish after the sign-in: {out.tail()}"
 
 
 def _install(staging: Path, live: Path) -> str | None:
@@ -188,10 +219,9 @@ async def _codex(session_id: int) -> str | None:
                     "browser was sent to after sign-in")
         if problem := await _replay_callback(callback):
             return problem
-        stopped = await _wait_exit(out, session_id, EXIT_WAIT_S)
-        if stopped:
+        if stopped := await _await_credentials(out, staging, session_id):
             return stopped
-        if proc.returncode != 0:
+        if not (staging / "auth.json").is_file() and proc.returncode not in (None, 0):
             return f"sign-in did not complete: {out.tail(pasted)}"
         return _install(staging, live)
     finally:
