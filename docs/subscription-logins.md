@@ -133,8 +133,15 @@ enabled in the ChatGPT security settings first) prints a sign-in link and listen
 `http://127.0.0.1:1455/auth/callback?code=...` and cannot open it - expected. The owner
 pastes that full address; `codex_callback()` accepts only http on `127.0.0.1`/`localhost`
 port 1455 with the callback path and a `code`, and rebuilds the address from its query, so a
-pasted line can never point the worker at another host. The worker replays it locally and
-the CLI finishes.
+pasted line can never point the worker at another host. The worker replays it locally.
+The CLI saves `auth.json` FIRST, then answers 302 to its own `/success` page and exits only
+once `/success` is requested (`codex-rs/login/src/server.rs`), so the replay follows
+redirects on that same listener only (never off it, at most 3). As a second safety net, an
+`auth.json` that appears in the staging home counts as success even if the CLI never exits.
+Prod 2026-11-11 (session 4): without both, the owner's successful sign-in sat waiting for
+`/success`, timed out and was thrown away with the staging home. A CLI that neither exits
+nor writes credentials within 120 s now fails with "the CLI did not finish after the
+sign-in" instead of a misleading "time limit".
 
 The Codex sign-in runs in a STAGING home (`$CODEX_HOME/.login-<session>`), and the new
 `auth.json` replaces the live one (atomic rename, mode 600) only after the CLI succeeded.

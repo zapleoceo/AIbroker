@@ -539,20 +539,6 @@ def test_codex_login_rejects_a_foreign_address(monkeypatch, tmp_path) -> None:
     assert replayed == [] and (live / "auth.json").read_text() == '{"old": true}'
 
 
-def test_codex_login_without_credentials_written(monkeypatch, tmp_path) -> None:
-    live, _, _ = _codex_env(monkeypatch, tmp_path, hit=False)
-    monkeypatch.setattr(login_flow, "EXIT_WAIT_S", 1.0)
-
-    async def out_probe(provider: str) -> LoginReport:
-        return LoginReport(False, detail="no")
-
-    monkeypatch.setattr(login_flow, "probe", out_probe)
-    _, row = ds.run(_drive("codex-sub", "owner",
-                           "http://127.0.0.1:1455/auth/callback?code=1", LoginReport(False)))
-    assert row.state == ls.EXPIRED
-    assert (live / "auth.json").read_text() == '{"old": true}'
-
-
 def test_codex_login_needs_codex_home(monkeypatch) -> None:
     monkeypatch.delenv("CODEX_HOME", raising=False)
     assert "CODEX_HOME" in (ds.run(login_flow._codex(1)) or "")
@@ -695,3 +681,80 @@ def test_login_loop_probes_then_stops(monkeypatch) -> None:
     ds.run(go())
     assert seen[0] is True and len(seen) >= 3
     ds.run(login_worker.login_loop(asyncio.Event(), ("agent:claude", "agent:codex")))
+
+
+async def _local_listener(redirect_to: str) -> tuple[asyncio.AbstractServer, int, list[str]]:
+    """A tiny stand-in for the codex login server: /auth/callback -> 302, everything else 200."""
+    paths: list[str] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        line = (await reader.readline()).decode()
+        while (await reader.readline()) not in (b"\r\n", b""):
+            pass
+        path = line.split(" ")[1]
+        paths.append(path.split("?")[0])
+        if path.startswith("/auth/callback"):
+            head = f"HTTP/1.1 302 Found\r\nLocation: {redirect_to}\r\nContent-Length: 0\r\n"
+        else:
+            head = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+        writer.write((head + "Connection: close\r\n\r\n" + ("" if "302" in head else "ok")).encode())
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1], paths
+
+
+def test_replay_follows_the_success_redirect_on_the_same_listener() -> None:
+    async def go() -> list[str]:
+        server, port, paths = await _local_listener("/success?ok=1")
+        async with server:
+            assert await login_flow._replay_callback(
+                f"http://127.0.0.1:{port}/auth/callback?code=1") is None
+        return paths
+
+    assert ds.run(go()) == ["/auth/callback", "/success"]
+
+
+def test_replay_never_follows_a_redirect_off_the_listener() -> None:
+    async def go() -> list[str]:
+        server, port, paths = await _local_listener("http://example.invalid/steal")
+        async with server:
+            assert await login_flow._replay_callback(
+                f"http://127.0.0.1:{port}/auth/callback?code=1") is None
+        return paths
+
+    assert ds.run(go()) == ["/auth/callback"]
+
+
+_CODEX_LOGIN_HANGS = _CODEX_LOGIN.replace(
+    "        print('Successfully logged in'); sys.exit(0)\n",
+    "        time.sleep(3600)\n")
+
+
+def test_written_credentials_count_even_if_the_cli_never_exits(monkeypatch, tmp_path) -> None:
+    """prod 2026-11-11 session 4: the CLI saved auth.json, answered 302 and waited for
+    /success; the sign-in was then thrown away. Credentials on disk must win."""
+    live, _, _ = _codex_env(monkeypatch, tmp_path)
+    _fake_exec(monkeypatch, login_flow, _CODEX_LOGIN_HANGS)
+    monkeypatch.setattr(login_flow, "SETTLE_S", 0.05)
+    report, row = ds.run(_drive("codex-sub", "owner",
+                                "http://127.0.0.1:1455/auth/callback?code=ac_1",
+                                LoginReport(True)))
+    assert row.state == ls.DONE
+    assert (live / "auth.json").read_text() == '{"new": true}'
+    assert not list(live.glob(".login-*"))
+
+
+def test_cli_that_neither_exits_nor_writes_fails_with_a_clear_reason(monkeypatch, tmp_path) -> None:
+    live, _, _ = _codex_env(monkeypatch, tmp_path, hit=False)
+    monkeypatch.setattr(login_flow, "EXIT_WAIT_S", 0.5)
+
+    async def out_probe(provider: str) -> LoginReport:
+        return LoginReport(False, detail="no")
+
+    monkeypatch.setattr(login_flow, "probe", out_probe)
+    _, row = ds.run(_drive("codex-sub", "owner",
+                           "http://127.0.0.1:1455/auth/callback?code=1", LoginReport(False)))
+    assert row.state == ls.FAILED and "did not finish after the sign-in" in (row.message or "")
+    assert (live / "auth.json").read_text() == '{"old": true}'
