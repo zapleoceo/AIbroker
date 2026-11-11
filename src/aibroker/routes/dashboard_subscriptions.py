@@ -27,7 +27,7 @@ router = APIRouter()
 PAGE = "/dashboard/subscriptions"
 # A finished sign-in stays visible this long, so its result is read before it disappears.
 SHOW_FINISHED = timedelta(hours=1)
-# Re-render while the owner has nothing to type; never while the Claude code box is open.
+# Re-render while the owner has nothing to type; never while the paste box is open.
 _POLLING = (ls.REQUESTED, ls.STARTING, ls.CODE_SUBMITTED, ls.VERIFYING)
 
 
@@ -47,8 +47,8 @@ def panel_view(provider: str, account_id: str,
     state = row.state if row else None
     return {"provider": provider, "account_id": account_id, "row": row, "state": state,
             "active": state in ls.ACTIVE,
-            "polling": state in _POLLING or (state == ls.AWAITING and provider == "codex-sub"),
-            "wants_code": state == ls.AWAITING and provider == "claude-sub",
+            "polling": state in _POLLING,
+            "wants_code": state == ls.AWAITING,
             "url": f"{PAGE}/{provider}/{account_id}/login"}
 
 

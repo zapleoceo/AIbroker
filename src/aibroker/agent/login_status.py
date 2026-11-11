@@ -66,7 +66,10 @@ def verdict(row: AgentLoginStatusRow | None, down_at: datetime | None,
 async def record_status(provider: str, account_id: str, report: LoginReport,
                         now: datetime | None = None) -> None:
     """Upsert this worker's row. The last known mailbox survives a logout (a logged-out CLI
-    reports none), and changed_at moves only when logged_in flips."""
+    reports none), and changed_at moves only when logged_in flips. A probe that could not ask
+    the CLI (`report.failed`) writes nothing: the row ages into "stale", never "logged out"."""
+    if report.failed:
+        return
     now = now or _now()
     async with get_session() as s:
         row = await s.get(AgentLoginStatusRow, (provider, account_id))

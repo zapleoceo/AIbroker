@@ -226,7 +226,8 @@ Code reference for the compare page. Service and route modules are in `src/aibro
 known `email` (kept while logged out), `plan`, `detail`, `checked_at`, and `changed_at` (moves
 only when `logged_in` flips). `agent_login_sessions` (`AgentLoginSessionRow`): one row per
 dashboard re-login with a compare-and-swap `state`, the vendor `verify_url`, the Codex
-`user_code`, the worker's one-time `public_key`, and `code_sealed` (the Claude code sealed to
+`user_code` (unused since 2026-11-12, the Codex flow no longer shows a device code), the
+worker's one-time `public_key`, and `code_sealed` (the Claude code sealed to
 that key, cleared on use). See [subscription-logins.md](subscription-logins.md).
 
 ## Migrations

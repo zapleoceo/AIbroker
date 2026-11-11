@@ -16,10 +16,10 @@ from aibroker.agent import login_sessions as ls
 from aibroker.agent import login_status as st
 from aibroker.agent.login_identity import (
     LoginReport,
+    codex_callback,
     display_name,
     parse_claude_status,
     parse_codex_account,
-    parse_device_code,
     parse_login_url,
 )
 from aibroker.agent.login_seal import new_key, public_pem, seal, unseal
@@ -74,14 +74,27 @@ def test_parse_codex_account() -> None:
     assert parse_codex_account(None).logged_in is False
 
 
-def test_login_url_and_device_code_parsing() -> None:
+def test_login_url_parsing() -> None:
     claude = "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&x=1\n"
     assert parse_login_url(claude) == "https://claude.com/cai/oauth/authorize?code=true&x=1"
-    codex = "1. Open\n   \x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\n   \x1b[94mCH0D-X5NDU\x1b[0m"
-    assert parse_login_url(codex) == "https://auth.openai.com/codex/device"
-    assert parse_device_code(codex) == "CH0D-X5NDU"
+    codex = ("Starting local login server on http://localhost:1455.\n\n"
+             "\x1b[94mhttps://auth.openai.com/oauth/authorize?response_type=code&x=1\x1b[0m\n")
+    assert parse_login_url(codex) == "https://auth.openai.com/oauth/authorize?response_type=code&x=1"
     assert parse_login_url("visit https://evil.example/claude.com") is None
-    assert parse_device_code("no code") is None
+
+
+def test_codex_callback_accepts_only_the_local_listener() -> None:
+    ok = "http://127.0.0.1:1455/auth/callback?code=ac_1&state=s"
+    assert codex_callback(ok) == ok
+    assert codex_callback(" http://localhost:1455/auth/callback?code=ac_1&state=s ") == ok
+    for bad in ("http://evil.com:1455/auth/callback?code=1",
+                "http://127.0.0.1@evil.com:1455/auth/callback?code=1",
+                "https://127.0.0.1:1455/auth/callback?code=1",
+                "http://127.0.0.1:1456/auth/callback?code=1",
+                "http://127.0.0.1:1455/other?code=1",
+                "http://127.0.0.1:1455/auth/callback?state=1",
+                "http://[::1:1455/auth/callback?code=1", "code=1"):
+        assert codex_callback(bad) is None, bad
 
 
 # ─── sealing ─────────────────────────────────────────────────────────────────
@@ -91,7 +104,9 @@ def test_seal_roundtrip_and_limits() -> None:
     key = new_key()
     sealed = seal(public_pem(key), "  code#abc-123  ")
     assert "code" not in sealed and unseal(key, sealed) == "code#abc-123"
-    for bad in ("", "   ", "x" * 191):
+    long_line = "http://127.0.0.1:1455/auth/callback?code=" + "c" * 900
+    assert unseal(key, seal(public_pem(key), long_line)) == long_line
+    for bad in ("", "   ", "x" * 4097):
         with pytest.raises(ValueError):
             seal(public_pem(key), bad)
     from cryptography.hazmat.primitives import serialization
@@ -318,13 +333,15 @@ def test_code_box_does_not_poll_and_code_is_sealed() -> None:
     assert "already" in c2.headers["location"]
 
 
-def test_codex_device_code_is_shown_and_panel_polls() -> None:
+def test_codex_paste_box_and_plain_placeholder() -> None:
     sid = ds.run(ls.start_session("codex-sub", "owner"))
     ds.run(ls.claim_requested("codex-sub", "owner"))
-    ds.run(ls.advance(sid, (ls.STARTING,), state=ls.AWAITING, user_code="CH0D-X5NDU",
-                      verify_url="https://auth.openai.com/codex/device"))
+    ds.run(ls.advance(sid, (ls.STARTING,), state=ls.AWAITING, public_key=public_pem(new_key()),
+                      verify_url="https://auth.openai.com/oauth/authorize?x=1"))
     panel = ds.get(client, "/dashboard/subscriptions/codex-sub/owner/login").text
-    assert "CH0D-X5NDU" in panel and 'hx-trigger="every 2s"' in panel
+    assert "hx-trigger" not in panel and 'name="code"' in panel and "127.0.0.1:1455" in panel
+    # prod 2026-11-11: t() markup leaked into the attribute ("<span data-i18n ...")
+    assert 'placeholder="<' not in panel and 'placeholder="&lt;' not in panel
     ds.run(ls.finish(sid, ls.FAILED, "sign-in did not complete"))
     done = ds.get(client, "/dashboard/subscriptions/codex-sub/owner/login").text
     assert "hx-trigger" not in done and "sign-in did not complete" in done
@@ -372,8 +389,10 @@ def test_probe_codex_exits_without_answer(monkeypatch) -> None:
 def test_probes_time_out(monkeypatch) -> None:
     monkeypatch.setattr(login_probe, "PROBE_TIMEOUT_S", 1.0)
     _fake_exec(monkeypatch, login_probe, "import time;time.sleep(30)")
-    assert "timed out" in (ds.run(login_probe.probe("codex-sub")).detail or "")
-    assert "timed out" in (ds.run(login_probe.probe("claude-sub")).detail or "")
+    codex = ds.run(login_probe.probe("codex-sub"))
+    claude = ds.run(login_probe.probe("claude-sub"))
+    assert codex.failed and "timed out" in (codex.detail or "")
+    assert claude.failed and "timed out" in (claude.detail or "")
 
 
 _CLAUDE_LOGIN = ("import sys\n"
@@ -431,20 +450,152 @@ def test_claude_login_flow_refused_code_is_scrubbed(monkeypatch) -> None:
     assert "bad-code-xyz" not in (row.message or "") and "***" in (row.message or "")
 
 
-def test_codex_device_login_flow(monkeypatch) -> None:
-    script = ("print('Open https://auth.openai.com/codex/device', flush=True)\n"
-              "print('\\x1b[94mAB12-CDE34\\x1b[0m', flush=True)\n"
-              "import time; time.sleep(0.6)\n")
-    seen = _fake_exec(monkeypatch, login_flow, script)
+# Fake `codex login`: prints the link, waits for the replayed callback (a marker file the fake
+# replay writes), then writes auth.json into ITS CODEX_HOME and exits 0.
+_CODEX_LOGIN = ("import os, sys, time, pathlib\n"
+                "print('Starting local login server on http://localhost:1455.', flush=True)\n"
+                "print('https://auth.openai.com/oauth/authorize?response_type=code&x=1', flush=True)\n"
+                "home = pathlib.Path(os.environ['CODEX_HOME'])\n"
+                "for _ in range(400):\n"
+                "    if (home / 'callback-hit').exists():\n"
+                "        (home / 'auth.json').write_text('{\"new\": true}')\n"
+                "        print('Successfully logged in'); sys.exit(0)\n"
+                "    time.sleep(0.05)\n"
+                "sys.exit(3)\n")
+
+
+def _codex_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, *, hit: bool = True) -> Any:
+    live = tmp_path / "codex-state"
+    live.mkdir()
+    (live / "auth.json").write_text('{"old": true}')
+    monkeypatch.setenv("CODEX_HOME", str(live))
+    seen = _fake_exec(monkeypatch, login_flow, _CODEX_LOGIN)
     monkeypatch.setattr(login_flow, "POLL_S", 0.05)
+    replayed: list[str] = []
+
+    async def fake_replay(url: str) -> str | None:
+        replayed.append(url)
+        if hit:
+            for staging in live.glob(".login-*"):
+                (staging / "callback-hit").write_text("1")
+        return None
+
+    monkeypatch.setattr(login_flow, "_replay_callback", fake_replay)
 
     async def ok_probe(provider: str) -> LoginReport:
         return LoginReport(True, "g@p.t", "pro")
 
     monkeypatch.setattr(login_flow, "probe", ok_probe)
-    report, row = ds.run(_drive("codex-sub", "owner", None, LoginReport(True)))
-    assert report.logged_in and row.state == ls.DONE and row.user_code is None
-    assert seen[0][:3] == ["codex", "login", "--device-auth"]
+    return live, seen, replayed
+
+
+def test_codex_login_installs_credentials_only_after_success(monkeypatch, tmp_path) -> None:
+    live, seen, replayed = _codex_env(monkeypatch, tmp_path)
+    report, row = ds.run(_drive("codex-sub", "owner",
+                                "http://localhost:1455/auth/callback?code=ac_9&state=z",
+                                LoginReport(True)))
+    assert report.logged_in and row.state == ls.DONE
+    assert seen[0][:2] == ["codex", "login"] and "--device-auth" not in seen[0]
+    assert replayed == ["http://127.0.0.1:1455/auth/callback?code=ac_9&state=z"]
+    assert (live / "auth.json").read_text() == '{"new": true}'
+    assert not list(live.glob(".login-*"))          # staging home removed
+
+
+def test_cancelled_codex_login_keeps_the_working_credentials(monkeypatch, tmp_path) -> None:
+    """prod 2026-11-11 16:48: a cancelled re-login ran in the live CODEX_HOME and deleted the
+    working auth.json. The staging home must make that impossible."""
+    live, _, _ = _codex_env(monkeypatch, tmp_path)
+
+    async def go() -> AgentLoginSessionRow:
+        sid = await ls.start_session("codex-sub", "owner")
+        await ls.claim_requested("codex-sub", "owner")
+        task = asyncio.create_task(login_flow.run_login("codex-sub", "owner", sid, None))
+        for _ in range(200):
+            row = await ls.get_login(sid)
+            if row is not None and row.state == ls.AWAITING:
+                break
+            await asyncio.sleep(0.05)
+        await ls.cancel_session(sid)
+        await asyncio.wait_for(task, 30)
+        row = await ls.get_login(sid)
+        assert row is not None
+        return row
+
+    assert ds.run(go()).state == ls.CANCELLED
+    assert (live / "auth.json").read_text() == '{"old": true}'
+    assert not list(live.glob(".login-*"))
+
+
+def test_codex_login_rejects_a_foreign_address(monkeypatch, tmp_path) -> None:
+    live, _, replayed = _codex_env(monkeypatch, tmp_path)
+
+    async def out_probe(provider: str) -> LoginReport:
+        return LoginReport(False, detail="no")
+
+    monkeypatch.setattr(login_flow, "probe", out_probe)
+    _, row = ds.run(_drive("codex-sub", "owner", "http://evil.com:1455/auth/callback?code=1",
+                           LoginReport(False)))
+    assert row.state == ls.FAILED and "127.0.0.1:1455" in (row.message or "")
+    assert replayed == [] and (live / "auth.json").read_text() == '{"old": true}'
+
+
+def test_codex_login_without_credentials_written(monkeypatch, tmp_path) -> None:
+    live, _, _ = _codex_env(monkeypatch, tmp_path, hit=False)
+    monkeypatch.setattr(login_flow, "EXIT_WAIT_S", 1.0)
+
+    async def out_probe(provider: str) -> LoginReport:
+        return LoginReport(False, detail="no")
+
+    monkeypatch.setattr(login_flow, "probe", out_probe)
+    _, row = ds.run(_drive("codex-sub", "owner",
+                           "http://127.0.0.1:1455/auth/callback?code=1", LoginReport(False)))
+    assert row.state == ls.EXPIRED
+    assert (live / "auth.json").read_text() == '{"old": true}'
+
+
+def test_codex_login_needs_codex_home(monkeypatch) -> None:
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert "CODEX_HOME" in (ds.run(login_flow._codex(1)) or "")
+
+
+def test_replay_callback_reports_an_unreachable_listener(monkeypatch) -> None:
+    monkeypatch.setattr(login_flow, "CALLBACK_TIMEOUT_S", 2.0)
+    problem = ds.run(login_flow._replay_callback("http://127.0.0.1:9/auth/callback?code=1"))
+    assert problem and "did not answer" in problem
+
+
+def test_install_requires_written_credentials(tmp_path) -> None:
+    staging, live = tmp_path / "s", tmp_path / "l"
+    staging.mkdir()
+    live.mkdir()
+    assert "no credentials" in (login_flow._install(staging, live) or "")
+    (staging / "auth.json").write_text("{}")
+    assert login_flow._install(staging, live) is None and (live / "auth.json").exists()
+
+
+def test_failed_probe_is_not_stored_as_logged_out() -> None:
+    ds.run(st.record_status("codex-sub", "owner", LoginReport(True, "g@p.t", "pro")))
+    ds.run(st.record_status("codex-sub", "owner",
+                            LoginReport(False, detail="timed out", failed=True)))
+
+    async def read() -> AgentLoginStatusRow | None:
+        async with get_session() as s:
+            return await s.get(AgentLoginStatusRow, ("codex-sub", "owner"))
+
+    row = ds.run(read())
+    assert row is not None and row.logged_in is True
+
+
+def test_success_with_unconfirmed_probe_still_counts_as_signed_in(monkeypatch, tmp_path) -> None:
+    _codex_env(monkeypatch, tmp_path)
+
+    async def failed_probe(provider: str) -> LoginReport:
+        return LoginReport(False, detail="timed out", failed=True)
+
+    monkeypatch.setattr(login_flow, "probe", failed_probe)
+    _, row = ds.run(_drive("codex-sub", "owner",
+                           "http://127.0.0.1:1455/auth/callback?code=ac_1", LoginReport(False)))
+    assert row.state == ls.DONE and "could not confirm" in (row.message or "")
 
 
 def test_login_flow_without_link_fails_and_cancel_wins(monkeypatch) -> None:

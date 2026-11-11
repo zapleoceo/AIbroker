@@ -9,23 +9,25 @@
 {% elif p.wants_code %}
   <ol class="stack-sm">
     <li><a class="btn btn-primary" href="{{ row.verify_url }}" target="_blank" rel="noopener noreferrer">{{ m.icon("link") }}{{ t("Open the sign-in page", "Открыть страницу входа") }}</a></li>
+  {% if p.provider == "codex-sub" %}
+    <li>{{ t("Sign in to the ChatGPT account this slot should use.", "Войдите в тот аккаунт ChatGPT, который должен работать в этом слоте.") }}</li>
+    <li>{{ t("The browser then tries to open a page at 127.0.0.1:1455 and fails - that is expected. Copy that page's full address from the address bar and paste it here:", "Потом браузер попробует открыть страницу 127.0.0.1:1455 и не сможет - так и должно быть. Скопируйте полный адрес этой страницы из адресной строки и вставьте сюда:") }}</li>
+  {% else %}
     <li>{{ t("Sign in to the Claude account this slot should use.", "Войдите в тот аккаунт Claude, который должен работать в этом слоте.") }}</li>
     <li>{{ t("Copy the code the page shows and paste it here:", "Скопируйте код со страницы и вставьте сюда:") }}</li>
+  {% endif %}
   </ol>
   <form method="post" action="/dashboard/subscriptions/login/{{ row.id }}/code" class="row-form" autocomplete="off">
-    <input name="code" type="password" required maxlength="400" autocomplete="one-time-code" spellcheck="false" placeholder="{{ t('sign-in code', 'код входа') }}">
+    {% if p.provider == "codex-sub" %}
+    <input name="code" type="password" required maxlength="4000" autocomplete="off" spellcheck="false" {{ ph("http://127.0.0.1:1455/auth/callback?code=…", "http://127.0.0.1:1455/auth/callback?code=…") }}>
+    {% else %}
+    <input name="code" type="password" required maxlength="4000" autocomplete="one-time-code" spellcheck="false" {{ ph("sign-in code", "код входа") }}>
+    {% endif %}
     <button class="btn btn-primary" type="submit">{{ m.icon("check") }}{{ t("Sign in", "Войти") }}</button>
   </form>
-  <p class="muted small">{{ t("The code is encrypted for this worker only and erased as soon as it is used. It is valid for about 10 minutes.", "Код шифруется только для этого воркера и стирается сразу после использования. Действует около 10 минут.") }}</p>
-{% elif p.state == "awaiting_user" %}
-  <ol class="stack-sm">
-    <li><a class="btn btn-primary" href="{{ row.verify_url }}" target="_blank" rel="noopener noreferrer">{{ m.icon("link") }}{{ t("Open the sign-in page", "Открыть страницу входа") }}</a></li>
-    <li>{{ t("Sign in to the ChatGPT account and enter this code:", "Войдите в аккаунт ChatGPT и введите этот код:") }}
-      <div class="mono" style="font-size:1.6em;letter-spacing:.08em;margin:.3em 0">{{ row.user_code }}</div></li>
-    <li class="muted">{{ t("Valid for 15 minutes. This panel updates by itself when you are done.", "Действует 15 минут. Панель обновится сама, когда вы закончите.") }}</li>
-  </ol>
+  <p class="muted small">{{ t("Encrypted for this worker only and erased as soon as it is used. Valid for about 10 minutes.", "Шифруется только для этого воркера и стирается сразу после использования. Действует около 10 минут.") }}</p>
 {% elif p.state in ("code_submitted", "verifying") %}
-  <p class="muted">⏳ {{ t("Checking the code…", "Проверяем код…") }}</p>
+  <p class="muted">⏳ {{ t("Checking…", "Проверяем…") }}</p>
 {% elif p.state == "done" %}
   <p><span class="chip ok">{{ t("Signed in", "Вход выполнен") }}</span> <span class="muted">{{ row.message }}</span></p>
 {% else %}
