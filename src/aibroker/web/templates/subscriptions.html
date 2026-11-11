@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m with context %}
+{% block topbar_actions %}{% endblock %}
+{% block content %}
+<p class="muted">{{ t("Each subscription worker checks its own login every 5 minutes. A dropped login sends one Telegram message, and one more when it works again.", "Каждый подписочный воркер проверяет свой вход раз в 5 минут. Если сессия отвалится - придёт одно сообщение в Telegram, и ещё одно, когда снова заработает.") }}</p>
+<div class="grid-2">
+{% for a in accounts %}
+{% set acc = a.acc %}
+  <section class="card card-pad stack" id="acc-{{ acc.provider }}-{{ acc.account_id }}">
+    <div class="row-form" style="justify-content:space-between">
+      <h2 class="mono">{{ acc.name }}</h2>
+      {% if acc.state == "ok" %}<span class="chip ok">{{ t("Working", "Работает") }}</span>
+      {% elif acc.state == "logged_out" %}<span class="chip bad">{{ t("Not signed in", "Не залогинен") }}</span>
+      {% elif acc.state == "broken" %}<span class="chip bad">{{ t("Login broken", "Вход сломан") }}</span>
+      {% elif acc.state == "stale" %}<span class="chip warn">{{ t("Worker silent", "Воркер молчит") }}</span>
+      {% else %}<span class="chip warn">{{ t("No data yet", "Нет данных") }}</span>{% endif %}
+    </div>
+    <dl class="kv">
+      <dt>{{ t("App", "Приложение") }}</dt><dd>{{ acc.app }}</dd>
+      <dt>{{ t("Mailbox", "Ящик") }}</dt><dd class="mono">{{ acc.email or t("unknown until the first sign-in", "неизвестен до первого входа") }}</dd>
+      {% if acc.plan %}<dt>{{ t("Plan", "План") }}</dt><dd>{{ acc.plan }}</dd>{% endif %}
+      <dt>{{ t("Worker slot", "Слот воркера") }}</dt><dd class="mono">{{ acc.key }}</dd>
+      <dt>{{ t("Checked", "Проверено") }}</dt><dd>{{ acc.checked_at|ago if acc.checked_at else t("never", "никогда") }}</dd>
+      {% if acc.reason %}<dt>{{ t("Why", "Причина") }}</dt><dd>{{ acc.reason }}</dd>{% endif %}
+    </dl>
+    {% with p = a.panel %}{% include "_login_panel.html" %}{% endwith %}
+    {% if not a.panel.active %}
+    <form method="post" action="/dashboard/subscriptions/{{ acc.provider }}/{{ acc.account_id }}/login">
+      <button class="btn{{ ' btn-primary' if acc.state != 'ok' }}" type="submit">{{ m.icon("refresh") }}{{ t("Sign in again", "Перелогинить") }}</button>
+      {% if acc.state == "ok" %}<span class="muted small">{{ t("replaces the current working login", "заменит текущий рабочий вход") }}</span>{% endif %}
+    </form>
+    {% endif %}
+  </section>
+{% endfor %}
+</div>
+{% endblock %}

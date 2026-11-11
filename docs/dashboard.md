@@ -134,6 +134,14 @@ Raising the cap takes effect on the next request (`admit_request` re-reads the l
 - **Request drawer.** `request_attempts` groups by `usage_log.request_id` (migration 015) and falls back to the timing inference only for rows with a NULL id.
 
 
+### Subscriptions page (2026-11-11)
+
+`/dashboard/subscriptions` (nav: Subscriptions / Подписки) shows every subscription worker slot
+with its live login state, mailbox and a **Sign in again** button that runs the official CLI
+sign-in inside that slot's own worker. A dropped login sends one Telegram message and one more
+when it recovers. Details: [subscription-logins.md](subscription-logins.md). The Agent runs card
+below still shows bare worker IDs; the page shows the `CLD_XXXX` / `GPT_XXXX` display names.
+
 ### Subscription account selection (account-only draft)
 
 The Agent runs card renders subscription account choices, not model checkboxes. Saving

@@ -328,6 +328,17 @@ the deploy but do not honour priority. Rollback: `CREATE INDEX CONCURRENTLY IF N
 deep_jobs (status, run_after, created_at)`, `DROP INDEX CONCURRENTLY IF EXISTS ix_deep_jobs_claim_order`, then drop the column. Set
 `AGENT_INTERACTIVE_RESERVE` only after the migration, together with the worker image that reads it.
 
+### Subscription login health: migration 027 (2026-11-11)
+
+Migration 027 (`027_agent_logins.sql`) adds `agent_login_status` and `agent_login_sessions`
+(see [subscription-logins.md](subscription-logins.md)). Idempotent; apply as the schema owner
+BEFORE the new images start, because the workers write these tables from their first loop:
+```sh
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   < /var/www/aibroker/infra/sql/migrations/027_agent_logins.sql
+```
+Default privileges from 013 grant DML to `aibroker_app`. Without the migration a worker logs
+`login check failed` every probe and jobs are unaffected.
+
 ### Agent access on the dashboard: migration 026 (2026-11-06)
 
 Migration 026 (`026_project_agent_settings.sql`) adds `projects.agent_enabled BOOLEAN NOT NULL DEFAULT FALSE`,

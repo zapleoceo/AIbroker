@@ -1,0 +1,40 @@
+{# One account's sign-in panel. Re-rendered by htmx while there is nothing to type. #}
+{% import "_macros.html" as m with context %}
+<div class="login-panel stack-sm" id="login-{{ p.provider }}-{{ p.account_id }}"
+     {% if p.polling %}hx-get="{{ p.url }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+{% set row = p.row %}
+{% if row is none %}
+{% elif p.state in ("requested", "starting") %}
+  <p class="muted">⏳ {{ t("The worker is starting the sign-in…", "Воркер запускает вход…") }}</p>
+{% elif p.wants_code %}
+  <ol class="stack-sm">
+    <li><a class="btn btn-primary" href="{{ row.verify_url }}" target="_blank" rel="noopener noreferrer">{{ m.icon("link") }}{{ t("Open the sign-in page", "Открыть страницу входа") }}</a></li>
+    <li>{{ t("Sign in to the Claude account this slot should use.", "Войдите в тот аккаунт Claude, который должен работать в этом слоте.") }}</li>
+    <li>{{ t("Copy the code the page shows and paste it here:", "Скопируйте код со страницы и вставьте сюда:") }}</li>
+  </ol>
+  <form method="post" action="/dashboard/subscriptions/login/{{ row.id }}/code" class="row-form" autocomplete="off">
+    <input name="code" type="password" required maxlength="400" autocomplete="one-time-code" spellcheck="false" placeholder="{{ t('sign-in code', 'код входа') }}">
+    <button class="btn btn-primary" type="submit">{{ m.icon("check") }}{{ t("Sign in", "Войти") }}</button>
+  </form>
+  <p class="muted small">{{ t("The code is encrypted for this worker only and erased as soon as it is used. It is valid for about 10 minutes.", "Код шифруется только для этого воркера и стирается сразу после использования. Действует около 10 минут.") }}</p>
+{% elif p.state == "awaiting_user" %}
+  <ol class="stack-sm">
+    <li><a class="btn btn-primary" href="{{ row.verify_url }}" target="_blank" rel="noopener noreferrer">{{ m.icon("link") }}{{ t("Open the sign-in page", "Открыть страницу входа") }}</a></li>
+    <li>{{ t("Sign in to the ChatGPT account and enter this code:", "Войдите в аккаунт ChatGPT и введите этот код:") }}
+      <div class="mono" style="font-size:1.6em;letter-spacing:.08em;margin:.3em 0">{{ row.user_code }}</div></li>
+    <li class="muted">{{ t("Valid for 15 minutes. This panel updates by itself when you are done.", "Действует 15 минут. Панель обновится сама, когда вы закончите.") }}</li>
+  </ol>
+{% elif p.state in ("code_submitted", "verifying") %}
+  <p class="muted">⏳ {{ t("Checking the code…", "Проверяем код…") }}</p>
+{% elif p.state == "done" %}
+  <p><span class="chip ok">{{ t("Signed in", "Вход выполнен") }}</span> <span class="muted">{{ row.message }}</span></p>
+{% else %}
+  <p><span class="chip {{ 'warn' if p.state in ('expired', 'cancelled') else 'bad' }}">{{ {"failed": t("Failed", "Не удалось"), "expired": t("Timed out", "Время вышло"), "cancelled": t("Cancelled", "Отменено")}.get(p.state, p.state) }}</span>
+     <span class="muted">{{ row.message }}</span></p>
+{% endif %}
+{% if p.active %}
+  <form method="post" action="/dashboard/subscriptions/login/{{ row.id }}/cancel">
+    <button class="btn" type="submit">{{ m.icon("x") }}{{ t("Cancel sign-in", "Отменить вход") }}</button>
+  </form>
+{% endif %}
+</div>

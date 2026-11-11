@@ -555,7 +555,10 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
    (needs CLI >= 2.1.277, gradual rollout, not guaranteed -
    https://support.claude.com/en/articles/17040437-claude-code-wrap-up-allowance).
    We never change account settings; the owner confirms.
-3. Log in (owner only, interactive, once):
+3. Log in (owner only, interactive, once). Since 2026-11-11 the usual way is
+   **Dashboard → Subscriptions → Sign in again**, which runs `claude auth login` inside the
+   slot's own worker ([subscription-logins.md](subscription-logins.md)); the manual flow below
+   remains the fallback when the dashboard or the worker is down:
    `docker compose --profile agent run --rm agent-worker claude` then type `/login` and follow
    the official browser/device flow. Check: `docker compose --profile agent run --rm agent-worker
    claude auth status` shows `"loggedIn": true` and `"authMethod": "claude.ai"`.

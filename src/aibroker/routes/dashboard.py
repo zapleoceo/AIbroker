@@ -31,7 +31,7 @@ from aibroker.db import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow
 from aibroker.providers.auto_discover import discover_and_store
 from aibroker.providers.health_probes import probe
-from aibroker.routes import dashboard_pages
+from aibroker.routes import dashboard_pages, dashboard_subscriptions
 from aibroker.routes.dashboard_agent_access import agent_form_values
 from aibroker.routes.dashboard_assets import _LONG_CACHE
 from aibroker.routes.dashboard_scopes import (
@@ -47,6 +47,7 @@ from aibroker.web.render import STATIC_DIR, render, render_html
 # included. The client API stays in the schema.
 router = APIRouter(tags=["dashboard"], include_in_schema=False)
 router.include_router(dashboard_pages.router)
+router.include_router(dashboard_subscriptions.router)
 
 
 # ─── Login ──────────────────────────────────────────────────────────────────

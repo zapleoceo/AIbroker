@@ -277,6 +277,41 @@ class DeepJobRow(Base):
     )
 
 
+class AgentLoginStatusRow(Base):
+    """Login health of one subscription worker, as its own CLI reports it (migration 027,
+    docs/subscription-logins.md). Written only by that worker."""
+    __tablename__ = "agent_login_status"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    logged_in: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320))
+    plan: Mapped[str | None] = mapped_column(String(64))
+    detail: Mapped[str | None] = mapped_column(String(200))
+    checked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class AgentLoginSessionRow(Base):
+    """A dashboard-started re-login, carried out by the account's own worker (migration 027)."""
+    __tablename__ = "agent_login_sessions"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False)
+    verify_url: Mapped[str | None] = mapped_column(Text)
+    user_code: Mapped[str | None] = mapped_column(String(64))
+    public_key: Mapped[str | None] = mapped_column(Text)
+    code_sealed: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (Index("ix_agent_login_sessions_account", "provider", "account_id", "state"),)
+
+
 class AgentRunRow(Base):
     """Agent-run side record (migration 017): one row per `agent:*` deep_jobs row.
 

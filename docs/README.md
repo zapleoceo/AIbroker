@@ -11,6 +11,7 @@ CI fails otherwise. Opt-out: `docs-not-needed` in the commit message
 | [architecture.md](./architecture.md) | High-level diagram, request flow, scaling story |
 | [api.md](./api.md) | Every public endpoint (proxy + admin + dashboard) |
 | [auth.md](./auth.md) | X-Admin-Key / X-Project-Key / Telegram login flow, scopes |
+| [subscription-logins.md](./subscription-logins.md) | Subscription login health, one-shot Telegram alerts, dashboard re-login (CLD_/GPT_ names) |
 | [routing.md](./routing.md) | Capability → provider chains, LRU + cap-aware selector, cost guard |
 | [providers.md](./providers.md) | Per-provider mapping (model defaults, LiteLLM behavior, health probes) |
 | [deploy-ops.md](./deploy-ops.md) | Restricted SSH key flow, GH Actions secrets, manual deploy fallback |

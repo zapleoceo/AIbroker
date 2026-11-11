@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy import case, select, text, update
 
+from aibroker.agent.login_alerts import check_subscription_logins
 from aibroker.config import get_settings
 from aibroker.crypto import decrypt
 from aibroker.db import close_engine, get_session, init_engine
@@ -277,6 +278,10 @@ async def tick(sweep: int = 0) -> None:
                     )
 
     await _check_paid_tail()
+    try:
+        await check_subscription_logins()
+    except Exception:  # noqa: BLE001 - one bad check must not stop the key sweep
+        log.exception("subscription login check failed")
 
     log.info("monitor tick: alive=%d cooldown=%d dead=%d total=%d",
              alive_count, cooldown_count, dead_count, len(rows))
