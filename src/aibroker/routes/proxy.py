@@ -476,14 +476,14 @@ class SpeechRequest(BaseModel):
 
     @field_validator("text")
     @classmethod
-    def _nonblank(cls, v: str) -> str:
+    def _nonblank(_cls, v: str) -> str:
         if not v.strip():
             raise ValueError("text must not be blank")
         return v
 
     @field_validator("voice")
     @classmethod
-    def _known_voice(cls, v: str) -> str:
+    def _known_voice(_cls, v: str) -> str:
         if v not in SPEECH_VOICES:
             raise ValueError(f"unknown voice {v!r}; one of: {', '.join(sorted(SPEECH_VOICES))}")
         return v
