@@ -144,9 +144,9 @@ below still shows bare worker IDs; the page shows the `CLD_XXXX` / `GPT_XXXX` di
 
 ### Subscription account selection (account-only draft)
 
-The Agent runs card renders subscription account choices, not model checkboxes. Saving
-is locked by default until `AGENT_ACCOUNT_ONLY_UI_ENABLED` is enabled after fleet rollout.
-Each checkbox identifies both provider and worker account ID: `claude-sub/claude-2`,
+The Agent runs card renders subscription account choices, not model checkboxes. The form is
+always enabled for everyone who manages projects in the Broker dashboard; each save must include
+the account-access confirmation. Each checkbox identifies both provider and worker account ID: `claude-sub/claude-2`,
 `claude-sub/owner`, or `codex-sub/owner`. Labels show the actual worker ID and the
 subscription type; they do not infer a person's name or claim that the login is healthy.
 The inventory matches the currently supported worker topology, not live discovery.
@@ -168,8 +168,6 @@ and budgets remain in force. Clearing every account denies access, without env f
 Turning off Agent runs overrides the env allowlist for that converted project. A project
 still needs `llm:agent`; this form never grants it or changes a budget.
 
-While the rollout switch is off, the form is disabled and the server rejects account-only
-saves; it does not restore model checkboxes or change an existing stored policy. Legacy
-POSTs remain compatible only for unconverted projects. Turning the switch off later locks
-editing, not execution: converted policies remain enforced. Only enable it after all
-API/worker processes are upgraded and have loaded their snapshots.
+Opening the form does not restore model checkboxes or change an existing stored policy. Legacy
+POSTs remain compatible only for unconverted projects. Upgrade all API and worker processes, and
+confirm they have loaded their snapshots, before the first account-only save.

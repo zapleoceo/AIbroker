@@ -352,7 +352,7 @@ docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker   
 
 `infra/sql/init.sql` mirrors the columns. With successful snapshot refreshes, access changes reach API
 and workers within 5 s, without a restart. Legacy projects retain env allowlist union and policy fallback.
-The current Settings form uses `accounts-v1` and is locked by default; conversion is a separate,
+The current Settings form uses `accounts-v1` and is always enabled for everyone who manages projects in the Broker dashboard; conversion is a separate,
 confirmed access change, not part of migration 026. Converted policies override both env gates.
 See [agent-runs.md](agent-runs.md#legal--scope-note) and the account-only rollout precautions below.
 
@@ -369,17 +369,13 @@ existing JSON policy with `@accounts-v1`; explicit empty accounts use the reserv
 Do not convert projects or change live grants during deployment. Each conversion requires a separate
 review and confirmed Settings save, including approval to remove that project's model restrictions.
 
-1. Keep `AGENT_ACCOUNT_ONLY_UI_ENABLED=false` (the Settings and compose default) while upgrading.
-   It disables the rendered form and rejects `accounts-v1` POSTs. It does not revoke existing
-   agent access, revert a converted policy or block compatible legacy POSTs for unconverted projects.
-2. Upgrade every API process and all agent workers, including stopped workers before any later start.
+1. Upgrade every API process and all agent workers, including stopped workers before any later start.
    Verify the deployed policy version and a successful access-snapshot load in each serving process.
    A new process refuses all agent access until its first successful load; subsequent failures retain
-   its last good snapshot. The flag is a manual rollout gate, not an automatic fleet-version check.
-3. Only after these checks may an operator enable the flag on the API and recreate the API service
-   with the changed environment. Then review and confirm each project's account selection separately.
-   Successful refreshes propagate the saved policy to other processes within `REFRESH_S` (5 s);
-   the saving process refreshes immediately. Do not claim instantaneous fleet-wide revocation.
+   its last good snapshot. The upgrade is not an automatic fleet-version check, so verify it yourself.
+2. Review and confirm each project's account selection separately. Successful refreshes propagate the
+   saved policy to other processes within `REFRESH_S` (5 s); the saving process refreshes immediately.
+   Do not claim instantaneous fleet-wide revocation.
 
 **Stale forms versus mixed versions.** The upgraded `dash_project_agent` takes
 `SELECT FOR UPDATE` before reading the project marker in both save modes. Concurrent legacy saves
@@ -523,9 +519,8 @@ lost) until the idle pgbouncer server backends were terminated.
 ## Agent runs: legacy env setup and effective access
 
 Since migration 026 (2026-11-06), legacy dashboard grants can supplement the env allowlist and
-replace the env model/account policy. The current account-only Settings form is disabled until
-`AGENT_ACCOUNT_ONLY_UI_ENABLED` is explicitly enabled after full-fleet rollout. Existing policy
-is preserved until a confirmed save. Once converted to `accounts-v1`, the project's dashboard
+replace the env model/account policy. The current account-only Settings form is always enabled;
+saving requires the "confirm account access" checkbox. Existing policy is preserved until a confirmed save. Once converted to `accounts-v1`, the project's dashboard
 setting overrides both env gates, including explicit disable or no accounts selected.
 
 For an approved legacy project managed through env, configure both gates in the compose `.env`
@@ -1106,7 +1101,6 @@ docker compose up -d
 | `OWNER_TELEGRAM_ID` | only this Telegram user can log into dashboard |
 | `GLOBAL_DAILY_CAP_USD` | global daily spend cap |
 | `SIGNUP_ENABLED` | kill switch for `POST /v1/signup` (default `true`) |
-| `AGENT_ACCOUNT_ONLY_UI_ENABLED` | api (default `false`, also the compose default): enables account-only Settings saves only after full-fleet rollout; does not convert projects, disable agent execution or revert stored policy. See [rollout precautions](#account-only-policy-rollout-precautions) |
 | `SIGNUP_PER_IP_PER_DAY` / `SIGNUP_PER_DAY` | self-signup rate limits (defaults 3 / 50, rolling 24h) |
 | `SIGNUP_REQUEST_CAP` | lifetime request cap given to a new self-signup project (default 100) |
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
@@ -1210,6 +1204,5 @@ messages nor worker RPC `ready_for_queue` is a snapshot readiness assertion. Exi
 authorization behavior are unchanged. Logging occurs after each completed refresh attempt,
 including startup and the normal five-second loop; a hung attempt produces no fresh evidence.
 
-This evidence does not enable the feature or guarantee instantaneous revocation. Keep
-`AGENT_ACCOUNT_ONLY_UI_ENABLED=false` until the whole serving fleet is verified, and confirm
-the effective host/container value rather than inferring it from the repository default.
+This evidence does not guarantee instantaneous revocation. Verify the whole serving fleet
+(every API and worker process) before relying on account-only policy changes.

@@ -442,8 +442,6 @@ async def dash_project_agent(
     """Agent access from the Settings tab checkboxes; every process picks it up within
     project_access.REFRESH_S, this one at once (no container restart)."""
     if agent_access_mode == "accounts-v1":
-        if not get_settings().AGENT_ACCOUNT_ONLY_UI_ENABLED:
-            return _back(next, "!Account-only access is not enabled: finish the worker rollout first")
         if confirm_account_access != "1":
             return _back(next, "!Confirm the account access change before saving")
         try:

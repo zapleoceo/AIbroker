@@ -252,7 +252,6 @@ services:
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://aibroker-vision-local:8080}
       # Agent-run allowlist (fail-closed when empty); the agent-worker needs the same value.
       AGENT_ALLOWED_PROJECT_IDS: ${AGENT_ALLOWED_PROJECT_IDS:-}
-      AGENT_ACCOUNT_ONLY_UI_ENABLED: ${AGENT_ACCOUNT_ONLY_UI_ENABLED:-false}
       AGENT_FILES_IN_TABLE: ${AGENT_FILES_IN_TABLE:-false}   # migration 025 rollout flag (docs/deploy-ops.md)
       # Per-project model/account policy (JSON, fail-closed); the agent-worker re-checks it.
       AGENT_PROJECT_POLICY: ${AGENT_PROJECT_POLICY:-}

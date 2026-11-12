@@ -158,8 +158,6 @@ class Settings(BaseSettings):
     # FAIL-CLOSED: every agent request is refused (403 agent_project_not_allowed) even with the
     # llm:agent scope, and the worker refuses queued runs of other projects.
     AGENT_ALLOWED_PROJECT_IDS: str = ""
-    # Enable only after every API/worker has this policy version and a loaded snapshot.
-    AGENT_ACCOUNT_ONLY_UI_ENABLED: bool = False
     # Per-project agent policy, JSON: {"11": {"models": ["<exact id>"], "accounts": ["owner"]}}.
     # "*" admits known subscription candidates of the requested agent capability only.
     # Fail-closed: no entry / empty lists -> 403 agent_policy_missing; malformed -> everyone refused.

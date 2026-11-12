@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.agent import project_access
 from aibroker.agent.account_choices import ACCOUNT_ONLY, NO_ACCOUNTS
-from aibroker.config import get_settings
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
 from aibroker.routes import dashboard
@@ -31,7 +30,6 @@ pytestmark = pytest.mark.skipif(
 async def test_concurrent_legacy_save_cannot_erase_account_policy(
     monkeypatch: pytest.MonkeyPatch, chosen: list[str],
 ) -> None:
-    monkeypatch.setattr(get_settings(), "AGENT_ACCOUNT_ONLY_UI_ENABLED", True)
     monkeypatch.setattr(project_access, "_snapshot", {})
     async with get_session() as session:
         session.add(dash_seed.project(9719, "policy-race", agent_enabled=True,
