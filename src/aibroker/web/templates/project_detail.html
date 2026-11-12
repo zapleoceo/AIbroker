@@ -228,11 +228,8 @@
   <h2>{{ t("Agent runs (Claude / Codex subscription)", "Агенты (Claude / Codex по подписке)") }}</h2>
   <p class="muted">{{ t("Applied within a few seconds, no restart. An agent request also needs the llm:agent scope above.", "Применяется за несколько секунд, без перезапуска. Для запроса к агенту также нужно право llm:agent выше.") }}
     {% if not agent.has_scope %}<span class="pill rsv">{{ t("llm:agent is not granted", "llm:agent не выдано") }}</span>{% endif %}</p>
-  {% if not agent.account_ui_enabled %}
-  <p role="alert">{{ t("Account selection is locked until all API and agent workers are upgraded. Existing access is unchanged.", "Выбор аккаунтов заблокирован до обновления всех API и агентных воркеров. Текущий доступ не изменён.") }}</p>
-  {% endif %}
   <form method="post" action="/dashboard/projects/{{ project.id }}/agent" class="stack">
-    <fieldset class="stack"{% if not agent.account_ui_enabled %} disabled{% endif %}>
+    <fieldset class="stack">
     <input type="hidden" name="next" value="/dashboard/projects/{{ project.id }}?tab=settings">
     <label class="scope-cb"><input type="checkbox" name="agent_enabled" value="1"{% if agent.enabled %} checked{% endif %}>
       {{ t("Allow agent runs for this project", "Разрешить агентные запуски этому проекту") }}</label>

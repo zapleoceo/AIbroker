@@ -31,7 +31,6 @@ client = TestClient(app)
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
     monkeypatch.setattr(pa, "_snapshot", {})
-    monkeypatch.setattr(get_settings(), "AGENT_ACCOUNT_ONLY_UI_ENABLED", True)
     monkeypatch.setattr(get_settings(), "AGENT_ALLOWED_PROJECT_IDS", "")
     _env_policy(monkeypatch, {})
 
@@ -282,14 +281,17 @@ def test_serialized_empty_override_is_fail_closed_for_legacy_policy():
     assert not legacy_policy.allows_candidate("gpt-6.1-sol", "agent:codex")
 
 
-def test_account_only_save_is_locked_until_rollout_enabled(monkeypatch):
+def test_account_selection_is_always_open():
     ds.seed(ds.project(1, "stepan"))
-    monkeypatch.setattr(get_settings(), "AGENT_ACCOUNT_ONLY_UI_ENABLED", False)
+    page = client.get("/dashboard/projects/1?tab=settings", cookies=ds.cookies())
+    assert page.status_code == 200
+    section = page.text.split('id="agent-access"', 1)[1].split("</section>", 1)[0]
+    assert '<fieldset class="stack">' in section
+    assert "locked until" not in section
     r = client.post("/dashboard/projects/1/agent", cookies=ds.cookies(), follow_redirects=False,
                     data={"agent_enabled": "1", "agent_access_mode": "accounts-v1",
                           "confirm_account_access": "1", "agent_accounts": ["codex-sub/owner"]})
-    assert "rollout" in r.headers["location"]
-    assert pa.access_for(1) is None
+    assert "rollout" not in r.headers["location"]
 
 
 @pytest.mark.parametrize("mode", ["", "accounts-v1"])

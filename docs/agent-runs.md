@@ -94,11 +94,11 @@ with no CLI start or `billing.attested`. Compose passes the legacy env settings 
 
 **Dashboard account selection (migration 026).** The Settings tab's "Agent runs" card
 (`agent_view` in `routes/dashboard_agent_access.py`) now offers subscription accounts, not model
-checkboxes. `AGENT_ACCOUNT_ONLY_UI_ENABLED` defaults false: the form is disabled and
-`POST /dashboard/projects/{id}/agent` (`dash_project_agent`) refuses `accounts-v1` saves until rollout
-is explicitly enabled. Opening Settings or upgrading does not convert existing policies.
-See [dashboard.md](dashboard.md#subscription-account-selection-account-only-draft) for the form and
-[deploy-ops.md](deploy-ops.md#account-only-policy-rollout-precautions) before enabling it.
+checkboxes. The form is always enabled for everyone who manages projects in the Broker dashboard;
+saving requires the "confirm account access" checkbox. Opening Settings or upgrading does not convert
+existing policies. See [dashboard.md](dashboard.md#subscription-account-selection-account-only-draft)
+for the form and [deploy-ops.md](deploy-ops.md#account-only-policy-rollout-precautions) before the first
+account-only save.
 
 **Legacy model/account policy.** Before conversion, the stored `agent_models` (bare ids or `*`)
 and `agent_accounts` remain effective. `policy_for` uses this dashboard policy when both lists are
@@ -570,7 +570,6 @@ and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 
 5. For legacy env-managed access, set `AGENT_ALLOWED_PROJECT_IDS` (e.g. `11`) and the matching
    `AGENT_PROJECT_POLICY` model/account entry in the compose `.env`. A legacy dashboard grant can
    replace these; for a converted project, only its confirmed account-only settings apply.
-   Keep `AGENT_ACCOUNT_ONLY_UI_ENABLED=false` until the full-fleet rollout checks pass.
    Start the lane (after step 6 for the first start): `docker compose --profile agent up -d agent-worker`;
    grant the project `llm:agent` separately through the admin API.
 

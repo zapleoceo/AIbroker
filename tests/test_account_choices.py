@@ -24,11 +24,11 @@ def test_provider_and_id_together_select_an_account():
     assert account_ids([], "agent:claude") == ()
 
 
-def test_rollout_switch_defaults_closed_in_settings_and_compose():
+def test_account_selection_has_no_rollout_switch():
     from pathlib import Path
 
     from aibroker.config import Settings
 
-    assert Settings.model_fields["AGENT_ACCOUNT_ONLY_UI_ENABLED"].default is False
+    assert "AGENT_ACCOUNT_ONLY_UI_ENABLED" not in Settings.model_fields
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text()
-    assert "AGENT_ACCOUNT_ONLY_UI_ENABLED: ${AGENT_ACCOUNT_ONLY_UI_ENABLED:-false}" in compose
+    assert "AGENT_ACCOUNT_ONLY_UI_ENABLED" not in compose
