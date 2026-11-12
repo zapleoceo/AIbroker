@@ -51,7 +51,7 @@ def _clean(value: Any, limit: int) -> str | None:
 
 
 def parse_claude_status(output: str) -> LoginReport:
-    """`claude auth status` prints one JSON object (CLI 2.1.296). Anything else is a probe
+    """`claude auth status` prints one JSON object (CLI 2.1.296 and 2.1.322; 2.1.322 adds `loginExpiresAt`). Anything else is a probe
     problem, reported as logged out with the reason in `detail`."""
     text = strip_ansi(output).strip()
     try:

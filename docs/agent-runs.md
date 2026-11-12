@@ -534,12 +534,12 @@ description, are not returned as outputs, and are dropped from the stored reques
 The worker runs in its own container, `agent-worker` (`infra/agent-worker/Dockerfile`, compose
 profile `agent`, so a normal `docker compose up -d` does NOT start it). It is built on the
 broker image plus Node 22 and the official CLI pinned to an exact version
-(`@anthropic-ai/claude-code@2.1.296`, must be >= 2.1.277). Entry point:
+(`@anthropic-ai/claude-code@2.1.322` since 2026-11-12, was 2.1.296; must be >= 2.1.277). Entry point:
 `python -m aibroker.agent.run_worker` (`run_worker`: only the agent lane, no HTTP, no LLM
 dispatcher). No docker.sock, no privileged, no host network, no home mounts, `cap_drop: ALL`,
 `no-new-privileges`; CLI login state is the named volume `agent_claude_auth`
 (`/home/app/claude-state`). Resource limits (cpus 1, mem 1g, pids 256) are declared in compose
-and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.296 (Claude Code)`;
+and marked **needs owner OK**. Smoke (no login): `claude --version` -> `2.1.322 (Claude Code)`;
 `claude auth status` -> `loggedIn: false`.
 
 ### Owner checklist (all on the server, in the compose project directory)
@@ -768,7 +768,10 @@ What is guaranteed, and what is not.
   every value is joined (`--allowedTools=`, `--model=`, `--resume=`). Besides the scoped
   permissions the argv passes `--tools=<names>` (`tool_names`: the built-in tool set is cut to the requested
   names; none requested = `--tools ""`) and `--strict-mcp-config` without any `--mcp-config`
-  (no MCP servers); both flags exist in the pinned 2.1.296 (`claude --help`). Runs with
+  (no MCP servers); both flags exist in the pinned 2.1.322 (`claude --help`, re-checked 2026-11-12 with `-p`,
+  `--output-format`, `--verbose`, `--model`, `--resume`, `--allowedTools`, `--permission-mode`,
+  `--settings`, `--setting-sources`; `--max-turns` is hidden from help in both 2.1.296 and
+  2.1.322, still accepted, and not passed by the broker). Runs with
   attachments get exactly one extra permission, the scoped `Read(inputs/**)`.
 - **Environment: allow-list built from scratch.** `cli_env` creates the CLI's environment from
   `PATH, HOME, CLAUDE_CONFIG_DIR, DISABLE_AUTOUPDATER, LANG, TMPDIR` only (never a copy of the
