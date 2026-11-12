@@ -906,6 +906,8 @@ Response:
   for the current UTC month. These two figures are independent of `from` / `to`.
 - `currency` is always `"USD"`. Costs are rounded to 6 decimal places.
 
+Implementation: `services/project_usage.py` builds the response in `project_usage`, which returns a `ProjectUsage` dataclass; each total, capability and day is a `Bucket` holding calls, cost and tokens. `default_range` produces the current UTC month up to and including today, and `check_range` requires `to` to be after `from` and at most `MAX_DAYS` (366) days apart, otherwise the request gets a 422.
+
 ## Pinning a model (exact, 2026-10-03)
 
 `model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`)
