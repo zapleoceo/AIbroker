@@ -46,7 +46,8 @@ PERMISSION_PROFILE = "broker"
 # `--disable` features for a no_shell run (codex-cli 0.162.1 `codex features list`; all eight
 # still listed in 0.167.1, re-checked 2026-11-12). Verified live
 # 2026-10-16: with these off, "Run: id" is answered "command execution is disabled" and the JSON
-# stream has no command_execution item. image_generation stays on (no shell involved).
+# stream has no command_execution item. image_generation stayed on in 0.162.1; in 0.167.1 the image
+# tool runs through code mode, so a no_shell run makes NO image (docs/api.md, no_shell limitation).
 NO_SHELL_FEATURES = ("shell_tool", "unified_exec", "code_mode_host", "browser_use",
                      "browser_use_external", "computer_use", "in_app_browser", "apps")
 _ABS_PATH = re.compile(r"^/[A-Za-z0-9_./-]+\Z")

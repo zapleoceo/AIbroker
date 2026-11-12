@@ -1073,7 +1073,9 @@ prompt never names it). The thread UUID must come from this CLI process's single
 duplicate or conflicting thread identities disable PNG export.
 `snapshot_generated_paths()` records pre-existing names before the run, so a
 previous image cannot be claimed as this run's output.
-The pinned Codex 0.162.1 image extension writes `generated_images/<thread UUID>/<call ID>.png`.
+The Codex 0.162.1 image extension writes `generated_images/<thread UUID>/<call ID>.png`; the pinned
+0.167.1 writes `generated_images/<thread UUID>/exec-<UUID>.png` (the image tool now runs through
+code mode; verified by Broker job 613075, a 1536x1024 PNG). Export relies only on the thread directory.
 Resumed threads export no PNG because a stale CLI can still write into their shared thread directory
 after a lease takeover. An already populated directory for a claimed new thread also exports nothing.
 Accepted files: regular files only (no symlinked file, directory or source directory; depth <= 3;

@@ -957,13 +957,19 @@ routes, `["audio"]` for speech routes, `null` otherwise.
 
 `POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
 without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code
-mode, browser, computer use, apps; image generation stays on), so the model cannot write a file
+mode, browser, computer use, apps), so the model cannot write a file
 through a shell. `400 unsupported_for_subscription_model: no_shell` on a `claude-sub` model, on a
 model that is not a subscription route, and (`... no_shell with tools`) together with `tools`. It
 enters the Idempotency-Key payload hash only when `true`, so the hashes of requests without it do
 not change. It relies on the `NO_SHELL_FEATURES` list of `codex-cli` 0.162.1 (all eight names re-checked in 0.167.1) (the `--disable`
 feature names); recheck that list after every Codex CLI upgrade. Use it for image jobs: a model that skips the built-in image generation and draws
 with a script otherwise leaves a file it wrote itself.
+
+**Known limitation (Codex CLI 0.167.1, since 2026-11-12): `no_shell` also disables image
+generation.** 0.167.1 runs the image tool through code mode, which `no_shell` turns off: the model
+still lists `image_gen.imagegen` but cannot call it, so no image is made and `files` is empty
+(canary jobs 613072 and 613088; the same prompt without `no_shell`, job 613075, returned a PNG).
+On 0.162.1 images worked with `no_shell`. For an image, send the job without `no_shell`.
 
 `files[]` of a finished subscription job holds: files the run reported as changed (inside the
 workspace only: an absolute path inside the workspace is listed relative, one outside it is not
