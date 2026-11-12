@@ -10,7 +10,7 @@ existing contract.
 
 ## Verified transport capability
 
-The production Codex worker has `codex-cli 0.162.1`. Its generated experimental
+The production Codex worker has `codex-cli 0.167.1` (since 2026-11-12, was 0.162.1). Its generated experimental
 App Server schema includes `ThreadStartParams.dynamicTools`,
 `DynamicToolCallParams` (`threadId`, `turnId`, `callId`, `tool`, `arguments`), and
 `DynamicToolCallResponse` (`contentItems`, `success`). The official App Server

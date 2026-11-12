@@ -818,13 +818,17 @@ What is guaranteed, and what is not.
 
 ## Codex adapter (`agent:codex`)
 
-`aibroker.agent.codex_cli.CodexCLI` runs the official `codex exec --json` (pinned `@openai/codex@0.162.1`,
+`aibroker.agent.codex_cli.CodexCLI` runs the official `codex exec --json` (pinned `@openai/codex@0.167.1` since 2026-11-12, was 0.162.1,
 installed with its optional native-binary dependency) next to `ClaudeCLI`; both build on
 `SubprocessCLI` in `real_cli.py` (own process group, group kill on cancel, minimal environment).
 Argv (`build_codex_argv`, prompt on stdin via `-`, cwd = the run workspace):
 `codex exec [resume <thread id>] [--image=<file>...] --json [--model=<id>] -c sandbox_mode="workspace-write"
 -c approval_policy="never" -c forced_login_method="chatgpt" -c cli_auth_credentials_store="file"
---skip-git-repo-check --ignore-user-config --ignore-rules -`. Verified against the 0.162.1 help text:
+--skip-git-repo-check --ignore-user-config --ignore-rules -`. Verified against the 0.162.1 help text and re-verified against 0.167.1 on 2026-11-12 (`exec`
+flags, `exec resume`, every `NO_SHELL_FEATURES` name in `codex features list`, `codex sandbox -P`,
+`codex login status`, the browser login listener on 127.0.0.1:1455, and every App Server method
+the client sends or handles; `item/updated` in `_KNOWN_METHODS` is absent from both schemas and
+only affects log labels):
 there is **no `-a` flag on `codex exec`** (so the approval policy is a constant `-c` override) and
 `resume` has no `--sandbox`/`-C` (so the sandbox is a `-c` override for fresh and resumed runs alike).
 Never `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`, a wider sandbox or a

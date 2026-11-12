@@ -43,7 +43,8 @@ CONFIG_OVERRIDES = (
     'forced_login_method="chatgpt"', 'cli_auth_credentials_store="file"',
 )
 PERMISSION_PROFILE = "broker"
-# `--disable` features for a no_shell run (codex-cli 0.162.1 `codex features list`). Verified live
+# `--disable` features for a no_shell run (codex-cli 0.162.1 `codex features list`; all eight
+# still listed in 0.167.1, re-checked 2026-11-12). Verified live
 # 2026-10-16: with these off, "Run: id" is answered "command execution is disabled" and the JSON
 # stream has no command_execution item. image_generation stays on (no shell involved).
 NO_SHELL_FEATURES = ("shell_tool", "unified_exec", "code_mode_host", "browser_use",
