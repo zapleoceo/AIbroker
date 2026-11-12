@@ -10,7 +10,7 @@ FROM node:22-slim AS node
 
 FROM ${BASE_IMAGE}
 USER root
-ARG CLAUDE_CODE_VERSION=2.1.296
+ARG CLAUDE_CODE_VERSION=2.1.322
 ARG CODEX_VERSION=0.162.1
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules

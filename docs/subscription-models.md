@@ -79,7 +79,14 @@ independent subset of verified subscription IDs (`codex-sub` or `claude-sub`); i
 in that list gain the `vision` capability and image input in the catalog.
 The direct diagnostic agent route can be used to verify an input image before
 enabling its exact model ID. Compose uses the `default` sentinel when no override is
-provided. The default verified list contains only the completed Claude Sonnet
+provided. Prod 2026-11-12: `claude-fable-5-2` (Claude Fable 5.2, added in Claude Code 2.1.321 and its
+default Fable) was added to both prod lists after live checks on both Claude logins (team and
+max: `served=claude-fable-5-2`) and Broker job 612962 (`claude-sub/claude-fable-5-2`, done,
+`model_served: claude-fable-5-2`, billing `subscription`, account `claude-2`). It also answered
+on the then-pinned CLI 2.1.296, which only warns `unrecognized_model`; the pin moved to 2.1.322
+the same day so the CLI knows it. Codex was re-checked the same day: the account's
+`models_cache.json` lists exactly the eight configured IDs, no new model.
+The default verified list contains only the completed Claude Sonnet
 smoke model; other candidates remain unavailable until confirmed by a live run. The default Claude
 candidates are `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-haiku-5-5`; the last two are listed
 with `available: false` until a live check. Fable is not listed.
