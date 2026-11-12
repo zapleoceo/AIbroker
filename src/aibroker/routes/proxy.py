@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import (
@@ -95,6 +95,7 @@ from aibroker.services.llm_service import (
     run_embed,
     run_transcribe,
 )
+from aibroker.services.project_usage import Bucket, default_range, project_usage
 from aibroker.services.request_cap import admit_request
 from aibroker.services.speech_service import SpeechFailed, run_speech
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
@@ -1117,6 +1118,38 @@ async def jobs_tool_result(
     except ClientToolConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"accepted": accepted}
+
+
+@router.get("/usage")
+async def usage_endpoint(
+    from_: Annotated[date | None, Query(alias="from")] = None,
+    to: Annotated[date | None, Query()] = None,
+    ctx: ProjectCtx = Depends(require_project),
+) -> dict[str, Any]:
+    """What this project spent (any project key, no extra scope): the `usage_log` totals the cost
+    guard sums for the project caps, for `from` .. `to` (UTC dates, `to` exclusive; default the
+    current month), split by capability and by day, plus the caps and today's / this month's spend.
+    Flat-rate subscription agent runs are not billed here."""
+    today = datetime.now(UTC).date()
+    start, end = default_range(today)
+    start, end = from_ or start, to or end
+    try:
+        usage = await project_usage(ctx.project, start, end, today)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    def sums(b: Bucket) -> dict[str, Any]:
+        return {"calls": b.calls, "cost_usd": b.cost_usd,
+                "tokens_in": b.tokens_in, "tokens_out": b.tokens_out}
+
+    return {
+        "from": usage.start.isoformat(), "to": usage.end.isoformat(), "currency": "USD",
+        "total": sums(usage.total),
+        "by_capability": [{"capability": b.key, **sums(b)} for b in usage.by_capability],
+        "by_day": [{"day": b.key, **sums(b)} for b in usage.by_day],
+        "limits": {"daily_cap_usd": usage.daily_cap_usd, "monthly_cap_usd": usage.monthly_cap_usd,
+                   "today_usd": usage.today_usd, "month_usd": usage.month_usd},
+    }
 
 
 @router.get("/models", response_model=ModelsResponse)

@@ -181,6 +181,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
+| `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
@@ -830,6 +831,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/transcribe` | `llm:audio` |
 | `/v1/decisions` | `llm:decision` |
 | `/v1/speech` | `llm:speech` |
+| `/v1/usage` | none (any project key) |
 
 ## Admin (X-Admin-Key required)
 
@@ -857,6 +859,52 @@ Present on `GET /v1/jobs/{id}` / `GET /v1/deep/{id}` (done jobs), `POST
 `usage_log.model_served` (migration 011) — see `docs/providers.md` for why an
 alias is not always the model that ran. The dashboard's "Recent 50 calls"
 shows `model_served` when present, with the routing name in the cell tooltip.
+
+## `GET /v1/usage` — what this project spent (2026-11-13)
+
+Returns the broker's own spend numbers for the calling project, so a client can show them
+instead of re-counting. It reads the same `usage_log` rows the cost guard sums for the
+project's daily and monthly caps (`services/project_usage.py`, route `usage_endpoint` in
+`routes/proxy.py`).
+
+```
+GET /v1/usage?from=2026-11-01&to=2026-11-14
+X-Project-Key: <project key>
+```
+
+- Any project key works; no extra scope is required.
+- `from` and `to` are UTC dates. `to` is exclusive. Omitted, the range is the current UTC
+  month up to and including today (`from` = the 1st, `to` = tomorrow).
+- The range may span at most 366 days. `to <= from`, or a range longer than 366 days,
+  returns `422`.
+- Flat-rate subscription agent runs are not in `usage_log` and are not counted here.
+
+Response:
+
+```json
+{
+  "from": "2026-11-01",
+  "to": "2026-11-14",
+  "currency": "USD",
+  "total": {"calls": 412, "cost_usd": 3.817254, "tokens_in": 1834200, "tokens_out": 96150},
+  "by_capability": [
+    {"capability": "chat:deep", "calls": 37, "cost_usd": 2.91, "tokens_in": 1200000, "tokens_out": 40100},
+    {"capability": "chat:fast", "calls": 375, "cost_usd": 0.907254, "tokens_in": 634200, "tokens_out": 56050}
+  ],
+  "by_day": [
+    {"day": "2026-11-12", "calls": 200, "cost_usd": 2.0, "tokens_in": 900000, "tokens_out": 50000},
+    {"day": "2026-11-13", "calls": 212, "cost_usd": 1.817254, "tokens_in": 934200, "tokens_out": 46150}
+  ],
+  "limits": {"daily_cap_usd": 5.0, "monthly_cap_usd": 60.0, "today_usd": 1.817254, "month_usd": 3.817254}
+}
+```
+
+- `total`, `by_capability` and `by_day` share one shape: `calls`, `cost_usd`, `tokens_in`,
+  `tokens_out`, summed over the range. `by_capability` is sorted most expensive first;
+  `by_day` is in date order and lists only days with calls.
+- `limits` holds the project's caps (`null` when a cap is not set) and the spend for today and
+  for the current UTC month. These two figures are independent of `from` / `to`.
+- `currency` is always `"USD"`. Costs are rounded to 6 decimal places.
 
 ## Pinning a model (exact, 2026-10-03)
 
