@@ -1440,6 +1440,8 @@ its real spend of the current UTC month, so the counter does not restart from 0.
 keys read as 0 on first touch. Migration 019 (`api_keys.monthly_reset_at`) must be applied before deploy,
 see **Schema migrations** in [deploy-ops.md](deploy-ops.md).
 
+A project can read the spend these caps are checked against, split by capability and by day, from `GET /v1/usage` (see [api.md](api.md)).
+
 **Which window blocked.** `CostGuardError.window` is `"daily"` or `"monthly"` (global is
 daily). `llm_service.cap_message(window)` turns it into the client text: daily is
 `daily budget cap reached — retry after 00:00 UTC`, monthly is `monthly budget cap

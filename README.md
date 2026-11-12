@@ -70,7 +70,7 @@ build` / `up -d`, a drift gate (exit 12) and an all-services health gate of up
 to 180 s (exit 11). No rsync. Details in [docs/deploy-ops.md](docs/deploy-ops.md).
 
 Client endpoints: `/v1/jobs` (+ `GET /v1/jobs/{id}`), `/v1/deep`, `/v1/embed`,
-`/v1/transcribe`, `/v1/transcribe/jobs`, `/v1/decisions`. Sync `/v1/chat`
+`/v1/transcribe`, `/v1/transcribe/jobs`, `/v1/decisions`, `/v1/usage`. Sync `/v1/chat`
 returns 410.
 
 Domain: `https://aib.zapleo.com` (Cloudflare → nginx → broker on :8004).
