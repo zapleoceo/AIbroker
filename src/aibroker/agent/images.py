@@ -114,7 +114,9 @@ def export_generated_pngs(codex_home: str | None, workspace: str, since: float, 
     root = Path(codex_home) / GENERATED_DIR
     if root.is_symlink() or not root.is_dir():
         return []
-    # Codex 0.162.1 writes generated_images/<thread UUID>/<call ID>.png.
+    # Codex 0.162.1 writes generated_images/<thread UUID>/<call ID>.png; 0.167.1 writes
+    # generated_images/<thread UUID>/exec-<UUID>.png (image via code mode, job 613075). Only the
+    # thread directory is relied on, never the file name.
     # Never scan a sibling thread directory, including during a lease takeover.
     root = root / session_id
     if root.is_symlink() or not root.is_dir():
