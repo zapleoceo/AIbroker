@@ -961,7 +961,7 @@ mode, browser, computer use, apps; image generation stays on), so the model cann
 through a shell. `400 unsupported_for_subscription_model: no_shell` on a `claude-sub` model, on a
 model that is not a subscription route, and (`... no_shell with tools`) together with `tools`. It
 enters the Idempotency-Key payload hash only when `true`, so the hashes of requests without it do
-not change. It relies on the `NO_SHELL_FEATURES` list of `codex-cli` 0.162.1 (the `--disable`
+not change. It relies on the `NO_SHELL_FEATURES` list of `codex-cli` 0.162.1 (all eight names re-checked in 0.167.1) (the `--disable`
 feature names); recheck that list after every Codex CLI upgrade. Use it for image jobs: a model that skips the built-in image generation and draws
 with a script otherwise leaves a file it wrote itself.
 
