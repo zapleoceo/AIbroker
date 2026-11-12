@@ -444,7 +444,7 @@ async def test_cancel_terminates_a_hung_stand_in(tmp_path):
 
 def test_dockerfile_installs_the_pinned_codex_with_optional_deps_and_a_codex_home():
     df = (ROOT / "infra" / "agent-worker" / "Dockerfile").read_text(encoding="utf-8")
-    assert re.search(r"ARG CODEX_VERSION=0\.162\.1\n", df)
+    assert re.search(r"ARG CODEX_VERSION=0\.167\.1\n", df)
     assert "npm install -g @openai/codex@${CODEX_VERSION}" in df
     assert "omit=optional" not in df.replace("never --omit=optional", "")
     assert "CODEX_HOME=/home/app/codex-state" in df and "codex --version" in df
