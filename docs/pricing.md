@@ -47,6 +47,8 @@ The usage write after a successful paid call runs as its own tracked task behind
 
 * Gemini TTS (`gemini/gemini-3.8-flash-tts`, `speech`, raw `generateContent` with `responseModalities: ["AUDIO"]`, 2026-11-11): $0.50/M text tokens in + $9.00/M audio tokens out. Audio is 25 tokens per second, about $0.0135 per minute of speech. Google list price through 2026-12-31; it doubles from 2027-01-01 to $1.00 in / $18.00 out per M. `gemini/gemini-3.8-flash-lite-tts` is $0.50 / $6.00 per M (about $0.009 per minute). The pre-call reservation (`estimate_speech_cost`) is estimated from the text length; the booked cost comes from the reported token counts.
 
+* Gemini Live (`gemini/gemini-3.8-live`, `live`, WebSocket BidiGenerateContent, 2026-11-13): $0.75/M text tokens in, $4.50/M text tokens out, $3.00/M audio tokens in, $12.00/M audio tokens out. Audio rates are ~$0.005/min of input speech heard (~30 input tokens/s), ~$0.018/min of output speech spoken (~25 output tokens/s). Google list price (2026-11-13). The pre-call reservation (`estimate_live_cost`) assumes the session runs at full capacity (both sides speaking continuously) for the session ceiling (`LIVE_MAX_SESSION_S`=540 s); the booked cost (`live_cost`) is computed from the actual usage reported by Google, split by modality (`LiveUsage.text_in`, `audio_in`, `text_out`, `audio_out`). See `providers/gemini_live.py`.
+
 ## Models we register ourselves (`litellm.register_model`)
 
 | Model | Price | Source / date |

@@ -208,6 +208,12 @@ routing name in the tooltip.
 
 **Not live until the owner approves** (not part of the code change): add scope `llm:speech` to the paid gemini key labelled `demoniwwwe` and to the consuming project (SIM), optionally with a daily cost cap on that key. Until then `/v1/speech` returns `503`.
 
+## Gemini Live (live, 2026-11-13)
+
+`gemini` is the only provider in the `live` chain. Model `gemini/gemini-3.8-live`, Google's real-time speech-to-speech model launched on 2026-11-11 and the first GA release of Gemini Live (prior releases were preview). Transport `GeminiLiveTransport` (`providers/gemini_live.py`, raw WebSocket, not LiteLLM): bidirectional audio over `BidiGenerateContent`, caller's audio at 16 kHz mono 16-bit PCM little-endian, model's at 24 kHz mono 16-bit PCM little-endian. The session stays open for the duration of the call and is transcribed both directions (caller and model turns). Token cost is split by modality (text vs audio). Paid keys only; the decision is recorded in [history/provider-choices.md](history/provider-choices.md).
+
+**Not live until the owner approves** (not part of the code change): add scope `llm:live` to the paid gemini key labelled `demoniwwwe` and to the consuming project (SIM), optionally with a daily cost cap on that key. Until then `/v1/live` returns `4503` (4000 + 503).
+
 ## Adding a new provider
 
 One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).

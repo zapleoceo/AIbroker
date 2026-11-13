@@ -137,19 +137,25 @@ One provider = one registry entry; one attempt = one template. Design note:
 
 ```
 routes/proxy.py            thin: auth → scope → validate pin (400) → delegate; GET /v1/models
+  │  │
+  │  └─ routes/live.py             live_endpoint, LiveStart, SocketClient (WebSocket /v1/live)
   │
 services/llm_service.py    the WALKS: run_chat (chain / pinned steps / affine leg),
-  │                        run_embed, run_decision, run_transcribe, run_speech
+  │                        run_embed, run_decision, run_transcribe, run_speech, run_live
+  │
+services/live_service.py   live sessions: run_live, relay, LiveRequest, LiveOutcome, LiveFailed,
+  │                        LiveClient (receive, send_audio, send_event), Transcript (add, cleaned)
   ▼
 services/attempt.py        ONE key attempt: reserve → decrypt → call → release → gate →
   │                        record usage (+request_id) → re-pin affinity; one error path
   │   uses
-  ├─ providers/transport.py        Chat/Embed/Transcribe/Decide Protocols; call_llm/embed/
-  │    │                           transcribe/decide dispatch on ModelSpec.transport
+  ├─ providers/transport.py        Chat/Embed/Transcribe/Decide/Live Protocols; call_llm/embed/
+  │    │                           transcribe/decide/open_live dispatch on ModelSpec.transport
   │    ├─ litellm_client.py        litellm chat / embed / whisper / chat-audio
   │    ├─ local_vision.py          self-hosted Qwen3-VL (raw HTTP)
   │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
   │    ├─ gemini_tts.py            gemini-3.8-flash-tts (raw HTTP, /v1/speech)
+  │    ├─ gemini_live.py           GeminiLiveSession (setup, send_audio, send_text, events, close) / GeminiLiveTransport / connect_gemini_live (WebSocket, /v1/live)
   │    └─ decisions.py             OpenRouter decisions endpoint
   ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
   │    └─ providers/provider_specs/       one provider definition per module

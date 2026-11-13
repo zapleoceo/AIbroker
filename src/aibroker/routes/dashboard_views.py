@@ -295,7 +295,8 @@ _CAP_GROUPS: tuple[tuple[str, str, str], ...] = (
     ("embedding", "Embeddings", "Эмбеддинги"), ("decision", "Decisions", "Решения"),
 )
 _CAP_GROUP_OF = {"structured": "structured", "vision": "vision", "transcription": "voice",
-                 "speech": "voice", "embedding": "embedding", "decision": "decision"}
+                 "speech": "voice", "live": "voice", "embedding": "embedding",
+                 "decision": "decision"}
 
 
 def cap_group(capability: str) -> str:

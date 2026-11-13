@@ -18,7 +18,8 @@ SPEC = build_provider(
     "gemini", rank=30, max_keys=3, cooldown_base_s=60, adapter=_GeminiAdapter(),
     native_tools=True,
     transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport",
-                         "gemini_tts": "aibroker.providers.gemini_tts:GeminiTtsTransport"},
+                         "gemini_tts": "aibroker.providers.gemini_tts:GeminiTtsTransport",
+                         "gemini_live": "aibroker.providers.gemini_live:GeminiLiveTransport"},
     quota=Quota(req_per_day=1_500, doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
     # Free-quota providers (gemini 20/day/model, cohere 1000/month, mistral monthly,
     # openrouter :free ~50/day) probe via free unmetered key-list endpoints, never a
@@ -37,7 +38,8 @@ SPEC = build_provider(
               "prefilter": "gemini/gemini-2.5-flash-lite",
               "translate": "gemini/gemini-2.5-flash-lite",
               "transcription": "gemini/gemini-3.5-transcribe",
-              "speech": "gemini/gemini-3.8-flash-tts"},
+              "speech": "gemini/gemini-3.8-flash-tts",
+              "live": "gemini/gemini-3.8-live"},
     rotation={**dict.fromkeys(GEMINI_CHAT_LANES, GEMINI_CHAT_ROTATION),
               "vision": GEMINI_VISION_ROTATION},
     model_meta={   # dedicated ASR model needs raw generateContent (not litellm)
@@ -56,5 +58,13 @@ SPEC = build_provider(
             "capabilities": ("speech",),
             "input_usd_per_mtok": 0.50, "output_usd_per_mtok": 6.00,
             "note": "Gemini TTS lite; pin with model=gemini-3.8-flash-lite-tts"},
+        # Speech-to-speech (/v1/live, paid keys only). GA Live model (2026-09) per the
+        # 2026-11 pricing page: text $0.75 in / $4.50 out, audio $3 in / $12 out per 1M
+        # tokens -> about $0.005 per minute heard + $0.018 per minute spoken.
+        "gemini/gemini-3.8-live": {
+            "transport": "gemini_live", "pricing": "override", "register": False,
+            "input_usd_per_mtok": 0.75, "output_usd_per_mtok": 4.50,
+            "audio_input_usd_per_mtok": 3.00, "audio_output_usd_per_mtok": 12.00,
+            "note": "Gemini Live GA; 16 kHz PCM in, 24 kHz PCM out over WebSocket"},
     },
 )

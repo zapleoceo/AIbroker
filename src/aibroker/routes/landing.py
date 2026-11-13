@@ -439,8 +439,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">06</div>
         <h3 data-i18n="f6.t" data-en="Scope-gated projects" data-ru="Scope-проекты"></h3>
         <p data-i18n="f6.d"
-           data-en="Each project key carries allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision, llm:speech). Wrong scope → 403, no provider call."
-           data-ru="Каждый ключ проекта имеет allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision, llm:speech). Не тот scope → 403, провайдер не дёргается."></p>
+           data-en="Each project key carries allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision, llm:speech, llm:live). Wrong scope → 403, no provider call."
+           data-ru="Каждый ключ проекта имеет allowed_scopes (llm:chat, llm:edit, llm:deep, llm:vision, llm:audio, llm:embed, llm:decision, llm:speech, llm:live). Не тот scope → 403, провайдер не дёргается."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">07</div>
@@ -830,6 +830,8 @@ _LLMS_TXT = """# AIbroker
 - `POST /v1/decisions` — typed decisions (choice / score / yes-no), synchronous
 - `POST /v1/speech` — text → speech (Gemini TTS, paid keys, `llm:speech`), synchronous,
   base64 WAV in the response
+- `WS /v1/live` — real-time speech ↔ speech (Gemini Live, paid keys, `llm:live`): a phone
+  call over one WebSocket, 16 kHz PCM in, 24 kHz PCM out, transcript and cost at the end
 - `POST /v1/deep` + `GET /v1/deep/{job_id}` — async job API for
   `capability=chat:deep` (long-context/reasoning; latency observed up to
   ~8 min, past Cloudflare/nginx proxy timeouts — submit, then poll)

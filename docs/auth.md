@@ -17,6 +17,7 @@ Three independent layers of access. None overlap.
 - Stored in DB as `sha256(plain).hexdigest()` — not retrievable.
 - Plaintext prefix kept (first 12 chars) for ops display.
 - Required by every `/v1/*` client endpoint.
+- Looked up by `project_by_key()` (async helper, `auth.py`) to fetch the project row from DB.
 - Each project has an `allowed_scopes` list; a request that asks for a
   scope the project doesn't hold gets a 403.
 
@@ -47,6 +48,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs`. Re-checked on every read of an `agent:*` job and of `/v1/agent/runs` results, so revoking it closes existing results |
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
 | `llm:speech` | `/v1/speech` (`capability=speech`) — Gemini text → speech; paid gemini keys only |
+| `llm:live` | `/v1/live` (WebSocket) — Gemini Live real-time voice call; paid gemini keys only |
 
 Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
 `dashboard_scopes._KNOWN_SCOPES` (provider key forms), and this table.
