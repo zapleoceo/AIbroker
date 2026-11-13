@@ -142,7 +142,7 @@ class _Budget:
 async def _call(method: str, url: str, api_key: str, body: dict[str, Any] | None,
                 budget: _Budget, what: str) -> httpx.Response:
     """One HTTP exchange inside the budget. Errors carry the HTTP status + body so
-    classify_provider_error works (429 -> rate_limit, 401/403 -> auth); a 400 is the
+    classify_provider_error reads the status ("HTTP 429" -> rate_limit, 401/403 -> auth); a 400 is the
     request's own fault and becomes VideoRejected."""
     timeout = budget.left(what)
     try:
@@ -152,9 +152,9 @@ async def _call(method: str, url: str, api_key: str, body: dict[str, Any] | None
     except httpx.HTTPError as e:
         raise RuntimeError(f"gemini-video unreachable ({what}): {e}") from e
     if resp.status_code == 400:
-        raise VideoRejected(f"gemini-video 400: {resp.text[:300]}")
+        raise VideoRejected(f"gemini-video HTTP 400: {resp.text[:300]}")
     if resp.status_code >= 400:
-        raise RuntimeError(f"gemini-video {resp.status_code} ({what}): {resp.text[:200]}")
+        raise RuntimeError(f"gemini-video HTTP {resp.status_code} ({what}): {resp.text[:200]}")
     return resp
 
 

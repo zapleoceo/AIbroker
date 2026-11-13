@@ -134,7 +134,7 @@ async def test_every_key_failing_raises_video_failed(monkeypatch):
 
 
 async def test_a_refused_prompt_stops_the_walk_at_the_first_key(monkeypatch):
-    gen = AsyncMock(side_effect=VideoRejected("gemini-video 400: blocked"))
+    gen = AsyncMock(side_effect=VideoRejected("gemini-video HTTP 400: blocked"))
     calls = _wire(monkeypatch, picks=[_paid_key(1), _paid_key(2)], gen=gen)
     with pytest.raises(VideoRejected, match="blocked"):
         await _run()
