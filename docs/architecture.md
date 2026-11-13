@@ -141,7 +141,7 @@ routes/proxy.py            thin: auth → scope → validate pin (400) → deleg
   │  └─ routes/live.py             live_endpoint, LiveStart, SocketClient (WebSocket /v1/live)
   │
 services/llm_service.py    the WALKS: run_chat (chain / pinned steps / affine leg),
-  │                        run_embed, run_decision, run_transcribe, run_speech, run_live
+  │                        run_embed, run_decision, run_transcribe, run_speech, run_live, run_video
   │
 services/live_service.py   live sessions: run_live, relay, LiveRequest, LiveOutcome, LiveFailed,
   │                        LiveClient (receive, send_audio, send_event), Transcript (add, cleaned)
@@ -156,6 +156,7 @@ services/attempt.py        ONE key attempt: reserve → decrypt → call → rel
   │    ├─ gemini_asr.py            gemini-3.5-transcribe + in-transport fallback
   │    ├─ gemini_tts.py            gemini-3.8-flash-tts (raw HTTP, /v1/speech)
   │    ├─ gemini_live.py           GeminiLiveSession (setup, send_audio, send_text, events, close) / GeminiLiveTransport / connect_gemini_live (WebSocket, /v1/live)
+  │    ├─ gemini_video.py          gemini-omni-1.2-flash, Interactions API (raw HTTP, /v1/video/jobs): GeminiVideoTransport / generate_via_gemini
   │    └─ decisions.py             OpenRouter decisions endpoint
   ├─ providers/registry.py         ProviderSpec / ModelSpec / ProbeSpec + views (LEAF)
   │    └─ providers/provider_specs/       one provider definition per module
@@ -216,10 +217,10 @@ claimed chat job:
      key while the broker recorded $2; `is_timeout` gates this). Pre-processing
      rejects (429/auth/503) cost nothing and stay free.
    - `transport.call_llm` dispatches through the model's transport (litellm for
-     most providers, raw HTTP for `local` vision, gemini-ASR and gemini-TTS), applying the provider's
+     most providers, raw HTTP for `local` vision, gemini-ASR, gemini-TTS and gemini-video), applying the provider's
      **adapter** first (see below). Steps reserve → call → release → gate →
      record → affinity are ONE template, `services/attempt.run_attempt`, shared
-     by chat, vision, embedding, transcription, decisions and speech.
+     by chat, vision, embedding, transcription, decisions, speech and video.
    - `classify_provider_error`: 429 → cooldown (provider-signal first: the
      retry-after hint, then UTC midnight for daily quotas, then per-provider
      adaptive backoff — `routing/cooldown.py`); 401/403 → mark dead.
@@ -649,7 +650,7 @@ symbols are documented):
 - **Transports** (`providers/transport.py`): `transport_for`; implementations
   `LiteLLMTransport`, `LiteLLMChatAudioTransport` (`litellm_client.py`, with the functions
   `litellm_chat`, `litellm_embed`, `litellm_whisper`), `LocalVisionTransport`,
-  `GeminiAsrTransport`, `GeminiTtsTransport`, `OpenRouterDecisions`.
+  `GeminiAsrTransport`, `GeminiTtsTransport`, `GeminiVideoTransport`, `OpenRouterDecisions`.
 - **Cost / cache** : `register_price_overrides` (`providers/cost.py`), `cache_key_for`,
   `apply_cache_key` (`providers/prompt_cache.py`).
 - **Attempt template** (`services/attempt.py`): `Flow` (verdict of one attempt),

@@ -19,7 +19,8 @@ SPEC = build_provider(
     native_tools=True,
     transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport",
                          "gemini_tts": "aibroker.providers.gemini_tts:GeminiTtsTransport",
-                         "gemini_live": "aibroker.providers.gemini_live:GeminiLiveTransport"},
+                         "gemini_live": "aibroker.providers.gemini_live:GeminiLiveTransport",
+                         "gemini_video": "aibroker.providers.gemini_video:GeminiVideoTransport"},
     quota=Quota(req_per_day=1_500, doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
     # Free-quota providers (gemini 20/day/model, cohere 1000/month, mistral monthly,
     # openrouter :free ~50/day) probe via free unmetered key-list endpoints, never a
@@ -39,7 +40,8 @@ SPEC = build_provider(
               "translate": "gemini/gemini-2.5-flash-lite",
               "transcription": "gemini/gemini-3.5-transcribe",
               "speech": "gemini/gemini-3.8-flash-tts",
-              "live": "gemini/gemini-3.8-live"},
+              "live": "gemini/gemini-3.8-live",
+              "video": "gemini/gemini-omni-1.2-flash"},
     rotation={**dict.fromkeys(GEMINI_CHAT_LANES, GEMINI_CHAT_ROTATION),
               "vision": GEMINI_VISION_ROTATION},
     model_meta={   # dedicated ASR model needs raw generateContent (not litellm)
@@ -66,5 +68,13 @@ SPEC = build_provider(
             "input_usd_per_mtok": 0.75, "output_usd_per_mtok": 4.50,
             "audio_input_usd_per_mtok": 3.00, "audio_output_usd_per_mtok": 12.00,
             "note": "Gemini Live GA; 16 kHz PCM in, 24 kHz PCM out over WebSocket"},
+        # Video clips (/v1/video/jobs, paid keys only). Veo left the Gemini API on
+        # 2026-10-22; Omni Flash is Google's named replacement (Interactions API).
+        # 2026-11 pricing page: $1.50 in, $12 per 1M video output tokens; the tokens
+        # per second of video by resolution are in providers/gemini_video.py.
+        "gemini/gemini-omni-1.2-flash": {
+            "transport": "gemini_video", "pricing": "override", "register": False,
+            "input_usd_per_mtok": 1.50, "output_usd_per_mtok": 12.00,
+            "note": "Gemini Omni Flash video, 3-15 s with native audio; not live-verified"},
     },
 )

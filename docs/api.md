@@ -36,7 +36,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
   `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
 - **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
   not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
-  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe` and
+  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe`, `/v1/video/jobs` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
   (`GET /v1/jobs/{id}`), `/v1/models` and requests rejected for scope or body errors are free.
   A request counts once admitted, even if the provider then fails. Default scopes are `llm:chat` and
@@ -180,6 +180,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
+| `POST` | `/v1/video/jobs` | `VideoJobRequest` | `JobSubmitResponse` (**async** — `202` + `job_id`, poll `GET /v1/jobs/{id}`; clip as `video_base64`, see below) |
 | `WebSocket` | `/v1/live` | `LiveStart` + audio/text frames | streaming audio + transcript — see below |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 | `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
@@ -279,7 +280,7 @@ A transcription job runs under a finish-by budget: it stops starting new attempt
 `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
 `chat:deep`, `prefilter`, `structured`, `translate`, `vision`. (`transcription`
 goes through `/v1/transcribe/jobs`, `embedding` through `/v1/embed`, `decision`
-through `/v1/decisions`, `speech` through `/v1/speech`.)
+through `/v1/decisions`, `speech` through `/v1/speech`, `video` through `/v1/video/jobs`.)
 
 `chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
 Claude Sonnet leads the chain on its own daily cap (chain: anthropic → gemini →
@@ -396,7 +397,7 @@ GET /v1/jobs/123
 Every poll body also carries `trace_id` and `labels` (see below), and `cancel_requested: true` while a
 cancel is pending on a running job.
 
-**Caps apply to `/v1/embed`, `/v1/transcribe`, `/v1/decisions` (2026-09-07), `/v1/speech` (2026-11-11), and `/v1/live` (2026-11-13).** Until
+**Caps apply to `/v1/embed`, `/v1/transcribe`, `/v1/decisions` (2026-09-07), `/v1/speech` (2026-11-11), `/v1/live` (2026-11-13), and `/v1/video/jobs` (2026-11-14).** Until
 then the cost guard had exactly one caller — the chat path — so a project could
 spend past its daily cap through embeddings or transcription, and a PAID
 whisper key was always booked at $0.00 (its own cap was decorative). These
@@ -728,6 +729,41 @@ live 2026-11-11); `audio_s` is the duration in seconds.
 - **Timeout.** `GEMINI_TTS_TIMEOUT_S` (default 60 s).
 - **Errors.** `403` without `llm:speech`; `422` invalid body or unknown voice; `400` pinned model that does not serve speech; `503` no paid key carries `llm:speech`; `502` every key failed, or a spent cap.
 
+### `/v1/video/jobs` — prompt → video clip (2026-11-14)
+
+Asynchronous only: `202` with a `job_id` at once, then poll `GET /v1/jobs/{id}`. Gemini Omni Flash
+(`gemini/gemini-omni-1.2-flash`) through the raw Interactions endpoint. Submit is `video_submit`
+(`routes/proxy.py`); the job runs `run_video` (`services/video_service.py`). Chain: `gemini` only
+(`chains.CAPABILITY_CHAINS["video"]`). Scope `llm:video`. Veo is no longer served on the Gemini API;
+see [history/provider-choices.md](history/provider-choices.md).
+
+```json
+POST /v1/video/jobs
+{"prompt": "A paper boat drifts down a rain-soaked street at dusk", "duration_s": 5,
+ "aspect_ratio": "16:9", "resolution": "360p", "workflow": "video-test"}
+```
+
+Body (`VideoJobRequest`):
+- `prompt` (required): 1–4000 characters, not blank.
+- `duration_s`: whole seconds, 3–15; default `5`.
+- `aspect_ratio`: `9:16` (default) or `16:9`.
+- `resolution`: `720p` (default) or `360p`. 360p costs about a third of 720p.
+- `image_base64` (optional): a reference image (first frame / subject), at most 4 MB decoded. `reference_image()` decodes and validates it; invalid base64, empty or oversize is `400`. `image_mime`: `image/jpeg` (default), `image/png` or `image/webp`.
+- `model` (optional): a pin, as for the other lanes. Only `gemini/gemini-omni-1.2-flash` serves video; a pin to a model that does not is `400`.
+- `workflow` (optional): the usual tag.
+
+Response `202`: `{job_id, poll_url, poll_after_s: 10}`.
+
+Poll `GET /v1/jobs/{id}` as usual. A finished video job has `text: null` and carries `video_base64` (the MP4, base64), `mime_type` (`video/mp4`) and `video_s` (clip length in seconds), plus the usual `provider`, `model`, `model_served`, `cost_usd`, `latency_ms`, `key_label` and `request_id`. The queued request keeps the prompt and reference image in its `video` payload (`video_job_payload` / `video_request_from_job`); the dispatcher's `video` branch runs it through `_run_video_job`.
+
+- **Paid keys only.** `run_video` rotates gemini keys with `tier='paid'` and scope `llm:video`; a free key is never picked. With no such key the job is requeued like any job with no capacity.
+- **Caps apply.** The reservation is `estimate_video_cost`, through `run_attempt`. A spent project or global cap ends the job with the normal budget message.
+- **Retries.** `VideoRejected` (HTTP 400, a blocked prompt, or an answer with no clip) ends the job in `error` at once: no other key, no retry. `VideoFailed` (every key failed) is retried at most `VIDEO_MAX_RETRIES` (2) times instead of the usual eight, because every finished generation is billed.
+- **Timeout.** One ceiling, `GEMINI_VIDEO_TIMEOUT_S` (default 420 s), covers the create call, polling of a still-running interaction, the wait for the hosted file to become `ACTIVE`, and the MP4 download. Poll interval: `GEMINI_VIDEO_POLL_S` (default 5 s). Running out of time raises a plain `RuntimeError`, not `TimeoutError`, so the paid key (shared with speech and live) is not cooled.
+- **Output.** Clips always carry a native audio track (the API has no switch for it) and Google's invisible SynthID watermark.
+- **Price.** About $0.12 for a 5 s 360p clip, about $0.35 for a 5 s 720p clip. See [pricing.md](pricing.md).
+- **Errors.** `403` without `llm:video`; `422` invalid body; `400` bad image or a pinned model that does not serve video. Generation failures show on the job, not at submit.
+
 ### `/v1/live` — real-time voice call (2026-11-13)
 
 WebSocket-based real-time speech-to-speech via Gemini Live. The caller streams audio and receives
@@ -886,6 +922,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/decisions` | `llm:decision` |
 | `/v1/speech` | `llm:speech` |
 | `/v1/live` | `llm:live` |
+| `/v1/video/jobs` | `llm:video` |
 | `/v1/usage` | none (any project key) |
 
 ## Admin (X-Admin-Key required)
@@ -965,7 +1002,7 @@ Implementation: `services/project_usage.py` builds the response in `project_usag
 
 ## Pinning a model (exact, 2026-10-03)
 
-`model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`)
+`model` in the body of `POST /v1/jobs` (`/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/video/jobs`)
 pins **exactly that model**. Valid values are the ids and names listed by
 `GET /v1/models` (below): a routing id (`"gemini/gemini-2.5-flash"`) or a bare
 canonical name (`"gpt-oss-120b"`, which several providers serve).
@@ -1038,7 +1075,7 @@ Non-subscription rows have neither field. See [subscription-models.md](subscript
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription and live, and
-`["text"]` for chat, embedding and speech. It is `null` when the lane does not define
+`["text"]` for chat, embedding and speech, `["text", "image"]` for video. It is `null` when the lane does not define
 one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
@@ -1058,7 +1095,7 @@ a chat capability and cannot be combined with `response_format`.
 subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
-routes, `["audio"]` for speech and live routes, `null` otherwise.
+routes, `["audio"]` for speech and live routes, `["video"]` for video, `null` otherwise.
 
 `POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
 without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code

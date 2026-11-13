@@ -53,6 +53,12 @@ from aibroker.services.llm_service import (
     run_chat,
     run_transcribe,
 )
+from aibroker.services.video_service import (
+    VIDEO_FIELD,
+    VIDEO_MAX_RETRIES,
+    run_video,
+    video_request_from_job,
+)
 from aibroker.telemetry.notifier import alert
 from aibroker.telemetry.request_context import job_request_id, request_scope
 
@@ -318,6 +324,16 @@ async def _run_transcription_job(project: ProjectRow, req: dict[str, Any]):  # p
     )
 
 
+async def _run_video_job(project: ProjectRow, req: dict[str, Any]):  # pragma: no cover — exercised via the Postgres drain_once tests
+    """Async video clip: rebuild the queued request and walk the paid video keys.
+    A VideoRejected (ValueError) ends the job at once; VideoFailed is retried at
+    most VIDEO_MAX_RETRIES times, because every finished generation is billed."""
+    return await run_video(
+        project=project, request=video_request_from_job(req[VIDEO_FIELD]),
+        model=req.get("model"), workflow=req.get("workflow"),
+    )
+
+
 async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     """Run one claimed job to a terminal state (done) or re-queue/fail it.
     Reached only from a real claimed row → Postgres-only via drain_once tests
@@ -353,6 +369,8 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
         with request_scope(job_request_id(row.id)):
             if row.capability == "transcription":
                 outcome = await _run_transcription_job(project, req)
+            elif row.capability == "video":
+                outcome = await _run_video_job(project, req)
             else:
                 outcome = await run_chat(
                     project=project, capability=row.capability,
@@ -378,8 +396,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                            error_message=f"invalid job ({type(e).__name__}): {e}",
                            expect_started_at=row.started_at)
             return
-        await _requeue_or_fail(row.id, row.retry_count, f"run failed: {e}",
-                                expect_started_at=row.started_at)
+        await _requeue_or_fail(
+            row.id, row.retry_count, f"run failed: {e}", expect_started_at=row.started_at,
+            max_retries=VIDEO_MAX_RETRIES if row.capability == "video" else None)
         return
     if outcome is CANCELLED:
         await _finish(row.id, status="cancelled", expect_started_at=row.started_at)
@@ -435,6 +454,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             "tool_calls": getattr(outcome, "tool_calls", None),
             "finish_reason": getattr(outcome, "finish_reason", None),
             "refusal": getattr(outcome, "refusal", None),
+            # Video only: what `result_text` (base64) decodes to, and its length.
+            "mime_type": getattr(outcome, "mime_type", None),
+            "video_s": getattr(outcome, "video_s", None),
         },
         expect_started_at=row.started_at,
     )

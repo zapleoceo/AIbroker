@@ -53,6 +53,7 @@ from aibroker.config import get_settings
 from aibroker.providers import catalog
 from aibroker.providers.catalog import UnknownModel
 from aibroker.providers.decisions import DecisionRequestInvalid, validate_questions
+from aibroker.providers.gemini_video import VIDEO_MAX_S, VIDEO_MIN_S, VideoRequest
 from aibroker.providers.job_contract import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_TEMPERATURE,
@@ -99,6 +100,7 @@ from aibroker.services.project_usage import Bucket, default_range, project_usage
 from aibroker.services.request_cap import admit_request
 from aibroker.services.speech_service import SpeechFailed, run_speech
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
+from aibroker.services.video_service import VIDEO_FIELD, video_job_payload
 from aibroker.services.vision_payload import inline_image_problem
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 
@@ -633,6 +635,10 @@ class DeepJobResponse(BaseModel):
     finish_reason: str | None = None
     refusal: str | None = None
     files: list[dict[str, Any]] | None = None
+    video_base64: str | None = Field(
+        None, description="video jobs only: the finished clip (base64); `text` stays null")
+    mime_type: str | None = Field(None, description="video jobs only, e.g. video/mp4")
+    video_s: float | None = Field(None, description="video jobs only: clip length, seconds")
     # Vision only, and only when the self-hosted `local` provider answered:
     # what the image was, and what shape `text` is in. Additive on purpose —
     # `text` stays prose for every provider, so a client that only reads `text`
@@ -797,8 +803,11 @@ def _job_response(row: Any, files: Any = _SYNC_FILES) -> DeepJobResponse:
             tool_calls=[call] if call else None,
             finish_reason="tool_calls" if call else None,
         )
+    is_video = getattr(row, "capability", None) == "video"
     return DeepJobResponse(
-        job_id=row.id, status="done", text=row.result_text,
+        job_id=row.id, status="done", text=None if is_video else row.result_text,
+        video_base64=row.result_text if is_video else None,
+        mime_type=meta.get("mime_type"), video_s=meta.get("video_s"),
         provider=meta.get("provider"), model=meta.get("model"),
         requested_model=requested_model,
         model_served=meta.get("model_served"),
@@ -1064,6 +1073,82 @@ async def transcribe_submit(
     return JobSubmitResponse(  # pragma: no cover — same
         job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
     )
+
+
+# ─── video — prompt → short clip (Gemini Omni, paid keys only, async) ──────
+
+VIDEO_MAX_PROMPT_CHARS = 4000
+# A reference image rides in the job row as base64; 4 MB decoded keeps the row small.
+VIDEO_MAX_IMAGE_BYTES = 4 * 1024 * 1024
+
+
+class VideoJobRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=VIDEO_MAX_PROMPT_CHARS)
+    duration_s: int = Field(5, ge=VIDEO_MIN_S, le=VIDEO_MAX_S,
+                            description="clip length in whole seconds")
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    resolution: Literal["360p", "720p"] = Field(
+        "720p", description="360p costs about a third of 720p")
+    image_base64: str | None = Field(
+        None, description="optional reference image (first frame / subject), base64")
+    image_mime: Literal["image/jpeg", "image/png", "image/webp"] = "image/jpeg"
+    model: str | None = Field(None, description="override the lane model "
+                                                "(gemini-omni-1.2-flash by default)")
+    workflow: str | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def _nonblank(_cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("prompt must not be blank")
+        return v
+
+    def reference_image(self) -> bytes | None:
+        """The decoded reference image, or None; ValueError names what is wrong."""
+        if not self.image_base64:
+            return None
+        try:
+            raw = base64.b64decode(self.image_base64, validate=True)
+        except ValueError as e:
+            raise ValueError("image_base64 is not valid base64") from e
+        if not raw or len(raw) > VIDEO_MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"image must be 1 byte to {VIDEO_MAX_IMAGE_BYTES // (1024 * 1024)} MB")
+        return raw
+
+
+@router.post("/video/jobs", response_model=JobSubmitResponse,
+             status_code=status.HTTP_202_ACCEPTED)
+async def video_submit(
+    body: VideoJobRequest,
+    response: Response,
+    ctx: ProjectCtx = Depends(require_project),
+) -> JobSubmitResponse:
+    """Prompt (+ optional reference image) → short video clip, ASYNC ONLY: returns a
+    job_id at once, poll GET /v1/jobs/{id}; a finished job carries `video_base64`.
+
+    Gemini Omni Flash on paid keys carrying `llm:video`. A generation takes tens of
+    seconds to minutes, so there is no synchronous variant. A refused prompt ends
+    the job in `error` without retries; each finished clip is billed."""
+    _require_capability_scope(ctx, scope_for("video"))
+    _validate_pin(body.model, "video")
+    try:
+        image = body.reference_image()
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    await admit_request(ctx.project)
+    request = VideoRequest(
+        prompt=body.prompt, duration_s=body.duration_s, aspect_ratio=body.aspect_ratio,
+        resolution=body.resolution, image=image,
+        image_mime=body.image_mime if image else None)
+    job_id = await submit_job(
+        project=ctx.project, capability="video",
+        messages=[], model=body.model, max_tokens=0, temperature=0.0,
+        response_format=None, workflow=body.workflow,
+        extra={VIDEO_FIELD: video_job_payload(request)},
+    )
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
 
 
 @router.get("/jobs/{job_id}", response_model=DeepJobResponse)
