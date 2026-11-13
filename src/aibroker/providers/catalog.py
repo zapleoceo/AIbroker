@@ -146,7 +146,7 @@ def input_modalities(spec: ModelSpec) -> list[str] | None:
     """Input types accepted by the Broker on this model's configured lanes."""
     if "vision" in spec.capabilities:
         return ["text", "image"]
-    if "transcription" in spec.capabilities:
+    if "transcription" in spec.capabilities or "live" in spec.capabilities:
         return ["audio"]
     if "speech" in spec.capabilities:
         return ["text"]
@@ -164,7 +164,7 @@ def output_modalities(spec: ModelSpec) -> list[str] | None:
 
     if spec.pricing == "subscription" and subscription_image_output_verified(spec.id):
         return ["text", "image"]
-    if "speech" in spec.capabilities:
+    if "speech" in spec.capabilities or "live" in spec.capabilities:
         return ["audio"]
     if spec.pricing == "subscription" or "transcription" in spec.capabilities or any(
         capability_family(cap) == "chat" for cap in spec.capabilities

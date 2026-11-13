@@ -1037,7 +1037,7 @@ a live test proved that route; it never decides selection, which is still `avail
 Non-subscription rows have neither field. See [subscription-models.md](subscription-models.md).
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
-`["text", "image"]` for a vision lane, `["audio"]` for transcription, and
+`["text", "image"]` for a vision lane, `["audio"]` for transcription and live, and
 `["text"]` for chat, embedding and speech. It is `null` when the lane does not define
 one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
@@ -1058,7 +1058,7 @@ a chat capability and cannot be combined with `response_format`.
 subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
-routes, `["audio"]` for speech routes, `null` otherwise.
+routes, `["audio"]` for speech and live routes, `null` otherwise.
 
 `POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
 without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code
