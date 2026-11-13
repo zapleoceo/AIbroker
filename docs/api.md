@@ -180,6 +180,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
+| `WebSocket` | `/v1/live` | `LiveStart` + audio/text frames | streaming audio + transcript — see below |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 | `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
 
@@ -395,18 +396,18 @@ GET /v1/jobs/123
 Every poll body also carries `trace_id` and `labels` (see below), and `cancel_requested: true` while a
 cancel is pending on a running job.
 
-**Caps apply to `/v1/embed`, `/v1/transcribe` and `/v1/decisions` too (2026-09-07), and to `/v1/speech` (2026-11-11).** Until
+**Caps apply to `/v1/embed`, `/v1/transcribe`, `/v1/decisions` (2026-09-07), `/v1/speech` (2026-11-11), and `/v1/live` (2026-11-13).** Until
 then the cost guard had exactly one caller — the chat path — so a project could
 spend past its daily cap through embeddings or transcription, and a PAID
-whisper key was always booked at $0.00 (its own cap was decorative). Both
+whisper key was always booked at $0.00 (its own cap was decorative). These
 endpoints now reserve before the call and release after, like chat; a spent
 project/global cap ends the walk with the same `daily budget cap reached —
-retry after 00:00 UTC` message (HTTP 503 on these two sync endpoints), a
+retry after 00:00 UTC` message (HTTP 503 on sync endpoints), a
 per-key cap just moves to the provider's next key. Whisper calls are priced
 per audio-minute (`whisper_cost`; the pre-call reservation uses
 `estimate_transcription_cost`) (`openai/whisper-1` $0.006/min; groq whisper at list) from
 the provider-reported duration, or a bitrate estimate when it is absent. Free
-keys are unchanged: $0, no reservation.
+keys are unchanged: $0, no reservation. Live calls reserve `estimate_live_cost` for the whole session ceiling and book `live_cost` after the call ends.
 
 **Monthly caps (2026-10-13).** `monthly_cost_cap_usd`, on the project and on its keys, is enforced on every reserving endpoint (`/v1/jobs`, `/v1/embed`, `/v1/transcribe`, `/v1/decisions`) over the current UTC calendar month. It was stored but ignored before. `0` means the same as for the daily cap: free providers only at project level, and that key is excluded at key level. A spent monthly cap returns `monthly budget cap reached — retry after the 1st of next month, 00:00 UTC` (a spent daily cap still returns `daily budget cap reached — retry after 00:00 UTC`). On the monthly text, stop resubmitting until the first day of the next UTC month.
 
@@ -727,6 +728,59 @@ live 2026-11-11); `audio_s` is the duration in seconds.
 - **Timeout.** `GEMINI_TTS_TIMEOUT_S` (default 60 s).
 - **Errors.** `403` without `llm:speech`; `422` invalid body or unknown voice; `400` pinned model that does not serve speech; `503` no paid key carries `llm:speech`; `502` every key failed, or a spent cap.
 
+### `/v1/live` — real-time voice call (2026-11-13)
+
+WebSocket-based real-time speech-to-speech via Gemini Live. The caller streams audio and receives
+the model's voice + transcript in real time. Chain: `gemini` only. Scope `llm:live`.
+
+**Protocol** (one socket = one call; `X-Project-Key` header on handshake):
+
+```
+client → {"type": "start", "voice": "Kore", "system": "...", "language": "ru-RU",
+          "greeting": "...", "model": null, "workflow": "call", "max_seconds": 300}
+broker → {"type": "ready", "model", "voice", "input_rate_hz": 16000,
+          "output_rate_hz": 24000, "max_seconds"}
+client → binary frames: audio 16 kHz mono 16-bit PCM little-endian
+         {"type": "text", "text": "..."}  (optional typed turn)
+         {"type": "end"}                  (hang up; closing the socket does too)
+broker → binary frames: audio 24 kHz mono 16-bit PCM little-endian
+         {"type": "transcript", "role": "user" | "assistant", "text": "..."}
+         {"type": "interrupted"}         (caller talked over audio)
+         {"type": "turn_complete"}
+broker → {"type": "done", "transcript": [...], "duration_s", "tokens_in", "tokens_out",
+          "cost_usd", "request_id", "end_reason"}, then close 1000.
+```
+
+Errors: `{"type": "error", "code": ..., "detail": "..."}` then close with `4000 + HTTP status`:
+- `4400` (400) — bad request
+- `4401` (401) — invalid/missing `X-Project-Key`
+- `4403` (403) — project lacks scope `llm:live`
+- `4408` (408) — no `start` message within `LIVE_START_TIMEOUT_S`
+- `4422` (422) — invalid start message body
+- `4429` (429) — project cap exhausted
+- `4502` (502) — every paid key failed to open a session (inner detail: key auth, model error, timeout)
+- `4503` (503) — no paid key carries `llm:live` on this project
+
+**Message fields:**
+
+- **start.** `voice` (one of 30 prebuilt voices, default `Kore`); `system` (system prompt, max 60k chars);
+  `language` (BCP-47, e.g. `ru-RU`); `greeting` (optional typed first user turn — model speaks first);
+  `model` (optional pin); `workflow` (optional tag); `max_seconds` (session ceiling in seconds, default/max `LIVE_MAX_SESSION_S`=540).
+- **ready.** `input_rate_hz` (16000), `output_rate_hz` (24000), `max_seconds` (effective ceiling after constraints).
+- **transcript.** `role` (`user`|`assistant`), `text` (one fragment; consecutive same-role fragments are merged in the final transcript).
+- **done.** `transcript` (cleaned: fragments merged, whitespace normalized, blank turns dropped); `model`, `voice`, `duration_s` (wall-clock), `tokens_in`, `tokens_out`, `cost_usd`, `key_label`, `request_id` (usage row id), `end_reason` (`caller_hung_up`, `caller_ended`, `upstream_closed`, `upstream_error`, `time_limit`, `upstream_go_away`).
+
+**Implementation:** The broker dispatches to the `LiveTransport` protocol on `ModelSpec.transport`, with `open_live()` opening a session. The Gemini transport is `GeminiLiveTransport` (`providers/gemini_live.py`).
+
+**Constraints:**
+
+- **Paid keys only.** The lane rotates gemini keys with `tier='paid'` and scope `llm:live` (`run_live`). A free key is never picked.
+- **Session ceiling.** `LIVE_MAX_SESSION_S` (default 540 s / 9 min). Google's Live socket closes with `goAway` after ~10 min; we enforce a hard wall-clock timeout at the session ceiling. Reservation covers the full ceiling.
+- **Key rotation only while connecting.** Once the session is set up (`ready` sent), the caller's audio has committed to that key. An upstream failure later ends the call (booked with usage so far) instead of silently rotating to another key.
+- **Costs split by modality.** Text tokens in/out are billed at the text rate; audio tokens in/out at the audio rate. See [pricing.md](pricing.md).
+- **Connect timeout.** `LIVE_CONNECT_TIMEOUT_S` (default 15 s) per key attempt (socket open + setup).
+- **Errors.** `403` without `llm:live`; `422` invalid start body or unknown voice; `400` pinned model that does not serve live; `408` start message did not arrive in time; `429` project/global cap exhausted; `503` no paid key carries `llm:live`; `502` all paid keys failed to open.
+
 ### Vision (`?capability=vision`)
 
 Submitted through the generic async job endpoints
@@ -831,6 +885,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/transcribe` | `llm:audio` |
 | `/v1/decisions` | `llm:decision` |
 | `/v1/speech` | `llm:speech` |
+| `/v1/live` | `llm:live` |
 | `/v1/usage` | none (any project key) |
 
 ## Admin (X-Admin-Key required)

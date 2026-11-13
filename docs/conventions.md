@@ -21,7 +21,8 @@ src/aibroker/
     shared_state.py    Redis-shared affinity + saturation (fail-open)
     affinity.py        key pin + route pin (project, workflow, capability, pin)
   services/
-    llm_service.py     run_chat/run_embed/run_decision/run_transcribe — the WALKS
+    llm_service.py     run_chat/run_embed/run_decision/run_transcribe/run_speech/run_live — the WALKS
+    live_service.py    relay — relay audio both ways; LiveRequest/LiveOutcome/Transcript
     attempt.py         the ONE key-attempt template (reserve→call→release→gate→record→affinity)
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
@@ -35,17 +36,18 @@ src/aibroker/
     specs.py           ordered registration of provider definitions
     provider_specs/    one build_provider(...) definition per provider
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
-    transport.py       Chat/Embed/Transcribe/Decide Protocols + registered dispatch
+    transport.py       Chat/Embed/Transcribe/Decide/Live Protocols + registered dispatch
     litellm_client.py  litellm chat/embed/whisper transport
-    local_vision.py / gemini_asr.py / gemini_tts.py   raw-HTTP transports
-    cost.py            pricing (litellm map + registry overrides, per-minute audio)
+    local_vision.py / gemini_asr.py / gemini_tts.py / gemini_live.py   raw-HTTP/WebSocket: GeminiLiveSession / GeminiLiveTransport, connect_gemini_live; LiveEvent, ParsedMessage, LiveClosed, WebSocketLike, setup_message, audio_message, text_message, parse_server_message
+    cost.py            pricing (litellm map + registry overrides, per-minute audio, live cost)
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
     health_probes.py   Cheapest call per provider
     model_scores.py    Artificial Analysis Intelligence Index: static table, exact name match only
   routes/
     health.py          / + /healthz + /v1/health
-    proxy.py           /v1/jobs + /v1/embed
+    proxy.py           /v1/jobs + /v1/embed + /v1/speech
+    live.py            /v1/live (WebSocket) — live_endpoint
     jobs_control.py    GET /v1/jobs?label.k=v + /v1/jobs/{id}/cancel + /v1/jobs/cancel
     compare.py         /ask2many public compare page + /ask2many/api/* (no login)
     admin.py           /admin/* (X-Admin-Key)

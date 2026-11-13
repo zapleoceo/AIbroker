@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     GEMINI_ASR_TIMEOUT_S: float = 60.0
     # Gemini TTS (/v1/speech): a voice note of a few sentences renders in ~3-10 s.
     GEMINI_TTS_TIMEOUT_S: float = 60.0
+    # Gemini Live (/v1/live): connect + setup ceiling per key attempt, and the
+    # longest call. Google closes one Live WebSocket after ~10 min (goAway first),
+    # so a call is capped below that; the reservation covers the whole ceiling.
+    LIVE_CONNECT_TIMEOUT_S: float = 15.0
+    LIVE_MAX_SESSION_S: float = 540.0
+    # The caller must send its `start` message this soon after the socket opens.
+    LIVE_START_TIMEOUT_S: float = 10.0
 
     # How long a request family stays pinned to the (provider, model, key) whose
     # provider-side prompt cache is warm (routing/affinity.py). Default 2h.

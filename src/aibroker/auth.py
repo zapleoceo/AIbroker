@@ -73,6 +73,19 @@ async def require_admin(
     return AdminCtx()
 
 
+async def project_by_key(plaintext: str) -> ProjectRow | None:
+    """The active project owning this key (HTTP routes and the /v1/live WebSocket)."""
+    h = hash_project_key(plaintext)
+    async with get_session() as s:
+        return (
+            await s.execute(
+                select(ProjectRow).where(
+                    ProjectRow.project_key_hash == h, ProjectRow.is_active.is_(True)
+                )
+            )
+        ).scalar_one_or_none()
+
+
 async def require_project(
     request: Request,
     x_project_key: str | None = Header(None, alias="X-Project-Key"),
@@ -82,15 +95,7 @@ async def require_project(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="X-Project-Key required",
         )
-    h = hash_project_key(x_project_key)
-    async with get_session() as s:
-        proj = (
-            await s.execute(
-                select(ProjectRow).where(
-                    ProjectRow.project_key_hash == h, ProjectRow.is_active.is_(True)
-                )
-            )
-        ).scalar_one_or_none()
+    proj = await project_by_key(x_project_key)
     if proj is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid project key"

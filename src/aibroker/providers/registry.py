@@ -56,6 +56,9 @@ class ModelSpec:
     input_usd_per_mtok: float | None = None
     output_usd_per_mtok: float | None = None
     cache_read_usd_per_mtok: float | None = None
+    # Audio tokens priced apart from text (Gemini Live); None -> the text price above.
+    audio_input_usd_per_mtok: float | None = None
+    audio_output_usd_per_mtok: float | None = None
     usd_per_minute: float | None = None
     litellm_extra: Mapping[str, Any] = field(default_factory=dict)
     register: bool = True                      # push an "override" into litellm's map

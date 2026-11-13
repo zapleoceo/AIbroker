@@ -96,6 +96,7 @@ one-line rationale per entry; the evidence is here. Entries are grouped by subje
   on PAID keys only so spend lands on the prepaid account. A $0 free-tier key is NOT
   refused (200 OK, cost booked), so this is a routing choice, not an error workaround.
 - **2026-11-11 speech lane** (`gemini-3.8-flash-tts`, `POST /v1/speech`): the owner asked for the persona voice via the newest Google TTS on the paid account. Model: `gemini/gemini-3.8-flash-tts`, the newest non-preview TTS in the `ListModels` of our keys on 2026-11-11; `gemini-3.8-flash-lite-tts` is pinnable (`model`) as the cheaper option ($0.50 / $6.00 per M vs $0.50 / $9.00). Served on PAID gemini keys only, behind its own scope `llm:speech` (not in the default scopes), so the spend lands on the prepaid account and a free pool key never answers it. Single-provider chain (`["gemini"]`): no fallback.
+- **2026-11-13 live lane** (`gemini-3.8-live`, `WebSocket /v1/live`): the owner wants persona phone calls via Google speech-to-speech. Gemini Live (GA, 2026-11-11) is Google's real-time speech-to-speech model. Serves on PAID gemini keys only, behind its own scope `llm:live` (not in the default scopes), so the spend lands on the prepaid account and a free pool key never answers it. Single-provider chain (`["gemini"]`): no fallback. Token usage split by modality (text vs audio); costs per 1M: text $0.75 in / $4.50 out, audio $3.00 in / $12.00 out.
 
 ## JSON reliability
 

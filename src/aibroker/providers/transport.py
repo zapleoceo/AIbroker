@@ -8,7 +8,8 @@ dispatch through it, so no caller special-cases a provider.
 
 Return convention for every method: `(payload, meta)` where meta carries at least
 model, model_served, tokens_in, tokens_out, cost_usd, latency_ms.
-`synthesize` (text -> speech) returns audio bytes as its payload.
+`synthesize` (text -> speech) returns audio bytes as its payload; `open_live`
+(speech <-> speech) returns a streaming session instead.
 """
 from __future__ import annotations
 
@@ -40,6 +41,14 @@ class TranscribeTransport(Protocol):
 class SpeechTransport(Protocol):
     async def synthesize(self, *, model: str, text: str, voice: str, style: str | None,
                          api_key: str) -> tuple[bytes, dict[str, Any]]: ...
+
+
+@runtime_checkable
+class LiveTransport(Protocol):
+    """Opens a set-up speech-to-speech session (providers/gemini_live.py); the
+    session object carries the audio both ways and the running usage."""
+    async def open_live(self, *, model: str, voice: str, system: str, language: str | None,
+                        api_key: str, timeout: float) -> Any: ...
 
 
 @runtime_checkable
@@ -124,6 +133,15 @@ async def synthesize(*, model: str, text: str, voice: str, style: str | None,
     """Text -> audio bytes through the model's transport (meta carries mime_type)."""
     return await transport_for(model).synthesize(
         model=model, text=text, voice=voice, style=style, api_key=api_key)
+
+
+async def open_live(*, model: str, voice: str, system: str, language: str | None,
+                    api_key: str, timeout: float) -> Any:
+    """A connected live session through the model's transport (no payload/meta pair:
+    the session streams, and its usage is read when it ends)."""
+    return await transport_for(model).open_live(
+        model=model, voice=voice, system=system, language=language, api_key=api_key,
+        timeout=timeout)
 
 
 async def decide(*, model: str, state: str, questions: dict[str, Any],

@@ -35,6 +35,7 @@ Capability = Literal[
     "translate",
     "decision",
     "speech",
+    "live",
 ]
 
 
@@ -73,6 +74,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "decision": ["openrouter"],
     # Text-to-speech: Gemini TTS on PAID keys only (see run_speech).
     "speech": ["gemini"],
+    # Real-time speech-to-speech (phone calls): Gemini Live, PAID keys only (see run_live).
+    "live": ["gemini"],
 }
 
 
@@ -99,6 +102,9 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     # Paid lane, explicit opt-in per project AND per key: only keys carrying
     # llm:speech are ever picked, so a free pool key never serves it.
     "speech": "llm:speech",
+    # Its own opt-in scope: a call bills minutes of audio both ways, a far larger
+    # spend per request than a voice note, so llm:speech does not imply it.
+    "live": "llm:live",
 }
 
 
