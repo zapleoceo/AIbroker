@@ -214,6 +214,12 @@ routing name in the tooltip.
 
 **Not live until the owner approves** (not part of the code change): add scope `llm:live` to the paid gemini key labelled `demoniwwwe` and to the consuming project (SIM), optionally with a daily cost cap on that key. Until then `/v1/live` returns `4503` (4000 + 503).
 
+## Gemini Omni video (video, 2026-11-14)
+
+`gemini` is the only provider in the `video` chain. Model `gemini/gemini-omni-1.2-flash` (`transport: gemini_video`, `pricing: override`, not registered with LiteLLM). Veo is no longer served on the Gemini API; Omni Flash is Google's named replacement. Transport `GeminiVideoTransport` (`providers/gemini_video.py`, raw HTTP, not LiteLLM): `generate_via_gemini` POSTs the body built by `interaction_body` to `https://generativelanguage.googleapis.com/v1beta/interactions` (`response_format` `type: "video"`, `delivery: "uri"`). A still-running interaction is polled by id; a hosted clip is polled until its file is `ACTIVE`, then downloaded. Inline base64 `data` is accepted too. The whole generation runs under one ceiling, `GEMINI_VIDEO_TIMEOUT_S` (420 s), polled every `GEMINI_VIDEO_POLL_S` (5 s). Input modalities `["text", "image"]`, output `["video"]`; the dashboard lists it under the "Video" capability chip group. Paid keys only; the decision is recorded in [history/provider-choices.md](history/provider-choices.md).
+
+**Not verified against a live key.** The transport was written from Google's published docs (2026-11). Not live until the owner approves (not part of the code change): add scope `llm:video` to a paid gemini key and to the consuming project. Until then video jobs cannot find a key.
+
 ## Adding a new provider
 
 One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).

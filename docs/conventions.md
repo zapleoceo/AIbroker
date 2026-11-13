@@ -23,6 +23,7 @@ src/aibroker/
   services/
     llm_service.py     run_chat/run_embed/run_decision/run_transcribe/run_speech/run_live — the WALKS
     live_service.py    relay — relay audio both ways; LiveRequest/LiveOutcome/Transcript
+    video_service.py   run_video (the video lane), VideoOutcome, VideoFailed, video_job_payload / video_request_from_job
     attempt.py         the ONE key-attempt template (reserve→call→release→gate→record→affinity)
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
@@ -36,9 +37,9 @@ src/aibroker/
     specs.py           ordered registration of provider definitions
     provider_specs/    one build_provider(...) definition per provider
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
-    transport.py       Chat/Embed/Transcribe/Decide/Live Protocols + registered dispatch
+    transport.py       Chat/Embed/Transcribe/Decide/Live/Video Protocols + registered dispatch (VideoTransport, generate_video)
     litellm_client.py  litellm chat/embed/whisper transport
-    local_vision.py / gemini_asr.py / gemini_tts.py / gemini_live.py   raw-HTTP/WebSocket: GeminiLiveSession / GeminiLiveTransport, connect_gemini_live; LiveEvent, ParsedMessage, LiveClosed, WebSocketLike, setup_message, audio_message, text_message, parse_server_message
+    local_vision.py / gemini_asr.py / gemini_tts.py / gemini_live.py / gemini_video.py   raw-HTTP/WebSocket: GeminiVideoTransport, VideoRequest, VideoRejected, generate_via_gemini, interaction_body; GeminiLiveSession / GeminiLiveTransport, connect_gemini_live; LiveEvent, ParsedMessage, LiveClosed, WebSocketLike, setup_message, audio_message, text_message, parse_server_message
     cost.py            pricing (litellm map + registry overrides, per-minute audio, live cost)
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
@@ -46,7 +47,7 @@ src/aibroker/
     model_scores.py    Artificial Analysis Intelligence Index: static table, exact name match only
   routes/
     health.py          / + /healthz + /v1/health
-    proxy.py           /v1/jobs + /v1/embed + /v1/speech
+    proxy.py           /v1/jobs + /v1/embed + /v1/speech + /v1/video/jobs
     live.py            /v1/live (WebSocket) — live_endpoint
     jobs_control.py    GET /v1/jobs?label.k=v + /v1/jobs/{id}/cancel + /v1/jobs/cancel
     compare.py         /ask2many public compare page + /ask2many/api/* (no login)

@@ -150,6 +150,8 @@ def input_modalities(spec: ModelSpec) -> list[str] | None:
         return ["audio"]
     if "speech" in spec.capabilities:
         return ["text"]
+    if "video" in spec.capabilities:
+        return ["text", "image"]
     if spec.pricing == "subscription" or "embedding" in spec.capabilities or any(
         capability_family(cap) == "chat" for cap in spec.capabilities
     ):
@@ -166,6 +168,8 @@ def output_modalities(spec: ModelSpec) -> list[str] | None:
         return ["text", "image"]
     if "speech" in spec.capabilities or "live" in spec.capabilities:
         return ["audio"]
+    if "video" in spec.capabilities:
+        return ["video"]
     if spec.pricing == "subscription" or "transcription" in spec.capabilities or any(
         capability_family(cap) == "chat" for cap in spec.capabilities
     ):

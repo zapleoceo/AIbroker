@@ -36,6 +36,7 @@ Capability = Literal[
     "decision",
     "speech",
     "live",
+    "video",
 ]
 
 
@@ -76,6 +77,8 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "speech": ["gemini"],
     # Real-time speech-to-speech (phone calls): Gemini Live, PAID keys only (see run_live).
     "live": ["gemini"],
+    # Short video clips: Gemini Omni Flash, PAID keys only, async job (see run_video).
+    "video": ["gemini"],
 }
 
 
@@ -105,6 +108,8 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     # Its own opt-in scope: a call bills minutes of audio both ways, a far larger
     # spend per request than a voice note, so llm:speech does not imply it.
     "live": "llm:live",
+    # Its own opt-in scope: one clip costs cents to a dollar, far above any text call.
+    "video": "llm:video",
 }
 
 

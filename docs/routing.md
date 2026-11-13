@@ -954,6 +954,7 @@ provider in a chain has a `DEFAULT_MODEL` entry.
 | `embedding` | voyage → cohere | `llm:embed` | voyage primary; cohere fallback (embed-english-v3) |
 | `speech` | gemini (`gemini-3.8-flash-tts`; `gemini-3.8-flash-lite-tts` via a `model` pin) | `llm:speech` | **New 2026-11-11 (owner: persona voice on the newest Google TTS).** Text → speech, `POST /v1/speech` (sync, not a `/v1/jobs` capability). **Paid gemini keys only** (`run_speech`, `require_tier="paid"`); a free key is never picked. Single-provider chain, no fallback. `providers/gemini_tts.py`. See `docs/api.md`. |
 | `live` | gemini (`gemini-3.8-live`) | `llm:live` | **New 2026-11-13 (owner: Gemini Live real-time speech-to-speech).** WebSocket call between caller and model (16 kHz in, 24 kHz out PCM), `WebSocket /v1/live`. **Paid gemini keys only** (`run_live`, `require_tier="paid"`); a free key is never picked. Single-provider chain, no fallback. `providers/gemini_live.py`. See `docs/api.md`. |
+| `video` | gemini (`gemini-omni-1.2-flash`) | `llm:video` | **New 2026-11-14 (owner: short video clips; Veo is gone from the Gemini API).** Prompt (+ optional reference image) → MP4, `POST /v1/video/jobs` (async only, not a sync route). **Paid gemini keys only** (`run_video`, `require_tier="paid"`); a free key is never picked. Single-provider chain, no fallback. `providers/gemini_video.py`. See `docs/api.md`. |
 | `decision` | openrouter | `llm:decision` | Typed decision model (TypeSafe Jev) — **paid openrouter keys only**, `POST /v1/decisions` (not a `/v1/jobs` capability; see `docs/api.md`). `run_decision` reserves against the project and global caps. Jev is primary; on a Jev failure or a cap block (caller did not pin `model`), Inception Mercury Decide (`mercury-decide:free`, $0) answers on the same key, unreserved — owner decision 2026-10-03, because in a 2026-10-03 series on real Vera events (mean of 4 runs, 126 + 42 calls) it matched Jev on project (69% vs 66%) but was clearly weaker on importance (exact 30% vs 53%) and slightly on needs_action (76% vs 80%), so it is never the primary. |
 
 `chain_for(cap)` raises `ValueError` on an unknown capability; the proxy rejects
@@ -1478,7 +1479,7 @@ apply on these lanes exactly as on chat — until then `reserve_cost` had a
 single caller in the chat path and a paid embed or whisper key was gated only
 by its own per-key cap. Whisper is priced per audio minute
 (`estimate_transcription_cost` before the call, `whisper_cost` after). Free
-keys still cost $0 and are exempt inside `reserve_cost`. **Speech (2026-11-11):** `run_speech` reserves the same way through `run_attempt`, with `estimate_speech_cost` before the call and the billed `tts_cost` after. **Live (2026-11-13):** `run_live` reserves `estimate_live_cost` for the whole session ceiling (the longest allowed call) and books `live_cost` after the session ends; key rotation happens only while connecting.
+keys still cost $0 and are exempt inside `reserve_cost`. **Speech (2026-11-11):** `run_speech` reserves the same way through `run_attempt`, with `estimate_speech_cost` before the call and the billed `tts_cost` after. **Live (2026-11-13):** `run_live` reserves `estimate_live_cost` for the whole session ceiling (the longest allowed call) and books `live_cost` after the session ends; key rotation happens only while connecting. **Video (2026-11-14):** `run_video` reserves `estimate_video_cost` through `run_attempt` before the call and books `video_cost` after it.
 
 **Daily counters that never reset (2026-07-03, found while fixing the above).**
 `api_keys.daily_used`/`daily_cost_used_usd` were never actually reset day to
@@ -2121,7 +2122,7 @@ Fixes from the project review; each is pinned by a regression test.
   400) when the model's provider prefix differs from `?provider=`, as chat does.
 - **Hard timeouts**: `EMBED_TIMEOUT_S`, `TRANSCRIBE_TIMEOUT_S`,
   `GEMINI_ASR_TIMEOUT_S` (`asyncio.wait_for` on embed, whisper, chat
-  transcription and gemini ASR), and `GEMINI_TTS_TIMEOUT_S` (60 s default) for the gemini TTS call.
+  transcription and gemini ASR), and `GEMINI_TTS_TIMEOUT_S` (60 s default) for the gemini TTS call. `GEMINI_VIDEO_TIMEOUT_S` (420 s default) is one ceiling over a whole gemini video generation (create, polling, hosted file, download), and `GEMINI_VIDEO_POLL_S` (5 s) is its poll interval.
 - **Response cache key** includes `response_format`, `tools`, `tool_choice`.
 - **Reservations** are released on every exit (decrypt failure, cancellation):
   `_release_reservation` is shielded and never raises.

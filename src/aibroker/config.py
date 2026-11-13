@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     GEMINI_ASR_TIMEOUT_S: float = 60.0
     # Gemini TTS (/v1/speech): a voice note of a few sentences renders in ~3-10 s.
     GEMINI_TTS_TIMEOUT_S: float = 60.0
+    # Gemini Omni video (/v1/video/jobs): ONE ceiling for the whole generation: the
+    # create call, waiting for the hosted file to become ACTIVE, and the download.
+    GEMINI_VIDEO_TIMEOUT_S: float = 420.0
+    # Seconds between two looks at the hosted file while it is still processing.
+    GEMINI_VIDEO_POLL_S: float = 5.0
     # Gemini Live (/v1/live): connect + setup ceiling per key attempt, and the
     # longest call. Google closes one Live WebSocket after ~10 min (goAway first),
     # so a call is capped below that; the reservation covers the whole ceiling.

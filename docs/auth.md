@@ -49,6 +49,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:audio` | `/v1/transcribe` (`capability=transcription`) — Whisper voice → text |
 | `llm:speech` | `/v1/speech` (`capability=speech`) — Gemini text → speech; paid gemini keys only |
 | `llm:live` | `/v1/live` (WebSocket) — Gemini Live real-time voice call; paid gemini keys only |
+| `llm:video` | `/v1/video/jobs` (`capability=video`) — Gemini Omni video clips; paid gemini keys only; not in the default scopes |
 
 Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
 `dashboard_scopes._KNOWN_SCOPES` (provider key forms), and this table.
