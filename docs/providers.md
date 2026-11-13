@@ -220,6 +220,8 @@ routing name in the tooltip.
 
 **Not verified against a live key.** The transport was written from Google's published docs (2026-11). Not live until the owner approves (not part of the code change): add scope `llm:video` to a paid gemini key and to the consuming project. Until then video jobs cannot find a key.
 
+Errors: every upstream HTTP error is raised as `gemini-video HTTP <status> (...)`, the form `classify_provider_error` reads (a status that follows a keyword such as `HTTP`): a 429 cools the key (rate_limit), a 401/403 marks it dead (auth), and a 400 becomes `VideoRejected` (`gemini-video HTTP 400: ...`).
+
 ## Adding a new provider
 
 One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).
