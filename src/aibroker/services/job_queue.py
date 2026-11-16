@@ -59,6 +59,8 @@ from aibroker.services.video_service import (
     run_video,
     video_request_from_job,
 )
+from aibroker.services.vivix_jobs import VIVIX_FIELD
+from aibroker.services.vivix_jobs import execute as execute_vivix
 from aibroker.telemetry.notifier import alert
 from aibroker.telemetry.request_context import job_request_id, request_scope
 
@@ -346,6 +348,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if project is None:
         await _finish(row.id, status="error", error_message="project no longer exists",
                        expect_started_at=row.started_at)
+        return
+    if row.capability == "video" and VIVIX_FIELD in req:
+        await execute_vivix(row, project)
         return
     if row.cancel_requested:   # asked to cancel while queued/requeued: no provider call at all
         log.info("job %d (%s) cancelled before running%s", row.id, row.capability, tag)

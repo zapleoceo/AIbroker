@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -18,6 +18,7 @@ from aibroker.routing.selector import (
     month_params,
     month_start_utc,
 )
+from aibroker.services.vivix_billing import held as vivix_held
 
 
 class CostGuardError(Exception):
@@ -138,15 +139,18 @@ async def reserve_cost(
         if key_daily:
             sets += [f"daily_cost_used_usd = {FRESH_DAILY_COST_SQL} + :c",
                      "daily_reset_at = CURRENT_DATE"]
-            conds.append(f"{FRESH_DAILY_COST_SQL} + :c <= k.daily_cost_cap_usd")
+            conds.append(f"{FRESH_DAILY_COST_SQL} + :c + :held <= k.daily_cost_cap_usd")
         if key_monthly:
             sets += [f"monthly_cost_used_usd = {FRESH_MONTHLY_COST_SQL} + :c",
                      "monthly_reset_at = :month_start"]
-            conds.append(f"{FRESH_MONTHLY_COST_SQL} + :c <= k.monthly_cost_cap_usd")
+            conds.append(f"{FRESH_MONTHLY_COST_SQL} + :c + :held <= k.monthly_cost_cap_usd")
         params: dict[str, object] = {"id": api_key.id, "c": estimated_cost}
         if key_monthly:
             params.update(month_params())
         async with get_session() as s:
+            # Share the key lock with Vivix admission: persistent holds survive window resets.
+            await s.execute(select(ApiKeyRow.id).where(ApiKeyRow.id == api_key.id).with_for_update())
+            params["held"] = float(await vivix_held(s, key_id=api_key.id))
             row = (await s.execute(
                 text(
                     f"UPDATE api_keys AS k SET {', '.join(sets)} "
@@ -189,6 +193,7 @@ async def reserve_cost(
                     },
                 )
             ).scalar() or 0.0
+            used += float(await vivix_held(s, project_id=project.id))
         if used + estimated_cost > project.daily_cost_cap_usd:
             # Refund the per-key reservation we just took — this attempt never happens.
             await release_cost(api_key=api_key, estimated_cost=estimated_cost)
@@ -213,6 +218,7 @@ async def reserve_cost(
                     {"pid": project.id, "start": m_start},
                 )
             ).scalar() or 0.0
+            m_used += float(await vivix_held(s, project_id=project.id))
         if m_used + estimated_cost > project.monthly_cost_cap_usd:
             await release_cost(api_key=api_key, estimated_cost=estimated_cost)
             raise CostGuardError(
@@ -224,6 +230,8 @@ async def reserve_cost(
     s = get_settings()
     if s.GLOBAL_DAILY_CAP_USD > 0:
         used = await _global_cost_today()
+        async with get_session() as session:
+            used += float(await vivix_held(session))
         if used + estimated_cost > s.GLOBAL_DAILY_CAP_USD:
             await release_cost(api_key=api_key, estimated_cost=estimated_cost)
             raise CostGuardError(

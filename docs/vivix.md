@@ -1,6 +1,6 @@
 # Vivix transport foundation (2026-11-16)
 
-Status: disabled provider foundation, not an operational Broker video API.
+Status: disabled provider integration, not an operational Vivix video service.
 The registered `vivix` ProviderSpec has an HTTP transport but no routable models,
 default capability, automatic key probe or billing probe. It is classified as paid.
 There is no free-price fallback. No personal workspace entitlement, balance,
@@ -53,12 +53,12 @@ audio and video reference fees. These are not proof of the personal account's
 contract or entitlement, and are not hardcoded as a permanent price. Unknown
 pricing is not zero. A1 billing has not been established for this integration.
 
-Before enabling any model, extend the existing video request schema and worker
-with provider-specific inputs and resumable Vivix submission/poll lifecycle,
-exact workspace permission checks, conservative cost reservation including
-reference fees, settlement/reconciliation on terminal and ambiguous outcomes,
-cancellation semantics, and selection beyond the first chain provider.
-Only then register priced video models and expose an activation configuration.
+The local implementation now supplies provider-specific request validation,
+durable submit/poll lifecycle, conservative reservation, settlement and a dedicated
+dispatcher branch. Activation still requires verified workspace permissions,
+media inspections, pricing including reference fees and final billing receipts.
+Only after PostgreSQL validation and release gates may a trusted runtime be wired,
+priced models registered and activation configured.
 Neither an ITStep test result nor access to `name:latest` grants access to a
 personal key or a bare model name. No ITStep credentials or credits are used.
 
@@ -66,19 +66,31 @@ personal key or a bare model name. No ITStep credentials or credits are used.
 
 ### Local lifecycle and accounting stage
 
-`VivixService` is an internal, unregistered service. `prepare` admits an exact
+`VivixService` is internal; the public route is guarded by `get_runtime()`, which
+unconditionally returns `None` in shipped code. `prepare` admits an exact
 account/model/request only with a nonexpired `VivixQuote`: a positive USD ceiling,
 request digest, account identity, provenance, and explicit inclusion of reference
 fees. The quote is a trusted internal input, never a public client assertion.
 There are no hardcoded rates, default permissions, pricing discovery, or live calls
-in this stage. A1/W1 wire helpers retain their existing contracts; comprehensive
-provider-specific request validation still belongs in the future route bridge.
+in this stage. `vivix_inputs` validates A1 single/multi-segment voice modes and
+W1 duration, ratios, seed, reference counts, keyframe conflicts and unknown fields.
+`vivix_media` requires trusted URL-bound size/dimension/duration evidence for
+referenced media. It never downloads or guesses media properties.
 
 `VivixStore` persists reservations in `vivix_jobs`. Admission serializes on
 `vivix_ledger_lock` and checks account, project and global lifetime budgets against
 both unresolved holds and settled cost. These are conservative isolated budgets,
-not replacements for Broker daily/monthly caps or `usage_log`. Migration 028 and
-the matching fresh-install DDL are prepared, not applied to any running database.
+not replacements for Broker daily/monthly caps. `BrokerVivixStore` additionally
+checks real project/key daily/monthly caps, global daily cap, existing usage and
+all unresolved holds. Ordinary `reserve_cost` also counts these holds, including
+after UTC window resets. Settlement atomically closes the hold, writes `usage_log`
+and updates key counters once; a failed write rolls back everything. No delayed
+refund subtracts an old reservation from new-window spend. Existing ordinary-lane
+project/global concurrency and global-cache limitations remain as documented in
+the cost guard; this does not claim globally serializable admission for all lanes.
+Migrations 028/029 and matching fresh-install DDL are prepared, not applied to any
+running database. Both are required before deploying this code because ordinary
+cost guards now read persistent holds, even while Vivix activation is disabled.
 The ledger must not be purged by ordinary job retention while holds are unresolved.
 
 `advance` commits `submitting` before POST. Concurrent callers use versioned
@@ -103,16 +115,52 @@ remote cancellation. During an active POST it leaves the version unchanged so th
 worker can persist the task ID; the caller must retry cancellation after that
 attempt resolves. An expired pre-submit quote releases its unused hold.
 
-Before activation, still connect these transitions to authenticated video admission,
-existing durable jobs/dispatcher, account/key resolution, Broker daily/monthly
-budgets and usage accounting, and a verified source of quotes/permissions/receipts.
-Keep the current public entry point disabled until all these bridges and their
-integration tests exist. HTTP responses/credentials are not stored by the lifecycle;
-inputs and signed result URLs require the existing job privacy/retention policy
-when the bridge is added. PostgreSQL migration/concurrency validation is also pending.
+The existing `/v1/video/jobs` route now accepts a separate `provider: vivix` shape
+with native `inputs`, exact `model` and mandatory `Idempotency-Key`. It enforces the
+ordinary project scope and request cap; replay returns the existing job without
+spending the cap again. Clients cannot provide quotes, account IDs or credentials.
+With no trusted runtime it returns 503 before enqueue or provider calls. Existing
+Gemini bodies remain supported. Vivix jobs in the ordinary dispatcher bypass the
+Gemini walk and generic retries; poll ticks do not increment generation retries.
+The persisted Broker key/account binding is checked before decryption and cannot
+rotate to another key. Pending cancellation stays queued until the Vivix worker
+can refund an unsubmitted request or finish accounting for a submitted one.
+
+A successful settled Vivix poll returns `video_url` and `billing_status: settled`;
+it does not download the video or encode it as base64. Unknown acceptance reports
+reconciliation required and retains the hold. A terminal job without a receipt
+stays pending with unknown cost, never reported as free. Credential values and
+raw provider error bodies are not persisted. The ledger contains private request
+inputs/result URLs and must retain access restrictions and unresolved holds.
+
+Remaining gates: an authorized implementation of `VivixRuntime` backed by verified
+permission/media/quote/receipt sources, PostgreSQL migration/concurrency tests,
+Haiku docs review and authorized release. No runtime, activation flag, new key,
+price table or discovery call is supplied. `tests/test_vivix_postgres.py` explicitly
+skips without a guarded PostgreSQL `TEST_DATABASE_URL`; the local SQLite mock
+route/dispatcher/accounting suite does not substitute for those checks.
 
 This section was updated locally by Codex; it is **not** Haiku model evidence and
 does not satisfy the required Haiku documentation gate.
+
+### Internal validation and bridge symbols
+
+`StrictInput` forbids extra fields and coercion. `Reference` and `media_url` describe
+HTTP(S) material references; `WorldJob` / `WorldInputs` validate W1 requests.
+`TTSConfig`, `AvatarSegment` and `AvatarInputs` cover A1 voice/segment forms.
+`validate_inputs` selects the appropriate schema; `VivixJobRequest` is the separate
+public request shape. `MediaEvidence` contains trusted inspection facts and
+`validate_media` checks them against exact requested URLs and material limits.
+`Authorization` binds a Broker key/account to permissions, quote and media evidence;
+`Receipt` supplies final verified cost. `VivixRuntime` is the trusted provider of
+those facts; `get_runtime` currently returns no implementation. `VivixDisabled`
+is the explicit refusal, and `vivix_jobs.submit` / `execute` bridge standard jobs.
+`BrokerVivixStore` uses `held`, `spent` and `check` for existing Broker budgets.
+`VivixLedgerLock` serializes admissions and `VivixJobRow` persists job/hold state;
+`VivixLimits` supplies the additional lifetime ceilings. `request_digest` binds a
+quote to exact JSON inputs and `usd` rejects invalid monetary values. Transport
+parsing uses `model_ids` for exact permissions, `video_result` for task state and
+`VivixError` for sanitized upstream failures.
 
 `tests/test_vivix.py` intercepts all HTTP using `httpx.MockTransport` and covers
 registry/pin exclusion, default-disabled submission, exact tags, both API shapes,

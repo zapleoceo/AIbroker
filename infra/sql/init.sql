@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS vivix_jobs (
   id VARCHAR(128) PRIMARY KEY,
   project_id VARCHAR(128) NOT NULL,
   account_id VARCHAR(128) NOT NULL,
+  api_key_id BIGINT,
   version INTEGER NOT NULL,
   reserved_usd NUMERIC(24,8) NOT NULL CHECK (reserved_usd >= 0),
   settled_usd NUMERIC(24,8) NOT NULL CHECK (settled_usd >= 0),
@@ -310,6 +311,7 @@ CREATE TABLE IF NOT EXISTS vivix_jobs (
 );
 CREATE INDEX IF NOT EXISTS ix_vivix_jobs_project_id ON vivix_jobs(project_id);
 CREATE INDEX IF NOT EXISTS ix_vivix_jobs_account_id ON vivix_jobs(account_id);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_api_key_id ON vivix_jobs(api_key_id);
 
 -- 012 destructive-DDL guard (event trigger); see migrations/012_block_destructive_ddl.sql
 DO $guard$

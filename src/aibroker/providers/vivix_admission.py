@@ -10,6 +10,7 @@ from typing import Any
 
 from aibroker.providers.gemini_video import VideoRejected
 from aibroker.providers.vivix import _world
+from aibroker.providers.vivix_inputs import validate_inputs
 
 
 def request_digest(model: str, inputs: dict[str, Any]) -> str:
@@ -58,6 +59,7 @@ def admit(*, model: str, inputs: dict[str, Any], account_id: str,
         if not isinstance(jobs, list) or len(jobs) != 1 or not isinstance(jobs[0], dict):
             raise VideoRejected("Vivix W1 requires exactly one job")
     digest = request_digest(model, inputs)
+    validate_inputs(model, inputs)
     if (quote is None or quote.account_id != account_id or quote.request_hash != digest
             or not quote.evidence.strip() or not quote.includes_reference_fees
             or not math.isfinite(quote.expires_at) or not now < quote.expires_at):

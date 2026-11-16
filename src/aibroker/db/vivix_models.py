@@ -2,7 +2,7 @@
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, Integer, Numeric, String
+from sqlalchemy import JSON, BigInteger, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from aibroker.db.engine import Base
@@ -21,6 +21,7 @@ class VivixJobRow(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     account_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    api_key_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     reserved_usd: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)
     settled_usd: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=False)

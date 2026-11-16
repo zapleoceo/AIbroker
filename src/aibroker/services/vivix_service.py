@@ -18,7 +18,8 @@ class VivixService:
 
     async def prepare(self, *, job_id: str, project_id: str, account_id: str,
                       model: str, inputs: dict[str, Any], allowed_models: frozenset[str],
-                      quote: VivixQuote | None, limits: VivixLimits) -> Snapshot:
+                      quote: VivixQuote | None, limits: VivixLimits,
+                      broker_key_id: int | None = None, workflow: str | None = None) -> Snapshot:
         inputs = copy.deepcopy(inputs)
         reserve = admit(model=model, inputs=inputs, account_id=account_id,
                         allowed_models=allowed_models, quote=quote, now=time.time())
@@ -28,7 +29,8 @@ class VivixService:
             limits=limits, body={"state": "prepared", "model": model, "inputs": inputs,
                                  "request_hash": request_digest(model, inputs),
                                  "quote_evidence": quote.evidence, "quote_expires": quote.expires_at,
-                                 "ceiling_usd": reserve, "cancel_requested": False})
+                                 "ceiling_usd": reserve, "cancel_requested": False,
+                                 "broker_key_id": broker_key_id, "workflow": workflow})
 
     async def advance(self, *, job_id: str, project_id: str, account_id: str,
                       api_key: str) -> Snapshot:

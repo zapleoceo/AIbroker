@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.engine import get_session
 from aibroker.db.vivix_models import VivixJobRow, VivixLedgerLock
@@ -46,6 +47,16 @@ def money(value: str) -> Decimal:
 
 
 class VivixStore:
+    async def before_create(self, session: AsyncSession, project_id: str, account_id: str,
+                            body: dict[str, Any], amount: Decimal) -> None:
+        if body.get("broker_key_id") is not None:
+            raise VideoRejected("Broker-bound Vivix jobs require BrokerVivixStore")
+
+    async def after_settle(self, session: AsyncSession, old: Snapshot,
+                           body: dict[str, Any], amount: Decimal) -> None:
+        if old.body.get("broker_key_id") is not None:
+            raise VideoRejected("Broker-bound Vivix settlement requires BrokerVivixStore")
+
     async def load(self, job_id: str, project_id: str) -> Snapshot:
         async with get_session() as session:
             row = await session.get(VivixJobRow, job_id)
@@ -78,8 +89,10 @@ class VivixStore:
                     VivixJobRow.reserved_usd + VivixJobRow.settled_usd), 0)).where(predicate))
                 if used + amount > cap:
                     raise VideoRejected("Vivix ledger budget exhausted")
+            await self.before_create(session, project_id, account_id, body, amount)
             row = VivixJobRow(id=job_id, project_id=project_id, account_id=account_id,
-                             version=0, reserved_usd=amount, settled_usd=Decimal(0), body=body)
+                             api_key_id=body.get("broker_key_id"), version=0,
+                             reserved_usd=amount, settled_usd=Decimal(0), body=body)
             session.add(row)
             await session.flush()
             return snapshot(row)
@@ -98,4 +111,6 @@ class VivixStore:
             result = await session.execute(update(VivixJobRow).where(
                 VivixJobRow.id == old.id, VivixJobRow.project_id == old.project_id,
                 VivixJobRow.version == old.version).values(**values))
+            if result.rowcount == 1 and settled is not None:
+                await self.after_settle(session, old, body, money(settled))
             return result.rowcount == 1

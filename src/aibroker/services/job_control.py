@@ -56,6 +56,10 @@ async def _cancel_plain(job_id: int, project_id: int) -> CancelResult | None:
         if row is None:
             return None
         if row.status == "pending":
+            if row.capability == "video" and "vivix" in (row.request or {}):
+                # The Vivix worker must reconcile an already submitted task and its hold.
+                row.cancel_requested = True
+                return CancelResult(job_id, CANCEL_REQUESTED, row.status)
             row.status = CANCELLED
             row.completed_at = datetime.now(UTC).replace(tzinfo=None)
             if isinstance(row.request, dict) and row.request.get(AUDIO_FIELD):

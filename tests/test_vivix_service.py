@@ -201,7 +201,7 @@ async def test_request_idempotency_and_conflict(ledger):
     service = VivixService(ledger, transport([]))
     first = await prepare(service)
     assert (await prepare(service)).version == first.version
-    other = {"jobs": [{"prompt": "different"}]}
+    other = {"jobs": [{"prompt": "different", "duration": 5}]}
     with pytest.raises(VideoRejected, match="conflict"):
         await prepare(service, inputs=other, quote=quote(request_hash=request_digest(MODEL, other)))
 
