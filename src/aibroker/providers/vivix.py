@@ -61,6 +61,10 @@ class VivixVideoTransport:
             raise ValueError("Vivix model disabled: pricing and video admission are not configured")
         if "model" in inputs:
             raise ValueError("Vivix model must be passed separately")
+        if world:
+            jobs = inputs.get("jobs")
+            if not isinstance(jobs, list) or len(jobs) != 1 or not isinstance(jobs[0], dict):
+                raise ValueError("Vivix W1 requires exactly one job")
         if model not in await self.list_models(api_key=api_key):
             raise ValueError("Vivix model not enabled for this API key")
         path = "videos/jobs" if world else "videos/generations"

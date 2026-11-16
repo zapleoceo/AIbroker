@@ -116,7 +116,7 @@ async def test_workspace_permission_does_not_drop_latest():
     transport = VivixVideoTransport(http_transport=httpx.MockTransport(handler),
                                     enabled_models=frozenset({"vivix-w1"}))
     with pytest.raises(ValueError, match="not enabled"):
-        await transport.submit_video(model="vivix-w1", inputs={}, api_key="FAKE")
+        await transport.submit_video(model="vivix-w1", inputs={"jobs": [{}]}, api_key="FAKE")
 
 
 @pytest.mark.parametrize("world", [True, False])
@@ -150,7 +150,7 @@ async def test_transport_failure_is_not_retried():
     transport = VivixVideoTransport(http_transport=httpx.MockTransport(handler),
                                     enabled_models=frozenset({"vivix-w1"}))
     with pytest.raises(TimeoutError, match="outcome may be unknown") as exc:
-        await transport.submit_video(model="vivix-w1", inputs={}, api_key="FAKE")
+        await transport.submit_video(model="vivix-w1", inputs={"jobs": [{}]}, api_key="FAKE")
     assert "SECRET" not in str(exc.value)
     assert [r.method for r in calls] == ["GET", "POST"]
 
@@ -182,3 +182,13 @@ async def test_json_and_redirect_errors(bad):
     with pytest.raises((ValueError, VivixError)):
         await transport.list_models(api_key="FAKE")
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("jobs", [[], [{}, {}], None])
+async def test_world_rejects_non_single_job_before_http(jobs):
+    def forbidden(req):
+        pytest.fail("invalid batch attempted HTTP")
+    transport = VivixVideoTransport(http_transport=httpx.MockTransport(forbidden),
+                                    enabled_models=frozenset({"vivix-w1"}))
+    with pytest.raises(ValueError, match="exactly one job"):
+        await transport.submit_video(model="vivix-w1", inputs={"jobs": jobs}, api_key="FAKE")
