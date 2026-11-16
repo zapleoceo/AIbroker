@@ -4,8 +4,11 @@ Migration 030 adds `BudgetLedgerLock` and `BudgetReservationRow`. Positive ordin
 estimates get a UUID, project/key binding, amount (rounded up to eight decimals),
 original UTC day/month, debited-window flags and state `held`. `Attempt.reservation_id`
 passes that identity to booking/refund; equal amounts on one key are never matched
-by amount. Zero-cost calls preserve the existing no-reservation path and paid cap-0
-rules. Unknown provider prices are not inferred from this accounting mechanism.
+by amount. A zero estimate creates no reservation, but paid/trial calls still
+check every key/project/global limit against settled spend and unresolved holds.
+The explicit free-tier zero-estimate bypass remains. `known_free_model` exempts
+the special paid cap-0 refusal only; it does not bypass an already exceeded cap.
+Unknown provider prices are not inferred from this accounting mechanism.
 
 `admit_ordinary` acquires `lock_budget`, reloads the key, checks daily/monthly key
 and project limits and the global daily limit, then inserts the hold and updates
@@ -34,7 +37,11 @@ the lock, though no reservation can bound a call that supplied no estimate.
 IDs cannot touch holds; settled/released IDs do nothing, and booking a released
 ID is rejected. `refund_debit` subtracts only from the original stamped windows.
 `uncounted_key_holds` adds holds omitted by a reset without double-counting those
-already in current key counters. `budget_day` supplies the UTC admission date.
+already in current key counters. `budget_day` supplies the UTC admission date
+after acquiring the budget and key locks. Booking samples `budget_now` after
+the budget lock and binds the same UTC timestamp/date/month to usage and counters.
+It does not use PostgreSQL transaction-start `CURRENT_DATE`/`now()` for money
+windows, because a lock wait can cross midnight or the start of a month.
 Ordinary answered failures still book zero, as before; ordinary cancellation
 refunds. This preserves existing invoice-reconciliation policy for answerless
 timeouts. Vivix ambiguous submissions instead retain their hold until verified
@@ -68,3 +75,9 @@ The former three strict XFAIL cases in `test_vivix_budget_overlap` now assert
 rejection and PASS. PostgreSQL migration tests isolate schema from create_all,
 apply 028→029→030 and repeat migrations while preserving unresolved holds;
 they remain NOT RUN locally without an authorized TEST_DATABASE_URL.
+
+`test_budget_zero_clock` covers zero-estimate paid/trial/known-free calls against
+exceeded key daily/monthly, project daily/monthly and global caps, with settled
+spend, ordinary holds and Vivix holds. It verifies exact-cap acceptance without
+inserting a zero hold, the free-tier bypass, and controlled post-lock month
+rollover for admission and atomic usage booking.

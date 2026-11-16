@@ -75,4 +75,8 @@ async def booking_reservation(session: AsyncSession, reservation_id: str,
 
 
 def budget_day() -> date:
-    return datetime.now(UTC).date()
+    return budget_now().date()
+
+
+def budget_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)

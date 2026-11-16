@@ -443,8 +443,8 @@ def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
             vals.append(f":{param}")
     cols += ["capability", "workflow", "tokens_in", "tokens_out", "cache_read_tokens",
              "cache_write_tokens", "cost_usd", "latency_ms", "status", "error_kind",
-             "http_status"]
-    vals += [":c", ":w", ":ti", ":to", ":cr", ":cw", ":co", ":lm", ":s", ":e", ":h"]
+             "http_status", "created_at"]
+    vals += [":c", ":w", ":ti", ":to", ":cr", ":cw", ":co", ":lm", ":s", ":e", ":h", ":booked_at"]
     return (f"INSERT INTO usage_log ({', '.join(cols)}) "
             f"VALUES ({', '.join(vals)}) RETURNING id")
 
@@ -533,15 +533,20 @@ async def record_usage(
         "    monthly_reset_at = :month_start, "
         f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
         "WHERE k.id = :k"
-    )
+    ).replace("CURRENT_DATE", ":booking_day")
     async def _write(missing: frozenset[str]) -> int:
         insert_sql = _insert_sql(missing=missing)
         dropped = {param for col, param in _OPTIONAL_USAGE_COLS if col in missing}
         p = {k: v for k, v in params.items() if k not in dropped}
-        upd_p = {**p, **month_params()}
         async with get_session() as s:
-            from aibroker.routing.budget_ledger import booking_reservation, lock_budget
+            from aibroker.routing.budget_ledger import booking_reservation, budget_now, lock_budget
             await lock_budget(s)
+            # PostgreSQL CURRENT_DATE/now() are fixed at transaction start, before
+            # a possible midnight lock wait. Bind one fresh UTC booking timestamp.
+            booked_at = budget_now()
+            p["booked_at"] = booked_at
+            upd_p = {**p, "booking_day": booked_at.date(),
+                     "month_start": booked_at.date().replace(day=1)}
             reservation = None
             if reservation_id is not None:
                 reservation = await booking_reservation(s, reservation_id, params)

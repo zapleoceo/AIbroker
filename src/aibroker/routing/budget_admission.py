@@ -16,23 +16,25 @@ from aibroker.routing.budget_ledger import (
 )
 
 
-async def admit_ordinary(api_key: ApiKeyRow, project: ProjectRow, estimate: float) -> str:
+async def admit_ordinary(api_key: ApiKeyRow, project: ProjectRow, estimate: float, *,
+                         known_free_model: bool = False) -> str | None:
     from aibroker.routing.cost_guard import CostGuardError
     from aibroker.services.vivix_billing import held, spent
 
     amount = Decimal(str(estimate))
-    if not amount.is_finite() or amount <= 0 or amount >= Decimal("1000000000000000"):
+    if not amount.is_finite() or amount < 0 or amount >= Decimal("1000000000000000"):
         raise ValueError("Invalid reservation amount")
     amount = amount.quantize(Decimal("0.00000001"), rounding=ROUND_CEILING)
-    today = budget_day()
     from datetime import datetime
-    day = datetime.combine(today, datetime.min.time())
-    month = day.replace(day=1)
     async with get_session() as session:
         await lock_budget(session)
         key = await session.scalar(select(ApiKeyRow).where(ApiKeyRow.id == api_key.id).with_for_update())
         if key is None:
             raise ValueError("Reservation key missing")
+        # Lock waits may cross a UTC day/month boundary. Sample only after waiting.
+        today = budget_day()
+        day = datetime.combine(today, datetime.min.time())
+        month = day.replace(day=1)
         # Honor both fresh administrative limits and stricter caller restrictions.
         stored_project = await session.get(ProjectRow, project.id) or project
 
@@ -41,6 +43,8 @@ async def admit_ordinary(api_key: ApiKeyRow, project: ProjectRow, estimate: floa
             return min((cap for cap in caps if cap is not None), default=None)
 
         def check(cap, used, kind, window="daily"):
+            if cap == 0 and key.tier == "paid" and not known_free_model:
+                raise CostGuardError(kind, cap, float(used), float(amount), window=window)
             if cap is not None and used + amount > Decimal(str(cap)):
                 raise CostGuardError(kind, cap, float(used), float(amount), window=window)
 
@@ -60,6 +64,8 @@ async def admit_ordinary(api_key: ApiKeyRow, project: ProjectRow, estimate: floa
         if cap > 0:
             check(cap, await spent(session, day) + await held(session)
                   + await ordinary_held(session), "global")
+        if amount == 0:
+            return None  # Unknown price is not free: check all debt, but create no zero hold.
         row = BudgetReservationRow(id=str(uuid4()), api_key_id=key.id, project_id=project.id,
                                    amount=amount, day=today, month=today.replace(day=1),
                                    debit_daily=key.daily_cost_cap_usd is not None,

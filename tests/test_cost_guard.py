@@ -9,7 +9,7 @@ test_selector.py). The free-tier / no-cap bypass tests never touch the DB
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import insert
@@ -46,7 +46,7 @@ async def _add_key(**kw) -> ApiKeyRow:
         # Seeded usage represents TODAY's spend — a None/stale daily_reset_at
         # would make the reset-aware SQL read the counter as 0.
         "daily_cost_used_usd": 0.0, "daily_cost_cap_usd": None,
-        "daily_reset_at": date.today(),
+        "daily_reset_at": datetime.now(UTC).date(),
         "monthly_cost_used_usd": 0.0, "total_cost_usd": 0.0,
         "error_count": 0, "notes": "",
     }
@@ -181,18 +181,18 @@ async def test_reserve_cost_resets_stale_counter():
     reserve_cost must treat a non-today daily_reset_at as 0, not add the
     estimate on top of stale accumulation (which would permanently lock the
     key out the first time its 'daily' cap was ever crossed)."""
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     key = await _add_key(
         daily_cost_used_usd=999.0, daily_cost_cap_usd=1.0,
-        daily_reset_at=date.today() - timedelta(days=3),
+        daily_reset_at=datetime.now(UTC).date() - timedelta(days=3),
     )
     # Would raise instantly if 999 + 0.5 were compared against the $1 cap —
     # must instead treat the stale 999 as 0 and succeed.
     await reserve_cost(api_key=key, project=_project(), estimated_cost=0.5)
     row = await _read_key(key.id)
     assert row.daily_cost_used_usd == pytest.approx(0.5)
-    assert row.daily_reset_at == date.today()
+    assert row.daily_reset_at == datetime.now(UTC).date()
 
 
 async def test_release_cost_paid_key_without_per_key_cap_is_a_noop():
@@ -282,8 +282,7 @@ async def test_cap_zero_refuses_paid_key_with_zero_estimate():
 
 
 async def test_cap_zero_admits_paid_key_on_registry_free_model():
-    paid = ApiKeyRow(id=5, provider="openrouter", label="x", tier="paid",
-                     token_encrypted="x", scopes=["llm:chat"], daily_cost_cap_usd=None)
+    paid = await _add_key(provider="openrouter", daily_cost_cap_usd=None)
     await reserve_cost(api_key=paid, project=_project(cap=0.0), estimated_cost=0.0,
                        known_free_model=True)
 
@@ -297,8 +296,7 @@ async def test_cap_zero_still_admits_free_key():
 async def test_cap_zero_trial_key_keeps_master_behaviour():
     """Master never refused a trial key at estimate $0 under cap 0 (only tier=='paid'
     is the new rule); a positive estimate was and stays refused."""
-    trial = ApiKeyRow(id=8, provider="nvidia", label="x", tier="trial", token_encrypted="x",
-                      scopes=["llm:chat"], daily_cost_cap_usd=None)
+    trial = await _add_key(provider="nvidia", tier="trial", daily_cost_cap_usd=None)
     await reserve_cost(api_key=trial, project=_project(cap=0.0), estimated_cost=0.0)
     with pytest.raises(CostGuardError):
         await reserve_cost(api_key=trial, project=_project(cap=0.0), estimated_cost=0.001)

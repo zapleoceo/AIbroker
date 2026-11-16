@@ -80,10 +80,8 @@ async def reserve_cost(
             for window in ("daily", "monthly"):
                 if getattr(obj, window + "_cost_cap_usd") == 0:
                     raise CostGuardError(kind, 0, 0, estimated_cost, window=window)
-    if estimated_cost <= 0:
-        return None
     from aibroker.routing.budget_admission import admit_ordinary
-    return await admit_ordinary(api_key, project, estimated_cost)
+    return await admit_ordinary(api_key, project, estimated_cost, known_free_model=known_free_model)
 
 
 async def release_cost(*, api_key: ApiKeyRow, estimated_cost: float = 0,
