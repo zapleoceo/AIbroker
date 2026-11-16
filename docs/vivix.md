@@ -64,6 +64,56 @@ personal key or a bare model name. No ITStep credentials or credits are used.
 
 ## Verification and delivery
 
+### Local lifecycle and accounting stage
+
+`VivixService` is an internal, unregistered service. `prepare` admits an exact
+account/model/request only with a nonexpired `VivixQuote`: a positive USD ceiling,
+request digest, account identity, provenance, and explicit inclusion of reference
+fees. The quote is a trusted internal input, never a public client assertion.
+There are no hardcoded rates, default permissions, pricing discovery, or live calls
+in this stage. A1/W1 wire helpers retain their existing contracts; comprehensive
+provider-specific request validation still belongs in the future route bridge.
+
+`VivixStore` persists reservations in `vivix_jobs`. Admission serializes on
+`vivix_ledger_lock` and checks account, project and global lifetime budgets against
+both unresolved holds and settled cost. These are conservative isolated budgets,
+not replacements for Broker daily/monthly caps or `usage_log`. Migration 028 and
+the matching fresh-install DDL are prepared, not applied to any running database.
+The ledger must not be purged by ordinary job retention while holds are unresolved.
+
+`advance` commits `submitting` before POST. Concurrent callers use versioned
+updates, so only one can submit. A timeout, malformed response or HTTP error after
+this boundary becomes `unknown`, preserving the full hold; cancellation or a crash
+can leave `submitting`, which is also never automatically resubmitted. An accepted
+task resumes one GET poll per call after restart. Poll errors leave it pollable.
+Terminal provider status alone never implies a zero bill or releases the hold.
+
+`recover_submission` accepts trusted operator evidence after worker loss or an
+authoritative lookup. A verified task ID resumes polling; without one it marks
+the submission unknown and retains the hold. Recovery never sends POST.
+`reconcile` requires a trusted final billing receipt, atomically moves the hold
+to actual cost, and rejects conflicting duplicate settlements. A real overrun is
+recorded honestly and blocks later admissions as applicable. Zero settlement is
+accepted only with explicit reconciliation evidence, never inferred from failure.
+Neither recovery nor settlement is exposed as a user-accessible route.
+
+`cancel` refunds only a never-submitted prepared job. After submission it records
+local cancellation intent while polling/accounting continue; it does not claim
+remote cancellation. During an active POST it leaves the version unchanged so the
+worker can persist the task ID; the caller must retry cancellation after that
+attempt resolves. An expired pre-submit quote releases its unused hold.
+
+Before activation, still connect these transitions to authenticated video admission,
+existing durable jobs/dispatcher, account/key resolution, Broker daily/monthly
+budgets and usage accounting, and a verified source of quotes/permissions/receipts.
+Keep the current public entry point disabled until all these bridges and their
+integration tests exist. HTTP responses/credentials are not stored by the lifecycle;
+inputs and signed result URLs require the existing job privacy/retention policy
+when the bridge is added. PostgreSQL migration/concurrency validation is also pending.
+
+This section was updated locally by Codex; it is **not** Haiku model evidence and
+does not satisfy the required Haiku documentation gate.
+
 `tests/test_vivix.py` intercepts all HTTP using `httpx.MockTransport` and covers
 registry/pin exclusion, default-disabled submission, exact tags, both API shapes,
 HTTP and envelope errors, terminal states, missing URLs and no POST retries.

@@ -293,6 +293,24 @@ CREATE TABLE IF NOT EXISTS api_key_model_cooldowns (
   PRIMARY KEY (api_key_id, model)
 );
 
+-- Staged Vivix ledger (028); independent lifetime budgets, no public activation.
+CREATE TABLE IF NOT EXISTS vivix_ledger_lock (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO vivix_ledger_lock(id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS vivix_jobs (
+  id VARCHAR(128) PRIMARY KEY,
+  project_id VARCHAR(128) NOT NULL,
+  account_id VARCHAR(128) NOT NULL,
+  version INTEGER NOT NULL,
+  reserved_usd NUMERIC(24,8) NOT NULL CHECK (reserved_usd >= 0),
+  settled_usd NUMERIC(24,8) NOT NULL CHECK (settled_usd >= 0),
+  body JSON NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_project_id ON vivix_jobs(project_id);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_account_id ON vivix_jobs(account_id);
+
 -- 012 destructive-DDL guard (event trigger); see migrations/012_block_destructive_ddl.sql
 DO $guard$
 BEGIN
