@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from aibroker.providers.catalog import UnknownModel, resolve_pin
+from aibroker.providers.gemini_video import VideoRejected, VideoRequest
 from aibroker.providers.provider_errors import classify_provider_error
 from aibroker.providers.registry import REGISTRY
 from aibroker.providers.transport import VideoTransport, _load
@@ -71,6 +72,9 @@ async def test_default_disabled_without_network():
         await transport.submit_video(model="vivix-w1", inputs={}, api_key="FAKE")
     with pytest.raises(ValueError, match="Unsupported"):
         await transport.submit_video(model="vivix-w1-stream", inputs={}, api_key="FAKE")
+    request = VideoRequest(prompt="mock", duration_s=5, aspect_ratio="16:9", resolution="720p")
+    with pytest.raises(VideoRejected, match="disabled"):
+        await transport.generate_video(model="vivix/vivix-w1", request=request, api_key="FAKE")
 
 
 @pytest.mark.parametrize("model,world", [("vivix-a1:latest", False), ("vivix-w1", True)])

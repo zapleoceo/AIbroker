@@ -88,7 +88,8 @@ unchanged.
 ## Testing a new model/provider without live keys
 
 For an asynchronous video transport foundation, see [Vivix](vivix.md). Its
-`VideoTransport` protocol separates submit and poll results from chat metadata.
+It implements the existing `VideoTransport.generate_video` entry point as a
+pre-network rejection while disabled; internal submit/poll helpers are mock-tested.
 An unpriced or unverified provider must not register routable models as free;
 Vivix remains disabled until video admission and cost accounting exist.
 

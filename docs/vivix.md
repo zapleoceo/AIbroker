@@ -6,17 +6,21 @@ default capability, automatic key probe or billing probe. It is classified as pa
 There is no free-price fallback. No personal workspace entitlement, balance,
 model availability or successful generation has been verified.
 
-`VivixVideoTransport` implements the asynchronous `VideoTransport` protocol:
-one submission returns a task ID; one poll returns a `VideoResult`. It does not
+`VivixVideoTransport` implements the existing `VideoTransport.generate_video`
+entry point as a `VideoRejected` failure before HTTP. Internal helpers separate
+submission (a task ID) and one poll (a `VideoResult`). The adapter does not
 poll in a loop, retry a POST, download media or synthesize speech separately.
 Its default enabled-model set is empty: submission fails before HTTP. The explicit
 constructor allowlist is used by mock tests; no application configuration enables it.
 Callers must not use it to bypass admission or billing controls.
 
-The existing checkout has chat/embed/transcription/speech/decision dispatch and
-chat-oriented durable jobs, but no public video request/admission/worker lifecycle.
-Consequently `GET /v1/models` does not advertise Vivix video models, and model pins
-cannot route them through chat. A provider listing does not imply model support.
+The starting checkout, 4c7f34d, predates video support. This change is based on
+master df4460a, which already has `POST /v1/video/jobs`, a video worker,
+`VideoRequest`, and `VideoTransport.generate_video`. Its service selects the first
+provider in the chain and uses Gemini token pricing plus retries across keys.
+Those assumptions cannot safely price or retry Vivix submissions. Consequently
+`GET /v1/models` does not advertise Vivix video models, and pins cannot route them
+through chat or video. A provider listing does not imply model support.
 
 ## Upstream contracts
 
@@ -49,10 +53,11 @@ audio and video reference fees. These are not proof of the personal account's
 contract or entitlement, and are not hardcoded as a permanent price. Unknown
 pricing is not zero. A1 billing has not been established for this integration.
 
-Before enabling any model, implement and test a video request schema and durable
-submission/poll lifecycle, exact workspace permission checks, conservative cost
-reservation including reference fees, settlement/reconciliation on terminal and
-ambiguous outcomes, cancellation semantics, and capability-specific routing.
+Before enabling any model, extend the existing video request schema and worker
+with provider-specific inputs and resumable Vivix submission/poll lifecycle,
+exact workspace permission checks, conservative cost reservation including
+reference fees, settlement/reconciliation on terminal and ambiguous outcomes,
+cancellation semantics, and selection beyond the first chain provider.
 Only then register priced video models and expose an activation configuration.
 Neither an ITStep test result nor access to `name:latest` grants access to a
 personal key or a bare model name. No ITStep credentials or credits are used.

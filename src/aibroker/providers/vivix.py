@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import httpx
 
+from aibroker.providers.gemini_video import VideoRejected, VideoRequest
 from aibroker.providers.video_contract import VideoResult
 from aibroker.providers.vivix_contract import (
     VivixError,
@@ -31,6 +32,12 @@ class VivixVideoTransport:
                  enabled_models: frozenset[str] = frozenset()) -> None:
         self._http_transport = http_transport
         self._enabled_models = enabled_models
+
+    async def generate_video(self, *, model: str, request: VideoRequest,
+                             api_key: str) -> tuple[bytes, dict[str, Any]]:
+        # The public video walk uses Gemini token pricing and retries across keys.
+        # Vivix cannot enter that walk until reservations and ambiguous submits are handled.
+        raise VideoRejected("Vivix video disabled: provider-specific admission and pricing required")
 
     async def _request(self, method: str, path: str, api_key: str,
                        body: dict[str, Any] | None = None) -> dict[str, Any]:
