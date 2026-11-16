@@ -1,5 +1,9 @@
 # Providers
 
+Vivix has a [disabled asynchronous video transport foundation](vivix.md), with no
+routable models or automatic probes. Personal workspace access and billing remain
+unverified; this is not a live video capability or a free provider tier.
+
 LiteLLM SDK does the per-provider HTTP. Our config maps capabilities to
 default models.
 

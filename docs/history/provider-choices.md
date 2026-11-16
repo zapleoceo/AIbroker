@@ -8,6 +8,12 @@ one-line rationale per entry; the evidence is here. Entries are grouped by subje
 
 ## Chain order (routing/chains.py)
 
+- **2026-11-16 Vivix foundation disabled.** Added an opt-in asynchronous transport
+  with separate A1 generations and W1 jobs contracts. No routable models, chain
+  slots or automatic probes: personal workspace access is unverified and video
+  admission/cost accounting are not implemented. W1 documentation now publishes
+  paid base/reference fees; missing account pricing is not free. See [Vivix](../vivix.md).
+
 - **2026-07-05 strict free-first.** Paid (deepseek/anthropic/openai) moved to the
   tail of every `chat:*` chain, after ALL free providers. Was: deepseek ahead of
   openrouter/github/sambanova/zai "for backfill speed", which fired a paid call as

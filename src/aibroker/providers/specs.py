@@ -19,6 +19,7 @@ from aibroker.providers.provider_specs import (
     openai,
     openrouter,
     sambanova,
+    vivix,
     voyage,
     zai,
 )
@@ -39,3 +40,4 @@ register(local.SPEC)
 register(deepseek.SPEC)
 register(anthropic.SPEC)
 register(openai.SPEC)
+register(vivix.SPEC)

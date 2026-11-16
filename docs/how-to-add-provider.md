@@ -87,6 +87,11 @@ unchanged.
 
 ## Testing a new model/provider without live keys
 
+For an asynchronous video transport foundation, see [Vivix](vivix.md). Its
+`VideoTransport` protocol separates submit and poll results from chat metadata.
+An unpriced or unverified provider must not register routable models as free;
+Vivix remains disabled until video admission and cost accounting exist.
+
 - `tests/test_registry.py` — consistency (chains, defaults, pricing, transports).
 - `tests/test_pin_resolution.py` — pins resolve and walk deterministically.
 - Drive `run_chat` with fakes (`pick_and_reserve`, `call_llm`, `reserve_cost`, …) as in
