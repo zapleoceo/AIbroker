@@ -52,9 +52,19 @@ async def test_migrations_are_idempotent_on_test_database():
                                        "'{\"state\":\"unknown\"}')"))
             await apply("029_vivix_broker_binding.sql")
             assert await session.scalar(column, {"schema": schema}) == "bigint"
+            assert await session.scalar(text("SELECT to_regclass('budget_reservations')")) is None
+            await apply("030_shared_budget_reservations.sql")
+            await session.execute(text("INSERT INTO budget_reservations "
+                                       "(id,api_key_id,project_id,amount,day,month,debit_daily,"
+                                       "debit_monthly,state) VALUES "
+                                       "('legacy-hold',2,1,2,CURRENT_DATE,CURRENT_DATE,true,true,'held')"))
             for _ in range(2):
                 await apply("028_vivix_ledger.sql")
                 await apply("029_vivix_broker_binding.sql")
+                await apply("030_shared_budget_reservations.sql")
+            hold = (await session.execute(text("SELECT * FROM budget_reservations"))).mappings().one()
+            assert hold["amount"] == 2 and hold["state"] == "held" and hold["usage_id"] is None
+            assert await session.scalar(text("SELECT COUNT(*) FROM budget_ledger_lock WHERE id=1")) == 1
             row = (await session.execute(text("SELECT * FROM vivix_jobs"))).mappings().one()
             assert row["id"] == "legacy" and row["version"] == 3
             assert row["reserved_usd"] == Decimal("2.25") and row["settled_usd"] == 0

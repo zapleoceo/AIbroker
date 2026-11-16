@@ -75,7 +75,7 @@ async def test_project_monthly_cap_blocks_paid_reservation():
         await reserve_cost(api_key=key, project=_project(monthly=1.0), estimated_cost=0.2)
     assert ei.value.kind == "project"
     assert ei.value.limit == 1.0
-    assert ei.value.used == pytest.approx(0.9)
+    assert ei.value.used == pytest.approx(0.95)  # settled spend plus the live 0.05 hold
 
 
 async def test_key_monthly_cap_blocks_reservation_and_counts_up():
@@ -183,6 +183,6 @@ async def test_release_without_any_cap_is_a_noop():
 @pytest.mark.skipif(not ON_POSTGRES, reason="release uses GREATEST (Postgres)")
 async def test_release_refunds_monthly_reservation():
     key = await _add_key(monthly_cost_cap_usd=2.0)
-    await reserve_cost(api_key=key, project=_project(), estimated_cost=0.5)
-    await release_cost(api_key=key, estimated_cost=0.5)
+    rid = await reserve_cost(api_key=key, project=_project(), estimated_cost=0.5)
+    await release_cost(api_key=key, reservation_id=rid)
     assert (await _read(key.id)).monthly_cost_used_usd == pytest.approx(0.0)

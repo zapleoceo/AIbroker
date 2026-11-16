@@ -56,18 +56,23 @@ class BrokerVivixStore(VivixStore):
         day, month = now.replace(hour=0, minute=0, second=0, microsecond=0), now.replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
         hold = await held(session, key_id=key_id)
+        from aibroker.routing.budget_ledger import ordinary_held, uncounted_key_holds
         daily = key.daily_cost_used_usd if key.daily_reset_at == day.date() else 0
         monthly = key.monthly_cost_used_usd if key.monthly_reset_at == month.date() else 0
-        check(key.daily_cost_cap_usd, Decimal(str(daily)) + hold, amount, "key daily")
-        check(key.monthly_cost_cap_usd, Decimal(str(monthly)) + hold, amount, "key monthly")
+        check(key.daily_cost_cap_usd, Decimal(str(daily)) + hold + await uncounted_key_holds(
+            session, key, window="daily", today=day.date()), amount, "key daily")
+        check(key.monthly_cost_cap_usd, Decimal(str(monthly)) + hold + await uncounted_key_holds(
+            session, key, window="monthly", today=day.date()), amount, "key monthly")
         hold = await held(session, project_id=project.id)
+        hold += await ordinary_held(session, project_id=project.id)
         check(project.daily_cost_cap_usd, await spent(session, day, project_id=project.id) + hold,
               amount, "project daily")
         check(project.monthly_cost_cap_usd, await spent(session, month, project_id=project.id) + hold,
               amount, "project monthly")
         cap = get_settings().GLOBAL_DAILY_CAP_USD
         if cap > 0:
-            check(cap, await spent(session, day) + await held(session), amount, "global daily")
+            check(cap, await spent(session, day) + await held(session) + await ordinary_held(session),
+                  amount, "global daily")
 
     async def after_settle(self, session: AsyncSession, old: Snapshot,
                            body: dict[str, Any], amount: Decimal) -> None:

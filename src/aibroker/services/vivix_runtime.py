@@ -37,5 +37,5 @@ class VivixRuntime(Protocol):
 
 def get_runtime() -> VivixRuntime | None:
     # Implement only after verified account, media, quote and receipt sources + release gates.
-    # Also blocked on cross-key ordinary/Vivix project/global reservations (docs/vivix.md).
+    # Shared budget migrations and PostgreSQL validation are also release gates (docs/vivix.md).
     return None

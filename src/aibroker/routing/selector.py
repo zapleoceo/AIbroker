@@ -502,6 +502,7 @@ async def record_usage(
     http_status: int | None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    reservation_id: str | None = None,
 ) -> int:
     """Insert usage_log row + update counters on the api_key.
 
@@ -539,6 +540,13 @@ async def record_usage(
         p = {k: v for k, v in params.items() if k not in dropped}
         upd_p = {**p, **month_params()}
         async with get_session() as s:
+            from aibroker.routing.budget_ledger import booking_reservation, lock_budget
+            await lock_budget(s)
+            reservation = None
+            if reservation_id is not None:
+                reservation = await booking_reservation(s, reservation_id, params)
+                if reservation.state == "settled":
+                    return int(reservation.usage_id)
             if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
                 # One round-trip: data-modifying CTE folds the INSERT and the
                 # counter UPDATE into a single statement (2026-07-16).
@@ -556,6 +564,9 @@ async def record_usage(
                 # same session/transaction, just two round-trips.
                 usage_id = (await s.execute(text(insert_sql), p)).scalar_one()
                 await s.execute(text(update_sql), upd_p)
+            if reservation is not None:
+                reservation.state = "settled"
+                reservation.usage_id = int(usage_id)
         return int(usage_id)
 
     missing = frozenset(_missing_usage_cols)

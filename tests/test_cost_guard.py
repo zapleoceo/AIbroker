@@ -74,13 +74,12 @@ async def test_free_key_zero_cost_passes():
     await reserve_cost(api_key=k, project=_project(), estimated_cost=0.0)
 
 
-async def test_key_with_no_cap_skips_the_db_entirely():
-    """daily_cost_cap_usd=None → the per-key branch never runs — an unsaved,
-    fake key id is fine since no query ever references it."""
-    k = ApiKeyRow(id=999_999, provider="x", label="x", tier="paid",
-                  token_encrypted="x", scopes=["llm:chat"],
-                  daily_cost_used_usd=1_000_000, daily_cost_cap_usd=None)
-    await reserve_cost(api_key=k, project=_project(), estimated_cost=10.0)
+async def test_key_with_no_cap_still_has_a_durable_project_hold():
+    k = await _add_key(daily_cost_used_usd=1_000_000, daily_cost_cap_usd=None)
+    rid = await reserve_cost(api_key=k, project=_project(), estimated_cost=10.0)
+    assert isinstance(rid, str)
+    assert (await _read_key(k.id)).daily_cost_used_usd == 1_000_000
+    await release_cost(api_key=k, reservation_id=rid)
 
 
 async def test_release_cost_free_tier_is_a_noop():
@@ -128,19 +127,18 @@ async def test_paid_at_cap_blocks_without_reserving():
 @pytest.mark.skipif(not ON_POSTGRES, reason="reserve_cost's UPDATE needs a real row")
 async def test_release_cost_refunds_reservation():
     key = await _add_key(daily_cost_used_usd=0.0, daily_cost_cap_usd=2.0)
-    await reserve_cost(api_key=key, project=_project(), estimated_cost=0.5)
+    rid = await reserve_cost(api_key=key, project=_project(), estimated_cost=0.5)
     assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(0.5)
-    await release_cost(api_key=key, estimated_cost=0.5)
+    await release_cost(api_key=key, reservation_id=rid)
     assert (await _read_key(key.id)).daily_cost_used_usd == pytest.approx(0.0)
 
 
 @pytest.mark.skipif(not ON_POSTGRES, reason="reserve_cost's UPDATE needs a real row")
-async def test_release_cost_never_goes_negative():
-    """GREATEST(0, ...) guard: releasing more than was ever reserved (e.g. a
-    stray double-release) clamps at 0 instead of underflowing negative."""
+async def test_release_without_identity_cannot_erase_spend():
+    """A key/amount is not a reservation identity and cannot refund spend."""
     key = await _add_key(daily_cost_used_usd=0.1, daily_cost_cap_usd=2.0)
     await release_cost(api_key=key, estimated_cost=5.0)
-    assert (await _read_key(key.id)).daily_cost_used_usd == 0.0
+    assert (await _read_key(key.id)).daily_cost_used_usd == 0.1
 
 
 # ─── The actual race this change closes ──────────────────────────────────────

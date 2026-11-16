@@ -12,6 +12,7 @@ from aibroker.db.engine import get_session
 from aibroker.db.vivix_models import VivixJobRow, VivixLedgerLock
 from aibroker.providers.gemini_video import VideoRejected
 from aibroker.providers.vivix_admission import usd
+from aibroker.routing.budget_ledger import lock_budget
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class VivixStore:
         caps = [money(limits.account_usd), money(limits.project_usd), money(limits.global_usd)]
         async with get_session() as session:
             # Every admission takes this DB lock; a SUM without it can over-admit concurrent jobs.
+            await lock_budget(session)
             lock = await session.execute(update(VivixLedgerLock).where(VivixLedgerLock.id == 1)
                                          .values(version=VivixLedgerLock.version + 1))
             if lock.rowcount != 1:
@@ -106,6 +108,7 @@ class VivixStore:
             values["settled_usd"] = money(settled)
         async with get_session() as session:
             if reserved is not None or settled is not None:
+                await lock_budget(session)
                 await session.execute(update(VivixLedgerLock).where(VivixLedgerLock.id == 1)
                                       .values(version=VivixLedgerLock.version + 1))
             result = await session.execute(update(VivixJobRow).where(

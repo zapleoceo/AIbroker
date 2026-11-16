@@ -1823,7 +1823,7 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
         return 1
 
     async def fake_reserve(**kw):
-        return None
+        return "timeout-reservation"
 
     async def fake_release(**kw):
         released.update(kw)
@@ -1856,7 +1856,8 @@ async def test_timeout_attempt_not_billed_to_admission(monkeypatch):
     flow = res.flow
     assert flow is Flow.NEXT_KEY
     assert booked["cost_usd"] == 0.0                       # $0 to the admission cap
-    assert released["estimated_cost"] == pytest.approx(0.0123)  # reservation unwound
+    assert released == {}  # zero-cost booking atomically unwinds the reservation
+    assert booked["reservation_id"] == "timeout-reservation"
 
 
 async def _walk_with_bodies(monkeypatch, bodies, *, chain=("deepseek", "gemini"),

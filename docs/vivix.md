@@ -85,12 +85,11 @@ checks real project/key daily/monthly caps, global daily cap, existing usage and
 all unresolved holds. Ordinary `reserve_cost` also counts these holds, including
 after UTC window resets. Settlement atomically closes the hold, writes `usage_log`
 and updates key counters once; a failed write rolls back everything. No delayed
-refund subtracts an old reservation from new-window spend. Existing ordinary-lane
-project/global concurrency and global-cache limitations remain as documented in
-the cost guard; this does not claim globally serializable admission for all lanes.
-Migrations 028/029 and matching fresh-install DDL are prepared, not applied to any
-running database. Both are required before deploying this code because ordinary
-cost guards now read persistent holds, even while Vivix activation is disabled.
+refund subtracts an old reservation from new-window spend. Shared durable ordinary
+reservations now close the cross-key project/global admission gap; details and
+operational limitations are in [budget-reservations.md](budget-reservations.md).
+Migrations 028/029/030 and fresh-install DDL are prepared only. They are required
+before future deployment, even while Vivix activation is disabled.
 The ledger must not be purged by ordinary job retention while holds are unresolved.
 
 `advance` commits `submitting` before POST. Concurrent callers use versioned
@@ -172,31 +171,12 @@ CLAUDE.md requires a Haiku documentation subagent before PR/deploy. This documen
 is an implementation draft, not a claim that the Haiku requirement has passed.
 Run `scripts/docs_gate.sh` before pushing; exact-commit CI remains authoritative.
 
-### Activation blocker: overlapping ordinary and Vivix reservations
+### Shared budget reservations
 
-Project daily/monthly and global daily caps are NOT safe across the two paths.
-An ordinary paid request on key 2 can reserve $2 and remain in flight with no
-usage_log entry. Vivix on key 1 then admits a $2.25 hold against the same $3 cap:
-ordinary estimates exist only in key counters, while Vivix sums usage_log and
-Vivix holds for project/global checks. Both calls are admitted, totaling $4.25.
-The Vivix singleton lock does not cover ordinary reservations. Even putting
-both admissions under that lock would not make the missing ordinary obligation
-visible after its transaction commits. This is a release/activation blocker,
-not a guaranteed project/global cap. `get_runtime` must remain disabled.
-
-`tests/test_vivix_budget_overlap.py` deterministically reproduces the in-flight
-interleaving for project daily/monthly and global daily limits on different keys.
-Strict expected failures accept only the explicit, fully asserted overspend;
-unexpected exceptions fail. A fix requires shared durable project/global
-reservations, atomic admission and booking/refund across both paths, including
-crash and window-reset behavior, followed by PostgreSQL concurrency validation.
-That broader accounting change is not implemented here.
-
-PostgreSQL tests now require exactly one admitted Snapshot and the expected
-budget refusal, restrict settlement outcomes to success or the documented CAS
-conflict, and reread one exact usage entry, zero hold and all key counters before
-and after an idempotent retry. Migration checks use an isolated transactional
-schema outside ORM create_all: apply 028, insert an unresolved legacy hold,
-then apply/reapply 029 and verify row preservation, nullable BIGINT binding and
-index. The entire test schema is rolled back. These PostgreSQL checks remain
-NOT RUN locally without an explicitly authorized TEST_DATABASE_URL.
+The cross-key ordinary/Vivix budget race is addressed locally by migration 030
+and the shared durable ledger described in [budget-reservations.md](budget-reservations.md).
+The previous three strict XFAIL reproductions now require correct budget rejection.
+Both paths serialize admission and monetary transitions, and ordinary booking
+atomically replaces its hold with actual usage, including billed rejection.
+PostgreSQL validation and migration rollout remain release gates; Vivix stays
+unconditionally disabled. No production migration or provider call was made.
