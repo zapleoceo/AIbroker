@@ -310,3 +310,13 @@ Offline tests cover cap+cancel, failed/manual restart, concurrent/stale/foreign
 claims, nonadmin and revoked provider access, no POST and single settlement.
 Real PostgreSQL stale-sweep/concurrency validation remains NOT RUN here. Existing
 031 migration/rollout, PostgreSQL, Haiku and publication gates remain mandatory.
+
+### Omni response contract check (2026-11-17)
+
+Primary source: https://aistudio.google.com/docs/omni#rest-response-schema .
+The documentation distinguishes SDK `output_video` from raw REST video content
+in `steps[].content[]`. Broker sends raw REST and already parses the latter.
+`test_documented_omni_raw_rest_response` uses synthetic bytes and the documented
+envelope for both create and known-receipt GET-only recovery. No parser change is
+justified by this example; neither a live incompatibility nor live success is
+claimed. Limits, URL handling, error handling and dispatch code are unchanged.
