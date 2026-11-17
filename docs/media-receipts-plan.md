@@ -1,9 +1,10 @@
 # Media receipt/reconciliation contract proposal
 
-Read-only code review against be18e51029d2bd75d31ccdcfa848cad75c44b462.
-This is a proposed local implementation plan, not an implemented API or a claim
-of provider-side exactly-once execution. No provider calls or integration tests
-were run for this review. Existing Vivix work remains unchanged and disabled.
+Initial read-only review was against be18e51029d2bd75d31ccdcfa848cad75c44b462.
+The initial plan and narrow-guard review below document the pre-implementation
+findings. The final section records the subsequently implemented LOCAL dispatch
+slice and supersedes their statements that no guard exists. This is not a released
+API or a claim of provider-side exactly-once execution. Vivix remains disabled.
 
 ## Confirmed behavior
 
@@ -119,6 +120,8 @@ remain blockers. No push, PR, deploy, production access or Vivix activation.
 
 ## Narrow guard review and executable reproductions
 
+Historical findings at 95aef41, before the implementation described below.
+
 `tests/test_media_resubmit_risk.py` adds fault-injection reproductions against the
 real Gemini transport orchestration, video key walk and queue execution. HTTP
 `_send`, key selection and billing collaborators are mocked; no external request
@@ -176,3 +179,80 @@ claims/worker death before and after fence; known-ID recovery with zero POSTs;
 reservation retention on unknown; foreign scope/fence rejection; and PostgreSQL
 CAS/rollback/stale-reclaim integration. The current change supplies reproductions
 and this dependency boundary only, not the guard or durable receipt capability.
+
+## Implemented local dispatch slice (not released)
+
+`MediaDispatchRow` in migration 031 stores job/project identity, `media_fingerprint`
+of canonical job input, phase, queue claim timestamp, key/account binding, hash of
+the encrypted credential, reservation ID, resolved model, provider ID and usage ID.
+The credential itself is not copied into the receipt. Project scope and the exact
+claim are checked by `MediaDispatch.fence`; `MediaUnknown` is the explicit refusal
+to repeat an uncertain operation. `validate_input` compares the actual call to
+the durable payload, and begin rechecks its fingerprint under lock. A stale/foreign worker cannot submit,
+persist a provider receipt or finalize someone else's job. Changed input is refused.
+
+`run_video` now requires a `MediaDispatch` context, supplied by the existing queue.
+No-key selection and proven validation/decrypt/admission failures remain before
+the dispatch fence. `bind` associates the attempt's reservation in memory only;
+it is NOT the guarantee. After request validation and decryption, `begin` locks
+and compares the durable job/receipt, checks its held reservation and current key,
+then commits prepared -> submitting immediately before the POST. Only one CAS
+winner can submit. A loser settles/refunds only its own unused reservation and
+does not change the winner's dispatch or rotate to another paid generation.
+
+`generate_via_gemini` persists the returned provider ID through `receipt` before
+polling or downloading. `load` after a changed worker claim converts submitting
+without a committed receipt to unknown. With a known ID, `media_resume_key`
+requires the original key/account/credential fingerprint and uses only GET; it
+does not reserve again or pick a replacement key/model. Exceptions/cancellation
+after dispatch retain unsettled reservations (`started`/`uncertain`) and do not
+book the ordinary zero-cost error/refund policy. This is deliberately conservative,
+including post-fence HTTP refusals where payment/nonacceptance is not proven.
+
+`record_usage` invokes `finalize` in the same transaction as actual cost, usage ID
+and reservation settlement. Failure rolls back all of those writes. `booked`
+reuses the stored usage ID on GET recovery and verifies the returned cost/binding;
+it does not book a second charge. Artifact bytes still use the existing job finish
+path: if that later write is lost, known-ID recovery GETs the artifact again. If
+no recoverable provider ID exists, the job becomes unknown, even when a usage row
+already proves its billing. No new artifact storage or retention period is added.
+
+`media_quarantine` blocks unknown jobs in generic retry and shutdown paths. Stale
+recovery first quarantines such jobs; subsequent execution also loads the durable
+phase before any paid call. Generic requeue now additionally requires running
+status, so a late retry cannot revive an already quarantined terminal job.
+Cancellation before dispatch remains safe to cancel/refund; after dispatch it
+cannot authorize another POST or erase an unsettled hold. Known-ID polling may
+still hit normal retry limits, leaving its receipt/hold for explicit reconciliation.
+Completed artifacts retain existing job-retention behavior. Unresolved media jobs
+are excluded from purge; submission tombstones have no cascading job foreign key.
+
+### Mandatory rollout/dependency gate
+
+- Migrations 028/029/030/031 must exist before these code paths run. Missing 031
+  fails closed before video POST; there is no fallback to unguarded generation.
+- Stop and drain ALL old workers before applying 031 or starting new workers.
+  Mixed old/new workers are unsupported. The migration records unknown and
+  quarantines pre-existing pending/running non-Vivix video jobs because their
+  historical POST state cannot be proved. It does not alter budgets/credentials,
+  nor infer a refund for old jobs. This behavior requires explicit rollout review.
+- Migration/init SQL are prepared only and have NOT been applied to production.
+  PostgreSQL migration/CAS/restart/stale-reclaim tests are prepared but NOT RUN
+  here. SQLite/mock results are not PostgreSQL integration evidence.
+- Public key-based receipt lookup, Gemini submit idempotency wiring, async speech,
+  durable speech artifacts and operator reconciliation UI are NOT implemented by
+  this slice. Guarantees apply to retries/recovery of the same durable video job;
+  submitting a distinct job is not provider-side deduplication. Low-level transport
+  unit calls without a job context do not claim these queue-level guarantees.
+- No provider-side exactly-once claim. A crash after the fence but before the send
+  is also unknown, sacrificing availability to avoid a possible second charge.
+  Provider receipt expiry/unavailable account can prevent artifact recovery.
+- No push/PR/deploy, provider calls or activation occurred. Publication denial,
+  unavailable Haiku documentation review and PostgreSQL validation remain gates.
+
+The former three XFAIL tests now assert one POST with ordinary PASS expectations.
+Coverage includes GET-only retries, lost job finish, atomic booking rollback,
+concurrent CAS/loser refund, pre-dispatch no-key/decrypt/validation, cancellation
+and shutdown quarantine, foreign/stale claims and changed credential/project/input.
+`test_media_dispatch_postgres` adds a genuine prior-schema migration test in a
+transactional isolated schema and a real PostgreSQL stale-reclaim/hold test.

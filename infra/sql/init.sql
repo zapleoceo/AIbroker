@@ -382,3 +382,19 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
 CREATE INDEX IF NOT EXISTS ix_budget_reservations_api_key_id ON budget_reservations(api_key_id);
 CREATE INDEX IF NOT EXISTS ix_budget_reservations_project_id ON budget_reservations(project_id);
 CREATE INDEX IF NOT EXISTS ix_budget_reservations_state ON budget_reservations(state);
+
+CREATE TABLE IF NOT EXISTS media_dispatch (
+  job_id BIGINT PRIMARY KEY,
+  project_id BIGINT NOT NULL,
+  fingerprint VARCHAR(64) NOT NULL,
+  phase VARCHAR(16) NOT NULL CHECK (phase IN ('prepared','submitting','submitted','settled','unknown')),
+  claim TIMESTAMP,
+  key_id BIGINT,
+  account_id VARCHAR(255),
+  key_fingerprint VARCHAR(64),
+  reservation_id VARCHAR(36),
+  model VARCHAR(200),
+  provider_id VARCHAR(255),
+  usage_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS ix_media_dispatch_project_id ON media_dispatch(project_id);

@@ -65,7 +65,14 @@ def _wire(monkeypatch, *, picks, gen, record=None, reserve=None):
 
 
 async def _run(**kw):
-    args = {"project": PROJECT, "request": REQ, "model": None, "workflow": "kruzhok"} | kw
+    # Service-only collaborator stub; durable guarantees are tested separately
+    # with real DB state in test_media_dispatch/test_media_resubmit_risk.
+    dispatch = SimpleNamespace(load=AsyncMock(return_value={"phase": "prepared"}),
+                               validate_input=AsyncMock(return_value=None),
+                               bind=lambda *a: None, started=AsyncMock(return_value=False),
+                               booked=AsyncMock(return_value=None))
+    args = {"project": PROJECT, "request": REQ, "model": None, "workflow": "kruzhok",
+            "dispatch": dispatch} | kw
     return await svc.run_video(**args)
 
 
@@ -89,7 +96,8 @@ async def test_success_returns_the_clip_and_books_cost(monkeypatch):
     out = await _run()
     assert base64.b64decode(out.text) == MP4 and out.mime_type == "video/mp4"
     assert out.request_id == 77 and out.key_label == "paid1" and out.video_s == 5.0
-    assert gen.await_args.kwargs == {"model": MODEL, "request": REQ, "api_key": "plain"}
+    assert {k: v for k, v in gen.await_args.kwargs.items() if k != "dispatch"} == {
+        "model": MODEL, "request": REQ, "api_key": "plain"}
     kw = record.await_args.kwargs
     assert (kw["capability"], kw["status"], kw["tokens_out"]) == ("video", "ok", 9_655)
     assert kw["cost_usd"] == pytest.approx(0.116)

@@ -30,11 +30,11 @@ import contextlib
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
-from sqlalchemy import func, text, update
+from sqlalchemy import func, select, text, update
 
 from aibroker.config import get_settings
 from aibroker.db import get_session
@@ -53,6 +53,7 @@ from aibroker.services.llm_service import (
     run_chat,
     run_transcribe,
 )
+from aibroker.services.media_dispatch import MediaDispatch, MediaUnknown, media_quarantine
 from aibroker.services.video_service import (
     VIDEO_FIELD,
     VIDEO_MAX_RETRIES,
@@ -191,6 +192,15 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     Postgres-only (make_interval) — covered for real by the SKIP-LOCKED
     Postgres run: test_job_queue.py::test_requeue_stale_running_reclaims_dead_
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
+    # Fence unknown media before generic retry. No provider receipt => no resubmit.
+    async with get_session() as s:
+        stale = (await s.scalars(select(DeepJobRow).where(
+            DeepJobRow.status == "running", DeepJobRow.capability == "video",
+            DeepJobRow.started_at < datetime.now(UTC).replace(tzinfo=None)
+            - timedelta(seconds=_STALE_RUNNING_S)))).all()
+    for job in stale:
+        if VIVIX_FIELD not in job.request:
+            await media_quarantine(job.id, job.started_at)
     async with get_session() as s:
         await s.execute(
             text(
@@ -250,6 +260,8 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
     path was guarded, so the error/no-provider paths could double-execute).
 
     A job whose client asked to cancel ends `cancelled` here instead of being retried."""
+    if await media_quarantine(job_id, expect_started_at):
+        return
     if await cancel_flag(job_id):
         await _finish(job_id, status="cancelled", expect_started_at=expect_started_at)
         return
@@ -263,7 +275,7 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
             text(
                 "UPDATE deep_jobs SET status = 'pending', started_at = NULL, "
                 "  retry_count = :rc, run_after = now() + make_interval(secs => :backoff) "
-                "WHERE id = :id "
+                "WHERE id = :id AND status = 'running' "
                 "  AND (CAST(:expected AS timestamp) IS NULL OR started_at = :expected)"
             ),
             {"id": job_id, "rc": retry_count + 1, "backoff": _backoff_s(retry_count + 1),
@@ -280,6 +292,8 @@ async def _release_claim(job_id: int, started_at: datetime | None) -> bool:
     must not eat the retry budget. Returns True when the row was released."""
     if started_at is None:
         return False
+    if await media_quarantine(job_id, started_at):
+        return True
     async with get_session() as s:
         res = await s.execute(
             update(DeepJobRow)
@@ -326,13 +340,14 @@ async def _run_transcription_job(project: ProjectRow, req: dict[str, Any]):  # p
     )
 
 
-async def _run_video_job(project: ProjectRow, req: dict[str, Any]):  # pragma: no cover — exercised via the Postgres drain_once tests
+async def _run_video_job(project: ProjectRow, req: dict[str, Any], dispatch: MediaDispatch):  # pragma: no cover - exercised via the Postgres drain_once tests
     """Async video clip: rebuild the queued request and walk the paid video keys.
     A VideoRejected (ValueError) ends the job at once; VideoFailed is retried at
     most VIDEO_MAX_RETRIES times, because every finished generation is billed."""
     return await run_video(
         project=project, request=video_request_from_job(req[VIDEO_FIELD]),
         model=req.get("model"), workflow=req.get("workflow"),
+        dispatch=dispatch,
     )
 
 
@@ -352,7 +367,15 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if row.capability == "video" and VIVIX_FIELD in req:
         await execute_vivix(row, project)
         return
-    if row.cancel_requested:   # asked to cancel while queued/requeued: no provider call at all
+    dispatch = None
+    recovering_media = False
+    if row.capability == "video":
+        dispatch = MediaDispatch(row.id, row.project_id, row.started_at)
+        if await media_quarantine(row.id, row.started_at):
+            return
+        media = await dispatch.load()
+        recovering_media = media["phase"] != "prepared"
+    if row.cancel_requested and not recovering_media:   # no provider call before dispatch
         log.info("job %d (%s) cancelled before running%s", row.id, row.capability, tag)
         await _finish(row.id, status="cancelled", expect_started_at=row.started_at)
         return
@@ -375,7 +398,7 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
             if row.capability == "transcription":
                 outcome = await _run_transcription_job(project, req)
             elif row.capability == "video":
-                outcome = await _run_video_job(project, req)
+                outcome = await _run_video_job(project, req, dispatch)
             else:
                 outcome = await run_chat(
                     project=project, capability=row.capability,
@@ -387,6 +410,11 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                     tools=req.get("tools"), tool_choice=req.get("tool_choice"),
                     should_stop=lambda: cancel_flag(row.id),
                 )
+    except MediaUnknown as e:
+        if not await media_quarantine(row.id, row.started_at):
+            await _requeue_or_fail(row.id, row.retry_count, str(e),
+                                   expect_started_at=row.started_at, max_retries=VIDEO_MAX_RETRIES)
+        return
     except UnknownModel as e:
         # The pin is not in the catalog (queued before a registry change): no retry
         # can fix it — fail the job with the suggestions instead of burning 8 runs.
@@ -500,6 +528,8 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
                 "DELETE FROM deep_jobs WHERE id IN ("
                 "  SELECT id FROM deep_jobs "
                 "  WHERE status IN ('done', 'error', 'cancelled') "
+                "    AND NOT EXISTS (SELECT 1 FROM media_dispatch m WHERE m.job_id=deep_jobs.id "
+                "      AND m.phase IN ('submitting','submitted','unknown')) "
                 "    AND completed_at IS NOT NULL "
                 "    AND completed_at < now() - make_interval(days => :days) "
                 "  LIMIT :batch"

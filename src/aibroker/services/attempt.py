@@ -217,6 +217,8 @@ class Attempt:
     pinned_model: str | None = None         # part of the affinity key
     note_affinity: bool = True
     reservation_id: str | None = field(default=None, init=False)
+    media_dispatch: Any = None
+    recovered_reservation: str | None = None
 
 
 @dataclass
@@ -331,7 +333,7 @@ async def _record_rejection(a: Attempt, rej: Rejection, meta: dict[str, Any]) ->
 
 async def run_attempt(a: Attempt) -> AttemptResult:
     """Run one key attempt to a verdict (see module docstring)."""
-    a.reservation_id = None
+    a.reservation_id = a.recovered_reservation
     if a.reserve:
         try:
             spec = model_spec(a.model)
@@ -343,10 +345,18 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     try:
         # decrypt INSIDE the try: it runs after reserve_cost, so a failure here
         # must release the reservation like any other attempt failure.
+        if a.media_dispatch is not None:
+            a.media_dispatch.bind(a.key, a.reservation_id, a.model)
         plain = decrypt(a.key.token_encrypted)
         payload, meta = await a.call(plain)
         meta["cost_usd"] = _billed_cost(a.key, meta, model=a.model)
     except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
+        if a.media_dispatch is not None and await a.media_dispatch.started():
+            from aibroker.services.media_dispatch import MediaUnknown
+            await a.media_dispatch.uncertain()
+            if not isinstance(e, Exception):
+                raise
+            raise MediaUnknown("media result uncertain; hold retained, no key rotation") from e
         # The attempt is over however it ends — fully release the reservation so
         # an answerless call (incl. a paid timeout) consumes NO admission budget.
         # BaseException so a cancelled request (CancelledError) releases too; it
@@ -367,7 +377,9 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     # request here must not drop the ledger row. The write runs as its own task, so
     # a cancel raises here immediately but the write still completes in the
     # background (cancellation does not wait for it).
-    usage_id = await _shield_booking(record_usage(
+    existing_usage = (await a.media_dispatch.booked(meta["cost_usd"])
+                      if a.media_dispatch is not None else None)
+    usage_id = existing_usage if existing_usage is not None else await _shield_booking(record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,
         provider=a.provider, model=a.model, model_served=meta.get("model_served"),
         capability=a.capability, workflow=a.workflow,
@@ -378,6 +390,7 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         latency_ms=meta.get("latency_ms"), status="ok", error_kind=None,
         http_status=200, request_id=current_request_id(),
         reservation_id=a.reservation_id,
+        media_dispatch=a.media_dispatch,
     ), a)
     # A success re-pins the request family AND (project, provider) to what just
     # worked, so the NEXT request lands where the provider-side cache is warm.

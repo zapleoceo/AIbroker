@@ -191,15 +191,28 @@ async def _await_file(uri: str, api_key: str, budget: _Budget, poll_s: float) ->
 
 
 async def generate_via_gemini(
-    *, model: str, request: VideoRequest, api_key: str,
+    *, model: str, request: VideoRequest, api_key: str, dispatch: Any = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Prompt (+ optional reference image) -> MP4 bytes, waiting out the generation."""
     settings = get_settings()
     budget = _Budget(settings.GEMINI_VIDEO_TIMEOUT_S)
     poll_s = settings.GEMINI_VIDEO_POLL_S
     t0 = time.time()
-    created = (await _call("POST", _INTERACTIONS_URL, api_key,
-                           interaction_body(model, request), budget, "the create call")).json()
+    body = interaction_body(model, request)  # validation before the durable fence
+    state = await dispatch.load() if dispatch is not None else None
+    if state and state["phase"] != "prepared":
+        from aibroker.services.media_dispatch import MediaUnknown
+        if not state["provider_id"] or state["phase"] not in ("submitted", "settled"):
+            raise MediaUnknown("unknown media outcome; POST prohibited")
+        created = {"id": state["provider_id"], "status": "in_progress"}
+    else:
+        budget.left("the create call")
+        if dispatch is not None:
+            await dispatch.begin()
+        created = (await _call("POST", _INTERACTIONS_URL, api_key,
+                               body, budget, "the create call")).json()
+        if dispatch is not None and created.get("id"):
+            await dispatch.receipt(created["id"])
     data = await _await_interaction(created, api_key, budget, poll_s)
     part = _video_part(data)
     if part is None:
@@ -233,6 +246,6 @@ class GeminiVideoTransport:
     """VideoTransport for the Gemini Omni video models."""
 
     async def generate_video(
-        self, *, model: str, request: VideoRequest, api_key: str,
+        self, *, model: str, request: VideoRequest, api_key: str, dispatch: Any = None,
     ) -> tuple[bytes, dict[str, Any]]:
-        return await generate_via_gemini(model=model, request=request, api_key=api_key)
+        return await generate_via_gemini(model=model, request=request, api_key=api_key, dispatch=dispatch)

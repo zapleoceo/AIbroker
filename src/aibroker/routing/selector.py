@@ -503,6 +503,7 @@ async def record_usage(
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     reservation_id: str | None = None,
+    media_dispatch=None,
 ) -> int:
     """Insert usage_log row + update counters on the api_key.
 
@@ -551,6 +552,8 @@ async def record_usage(
             if reservation_id is not None:
                 reservation = await booking_reservation(s, reservation_id, params)
                 if reservation.state == "settled":
+                    if media_dispatch is not None:
+                        await media_dispatch.finalize(s, int(reservation.usage_id))
                     return int(reservation.usage_id)
             if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
                 # One round-trip: data-modifying CTE folds the INSERT and the
@@ -572,6 +575,8 @@ async def record_usage(
             if reservation is not None:
                 reservation.state = "settled"
                 reservation.usage_id = int(usage_id)
+            if media_dispatch is not None:
+                await media_dispatch.finalize(s, int(usage_id))
         return int(usage_id)
 
     missing = frozenset(_missing_usage_cols)

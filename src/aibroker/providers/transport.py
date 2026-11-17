@@ -143,11 +143,12 @@ async def synthesize(*, model: str, text: str, voice: str, style: str | None,
 
 
 async def generate_video(*, model: str, request: Any,
-                         api_key: str) -> tuple[bytes, dict[str, Any]]:
+                         api_key: str, dispatch: Any = None) -> tuple[bytes, dict[str, Any]]:
     """Prompt (+ optional reference image) -> MP4 bytes through the model's transport;
     `request` is a providers.gemini_video.VideoRequest."""
+    extra = {"dispatch": dispatch} if dispatch is not None else {}
     return await transport_for(model).generate_video(
-        model=model, request=request, api_key=api_key)
+        model=model, request=request, api_key=api_key, **extra)
 
 
 async def open_live(*, model: str, voice: str, system: str, language: str | None,
