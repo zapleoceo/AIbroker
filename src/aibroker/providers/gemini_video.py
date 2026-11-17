@@ -126,8 +126,9 @@ async def _send(method: str, url: str, api_key: str, body: dict[str, Any] | None
 class _Budget:
     """The one wall-clock ceiling shared by create, polling and download."""
 
-    def __init__(self, total_s: float) -> None:
+    def __init__(self, total_s: float, dispatch: Any = None) -> None:
         self.total_s = total_s
+        self.dispatch = dispatch
         self._end = time.monotonic() + total_s
 
     def left(self, what: str) -> float:
@@ -145,6 +146,8 @@ async def _call(method: str, url: str, api_key: str, body: dict[str, Any] | None
     classify_provider_error reads the status ("HTTP 429" -> rate_limit, 401/403 -> auth); a 400 is the
     request's own fault and becomes VideoRejected."""
     timeout = budget.left(what)
+    if method == "GET" and budget.dispatch is not None:
+        await budget.dispatch.authorize_http()
     try:
         resp = await asyncio.wait_for(_send(method, url, api_key, body, timeout), timeout)
     except (TimeoutError, httpx.TimeoutException) as e:
@@ -195,7 +198,7 @@ async def generate_via_gemini(
 ) -> tuple[bytes, dict[str, Any]]:
     """Prompt (+ optional reference image) -> MP4 bytes, waiting out the generation."""
     settings = get_settings()
-    budget = _Budget(settings.GEMINI_VIDEO_TIMEOUT_S)
+    budget = _Budget(settings.GEMINI_VIDEO_TIMEOUT_S, dispatch)
     poll_s = settings.GEMINI_VIDEO_POLL_S
     t0 = time.time()
     body = interaction_body(model, request)  # validation before the durable fence

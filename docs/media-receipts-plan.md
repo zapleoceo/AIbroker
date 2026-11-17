@@ -256,3 +256,21 @@ concurrent CAS/loser refund, pre-dispatch no-key/decrypt/validation, cancellatio
 and shutdown quarantine, foreign/stale claims and changed credential/project/input.
 `test_media_dispatch_postgres` adds a genuine prior-schema migration test in a
 transactional isolated schema and a real PostgreSQL stale-reclaim/hold test.
+
+### Local review corrections: cancellation and authorization
+
+Pending submitted Gemini jobs retain `cancel_requested` and remain eligible for
+GET-only reconciliation. Transient GET failures likewise requeue despite cancel,
+subject to the existing retry limit; cancellation never permits another POST.
+Unknown jobs still quarantine, and prepared jobs keep ordinary cancellation.
+
+Local receipt persistence, uncertainty marking, `booked` and `finalize` use the
+identity/claim fence without demanding fresh HTTP authorization. Thus revoking a
+project after a completed call cannot roll back its incurred-cost settlement.
+Financial bindings and stale/foreign claim protection remain mandatory.
+`authorize_http` rechecks project activity/scope before every subsequent GET,
+including polling and download; a returned receipt is retained even when that
+next call is prohibited. This does not revoke an HTTP call already in flight.
+Offline regressions cover both cancellation paths, scope/inactive revocation
+during booking, stale/foreign finalization, and revocation between POST and GET.
+PostgreSQL and Haiku gates remain unverified; these corrections are local only.

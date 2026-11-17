@@ -1,6 +1,7 @@
 """Cancel jobs of one project: a single job, or every in-flight job matching a trace/labels selector.
 
-A pending plain job becomes terminal `cancelled` at once. A running one only gets
+A pending plain job becomes terminal `cancelled` at once, except submitted media
+which must retain its reconciliation path. A running one only gets
 `cancel_requested`: the dispatcher checks the flag at attempt boundaries (llm_service.run_chat) and
 ends the job `cancelled` — a provider call already in flight may still be billed. `agent:*` jobs go
 through the agent run's own cancel (agent/runs.cancel_run).
@@ -14,6 +15,7 @@ from sqlalchemy import select
 
 from aibroker.agent.runs import RunConflict, cancel_run, get_run
 from aibroker.db import get_session
+from aibroker.db.media_models import MediaDispatchRow
 from aibroker.db.models import DeepJobRow
 from aibroker.services.deep_jobs import AUDIO_FIELD, get_job
 
@@ -56,8 +58,10 @@ async def _cancel_plain(job_id: int, project_id: int) -> CancelResult | None:
         if row is None:
             return None
         if row.status == "pending":
-            if row.capability == "video" and "vivix" in (row.request or {}):
-                # The Vivix worker must reconcile an already submitted task and its hold.
+            receipt = await s.get(MediaDispatchRow, job_id) if row.capability == "video" else None
+            if row.capability == "video" and ("vivix" in (row.request or {}) or (
+                    receipt and receipt.project_id == project_id and receipt.phase != "prepared")):
+                # Submitted work still needs accounting; unknown work must be quarantined.
                 row.cancel_requested = True
                 return CancelResult(job_id, CANCEL_REQUESTED, row.status)
             row.status = CANCELLED

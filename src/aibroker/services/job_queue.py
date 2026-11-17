@@ -38,6 +38,7 @@ from sqlalchemy import func, select, text, update
 
 from aibroker.config import get_settings
 from aibroker.db import get_session
+from aibroker.db.media_models import MediaDispatchRow
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
@@ -259,16 +260,29 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
     that's legitimately running elsewhere (2026-07-19 review: only the success
     path was guarded, so the error/no-provider paths could double-execute).
 
-    A job whose client asked to cancel ends `cancelled` here instead of being retried."""
+    Cancel ends ordinary work here; known media receipts retain GET-only reconciliation."""
     if await media_quarantine(job_id, expect_started_at):
         return
-    if await cancel_flag(job_id):
+    async with get_session() as s:
+        receipt = await s.get(MediaDispatchRow, job_id)
+        reconcile = bool(receipt and receipt.provider_id and receipt.phase in ("submitted", "settled"))
+    if await cancel_flag(job_id) and not reconcile:
         await _finish(job_id, status="cancelled", expect_started_at=expect_started_at)
         return
     if retry_count + 1 > (_MAX_RETRIES if max_retries is None else max_retries):
         await _finish(job_id, status="error",
                        error_message=f"{reason} (gave up after {retry_count} retries)",
                        expect_started_at=expect_started_at)
+        return
+    if reconcile:
+        # Cancellation prohibits generation, but must not discard GET-only accounting recovery.
+        async with get_session() as s:
+            await s.execute(update(DeepJobRow).where(
+                DeepJobRow.id == job_id, DeepJobRow.project_id == receipt.project_id,
+                DeepJobRow.status == "running", DeepJobRow.started_at == expect_started_at,
+            ).values(status="pending", started_at=None, retry_count=retry_count + 1,
+                     run_after=datetime.now(UTC).replace(tzinfo=None)
+                     + timedelta(seconds=_backoff_s(retry_count + 1))))
         return
     async with get_session() as s:
         await s.execute(

@@ -232,3 +232,108 @@ async def test_recovery_rejects_changed_binding_without_http(media_job, monkeypa
     async with get_session() as session:
         receipt = await session.get(MediaDispatchRow, 1)
         assert (await session.get(BudgetReservationRow, receipt.reservation_id)).state == "held"
+
+
+@pytest.mark.parametrize("pending", [True, False])
+async def test_cancel_preserves_submitted_reconciliation(media_job, monkeypatch, pending):
+    from aibroker.services import job_control, job_queue
+    from tests.test_media_resubmit_risk import mock_transport
+
+    calls = mock_transport(monkeypatch, "known_id_poll_failure")
+    with pytest.raises(MediaUnknown):
+        await run_media(media_job)
+    if pending:
+        await job_queue._release_claim(1, media_job[2].claim)
+    result = await job_control.cancel_job(1, 1)
+    assert result.state == "cancel_requested"
+    if not pending:
+        import httpx
+
+        from aibroker.providers import gemini_video
+
+        original_send = gemini_video._send
+
+        async def fail_get(method, url, *args):
+            calls.append((method, url))
+            assert method == "GET"
+            raise httpx.ReadTimeout("transient GET failure after cancellation")
+
+        monkeypatch.setattr(gemini_video, "_send", fail_get)
+        with pytest.raises(MediaUnknown):
+            await run_media(media_job)
+        monkeypatch.setattr(gemini_video, "_send", original_send)
+        await job_queue._requeue_or_fail(1, 0, "GET unavailable", media_job[2].claim)
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+        assert job.status == "pending" and job.cancel_requested
+    await new_claim()
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+    await job_queue._execute_guarded(job)
+    assert [m for m, _ in calls] == ["POST"] + ["GET"] * (2 if pending else 3)
+    async with get_session() as session:
+        receipt = await session.get(MediaDispatchRow, 1)
+        hold = await session.get(BudgetReservationRow, receipt.reservation_id)
+        assert receipt.phase == hold.state == "settled"
+        assert receipt.usage_id == hold.usage_id
+        assert await session.scalar(select(func.count()).select_from(UsageLogRow)) == 1
+        assert (await session.get(DeepJobRow, 1)).status == "done"
+
+
+@pytest.mark.parametrize("revocation", ["scope", "inactive"])
+async def test_revocation_during_booking_still_settles(media_job, monkeypatch, revocation):
+    from tests.test_media_resubmit_risk import mock_transport
+
+    calls = mock_transport(monkeypatch, "none")
+    original = MediaDispatch.booked
+
+    async def revoke_then_booked(self, cost):
+        async with get_session() as session:
+            project = await session.get(ProjectRow, 1)
+            if revocation == "scope":
+                project.allowed_scopes = []
+            else:
+                project.is_active = False
+        return await original(self, cost)
+
+    monkeypatch.setattr(MediaDispatch, "booked", revoke_then_booked)
+    result = await run_media(media_job)
+    async with get_session() as session:
+        receipt = await session.get(MediaDispatchRow, 1)
+        hold = await session.get(BudgetReservationRow, receipt.reservation_id)
+        assert receipt.phase == hold.state == "settled"
+        assert receipt.usage_id == hold.usage_id == result.request_id
+        assert await session.scalar(select(func.count()).select_from(UsageLogRow)) == 1
+    for context in (MediaDispatch(1, 2, media_job[2].claim),
+                    MediaDispatch(1, 1, media_job[2].claim - timedelta(seconds=1))):
+        context.bind(media_job[1], hold.id, receipt.model)
+        with pytest.raises(MediaUnknown):
+            async with get_session() as session:
+                await context.finalize(session, result.request_id)
+    with pytest.raises(MediaUnknown):
+        await run_media(media_job, await new_claim())
+    assert [m for m, _ in calls] == ["POST"]
+
+
+async def test_revocation_after_post_persists_receipt_but_stops_get(media_job, monkeypatch):
+    from aibroker.providers import gemini_video
+    from tests.test_media_resubmit_risk import mock_transport
+
+    calls = mock_transport(monkeypatch, "known_id_poll_failure")
+    original = gemini_video._send
+
+    async def revoke_after_response(*args):
+        response = await original(*args)
+        async with get_session() as session:
+            (await session.get(ProjectRow, 1)).allowed_scopes = []
+        return response
+
+    monkeypatch.setattr(gemini_video, "_send", revoke_after_response)
+    with pytest.raises(MediaUnknown):
+        await run_media(media_job)
+    assert [m for m, _ in calls] == ["POST"]
+    async with get_session() as session:
+        receipt = await session.get(MediaDispatchRow, 1)
+        assert receipt.provider_id == "known-receipt" and receipt.phase == "submitted"
+        assert (await session.get(BudgetReservationRow, receipt.reservation_id)).state == "held"
+        assert await session.scalar(select(func.count()).select_from(UsageLogRow)) == 0

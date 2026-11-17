@@ -30,7 +30,7 @@ class MediaDispatch:
         self.reservation_id = None
         self.model = None
 
-    async def fence(self, session: AsyncSession) -> DeepJobRow:
+    async def fence(self, session: AsyncSession, *, authorize_http: bool = True) -> DeepJobRow:
         # A write lock also works on SQLite. Compare the exact queue claim.
         result = await session.execute(update(DeepJobRow).where(
             DeepJobRow.id == self.job_id, DeepJobRow.project_id == self.project_id,
@@ -38,13 +38,18 @@ class MediaDispatch:
         ).values(id=DeepJobRow.id))
         if result.rowcount != 1:
             raise MediaUnknown("stale or foreign media claim; no submission allowed")
-        project = await session.get(ProjectRow, self.project_id)
-        if project is None or not project.is_active or "llm:video" not in project.allowed_scopes:
-            raise MediaUnknown("media project authorization revoked")
+        if authorize_http:
+            project = await session.get(ProjectRow, self.project_id)
+            if project is None or not project.is_active or "llm:video" not in project.allowed_scopes:
+                raise MediaUnknown("media project authorization revoked")
         job = await session.get(DeepJobRow, self.job_id)
         if job.capability != "video" or "vivix" in job.request:
             raise MediaUnknown("dispatch context is restricted to non-Vivix video jobs")
         return job
+
+    async def authorize_http(self) -> None:
+        async with get_session() as session:
+            await self.fence(session)
 
     async def load(self) -> dict:
         async with get_session() as session:
@@ -102,7 +107,7 @@ class MediaDispatch:
         if not provider_id or len(provider_id) > 255 or any(c in provider_id for c in "/?#\\"):
             raise MediaUnknown("invalid provider receipt; hold retained")
         async with get_session() as session:
-            await self.fence(session)
+            await self.fence(session, authorize_http=False)
             row = await session.get(MediaDispatchRow, self.job_id)
             if row.claim != self.claim or row.phase != "submitting":
                 raise MediaUnknown("stale media receipt")
@@ -116,13 +121,13 @@ class MediaDispatch:
 
     async def uncertain(self) -> None:
         async with get_session() as session:
-            await self.fence(session)
+            await self.fence(session, authorize_http=False)
             row = await session.get(MediaDispatchRow, self.job_id)
             if row and row.phase == "submitting" and row.reservation_id == self.reservation_id:
                 row.phase = "unknown"
 
     async def finalize(self, session: AsyncSession, usage_id: int) -> None:
-        await self.fence(session)
+        await self.fence(session, authorize_http=False)
         row = await session.get(MediaDispatchRow, self.job_id)
         if row is None or row.claim != self.claim or row.phase not in ("submitting", "submitted", "settled"):
             raise MediaUnknown("media finalization fence mismatch")
@@ -136,7 +141,7 @@ class MediaDispatch:
 
     async def booked(self, cost: float) -> int | None:
         async with get_session() as session:
-            await self.fence(session)
+            await self.fence(session, authorize_http=False)
             row = await session.get(MediaDispatchRow, self.job_id)
             if row is None or row.usage_id is None:
                 return None
