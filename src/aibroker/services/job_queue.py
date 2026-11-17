@@ -54,7 +54,12 @@ from aibroker.services.llm_service import (
     run_chat,
     run_transcribe,
 )
-from aibroker.services.media_dispatch import MediaDispatch, MediaUnknown, media_quarantine
+from aibroker.services.media_dispatch import (
+    MediaDispatch,
+    MediaUnknown,
+    media_quarantine,
+    media_wait,
+)
 from aibroker.services.video_service import (
     VIDEO_FIELD,
     VIDEO_MAX_RETRIES,
@@ -193,15 +198,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     Postgres-only (make_interval) — covered for real by the SKIP-LOCKED
     Postgres run: test_job_queue.py::test_requeue_stale_running_reclaims_dead_
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
-    # Fence unknown media before generic retry. No provider receipt => no resubmit.
-    async with get_session() as s:
-        stale = (await s.scalars(select(DeepJobRow).where(
-            DeepJobRow.status == "running", DeepJobRow.capability == "video",
-            DeepJobRow.started_at < datetime.now(UTC).replace(tzinfo=None)
-            - timedelta(seconds=_STALE_RUNNING_S)))).all()
-    for job in stale:
-        if VIVIX_FIELD not in job.request:
-            await media_quarantine(job.id, job.started_at)
+    await _reconcile_stale_media()
     async with get_session() as s:
         await s.execute(
             text(
@@ -213,10 +210,26 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
                 "  started_at = NULL, "
                 "  retry_count = retry_count + 1 "
                 "WHERE status = 'running' AND capability NOT LIKE 'agent:%' "
+                "  AND NOT EXISTS (SELECT 1 FROM media_dispatch m WHERE m.job_id=deep_jobs.id "
+                "    AND m.provider_id IS NOT NULL AND m.phase IN ('submitted','settled') "
+                "    AND (retry_count + 1 > :max OR error_message='reconciliation_manual_running')) "
                 "  AND started_at < now() - make_interval(secs => :stale)"
             ),
             {"max": _MAX_RETRIES, "stale": _STALE_RUNNING_S},
         )
+
+
+async def _reconcile_stale_media() -> None:
+    # Fence unknown media and spent manual grants before generic retry.
+    async with get_session() as s:
+        stale = (await s.scalars(select(DeepJobRow).where(
+            DeepJobRow.status == "running", DeepJobRow.capability == "video",
+            DeepJobRow.started_at < datetime.now(UTC).replace(tzinfo=None)
+            - timedelta(seconds=_STALE_RUNNING_S)))).all()
+    for job in stale:
+        if VIVIX_FIELD not in job.request:
+            await media_quarantine(job.id, job.started_at)
+            await media_wait(job.id, job.started_at, force=job.retry_count + 1 > _MAX_RETRIES)
 
 
 @retry_stale_statement
@@ -263,6 +276,9 @@ async def _requeue_or_fail(job_id: int, retry_count: int, reason: str,
     Cancel ends ordinary work here; known media receipts retain GET-only reconciliation."""
     if await media_quarantine(job_id, expect_started_at):
         return
+    if await media_wait(job_id, expect_started_at,
+                        force=retry_count + 1 > (_MAX_RETRIES if max_retries is None else max_retries)):
+        return
     async with get_session() as s:
         receipt = await s.get(MediaDispatchRow, job_id)
         reconcile = bool(receipt and receipt.provider_id and receipt.phase in ("submitted", "settled"))
@@ -307,6 +323,8 @@ async def _release_claim(job_id: int, started_at: datetime | None) -> bool:
     if started_at is None:
         return False
     if await media_quarantine(job_id, started_at):
+        return True
+    if await media_wait(job_id, started_at):
         return True
     async with get_session() as s:
         res = await s.execute(

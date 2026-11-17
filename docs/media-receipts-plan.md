@@ -274,3 +274,39 @@ next call is prohibited. This does not revoke an HTTP call already in flight.
 Offline regressions cover both cancellation paths, scope/inactive revocation
 during booking, stale/foreign finalization, and revocation between POST and GET.
 PostgreSQL and Haiku gates remain unverified; these corrections are local only.
+
+### Explicit admin reconciliation after automatic limits
+
+Known receipts at the GET retry cap or worker-death cap now retain job status
+`error`, exact reason `reconciliation_required`, original claim, receipt and
+financial binding, with no completed timestamp or automatic scheduling. Existing
+poll/list data exposes the waiting job; this uses existing columns, no migration.
+Admin-only GET on the same reconciliation URL, with `project_id`, returns its
+status, reason and `expected_claim` without exposing credentials or provider data.
+Unknown submissions without provider ID remain ineligible.
+
+`POST /admin/media/jobs/{job_id}/reconcile` uses the existing `require_admin` /
+`X-Admin-Key` authorization only. Body: `project_id` and `expected_claim` (the
+persisted naive UTC `started_at`). A CAS against waiting state and exact claim
+grants one bounded existing video execution, strictly GET-only, retaining the
+automatic retry counter. Foreign project, stale/duplicate claim, changed input,
+revoked project/key access and mismatched reservation are rejected with 409;
+nonadmins receive 401. No new permission, credential or project-owner endpoint.
+
+The persisted `reconciliation_manual_running` marker means failures, request
+interruption, shutdown and stale-worker recovery return to manual waiting rather
+than automatic polling. Successful local accounting settles once. An admin call
+may perform multiple GETs within the existing video timeout; it never creates a
+new provider operation. A lost admin HTTP response must be followed by job lookup,
+not blind reuse: the consumed claim conflicts. New explicit attempts require the
+new waiting claim returned by POST or obtained through admin GET. Accepted attempts
+emit the existing `media.reconcile` audit.
+
+`media_wait`, `claim_media_resume`, and `_reconcile_stale_media` implement these
+durable transitions. SQL stale recovery excludes capped/manual known receipts
+from generic terminalization, including rows crossing the stale cutoff during a
+scan. Holds survive unknown costs and revoked access; this is not a refund tool.
+Offline tests cover cap+cancel, failed/manual restart, concurrent/stale/foreign
+claims, nonadmin and revoked provider access, no POST and single settlement.
+Real PostgreSQL stale-sweep/concurrency validation remains NOT RUN here. Existing
+031 migration/rollout, PostgreSQL, Haiku and publication gates remain mandatory.

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db.budget_models import BudgetReservationRow
@@ -16,6 +16,57 @@ from aibroker.db.models import ApiKeyRow, DeepJobRow, ProjectRow, UsageLogRow
 
 class MediaUnknown(Exception):
     """A prior submission cannot safely be repeated. Its financial hold survives."""
+
+
+RECONCILIATION_REQUIRED = "reconciliation_required"
+RECONCILIATION_RUNNING = "reconciliation_manual_running"
+
+
+async def media_wait(job_id: int, claim: datetime | None, *, force: bool = False) -> bool:
+    """Park a known receipt at a cap, or an interrupted explicit manual pass."""
+    async with get_session() as session:
+        job = (await session.scalars(select(DeepJobRow).where(
+            DeepJobRow.id == job_id, DeepJobRow.status == "running",
+            DeepJobRow.started_at == claim).with_for_update())).one_or_none()
+        if job is None or (not force and job.error_message != RECONCILIATION_RUNNING):
+            return False
+        receipt = await session.get(MediaDispatchRow, job_id)
+        if (receipt is None or receipt.project_id != job.project_id or not receipt.provider_id
+                or receipt.phase not in ("submitted", "settled")):
+            return False
+        job.status, job.error_message = "error", RECONCILIATION_REQUIRED
+        job.completed_at, job.run_after = None, None
+        return True
+
+
+async def claim_media_resume(job_id: int, project_id: int, expected_claim: datetime) -> DeepJobRow:
+    """Admin caller grants one bounded execution; never resets automatic retry count."""
+    async with get_session() as session:
+        # Atomic write fence also serializes concurrent requests on SQLite.
+        result = await session.execute(update(DeepJobRow).where(
+            DeepJobRow.id == job_id, DeepJobRow.project_id == project_id,
+            DeepJobRow.status == "error", DeepJobRow.error_message == RECONCILIATION_REQUIRED,
+            DeepJobRow.started_at == expected_claim).values(id=DeepJobRow.id))
+        if result.rowcount != 1:
+            raise MediaUnknown("manual reconciliation claim conflict")
+        job = await session.get(DeepJobRow, job_id)
+        receipt = await session.get(MediaDispatchRow, job_id)
+        project = await session.get(ProjectRow, project_id)
+        if (job.capability != "video" or "vivix" in job.request or receipt is None
+                or receipt.project_id != project_id or not receipt.provider_id
+                or receipt.phase not in ("submitted", "settled")
+                or receipt.fingerprint != media_fingerprint(project_id, job.request)
+                or project is None or not project.is_active or "llm:video" not in project.allowed_scopes):
+            raise MediaUnknown("receipt is not eligible for manual reconciliation")
+        state = {c.name: getattr(receipt, c.name) for c in receipt.__table__.columns}
+        await media_resume_key(state, project_id)
+        hold = await session.get(BudgetReservationRow, receipt.reservation_id)
+        if (hold is None or (hold.project_id, hold.api_key_id) != (project_id, receipt.key_id)
+                or hold.state not in ("held", "settled") or hold.usage_id != receipt.usage_id):
+            raise MediaUnknown("manual reconciliation financial binding conflict")
+        job.status, job.started_at = "running", datetime.now(UTC).replace(tzinfo=None)
+        job.error_message = RECONCILIATION_RUNNING
+        return job
 
 
 def media_fingerprint(project_id: int, request: dict) -> str:
