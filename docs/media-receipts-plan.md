@@ -116,3 +116,63 @@ media-specific billing and artifact retention. Implementation is intentionally n
 started in this review. PostgreSQL runtime remains unavailable; mocks would not
 clear that gate. Haiku documentation review and the existing publication denial
 remain blockers. No push, PR, deploy, production access or Vivix activation.
+
+## Narrow guard review and executable reproductions
+
+`tests/test_media_resubmit_risk.py` adds fault-injection reproductions against the
+real Gemini transport orchestration, video key walk and queue execution. HTTP
+`_send`, key selection and billing collaborators are mocked; no external request
+or real charge is performed. The tests deliberately remain strict XFAIL only
+after fully asserting duplicate accepted mock POSTs, using a dedicated exception.
+Unexpected exceptions/assertion failures are FAIL, not swallowed by XFAIL.
+
+| Scenario | Observed unsafe sequence asserted by regression | Boundary |
+| --- | --- | --- |
+| Provider accepted create, response lost | POST, POST on next paid key | Offline transport + real key walk |
+| Known interaction ID, polling unavailable | POST, GET known ID, POST on next paid key | Offline transport + real key walk |
+| Artifact returned, durable job finish fails | POST, lost finish, reclaimed execution, POST | SQLite queue execution; reclaim state explicitly simulated |
+| Same lost finish with actual stale-reclaim SQL | Same required safety invariant | PostgreSQL-only; NOT RUN without authorized test runtime |
+
+The ordinary video tests also retain controls for pre-dispatch budget rejection
+(zero transport calls), no eligible key (zero generation), and deterministic
+prompt refusal (no key rotation). These controls are not proof of provider-side
+non-acceptance for generic HTTP/network failures.
+
+A transport-only guard cannot meet the requested restart guarantee. `_call`
+currently turns both POST uncertainty and GET polling failure into RuntimeError;
+changing that exception could stop the immediate key walk but not stale/shutdown
+reclaim after process death. A queue-only guard before `run_video` is too early:
+it cannot distinguish no-key/decrypt/admission failure from actual submission.
+In-memory flags and exception text are not durable submission evidence. No such
+partial guard was installed, and the three offline risks remain unfixed.
+
+The next dependent implementation unit is **durable media dispatch context**, not
+a new service and not artifact storage yet. It must be one coordinated slice:
+
+1. Extend the existing job's durable record with submission phase, immutable
+   attempt identity, claim fence, account/key binding, reservation ID and optional
+   provider receipt. A schema-backed CAS must persist `prepared -> submitting`
+   immediately before the paid POST; a new worker must load this same record.
+2. Pass this context from `job_queue._run_video_job` through `run_video` and the
+   media-specific Attempt path to Gemini transport. Key selection, validation,
+   budget admission and decrypt remain before the submission fence. Failures
+   proven to precede it may retain current retry/refund behavior. Once fenced,
+   ambiguous outcomes retain their hold and cannot rotate to a new paid key.
+3. Split `generate_via_gemini` create and resume phases. Commit known provider ID
+   before polling. Existing ID permits GET-only resume with original binding;
+   missing ID after submitting becomes unknown and prohibits another POST.
+4. Make `_requeue_stale_running`, `_release_claim`/shutdown, `_execute_guarded`
+   and `_requeue_or_fail` consult that persisted phase. A stale claim cannot
+   overwrite a newer receipt/terminal state. Unknown cannot be converted to a
+   fresh pending generation. Lost artifact with a known provider ID may retry
+   GET/download only; without recoverable evidence it stays unknown.
+
+These changes touch `db/models.py` + migration, `job_queue.py`, `video_service.py`,
+`attempt.py` and `providers/gemini_video.py` together. Receipt lookup/artifact
+retention and speech remain subsequent slices. Required regressions for this
+unit: all three existing XFAIL become ordinary PASS with at most one POST;
+pre-dispatch no-key/decrypt/budget failures remain safely retryable; parallel
+claims/worker death before and after fence; known-ID recovery with zero POSTs;
+reservation retention on unknown; foreign scope/fence rejection; and PostgreSQL
+CAS/rollback/stale-reclaim integration. The current change supplies reproductions
+and this dependency boundary only, not the guard or durable receipt capability.
