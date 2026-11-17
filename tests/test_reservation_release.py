@@ -1,5 +1,8 @@
 """reserve_cost → release_cost must pair on EVERY exit (2026-10-03 review).
 
+Current closure contract: zero-cost booking settles ordinary failures atomically;
+cancellation without a billable result refunds the exact durable reservation ID.
+
 Leaks fixed: decrypt() ran after reserve_cost but outside the try (chat, embed,
 transcribe), and `except Exception` missed asyncio.CancelledError (a client
 disconnect) — either left the estimate on the key's daily cost counter until
@@ -28,6 +31,8 @@ class _Ledger:
     def __init__(self):
         self.reserved = 0
         self.released = 0
+        self.settled = 0
+        self.refunded = 0
 
 
 @pytest.fixture
@@ -43,11 +48,20 @@ def ledger(monkeypatch):
 
     async def fake_reserve(**kw):
         led.reserved += 1
+        return "fixture-reservation"
 
     async def fake_release(**kw):
+        assert kw["reservation_id"] == "fixture-reservation"
+        assert kw["estimated_cost"] == 0.5
         led.released += 1
+        led.refunded += 1
 
     async def noop(**kw):
+        assert kw["reservation_id"] == "fixture-reservation"
+        assert kw["cost_usd"] == 0.0
+        assert kw["api_key_id"] == key.id and kw["project_id"] == PROJECT.id
+        led.released += 1  # zero-cost booking atomically settles the same hold
+        led.settled += 1
         return 1
 
     async def fake_penalize(k, e, **kw):
@@ -97,6 +111,7 @@ async def test_decrypt_failure_after_reserve_releases_the_reservation(monkeypatc
         await runner()  # the walk giving up is fine — the point is the ledger
     assert ledger.reserved == 1
     assert ledger.released == 1
+    assert ledger.settled == 1 and ledger.refunded == 0
 
 
 @pytest.mark.parametrize("runner,target", [
@@ -110,6 +125,7 @@ async def test_cancellation_releases_the_reservation_and_propagates(
         await runner()
     assert ledger.reserved == 1
     assert ledger.released == 1
+    assert ledger.refunded == 1 and ledger.settled == 0
 
 
 async def test_decision_cancellation_releases_the_reservation(monkeypatch, ledger):
@@ -121,6 +137,7 @@ async def test_decision_cancellation_releases_the_reservation(monkeypatch, ledge
         await svc.run_decision(project=PROJECT, state="s", questions={"q": {}},
                                model=None, workflow="w")
     assert ledger.reserved == 1 and ledger.released == 1
+    assert ledger.refunded == 1 and ledger.settled == 0
 
 
 async def test_release_failure_never_masks_the_attempt_outcome(monkeypatch):
@@ -128,4 +145,4 @@ async def test_release_failure_never_masks_the_attempt_outcome(monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr("aibroker.services.attempt.release_cost", bad_release)
-    await att._release_reservation(_paid_key(), 0.5)  # must not raise
+    await att._release_reservation(_paid_key(), 0.5, "fixture-reservation")  # must not raise
