@@ -33,6 +33,8 @@ class _Ledger:
         self.released = 0
         self.settled = 0
         self.refunded = 0
+        self.reservation_amount = None
+        self.reservation_key = None
 
 
 @pytest.fixture
@@ -48,11 +50,15 @@ def ledger(monkeypatch):
 
     async def fake_reserve(**kw):
         led.reserved += 1
+        led.reservation_amount = kw["estimated_cost"]
+        led.reservation_key = kw["api_key"]
         return "fixture-reservation"
 
     async def fake_release(**kw):
         assert kw["reservation_id"] == "fixture-reservation"
-        assert kw["estimated_cost"] == 0.5
+        assert led.reserved == 1
+        assert kw["api_key"] is led.reservation_key
+        assert kw["estimated_cost"] == led.reservation_amount
         led.released += 1
         led.refunded += 1
 
@@ -128,14 +134,16 @@ async def test_cancellation_releases_the_reservation_and_propagates(
     assert ledger.refunded == 1 and ledger.settled == 0
 
 
-async def test_decision_cancellation_releases_the_reservation(monkeypatch, ledger):
+@pytest.mark.parametrize("input_tokens", [10, 1000])
+async def test_decision_cancellation_releases_the_reservation(monkeypatch, ledger, input_tokens):
     monkeypatch.setattr("aibroker.services.attempt.decrypt", lambda t: "plain")
     monkeypatch.setattr(svc, "decide", _cancelled)
-    monkeypatch.setattr(svc, "estimate_tokens", lambda *a, **k: 10)
+    monkeypatch.setattr(svc, "estimate_tokens", lambda *a, **k: input_tokens)
     monkeypatch.setattr(svc, "scope_for", lambda c: "llm:decision")
     with pytest.raises(asyncio.CancelledError):
         await svc.run_decision(project=PROJECT, state="s", questions={"q": {}},
                                model=None, workflow="w")
+    assert ledger.reservation_amount == input_tokens * svc.JEV_INPUT_USD_PER_TOKEN
     assert ledger.reserved == 1 and ledger.released == 1
     assert ledger.refunded == 1 and ledger.settled == 0
 
