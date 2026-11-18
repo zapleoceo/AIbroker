@@ -11,10 +11,14 @@ from aibroker.db.models import ApiKeyRow, ProjectRow, UsageLogRow
 from aibroker.routing import budget_admission
 from aibroker.routing.cost_guard import CostGuardError, reserve_cost
 from tests.test_budget_reservations import book, reserve
-from tests.test_budget_reservations import ordinary as ordinary
-from tests.test_vivix_billing import binding as binding
+from tests.test_budget_reservations import ordinary as _ordinary_fixture
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+ordinary = _ordinary_fixture
+binding = _binding_fixture
 
 
 @pytest.mark.parametrize("window", ["key_daily", "key_monthly", "project_daily", "project_monthly", "global"])

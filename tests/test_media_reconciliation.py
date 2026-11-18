@@ -22,9 +22,12 @@ from aibroker.services.media_dispatch import (
     media_wait,
 )
 from aibroker.services.video_service import VIDEO_MAX_RETRIES
-from tests.test_media_dispatch import media_job as media_job
+from tests.test_media_dispatch import media_job as _media_job_fixture
 from tests.test_media_dispatch import run_media
 from tests.test_media_resubmit_risk import mock_transport
+
+# Register shared fixtures without shadowing imported names in test arguments.
+media_job = _media_job_fixture
 
 
 async def parked(media_job, monkeypatch):

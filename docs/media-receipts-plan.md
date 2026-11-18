@@ -320,3 +320,16 @@ in `steps[].content[]`. Broker sends raw REST and already parses the latter.
 envelope for both create and known-receipt GET-only recovery. No parser change is
 justified by this example; neither a live incompatibility nor live success is
 claimed. Limits, URL handling, error handling and dispatch code are unchanged.
+
+### Admin handler names and lint compatibility (2026-11-18)
+
+`MediaResumeRequest` carries `project_id` and `expected_claim` for the existing
+admin-only reconciliation POST. `media_reconciliation_state` implements its GET
+lookup; `reconcile_media` claims and executes the bounded GET-only recovery.
+These names describe the existing contract above, not new access or activation.
+
+The pinned deployment Ruff 0.7.4 flags shared fixture imports shadowed by pytest
+arguments. Tests now register those same fixture objects via module assignments;
+fixture names, dependency injection and assertions remain unchanged. Union-form
+`isinstance` checks are equivalent on the required Python 3.12 runtime. No lint
+rule or deployment threshold is disabled.

@@ -14,10 +14,13 @@ from aibroker.providers.gemini_video import VideoRejected
 from aibroker.routing.cost_guard import CostGuardError, release_cost, reserve_cost
 from aibroker.routing.selector import record_usage
 from aibroker.services.vivix_store import Snapshot
-from tests.test_vivix_billing import binding as binding
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared
 from tests.test_vivix_service import ledger as ledger
 from tests.test_vivix_service import transport
+
+# Register shared fixtures without shadowing imported names in test arguments.
+binding = _binding_fixture
 
 
 @pytest.fixture
@@ -63,8 +66,8 @@ async def test_cross_key_admission(ordinary, binding, monkeypatch, window, order
         assert exc.value.kind == ("global" if window == "global" else "project")
     else:
         outcomes = await asyncio.gather(reserve(ordinary), prepared(binding), return_exceptions=True)
-        assert sum(isinstance(x, (str, Snapshot)) for x in outcomes) == 1, outcomes
-        errors = [x for x in outcomes if isinstance(x, (CostGuardError, VideoRejected))]
+        assert sum(isinstance(x, str | Snapshot) for x in outcomes) == 1, outcomes
+        errors = [x for x in outcomes if isinstance(x, CostGuardError | VideoRejected)]
         assert len(errors) == 1, outcomes
         if isinstance(errors[0], VideoRejected):
             assert str(errors[0]) == f"Vivix {'global daily' if window == 'global' else 'project ' + window} budget exhausted"

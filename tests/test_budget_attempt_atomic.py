@@ -10,10 +10,14 @@ from aibroker.db.models import ApiKeyRow, ProjectRow, UsageLogRow
 from aibroker.providers.gemini_video import VideoRejected
 from aibroker.services import attempt as att
 from tests.test_budget_reservations import book, reserve
-from tests.test_budget_reservations import ordinary as ordinary
-from tests.test_vivix_billing import binding as binding
+from tests.test_budget_reservations import ordinary as _ordinary_fixture
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+ordinary = _ordinary_fixture
+binding = _binding_fixture
 
 
 @pytest.mark.parametrize("reject", [False, True])

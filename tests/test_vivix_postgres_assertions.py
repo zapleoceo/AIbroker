@@ -5,9 +5,12 @@ import pytest
 
 from aibroker.providers.gemini_video import VideoRejected
 from tests import test_vivix_postgres as pg
-from tests.test_vivix_billing import binding as binding
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+binding = _binding_fixture
 
 
 @pytest.mark.parametrize("case", ["admission", "settlement"])

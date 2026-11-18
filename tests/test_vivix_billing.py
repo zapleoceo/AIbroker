@@ -12,8 +12,11 @@ from aibroker.providers.gemini_video import VideoRejected
 from aibroker.routing.cost_guard import CostGuardError, reserve_cost
 from aibroker.services.vivix_billing import BrokerVivixStore
 from aibroker.services.vivix_service import VivixService
-from tests.test_vivix_service import ledger as ledger
+from tests.test_vivix_service import ledger as _ledger_fixture
 from tests.test_vivix_service import prepare, transport
+
+# Register shared fixtures without shadowing imported names in test arguments.
+ledger = _ledger_fixture
 
 
 @pytest.fixture
