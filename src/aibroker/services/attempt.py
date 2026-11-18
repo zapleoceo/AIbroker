@@ -3,8 +3,8 @@
 Every capability (chat, vision, embedding, transcription, decision) runs a single
 attempt the same way:
 
-    reserve cost -> decrypt key -> call -> release reservation
-        -> quality gate -> record usage -> update cache affinity
+    reserve cost -> decrypt key -> call -> quality gate
+        -> atomically settle reservation and usage -> update cache affinity
 
 with ONE error path (model-unavailable / penalize / size learning / booking).
 A runner supplies only what differs: the `call` closure, an optional `check`
@@ -115,23 +115,28 @@ def _usage_write_done(task: asyncio.Task[Any], *, key_id: int, project_id: int |
                   "is missing from usage_log", key_id, project_id, model, exc_info=exc)
 
 
-async def _release_reservation(key: ApiKeyRow, estimated_cost: float) -> None:
+async def _release_reservation(key: ApiKeyRow, estimated_cost: float,
+                               reservation_id: str | None) -> None:
     """Refund a reserve_cost reservation. Shielded from cancellation (a client
     disconnect cancelling the request mid-refund must still finish it) and never
     raises: a failed refund only leaves the daily counter conservatively high —
     it must not mask the real outcome of the attempt it is cleaning up after.
 
-    Every path that called reserve_cost reaches this exactly once, INCLUDING
-    asyncio.CancelledError (a BaseException that `except Exception` misses) and a
-    failure between the reserve and the provider call such as decrypt()
-    (2026-10-03 review: both leaked the reservation until midnight)."""
+    Only a cancellation without a billable result uses this path. Ordinary
+    errors settle with zero-cost usage; answered calls settle their actual cost.
+    A failed refund leaves a durable hold for explicit reconciliation."""
     try:
-        await asyncio.shield(release_cost(api_key=key, estimated_cost=estimated_cost))
+        task = asyncio.ensure_future(release_cost(api_key=key, estimated_cost=estimated_cost,
+                                                  reservation_id=reservation_id))
+        _usage_writes.add(task)
+        task.add_done_callback(functools.partial(
+            _usage_write_done, key_id=key.id, project_id=None, model="reservation-refund"))
+        await asyncio.shield(task)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001
-        log.exception("release_cost failed for key %s — reservation of $%.4f leaks "
-                      "until the daily reset", key.id, estimated_cost)
+        log.exception("release_cost failed for key %s - durable reservation of $%.4f retained",
+                      key.id, estimated_cost)
 
 
 async def _penalize(key: ApiKeyRow, exc: Exception, *, capability: str | None = None,
@@ -211,6 +216,9 @@ class Attempt:
     penalize: bool = True                   # False: book the error but never cool/kill the key
     pinned_model: str | None = None         # part of the affinity key
     note_affinity: bool = True
+    reservation_id: str | None = field(default=None, init=False)
+    media_dispatch: Any = None
+    recovered_reservation: str | None = None
 
 
 @dataclass
@@ -230,6 +238,7 @@ _STATUS_BY_KIND = {"rate_limit": "rate_limit", "auth": "auth_fail"}
 async def _record_error(
     *, key: ApiKeyRow, project: ProjectRow, provider: str, model: str,
     capability: str, workflow: str | None, exc: Exception,
+    reservation_id: str | None = None,
 ) -> None:
     """Book a failed attempt in usage_log. A failed attempt always books $0
     (the reservation is fully released): answerless calls must not consume
@@ -250,13 +259,15 @@ async def _record_error(
         latency_ms=None, status=_STATUS_BY_KIND.get(kind, "error"),
         error_kind=type(exc).__name__, http_status=http_status_of(exc),
         request_id=current_request_id(),
+        reservation_id=reservation_id,
     )
 
 
 async def _handle_call_error(a: Attempt, exc: Exception) -> Flow:
     """Classify a failed call, penalize/book it, return the walk verdict."""
     book = {"key": a.key, "project": a.project, "provider": a.provider, "model": a.model,
-            "capability": a.capability, "workflow": a.workflow, "exc": exc}
+            "capability": a.capability, "workflow": a.workflow, "exc": exc,
+            "reservation_id": a.reservation_id}
     # Model gone/unprovisioned (404): a MODEL problem, not a KEY one — this key's
     # other models work and sibling keys run the same dead model. Do NOT penalize
     # the key; move to the next provider.
@@ -300,7 +311,7 @@ async def _block_on_cap(a: Attempt, e: CostGuardError) -> Flow:
 
 async def _record_rejection(a: Attempt, rej: Rejection, meta: dict[str, Any]) -> None:
     billed = rej.bill
-    await record_usage(
+    await _shield_booking(record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,
         provider=a.provider, model=a.model, capability=a.capability,
         workflow=a.workflow,
@@ -312,7 +323,8 @@ async def _record_rejection(a: Attempt, rej: Rejection, meta: dict[str, Any]) ->
         latency_ms=meta.get("latency_ms"), status="error",
         error_kind=rej.error_kind, http_status=rej.http_status,
         request_id=current_request_id(),
-    )
+        reservation_id=a.reservation_id,
+    ), a)
     if rej.note:
         rej.note()
     if rej.log_message:
@@ -321,11 +333,11 @@ async def _record_rejection(a: Attempt, rej: Rejection, meta: dict[str, Any]) ->
 
 async def run_attempt(a: Attempt) -> AttemptResult:
     """Run one key attempt to a verdict (see module docstring)."""
-    reserved = a.estimated_cost if (a.reserve and a.estimated_cost > 0) else 0.0
+    a.reservation_id = a.recovered_reservation
     if a.reserve:
         try:
             spec = model_spec(a.model)
-            await reserve_cost(api_key=a.key, project=a.project,
+            a.reservation_id = await reserve_cost(api_key=a.key, project=a.project,
                                estimated_cost=a.estimated_cost,
                                known_free_model=spec is not None and spec.pricing == "free")
         except CostGuardError as e:
@@ -333,23 +345,29 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     try:
         # decrypt INSIDE the try: it runs after reserve_cost, so a failure here
         # must release the reservation like any other attempt failure.
+        if a.media_dispatch is not None:
+            a.media_dispatch.bind(a.key, a.reservation_id, a.model)
         plain = decrypt(a.key.token_encrypted)
         payload, meta = await a.call(plain)
         meta["cost_usd"] = _billed_cost(a.key, meta, model=a.model)
     except BaseException as e:  # noqa: BLE001 — classify, cool the key, try next
+        if a.media_dispatch is not None and await a.media_dispatch.started():
+            from aibroker.services.media_dispatch import MediaUnknown
+            await a.media_dispatch.uncertain()
+            if not isinstance(e, Exception):
+                raise
+            raise MediaUnknown("media result uncertain; hold retained, no key rotation") from e
         # The attempt is over however it ends — fully release the reservation so
         # an answerless call (incl. a paid timeout) consumes NO admission budget.
         # BaseException so a cancelled request (CancelledError) releases too; it
         # is re-raised untouched.
-        if reserved:
-            await _release_reservation(a.key, reserved)
         if not isinstance(e, Exception):
+            if a.reservation_id is not None:
+                await _release_reservation(a.key, a.estimated_cost, a.reservation_id)
             raise
         return AttemptResult(await _handle_call_error(a, e), error=e)
-    # Resolved: release the reservation; record_usage books the REAL final cost
-    # on top, so the key ends up debited by exactly the real cost.
-    if reserved:
-        await _release_reservation(a.key, reserved)
+    # Keep the hold through the quality gate and booking. record_usage swaps it
+    # for real spend atomically; a failure leaves a conservative durable hold.
 
     if a.check is not None and (rej := a.check(payload, meta)) is not None:
         await _record_rejection(a, rej, meta)
@@ -359,7 +377,9 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     # request here must not drop the ledger row. The write runs as its own task, so
     # a cancel raises here immediately but the write still completes in the
     # background (cancellation does not wait for it).
-    usage_task = asyncio.ensure_future(record_usage(
+    existing_usage = (await a.media_dispatch.booked(meta["cost_usd"])
+                      if a.media_dispatch is not None else None)
+    usage_id = existing_usage if existing_usage is not None else await _shield_booking(record_usage(
         api_key_id=a.key.id, project_id=a.project.id, lease_id=None,
         provider=a.provider, model=a.model, model_served=meta.get("model_served"),
         capability=a.capability, workflow=a.workflow,
@@ -369,14 +389,20 @@ async def run_attempt(a: Attempt) -> AttemptResult:
         cache_write_tokens=meta.get("cache_write_tokens", 0),
         latency_ms=meta.get("latency_ms"), status="ok", error_kind=None,
         http_status=200, request_id=current_request_id(),
-    ))
-    _usage_writes.add(usage_task)
-    usage_task.add_done_callback(functools.partial(
-        _usage_write_done, key_id=a.key.id, project_id=a.project.id, model=a.model))
-    usage_id = await asyncio.shield(usage_task)
+        reservation_id=a.reservation_id,
+        media_dispatch=a.media_dispatch,
+    ), a)
     # A success re-pins the request family AND (project, provider) to what just
     # worked, so the NEXT request lands where the provider-side cache is warm.
     if a.note_affinity:
         await affinity.note_success(a.project.id, a.workflow, a.capability,
                                     a.pinned_model, a.provider, a.model, a.key.id)
     return AttemptResult(Flow.SUCCESS, payload=payload, meta=meta, usage_id=usage_id)
+
+
+async def _shield_booking(write: Awaitable[int], a: Attempt) -> int:
+    task = asyncio.ensure_future(write)
+    _usage_writes.add(task)
+    task.add_done_callback(functools.partial(
+        _usage_write_done, key_id=a.key.id, project_id=a.project.id, model=a.model))
+    return await asyncio.shield(task)

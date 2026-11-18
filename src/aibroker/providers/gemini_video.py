@@ -126,8 +126,9 @@ async def _send(method: str, url: str, api_key: str, body: dict[str, Any] | None
 class _Budget:
     """The one wall-clock ceiling shared by create, polling and download."""
 
-    def __init__(self, total_s: float) -> None:
+    def __init__(self, total_s: float, dispatch: Any = None) -> None:
         self.total_s = total_s
+        self.dispatch = dispatch
         self._end = time.monotonic() + total_s
 
     def left(self, what: str) -> float:
@@ -145,6 +146,8 @@ async def _call(method: str, url: str, api_key: str, body: dict[str, Any] | None
     classify_provider_error reads the status ("HTTP 429" -> rate_limit, 401/403 -> auth); a 400 is the
     request's own fault and becomes VideoRejected."""
     timeout = budget.left(what)
+    if method == "GET" and budget.dispatch is not None:
+        await budget.dispatch.authorize_http()
     try:
         resp = await asyncio.wait_for(_send(method, url, api_key, body, timeout), timeout)
     except (TimeoutError, httpx.TimeoutException) as e:
@@ -191,15 +194,28 @@ async def _await_file(uri: str, api_key: str, budget: _Budget, poll_s: float) ->
 
 
 async def generate_via_gemini(
-    *, model: str, request: VideoRequest, api_key: str,
+    *, model: str, request: VideoRequest, api_key: str, dispatch: Any = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Prompt (+ optional reference image) -> MP4 bytes, waiting out the generation."""
     settings = get_settings()
-    budget = _Budget(settings.GEMINI_VIDEO_TIMEOUT_S)
+    budget = _Budget(settings.GEMINI_VIDEO_TIMEOUT_S, dispatch)
     poll_s = settings.GEMINI_VIDEO_POLL_S
     t0 = time.time()
-    created = (await _call("POST", _INTERACTIONS_URL, api_key,
-                           interaction_body(model, request), budget, "the create call")).json()
+    body = interaction_body(model, request)  # validation before the durable fence
+    state = await dispatch.load() if dispatch is not None else None
+    if state and state["phase"] != "prepared":
+        from aibroker.services.media_dispatch import MediaUnknown
+        if not state["provider_id"] or state["phase"] not in ("submitted", "settled"):
+            raise MediaUnknown("unknown media outcome; POST prohibited")
+        created = {"id": state["provider_id"], "status": "in_progress"}
+    else:
+        budget.left("the create call")
+        if dispatch is not None:
+            await dispatch.begin()
+        created = (await _call("POST", _INTERACTIONS_URL, api_key,
+                               body, budget, "the create call")).json()
+        if dispatch is not None and created.get("id"):
+            await dispatch.receipt(created["id"])
     data = await _await_interaction(created, api_key, budget, poll_s)
     part = _video_part(data)
     if part is None:
@@ -233,6 +249,6 @@ class GeminiVideoTransport:
     """VideoTransport for the Gemini Omni video models."""
 
     async def generate_video(
-        self, *, model: str, request: VideoRequest, api_key: str,
+        self, *, model: str, request: VideoRequest, api_key: str, dispatch: Any = None,
     ) -> tuple[bytes, dict[str, Any]]:
-        return await generate_via_gemini(model=model, request=request, api_key=api_key)
+        return await generate_via_gemini(model=model, request=request, api_key=api_key, dispatch=dispatch)

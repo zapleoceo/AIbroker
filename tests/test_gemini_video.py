@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -60,6 +61,42 @@ async def _generate(monkeypatch, *replies, request=REQ):
     monkeypatch.setattr(gv, "_send", send)
     out = await gv.generate_via_gemini(model=MODEL, request=request, api_key="k")
     return out, calls
+
+
+@pytest.mark.parametrize("recovering", [False, True])
+async def test_documented_omni_raw_rest_response(monkeypatch, recovering):
+    # Primary contract checked 2026-11-17:
+    # https://aistudio.google.com/docs/omni#rest-response-schema
+    # output_video is SDK-only. Raw REST uses steps[].content[]. All data below
+    # is synthetic, including the MP4 bytes; this is not a captured live response.
+    response = {
+        "steps": [
+            {"type": "user_input", "content": [{"type": "text", "text": "fixture prompt"}]},
+            {"type": "thought", "content": [{"type": "thought", "text": "fixture thought"}]},
+            {"type": "model_output", "content": [{"type": "video", "mime_type": "video/mp4",
+                                                    "data": base64.b64encode(MP4).decode()}]},
+        ],
+        "id": "v1_fixture", "status": "completed",
+        "model": "gemini-omni-1.2-flash", "object": "interaction",
+    }
+    send, calls = _script((200, response))
+    monkeypatch.setattr(gv, "_send", send)
+    dispatch = SimpleNamespace(
+        load=AsyncMock(return_value={"phase": "submitted" if recovering else "prepared",
+                                     "provider_id": "v1_fixture" if recovering else None}),
+        begin=AsyncMock(), receipt=AsyncMock(), authorize_http=AsyncMock(),
+    )
+    video, meta = await gv.generate_via_gemini(model=MODEL, request=REQ, api_key="fixture", dispatch=dispatch)
+    assert video == MP4 and meta["mime_type"] == "video/mp4"
+    assert [c["method"] for c in calls] == (["GET"] if recovering else ["POST"])
+    if recovering:
+        assert calls[0]["url"].endswith("/interactions/v1_fixture")
+        dispatch.begin.assert_not_awaited()
+        dispatch.receipt.assert_not_awaited()
+        dispatch.authorize_http.assert_awaited_once()
+    else:
+        dispatch.begin.assert_awaited_once()
+        dispatch.receipt.assert_awaited_once_with("v1_fixture")
 
 
 # ─── registry / routing wiring ───────────────────────────────────────────

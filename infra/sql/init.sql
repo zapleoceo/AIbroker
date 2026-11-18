@@ -293,6 +293,26 @@ CREATE TABLE IF NOT EXISTS api_key_model_cooldowns (
   PRIMARY KEY (api_key_id, model)
 );
 
+-- Staged Vivix ledger (028); independent lifetime budgets, no public activation.
+CREATE TABLE IF NOT EXISTS vivix_ledger_lock (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO vivix_ledger_lock(id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS vivix_jobs (
+  id VARCHAR(128) PRIMARY KEY,
+  project_id VARCHAR(128) NOT NULL,
+  account_id VARCHAR(128) NOT NULL,
+  api_key_id BIGINT,
+  version INTEGER NOT NULL,
+  reserved_usd NUMERIC(24,8) NOT NULL CHECK (reserved_usd >= 0),
+  settled_usd NUMERIC(24,8) NOT NULL CHECK (settled_usd >= 0),
+  body JSON NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_project_id ON vivix_jobs(project_id);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_account_id ON vivix_jobs(account_id);
+CREATE INDEX IF NOT EXISTS ix_vivix_jobs_api_key_id ON vivix_jobs(api_key_id);
+
 -- 012 destructive-DDL guard (event trigger); see migrations/012_block_destructive_ddl.sql
 DO $guard$
 BEGIN
@@ -338,3 +358,43 @@ BEGIN
   EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', app_role);
 END
 $roles$;
+
+-- Drain old workers before deploying: legacy in-flight estimates have no identity.
+-- No automatic expiry/deletion: unresolved holds require explicit reconciliation.
+CREATE TABLE IF NOT EXISTS budget_ledger_lock (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO budget_ledger_lock(id, version) VALUES (1, 0) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS budget_reservations (
+  id VARCHAR(36) PRIMARY KEY,
+  api_key_id BIGINT NOT NULL,
+  project_id BIGINT NOT NULL,
+  amount NUMERIC(24,8) NOT NULL CHECK (amount > 0),
+  day DATE NOT NULL,
+  month DATE NOT NULL,
+  debit_daily BOOLEAN NOT NULL,
+  debit_monthly BOOLEAN NOT NULL,
+  state VARCHAR(16) NOT NULL CHECK (state IN ('held', 'settled', 'released')),
+  usage_id BIGINT,
+  fingerprint VARCHAR(64)
+);
+CREATE INDEX IF NOT EXISTS ix_budget_reservations_api_key_id ON budget_reservations(api_key_id);
+CREATE INDEX IF NOT EXISTS ix_budget_reservations_project_id ON budget_reservations(project_id);
+CREATE INDEX IF NOT EXISTS ix_budget_reservations_state ON budget_reservations(state);
+
+CREATE TABLE IF NOT EXISTS media_dispatch (
+  job_id BIGINT PRIMARY KEY,
+  project_id BIGINT NOT NULL,
+  fingerprint VARCHAR(64) NOT NULL,
+  phase VARCHAR(16) NOT NULL CHECK (phase IN ('prepared','submitting','submitted','settled','unknown')),
+  claim TIMESTAMP,
+  key_id BIGINT,
+  account_id VARCHAR(255),
+  key_fingerprint VARCHAR(64),
+  reservation_id VARCHAR(36),
+  model VARCHAR(200),
+  provider_id VARCHAR(255),
+  usage_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS ix_media_dispatch_project_id ON media_dispatch(project_id);

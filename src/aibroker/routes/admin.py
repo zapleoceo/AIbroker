@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -24,6 +25,44 @@ from aibroker.telemetry import audit
 # client API; the admin endpoints are documented on the landing page / docs/api.md.
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)],
                    include_in_schema=False)
+
+
+class MediaResumeRequest(BaseModel):
+    project_id: int
+    expected_claim: datetime
+
+
+@router.get("/media/jobs/{job_id}/reconcile")
+async def media_reconciliation_state(job_id: int, project_id: int,
+                                     _: AdminCtx = Depends(require_admin)) -> dict:
+    from aibroker.services.deep_jobs import get_job
+
+    job = await get_job(job_id, project_id)
+    if job is None or job.capability != "video":
+        raise HTTPException(404, "video job not found")
+    return {"job_id": job_id, "project_id": project_id, "status": job.status,
+            "reason": job.error_message, "expected_claim": job.started_at}
+
+
+@router.post("/media/jobs/{job_id}/reconcile")
+async def reconcile_media(job_id: int, body: MediaResumeRequest, request: Request,
+                          _: AdminCtx = Depends(require_admin)) -> dict:
+    from aibroker.services.job_queue import _execute_guarded
+    from aibroker.services.media_dispatch import MediaUnknown, claim_media_resume, media_wait
+
+    try:
+        job = await claim_media_resume(job_id, body.project_id, body.expected_claim)
+    except MediaUnknown as exc:
+        raise HTTPException(409, str(exc)) from exc
+    try:
+        await audit(actor="admin", action="media.reconcile", target=str(job_id),
+                    metadata={"project_id": body.project_id}, ip=client_ip(request))
+        await _execute_guarded(job)
+    finally:
+        # A failed/cancelled request never grants an automatic retry. A crash is
+        # handled by stale recovery using the persisted manual-running marker.
+        await media_wait(job.id, job.started_at)
+    return await media_reconciliation_state(job_id, body.project_id, _)
 
 
 # ─── Projects ───────────────────────────────────────────────────────────────

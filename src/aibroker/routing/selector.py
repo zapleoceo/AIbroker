@@ -443,8 +443,8 @@ def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
             vals.append(f":{param}")
     cols += ["capability", "workflow", "tokens_in", "tokens_out", "cache_read_tokens",
              "cache_write_tokens", "cost_usd", "latency_ms", "status", "error_kind",
-             "http_status"]
-    vals += [":c", ":w", ":ti", ":to", ":cr", ":cw", ":co", ":lm", ":s", ":e", ":h"]
+             "http_status", "created_at"]
+    vals += [":c", ":w", ":ti", ":to", ":cr", ":cw", ":co", ":lm", ":s", ":e", ":h", ":booked_at"]
     return (f"INSERT INTO usage_log ({', '.join(cols)}) "
             f"VALUES ({', '.join(vals)}) RETURNING id")
 
@@ -502,6 +502,8 @@ async def record_usage(
     http_status: int | None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    reservation_id: str | None = None,
+    media_dispatch=None,
 ) -> int:
     """Insert usage_log row + update counters on the api_key.
 
@@ -532,13 +534,27 @@ async def record_usage(
         "    monthly_reset_at = :month_start, "
         f"    total_cost_usd = total_cost_usd + :co{recover_sql} "
         "WHERE k.id = :k"
-    )
+    ).replace("CURRENT_DATE", ":booking_day")
     async def _write(missing: frozenset[str]) -> int:
         insert_sql = _insert_sql(missing=missing)
         dropped = {param for col, param in _OPTIONAL_USAGE_COLS if col in missing}
         p = {k: v for k, v in params.items() if k not in dropped}
-        upd_p = {**p, **month_params()}
         async with get_session() as s:
+            from aibroker.routing.budget_ledger import booking_reservation, budget_now, lock_budget
+            await lock_budget(s)
+            # PostgreSQL CURRENT_DATE/now() are fixed at transaction start, before
+            # a possible midnight lock wait. Bind one fresh UTC booking timestamp.
+            booked_at = budget_now()
+            p["booked_at"] = booked_at
+            upd_p = {**p, "booking_day": booked_at.date(),
+                     "month_start": booked_at.date().replace(day=1)}
+            reservation = None
+            if reservation_id is not None:
+                reservation = await booking_reservation(s, reservation_id, params)
+                if reservation.state == "settled":
+                    if media_dispatch is not None:
+                        await media_dispatch.finalize(s, int(reservation.usage_id))
+                    return int(reservation.usage_id)
             if s.bind.dialect.name == "postgresql":  # pragma: no cover — Postgres-only, exercised by tests/test_selector.py
                 # One round-trip: data-modifying CTE folds the INSERT and the
                 # counter UPDATE into a single statement (2026-07-16).
@@ -556,6 +572,11 @@ async def record_usage(
                 # same session/transaction, just two round-trips.
                 usage_id = (await s.execute(text(insert_sql), p)).scalar_one()
                 await s.execute(text(update_sql), upd_p)
+            if reservation is not None:
+                reservation.state = "settled"
+                reservation.usage_id = int(usage_id)
+            if media_dispatch is not None:
+                await media_dispatch.finalize(s, int(usage_id))
         return int(usage_id)
 
     missing = frozenset(_missing_usage_cols)

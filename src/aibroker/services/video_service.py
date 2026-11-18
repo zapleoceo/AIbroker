@@ -30,6 +30,7 @@ from aibroker.services.llm_service import (
     _failure_text,
     _max_keys,
 )
+from aibroker.services.media_dispatch import MediaDispatch, MediaUnknown, media_resume_key
 
 CAPABILITY = "video"
 # Keys of the queued request (deep_jobs.request) that carry a video job.
@@ -61,9 +62,9 @@ class VideoFailed(Exception):
     """Every paid key failed (the job is retried, then ends in error)."""
 
 
-def _generate_call(model: str, request: VideoRequest):
+def _generate_call(model: str, request: VideoRequest, dispatch: MediaDispatch):
     async def call(plain: str):
-        return await generate_video(model=model, request=request, api_key=plain)
+        return await generate_video(model=model, request=request, api_key=plain, dispatch=dispatch)
     return call
 
 
@@ -94,21 +95,29 @@ async def run_video(
     request: VideoRequest,
     model: str | None,
     workflow: str | None,
+    dispatch: MediaDispatch | None = None,
 ) -> VideoOutcome | _BudgetExhausted | None:
     """Prompt → clip, rotating the provider's PAID keys that carry llm:video.
 
     None → no such key right now (the job is retried); the budget sentinel → a
     project/global cap is spent; VideoFailed → every key tried and failed;
     VideoRejected → the request itself was refused, no other key is tried."""
-    provider = chain_for(CAPABILITY)[0]
-    use_model = (resolve_pin(model, CAPABILITY, [provider])[0].model if model
-                 else model_for(provider, CAPABILITY))
+    if dispatch is None:
+        raise MediaUnknown("video requires a durable job dispatch context")
+    state = await dispatch.load()
+    await dispatch.validate_input(video_job_payload(request), model, workflow)
+    recovering = state["phase"] != "prepared"
+    if recovering and (not state["provider_id"] or state["phase"] not in ("submitted", "settled")):
+        raise MediaUnknown("unknown prior submission; no paid resubmit")
+    provider = "gemini" if recovering else chain_for(CAPABILITY)[0]
+    use_model = state["model"] if recovering else (
+        resolve_pin(model, CAPABILITY, [provider])[0].model if model else model_for(provider, CAPABILITY))
     if not use_model:
         return None
     any_key_seen = False
     last_error: str | None = None
     for _ in range(_max_keys(provider)):
-        key = await pick_and_reserve(provider, scope=scope_for(CAPABILITY),
+        key = await media_resume_key(state, project.id) if recovering else await pick_and_reserve(provider, scope=scope_for(CAPABILITY),
                                      require_tier="paid", project_id=project.id,
                                      models=[use_model])
         if key is None:
@@ -118,8 +127,10 @@ async def run_video(
             key=key, project=project, provider=provider, model=use_model,
             capability=CAPABILITY, workflow=workflow,
             estimated_cost=estimate_video_cost(use_model, request),
-            call=_generate_call(use_model, request),
+            call=_generate_call(use_model, request, dispatch),
             cap_flow=Flow.NEXT_KEY, pinned_model=model, note_affinity=False,
+            media_dispatch=dispatch, reserve=not recovering,
+            recovered_reservation=state["reservation_id"] if recovering else None,
         ))
         if res.flow is Flow.SUCCESS:
             meta = res.meta
@@ -133,8 +144,10 @@ async def run_video(
                 key_label=key.label, request_id=res.usage_id or 0,
                 model_served=meta.get("model_served"),
             )
-        if isinstance(res.error, VideoRejected):
+        if isinstance(res.error, (VideoRejected, MediaUnknown)):
             raise res.error
+        if recovering:
+            raise MediaUnknown("original media binding failed; no rotation")
         if res.flow is Flow.BUDGET_EXHAUSTED:
             return _exhausted_for(res.error)
         last_error = _failure_text(res)

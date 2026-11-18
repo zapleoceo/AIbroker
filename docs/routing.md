@@ -1414,11 +1414,14 @@ a naive `TIMESTAMP` and asyncpg rejects offset-aware values.
 ## Cost guard
 
 `src/aibroker/routing/cost_guard.py:reserve_cost(api_key, project, estimated_cost)`
-+ `release_cost(api_key, estimated_cost)`.
+returns a unique reservation ID. `record_usage(reservation_id=...)` settles it
+atomically; `release_cost(api_key, reservation_id=...)` handles cancellation.
+See [budget-reservations.md](budget-reservations.md) for the durable ledger,
+migration 030 and release limitations.
 
-Three independent caps: per-key (daily and monthly, one atomic statement, see below),
-per-project (daily and monthly, live SUM from `usage_log`), global (daily only,
-30s-cached SUM vs `GLOBAL_DAILY_CAP_USD`).
+Three caps share one transaction lock: per-key daily/monthly, per-project
+daily/monthly and global daily. All include outstanding holds; project/global
+spend uses live usage_log totals, never the old admission cache.
 Free-tier keys with `cost <= 0` skip the check entirely.
 
 **Cap 0 refuses paid keys (2026-10-13).** `daily_cost_cap_usd = 0` on the project or on a key refuses a `tier="paid"` key before any reservation unless the model is registry-known free (`pricing == "free"`, passed to `reserve_cost` as `known_free_model`). An unpriced model estimates $0 too, so before this `used + estimate > cap` admitted it and its real cost landed uncapped. Free-tier and `trial` keys behave as before (master never refused `trial` at a $0 estimate).
@@ -1429,7 +1432,7 @@ Free-tier keys with `cost <= 0` skip the check entirely.
 reset. `FRESH_MONTHLY_COST_SQL` reads the counter as 0 unless `monthly_reset_at` equals
 the first day of the current UTC month (`month_start_utc()`, bound as `:month_start`
 via `month_params()`; no DB-specific `date_trunc`). `reserve_cost` debits the daily and
-monthly windows in ONE atomic `UPDATE ... RETURNING` (both or neither); `release_cost`
+monthly windows and creates the durable hold in ONE transaction (both or neither); `release_cost`
 refunds exactly the windows that were reserved; `record_usage` stamps `monthly_reset_at`.
 The key pick (`pick_and_reserve`) excludes a key at its monthly cap through
 `MONTHLY_CAP_OK_SQL`, exactly like the daily cap: cap 0 on a key excludes that key
@@ -1450,26 +1453,16 @@ daily). `llm_service.cap_message(window)` turns it into the client text: daily i
 reached — retry after the 1st of next month, 00:00 UTC`. `run_chat` returns
 `BUDGET_EXHAUSTED` or `BUDGET_EXHAUSTED_MONTHLY` accordingly.
 
-**Real reservation pattern (2026-07-03).** `run_chat` estimates the
-worst-case cost (`estimate_llm_cost(model, prompt_tokens, max_tokens)` —
-assumes the full `max_tokens` budget is generated) and calls `reserve_cost`
-**before** the provider call; `release_cost` undoes the reservation once the
-attempt resolves (success or failure), and `record_usage` then books the REAL
-final cost on top — so a key ends up debited by exactly the real cost, the
-estimate only ever counting toward the cap for the few hundred ms the call is
-actually in flight. This used to be advertised on the landing page
-("Reservation pattern: estimate before, settle after") without actually being
-implemented that way — the earlier check-only guard (replaced by `reserve_cost`)
-was called with a hardcoded `estimated_cost=0.0`, so the per-key check was really just "is the counter,
-loaded earlier in the request, already over cap" — a plain Python comparison
-against a possibly-stale object, race-prone under concurrent requests against
-the same key. The per-key branch is now a single atomic
-`UPDATE ... WHERE ... RETURNING`: Postgres row-locks the key for the
-statement's duration, so two concurrent reservations against the same key
-serialize correctly instead of both reading the same stale value and both
-passing. Per-project/global checks are unchanged (live/cached SUM) — a
-smaller, accepted residual race remains there, a secondary backstop behind the
-now-atomic, tighter per-key cap.
+**Durable reservation pattern (2026-11-16, local implementation).**
+`reserve_cost` returns a UUID and admits under the shared budget lock before
+any provider call. Successful and billed-rejected responses retain that hold
+until `record_usage` atomically refunds the estimate, inserts usage, increments
+actual counters and marks the UUID settled. Retries return the same usage ID;
+changed settlement parameters are rejected. Explicit cancellation refunds by ID.
+There is no release-before-booking gap. Ordinary and Vivix admissions see each
+other's durable holds across keys, projects and UTC window resets. The shared
+ledger is described in [budget-reservations.md](budget-reservations.md); PostgreSQL
+validation is outstanding and no production migration has been applied.
 
 **Embed, transcribe and decisions reserve too (2026-09-07).** `run_embed`,
 `run_transcribe` and `run_decision` all call `_reserve_or_block` (a thin
@@ -1774,7 +1767,7 @@ all), so a JSON request still reaches every other provider.
 Per key:
 
 1. `pick_and_reserve` (None → no more keys for this provider → next provider).
-2. `reserve_cost` (CostGuardError → audit → next provider; caps are per-key/project/global; `release_cost` undoes the reservation when the attempt resolves).
+2. `reserve_cost` (CostGuardError → audit → next provider; caps are per-key/project/global; booking atomically settles the reservation; cancellation refunds by ID).
 3. `call_llm`. Exceptions are classified by `classify_provider_error`:
    - rate-limit / 429 → `cooldown_until`: the provider's retry-after hint, else UTC midnight for a daily quota, else the per-provider adaptive backoff (`routing/cooldown.py`); **try next key**.
    - 401/403/auth → `mark_dead`, **try next key**.
@@ -1970,7 +1963,7 @@ the reserved estimate so the per-key cost cap saw the upstream spend (the
 2026-07-12 `$122` gemini gap — real spend UNDERcounted). But under a `$0.50`
 cap, a few ANSWERLESS timeouts booked at the estimate exhausted the whole day's
 ADMISSION budget on zero answers. Every failed attempt now books `cost_usd=0`:
-`release_cost` fully unwinds the reservation, so an answerless timeout leaves
+zero-cost booking atomically unwinds the reservation, so an answerless timeout leaves
 `daily_cost_used_usd` untouched. Real timeout spend is reconciled off the
 provider invoice, out-of-band — not via the counter that gates whether the NEXT
 answer runs. (Provider timeouts are NEVER shortened — an aborted call = wasted
@@ -2124,8 +2117,9 @@ Fixes from the project review; each is pinned by a regression test.
   `GEMINI_ASR_TIMEOUT_S` (`asyncio.wait_for` on embed, whisper, chat
   transcription and gemini ASR), and `GEMINI_TTS_TIMEOUT_S` (60 s default) for the gemini TTS call. `GEMINI_VIDEO_TIMEOUT_S` (420 s default) is one ceiling over a whole gemini video generation (create, polling, hosted file, download), and `GEMINI_VIDEO_POLL_S` (5 s) is its poll interval.
 - **Response cache key** includes `response_format`, `tools`, `tool_choice`.
-- **Reservations** are released on every exit (decrypt failure, cancellation):
-  `_release_reservation` is shielded and never raises.
+- **Reservations** settle atomically with usage, including zero-cost errors.
+  Cancellation uses the shielded `_release_reservation`; failures retain a
+  durable hold for reconciliation, rather than expiring at midnight.
 - **`_prompt_chars`** reuses `content_chars` (`providers/context_limits.py`), so
   base64 images no longer count as text.
 - **Learned size ceilings** (`providers/observations.py`) expire after

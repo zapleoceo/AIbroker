@@ -71,6 +71,7 @@ from aibroker.providers.subscriptions import (
     subscription_model_verified,
     subscription_tools_accepted,
 )
+from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
 from aibroker.services.deep_jobs import (
@@ -102,6 +103,8 @@ from aibroker.services.speech_service import SpeechFailed, run_speech
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.video_service import VIDEO_FIELD, video_job_payload
 from aibroker.services.vision_payload import inline_image_problem
+from aibroker.services.vivix_jobs import VivixDisabled
+from aibroker.services.vivix_jobs import submit as submit_vivix
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
 
 # Capabilities the generic /v1/jobs endpoint serves — everything run_chat
@@ -637,6 +640,8 @@ class DeepJobResponse(BaseModel):
     files: list[dict[str, Any]] | None = None
     video_base64: str | None = Field(
         None, description="video jobs only: the finished clip (base64); `text` stays null")
+    video_url: str | None = None
+    billing_status: str | None = None
     mime_type: str | None = Field(None, description="video jobs only, e.g. video/mp4")
     video_s: float | None = Field(None, description="video jobs only: clip length, seconds")
     # Vision only, and only when the self-hosted `local` provider answered:
@@ -807,6 +812,7 @@ def _job_response(row: Any, files: Any = _SYNC_FILES) -> DeepJobResponse:
     return DeepJobResponse(
         job_id=row.id, status="done", text=None if is_video else row.result_text,
         video_base64=row.result_text if is_video else None,
+        video_url=meta.get("video_url"), billing_status=meta.get("billing_status"),
         mime_type=meta.get("mime_type"), video_s=meta.get("video_s"),
         provider=meta.get("provider"), model=meta.get("model"),
         requested_model=requested_model,
@@ -1083,6 +1089,7 @@ VIDEO_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
 
 class VideoJobRequest(BaseModel):
+    provider: Literal["gemini"] = "gemini"
     prompt: str = Field(min_length=1, max_length=VIDEO_MAX_PROMPT_CHARS)
     duration_s: int = Field(5, ge=VIDEO_MIN_S, le=VIDEO_MAX_S,
                             description="clip length in whole seconds")
@@ -1120,9 +1127,10 @@ class VideoJobRequest(BaseModel):
 @router.post("/video/jobs", response_model=JobSubmitResponse,
              status_code=status.HTTP_202_ACCEPTED)
 async def video_submit(
-    body: VideoJobRequest,
+    body: VideoJobRequest | VivixJobRequest,
     response: Response,
     ctx: ProjectCtx = Depends(require_project),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> JobSubmitResponse:
     """Prompt (+ optional reference image) → short video clip, ASYNC ONLY: returns a
     job_id at once, poll GET /v1/jobs/{id}; a finished job carries `video_base64`.
@@ -1131,6 +1139,20 @@ async def video_submit(
     seconds to minutes, so there is no synchronous variant. A refused prompt ends
     the job in `error` without retries; each finished clip is billed."""
     _require_capability_scope(ctx, scope_for("video"))
+    if isinstance(body, VivixJobRequest):
+        if not idempotency_key:
+            raise HTTPException(400, "Vivix requires Idempotency-Key")
+        try:
+            check_token(idempotency_key, "Idempotency-Key")
+            job_id = await submit_vivix(ctx.project, body, idempotency_key)
+        except VivixDisabled as e:
+            raise HTTPException(503, str(e)) from e
+        except IdempotencyConflict as e:
+            raise HTTPException(409, "Idempotency-Key conflict") from e
+        except ValueError as e:
+            raise HTTPException(400, "Vivix admission refused") from e
+        response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+        return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
     _validate_pin(body.model, "video")
     try:
         image = body.reference_image()

@@ -29,7 +29,7 @@ class _Rig:
 
     def __init__(self, monkeypatch):
         self.record = AsyncMock(return_value=99)
-        self.reserve = AsyncMock(return_value=None)
+        self.reserve = AsyncMock(return_value="fixture-reservation")
         self.release = AsyncMock(return_value=None)
         self.penalize = AsyncMock(return_value="error")
         self.audit = AsyncMock(return_value=None)
@@ -68,8 +68,8 @@ async def test_success_records_the_row_releases_and_repins(rig):
                                         pinned_model="gpt-oss-120b"))
     assert res.flow is Flow.SUCCESS and res.payload == "text" and res.usage_id == 99
     rig.reserve.assert_awaited_once()
-    rig.release.assert_awaited_once()
-    assert rig.release.await_args.kwargs["estimated_cost"] == 0.5
+    rig.release.assert_not_awaited()
+    assert rig.record.await_args.kwargs["reservation_id"] == "fixture-reservation"
     kw = rig.record.await_args.kwargs
     assert (kw["status"], kw["http_status"], kw["error_kind"]) == ("ok", 200, None)
     assert (kw["tokens_in"], kw["tokens_out"], kw["cost_usd"]) == (10, 5, 0.25)
@@ -140,7 +140,8 @@ async def test_generic_error_penalizes_books_and_tries_the_next_key(rig):
     res = await run_attempt(rig.attempt(
         key=_key("paid"), estimated_cost=0.5, call=AsyncMock(side_effect=RuntimeError("boom"))))
     assert res.flow is Flow.NEXT_KEY and str(res.error) == "boom"
-    rig.release.assert_awaited_once()       # an answerless call consumes no admission budget
+    rig.release.assert_not_awaited()       # zero-cost usage settles the hold atomically
+    assert rig.record.await_args.kwargs["reservation_id"] == "fixture-reservation"
     rig.penalize.assert_awaited_once()
     kw = rig.record.await_args.kwargs
     assert (kw["status"], kw["error_kind"], kw["cost_usd"], kw["tokens_in"]) == (

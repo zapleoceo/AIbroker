@@ -754,7 +754,16 @@ Body (`VideoJobRequest`):
 
 Response `202`: `{job_id, poll_url, poll_after_s: 10}`.
 
-Poll `GET /v1/jobs/{id}` as usual. A finished video job has `text: null` and carries `video_base64` (the MP4, base64), `mime_type` (`video/mp4`) and `video_s` (clip length in seconds), plus the usual `provider`, `model`, `model_served`, `cost_usd`, `latency_ms`, `key_label` and `request_id`. The queued request keeps the prompt and reference image in its `video` payload (`video_job_payload` / `video_request_from_job`); the dispatcher's `video` branch runs it through `_run_video_job`.
+Poll `GET /v1/jobs/{id}` as usual. A finished Gemini video job has `text: null` and carries `video_base64` (the MP4, base64), `mime_type` (`video/mp4`) and `video_s` (clip length in seconds), plus the usual `provider`, `model`, `model_served`, `cost_usd`, `latency_ms`, `key_label` and `request_id`. The queued request keeps the prompt and reference image in its `video` payload (`video_job_payload` / `video_request_from_job`); the dispatcher's `video` branch runs it through `_run_video_job`.
+
+The staged Vivix request shape is `{ "provider": "vivix", "model": "<exact model>",
+"inputs": { ...native A1/W1 fields... } }` with mandatory `Idempotency-Key` and
+`llm:video` project scope. It currently returns **503 disabled**: no trusted runtime
+or activation configuration is shipped. Quotes, credentials and account selection
+are never accepted from this request. When a future authorized runtime is wired,
+the separate durable Vivix branch returns a settled `video_url` and
+`billing_status`, not `video_base64`; unknown billing stays null while pending.
+See [Vivix integration and remaining gates](vivix.md).
 
 - **Paid keys only.** `run_video` rotates gemini keys with `tier='paid'` and scope `llm:video`; a free key is never picked. With no such key the job is requeued like any job with no capacity.
 - **Caps apply.** The reservation is `estimate_video_cost`, through `run_attempt`. A spent project or global cap ends the job with the normal budget message.

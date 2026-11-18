@@ -74,8 +74,9 @@ def _project():
 async def test_run_embed_reserves_and_releases_around_the_call():
     """REGRESSION: reserve_cost had exactly one caller (the chat path), so
     /v1/embed never consulted the project/global caps at all."""
-    reserve = AsyncMock()
+    reserve = AsyncMock(return_value="embed-reservation")
     release = AsyncMock()
+    booking = AsyncMock(return_value=42)
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(return_value=_key())), \
          patch.object(llm_service, "estimate_llm_cost", lambda *a, **k: 0.01), \
          patch("aibroker.services.attempt.reserve_cost", reserve), \
@@ -83,13 +84,16 @@ async def test_run_embed_reserves_and_releases_around_the_call():
          patch("aibroker.services.attempt.decrypt", lambda _: "plain"), \
          patch.object(llm_service, "embed", AsyncMock(return_value=(
              [[0.1, 0.2]], {"tokens_in": 5, "cost_usd": 0.0001, "latency_ms": 3}))), \
-         patch("aibroker.services.attempt.record_usage", AsyncMock(return_value=42)), \
+         patch("aibroker.services.attempt.record_usage", booking), \
          patch("aibroker.services.attempt.affinity.note_success", AsyncMock()):
         out = await run_embed(project=_project(), provider="voyage",
                               inputs=["hello world"], model=None, workflow=None)
     assert out is not None and out.request_id == 42
     reserve.assert_awaited_once()
-    release.assert_awaited_once()
+    release.assert_not_awaited()  # no release-before-booking window
+    booking.assert_awaited_once()
+    assert booking.await_args.kwargs["reservation_id"] == "embed-reservation"
+    assert booking.await_args.kwargs["cost_usd"] == 0.0001
 
 
 async def test_run_embed_project_cap_stops_the_walk_with_a_clear_error():
@@ -126,20 +130,25 @@ async def test_run_embed_per_key_cap_tries_the_next_key():
 
 async def test_run_embed_releases_reservation_when_provider_fails():
     release = AsyncMock()
+    booking = AsyncMock(return_value=43)
     # A positive estimate is the precondition: a $0 estimate reserves nothing
     # and (correctly) releases nothing. Pin it rather than depend on the
     # pricing table for a 1-char input.
     with patch.object(llm_service, "pick_and_reserve", AsyncMock(side_effect=[_key(), None])), \
          patch.object(llm_service, "estimate_llm_cost", lambda *a, **k: 0.01), \
-         patch("aibroker.services.attempt.reserve_cost", AsyncMock()), \
+         patch("aibroker.services.attempt.reserve_cost", AsyncMock(return_value="failed-embed-reservation")), \
          patch("aibroker.services.attempt.release_cost", release), \
          patch("aibroker.services.attempt.decrypt", lambda _: "plain"), \
          patch.object(llm_service, "embed", AsyncMock(side_effect=RuntimeError("boom"))), \
-         patch("aibroker.services.attempt._penalize", AsyncMock()), patch("aibroker.services.attempt._record_error", AsyncMock()),\
+         patch("aibroker.services.attempt._penalize", AsyncMock()), \
+         patch("aibroker.services.attempt.record_usage", booking), \
          pytest.raises(EmbedFailed):
         await run_embed(project=_project(), provider="voyage",
                         inputs=["x"], model=None, workflow=None)
-    release.assert_awaited_once()
+    release.assert_not_awaited()
+    booking.assert_awaited_once()
+    assert booking.await_args.kwargs["reservation_id"] == "failed-embed-reservation"
+    assert booking.await_args.kwargs["cost_usd"] == 0.0
 
 
 async def test_run_transcribe_project_cap_is_enforced():
