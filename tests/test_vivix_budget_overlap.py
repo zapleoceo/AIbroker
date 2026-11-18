@@ -7,9 +7,12 @@ from aibroker.db.engine import get_session
 from aibroker.db.models import ApiKeyRow, ProjectRow, UsageLogRow
 from aibroker.providers.gemini_video import VideoRejected
 from aibroker.routing.cost_guard import invalidate_global_cache, reserve_cost
-from tests.test_vivix_billing import binding as binding
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+binding = _binding_fixture
 
 
 @pytest.mark.parametrize("window", ["project daily", "project monthly", "global daily"])

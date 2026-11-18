@@ -144,7 +144,7 @@ async def run_video(
                 key_label=key.label, request_id=res.usage_id or 0,
                 model_served=meta.get("model_served"),
             )
-        if isinstance(res.error, (VideoRejected, MediaUnknown)):
+        if isinstance(res.error, VideoRejected | MediaUnknown):
             raise res.error
         if recovering:
             raise MediaUnknown("original media binding failed; no rotation")

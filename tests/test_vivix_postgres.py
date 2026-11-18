@@ -14,9 +14,12 @@ from aibroker.db.models import ApiKeyRow, ProjectRow, UsageLogRow
 from aibroker.db.vivix_models import VivixJobRow
 from aibroker.providers.gemini_video import VideoRejected
 from aibroker.services.vivix_store import Snapshot
-from tests.test_vivix_billing import binding as binding
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_billing import prepared, terminal
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+binding = _binding_fixture
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TEST_DATABASE_URL", "").startswith(("postgresql", "postgres")),

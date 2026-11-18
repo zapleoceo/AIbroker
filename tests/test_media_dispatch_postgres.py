@@ -12,7 +12,10 @@ from aibroker.db.media_models import MediaDispatchRow
 from aibroker.db.models import DeepJobRow
 from aibroker.routing.cost_guard import reserve_cost
 from aibroker.services.job_queue import _requeue_stale_running
-from tests.test_media_dispatch import media_job as media_job
+from tests.test_media_dispatch import media_job as _media_job_fixture
+
+# Register shared fixtures without shadowing imported names in test arguments.
+media_job = _media_job_fixture
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL", "").startswith("postgres"),
                                reason="NOT RUN: no authorized isolated PostgreSQL runtime")

@@ -15,9 +15,12 @@ from aibroker.db.models import DeepJobRow, UsageLogRow
 from aibroker.providers import gemini_video
 from aibroker.services import job_queue
 from aibroker.services.media_dispatch import MediaUnknown
-from tests.test_media_dispatch import media_job as media_job
+from tests.test_media_dispatch import media_job as _media_job_fixture
 from tests.test_media_dispatch import new_claim, run_media
 from tests.test_video_service import MP4
+
+# Register shared fixtures without shadowing imported names in test arguments.
+media_job = _media_job_fixture
 
 
 def mock_transport(monkeypatch, failure):

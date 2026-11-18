@@ -15,9 +15,12 @@ from aibroker.services import job_queue, vivix_runtime
 from aibroker.services.job_control import cancel_job
 from aibroker.services.vivix_runtime import Authorization, Receipt
 from tests.test_routes_proxy import _make_project
-from tests.test_vivix_billing import binding as binding
+from tests.test_vivix_billing import binding as _binding_fixture
 from tests.test_vivix_service import INPUTS, LIMITS, MODEL, quote, transport
 from tests.test_vivix_service import ledger as ledger
+
+# Register shared fixtures without shadowing imported names in test arguments.
+binding = _binding_fixture
 
 client = TestClient(app)
 BODY = {"provider": "vivix", "model": MODEL, "inputs": INPUTS}
