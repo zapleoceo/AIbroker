@@ -183,3 +183,24 @@ without an image, so the adapter must check `files` explicitly.
 
 `/v1/agent/runs` remains available for diagnostics and features specific to
 agent sessions. Clients of the universal jobs contract do not need it.
+
+## GPT-6.2 subscription candidates
+
+The default Codex catalog includes `gpt-6.2-astra` and `gpt-6.2-sol`, exposed as
+`codex-sub/gpt-6.2-astra` and `codex-sub/gpt-6.2-sol`. These exact IDs appear in the
+existing Codex account catalog; catalog presence alone does not prove a successful call.
+They remain unverified by default. Before enabling either route, run an exact-ID
+subscription check, record its evidence in `AGENT_SUBSCRIPTION_TESTED_MODELS`, and
+explicitly include the successful ID in `AGENT_SUBSCRIPTION_VERIFIED_MODELS`.
+The evidence field is informational; the verified list remains the availability gate.
+
+Existing jobs API, project/account policy and subscription billing guards apply.
+There is no API-billed fallback. `model_served` stays null unless independent CLI
+response evidence identifies the served model; the requested ID alone is not proof.
+Text verification does not establish vision, tool use or image generation support.
+Client defaults, scopes and paid-continuation settings are unchanged.
+
+Deployments with explicit environment catalog overrides must add the two candidates
+there as well; changing source defaults alone does not change those deployments.
+Documentation drafted by the Haiku subscription subagent, Broker job `623380`:
+`model_served=claude-haiku-5-5`, account `claude-2`, billing `subscription` (2026-11-18).
