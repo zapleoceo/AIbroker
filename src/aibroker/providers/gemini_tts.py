@@ -64,18 +64,20 @@ async def _post_gemini_tts(url: str, api_key: str, body: dict[str, Any],
 
 async def _post_bounded_tts(url: str, api_key: str, body: dict[str, Any], timeout: float,
                             max_response_bytes: int) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, json=body, headers={
+    async with (
+        httpx.AsyncClient(timeout=timeout) as client,
+        client.stream("POST", url, json=body, headers={
             "x-goog-api-key": api_key, "accept-encoding": "identity",
-        }) as response:
-            if response.headers.get("content-encoding", "identity").lower() != "identity":
-                raise ValueError("speech response uses unexpected encoding")
-            raw = bytearray()
-            async for chunk in response.aiter_raw(chunk_size=64 * 1024):
-                if len(raw) + len(chunk) > max_response_bytes:
-                    raise ValueError("speech response exceeds byte limit")
-                raw.extend(chunk)
-            return httpx.Response(response.status_code, content=bytes(raw))
+        }) as response,
+    ):
+        if response.headers.get("content-encoding", "identity").lower() != "identity":
+            raise ValueError("speech response uses unexpected encoding")
+        raw = bytearray()
+        async for chunk in response.aiter_raw(chunk_size=64 * 1024):
+            if len(raw) + len(chunk) > max_response_bytes:
+                raise ValueError("speech response exceeds byte limit")
+            raw.extend(chunk)
+        return httpx.Response(response.status_code, content=bytes(raw))
 
 
 async def synthesize_via_gemini(

@@ -818,7 +818,9 @@ Speech cancellation is not exposed. Repeated reads never call Gemini.
 The worker commits the paid estimate hold and a prepared record in one budget
 transaction. Only a verified prepared record (no send fence) can refund that
 hold after a crash. A second commit fences the single bounded Gemini POST.
-After the send fence, timeout/uncertain outcomes become `unknown`:
+Queued Speech rejects compressed upstream response bodies and limits the
+raw upstream response body to 12 MiB. After the send fence, timeout/uncertain
+outcomes become `unknown`:
 never rotate, auto-resend, or fall back to synchronous speech. No upstream
 receipt is available to fetch a possibly billed reply; conservatively retain
 its hold for accounting. Cancellation after dispatch may still be billed.
