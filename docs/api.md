@@ -275,6 +275,60 @@ Whisper ceiling is enforced before queueing; transport limits are under
 
 A transcription job runs under a finish-by budget: it stops starting new attempts once 18 minutes of its wall budget is spent (the same gate as chat, below the 25-minute stale-job window) and fails with `502 TranscribeFailed`. A stale reclaim therefore cannot re-run the paid call and book it twice.
 
+#### Recover a keyed asynchronous transcription
+
+Use `transcribe_keyed_submit` (`POST /v1/transcribe/keyed-jobs`) with multipart
+`file`, optional `?workflow=...`, `X-Project-Key` with `llm:audio`, and a required
+`Idempotency-Key` (up to 128 characters, `[A-Za-z0-9._:-]`). A missing key is
+422 before admission. Existing unkeyed `POST /v1/transcribe/jobs` and upload
+limits remain unchanged. The same project/key, exact audio bytes,
+effective filename and workflow return the existing job (200 with
+`Idempotent-Replay: true`). A new key returns 202; different input under the
+same key returns 409. Use a transcription-specific prefix: the key namespace
+is shared with other queued routes in that project.
+
+For a keyed submission, `admit_keyed_request` records the request allowance
+in the same transaction as the winning job insertion. A competing duplicate
+does not spend a second allowance. Replays return the original result or
+status, not a new provider run.
+
+Keyed 202 returns `job_id` and a typed `poll_url`. Read the same ID with
+`transcribe_job_status` (`GET /v1/transcribe/jobs/{id}`). If the 202 is lost,
+use `transcribe_job_by_key` (`GET /v1/transcribe/jobs/by-key/{key}`, with the
+same URL-encoded key). Both reads require the same active project and current
+`llm:audio` and send `Cache-Control: private, no-store`. They never submit a job.
+They return `pending`, `running`, `done`, `error` or `cancelled`. A `done`
+result has `text` (up to 256 KiB UTF-8) and optional provider/model/cost/latency
+metadata. An oversized transcript is terminal `transcript_too_large`; no
+partial text, source audio, or raw provider errors are exposed.
+
+Typed replies carry `X-Broker-Job-Contract: transcription-keyed-v1`, including
+a typed 404. SIM can probe a syntactically valid random unused key without
+submitting audio. Its single submit must still use `/v1/transcribe/keyed-jobs`:
+during a rolling upgrade, an older replica can return 404 on the new route
+but cannot create an unkeyed job there. The old `/v1/transcribe/jobs` route
+is not safe for new keyed clients on mixed replicas, even after a probe.
+Persist the stable key before the single POST. On loss, only GET; a
+404 or expired receipt never proves non-acceptance. Do not mint a replacement
+or fall back to synchronous transcription after ambiguity. Duplicate POST
+with the same payload, while the receipt exists, reads the same job without a
+new queue entry. This is a Broker-job guarantee; pre-existing upstream
+transcription retry behavior is unchanged.
+
+Generic ID and list/watermark APIs and generic cancellation never expose
+keyed transcription. Existing unkeyed async and synchronous clients retain
+their original routes and behavior.
+
+### Rolling out typed media jobs
+
+**Transcription (SIM).** Submit multipart `file` only to `POST /v1/transcribe/keyed-jobs` with `Idempotency-Key` and a project key scoped for `llm:audio`. An older replica may reject the dedicated route during a rolling upgrade. Never fall back to `POST /v1/transcribe/jobs`: an older replica may accept that request without enforcing idempotency. If submission is uncertain, reconcile through `GET /v1/transcribe/jobs/by-key/{key}` and poll a known ID through `GET /v1/transcribe/jobs/{id}`. Keep the original key for the same operation.
+
+To check the typed read contract without creating a job, look up a randomly generated, unused valid key with a project key scoped for `llm:audio`. Expect a `404` with `X-Broker-Job-Contract: transcription-keyed-v1` and `Cache-Control: private, no-store`. A marked `404` confirms only the replica that served it; verify deployment state separately before treating the whole fleet as upgraded. Do not treat an unmarked `404` as authoritative job absence.
+
+**Speech.** Keep `ASYNC_SPEECH_ADMISSION_ENABLED=false` (the default) until all workers are upgraded and the isolated SQLite and PostgreSQL 16 checks pass without provider calls. This flag controls async admission; it does not change existing synchronous or live speech. If a paid execution has an unknown outcome, typed reads can confirm that the broker recorded `unknown`; they cannot determine the upstream outcome because Gemini’s unary call does not provide a receipt. Do not retry or fall back to another provider for the same operation; the billing hold stays in place.
+
+Before pushing, run `bash scripts/docs_gate.sh` with a fresh `origin/master` (`--offline` is informational only); the required CI documentation checks must still pass before release.
+
 ### Capabilities (for `/v1/jobs`)
 
 `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`,
@@ -728,6 +782,60 @@ live 2026-11-11); `audio_s` is the duration in seconds.
 - **Price.** `gemini-3.8-flash-tts`: $0.50 per million text tokens in, $9.00 per million audio tokens out (25 audio tokens per second, about $0.0135 per minute of speech). Google list price through 2026-12-31; it doubles from 2027-01-01. The lite model is $0.50 / $6.00 per million (about $0.009 per minute). See [pricing.md](pricing.md).
 - **Timeout.** `GEMINI_TTS_TIMEOUT_S` (default 60 s).
 - **Errors.** `403` without `llm:speech`; `422` invalid body or unknown voice; `400` pinned model that does not serve speech; `503` no paid key carries `llm:speech`; `502` every key failed, or a spent cap.
+
+### `/v1/speech/jobs` — queued text to speech
+
+`speech_job_submit` takes the same JSON as `/v1/speech` and requires
+`llm:speech` plus `Idempotency-Key: tts-<unix-ms>-<lowercase-uuid-v4>`.
+Use one stable key per intentional utterance, persisted before submitting.
+Keys can start a job only within 24 h of creation (2 min future skew allowed).
+A first admission commits the task and, where configured, one lifetime request
+unit together, then returns 202. A same-key replay returns 200 and
+`Idempotent-Replay: true`; different input or a different typed lane under the
+same project/key returns 409. For a lost admission response, use
+`speech_job_by_key` (`GET /v1/speech/jobs/by-key/{key}`) with the same key and
+project. It is read-only and works while the receipt is retained, even
+after the window for creating a new task closes. Do not interpret 404 as
+proof the provider request did not occur.
+
+`speech_job_status` (`GET /v1/speech/jobs/{id}`) returns only short metadata
+and one state: pending/running/done/error/unknown/cancelled. Poll the same ID.
+`speech_job_result` is GET on its `result_url` and returns private, non-cacheable
+binary `audio/wav`, at most 8 MiB, for one hour. Only Gemini 3.8 Flash TTS and
+Gemini 3.8 Flash-Lite TTS are enabled for this typed unary route. The
+[Gemini migration guide](https://aistudio.google.com/docs/speech-generation#migration)
+specifies native RIFF WAV for this call. Broker independently checks and
+normalizes to 24 kHz mono signed 16-bit little-endian PCM in a WAV container.
+No headerless PCM or unknown content type is served. A pending or unsuccessful
+job has no result (409); expired bytes return 410. Outputs and reusable metadata
+are separated; old keys cannot dispatch after the receipt row ages out. All
+reads require the same active project and current `llm:speech`. Foreign jobs
+return 404, as do speech IDs on the generic `/v1/jobs/{id}` and `/v1/deep/{id}`
+routes regardless of scope. Speech is excluded from generic lists, paging
+watermarks, in-flight indicators, and both generic cancellation routes.
+Speech cancellation is not exposed. Repeated reads never call Gemini.
+
+The worker commits the paid estimate hold and a prepared record in one budget
+transaction. Only a verified prepared record (no send fence) can refund that
+hold after a crash. A second commit fences the single bounded Gemini POST.
+After the send fence, timeout/uncertain outcomes become `unknown`:
+never rotate, auto-resend, or fall back to synchronous speech. No upstream
+receipt is available to fetch a possibly billed reply; conservatively retain
+its hold for accounting. Cancellation after dispatch may still be billed.
+Settlement requires both usage counters and positive audio output tokens,
+even when the returned WAV passes structural checks. Missing or zero output
+usage leaves the outcome unknown and retains the hold.
+If usage is known but audio is malformed/unsupported, the worker records the
+actual cost as an unsuccessful attempt and returns terminal
+`speech_result_unsupported`, with no result and no automatic retry.
+Successful bytes and accounting commit together; input is stripped on
+terminalization. Existing synchronous, video and live routes are unchanged.
+
+Speech admission is disabled by default (`ASYNC_SPEECH_ADMISSION_ENABLED`).
+Enable only after all production queue workers on the same release have the
+speech fence and isolated worker/HTTP/retention checks pass. Turning off
+admission leaves status/results readable. Before returning to an older worker
+binary, disable admission and drain or inspect outstanding speech jobs.
 
 ### `/v1/video/jobs` — prompt → video clip (2026-11-14)
 

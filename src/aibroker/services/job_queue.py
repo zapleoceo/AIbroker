@@ -43,6 +43,7 @@ from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
+from aibroker.services import speech_jobs
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.job_control import cancel_flag
 from aibroker.services.job_meta import log_tag
@@ -199,6 +200,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     Postgres run: test_job_queue.py::test_requeue_stale_running_reclaims_dead_
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
     await _reconcile_stale_media()
+    await _reconcile_stale_speech()
     async with get_session() as s:
         await s.execute(
             text(
@@ -210,6 +212,7 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
                 "  started_at = NULL, "
                 "  retry_count = retry_count + 1 "
                 "WHERE status = 'running' AND capability NOT LIKE 'agent:%' "
+                "  AND capability <> 'speech' "
                 "  AND NOT EXISTS (SELECT 1 FROM media_dispatch m WHERE m.job_id=deep_jobs.id "
                 "    AND m.provider_id IS NOT NULL AND m.phase IN ('submitted','settled') "
                 "    AND (retry_count + 1 > :max OR error_message='reconciliation_manual_running')) "
@@ -217,6 +220,17 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
             ),
             {"max": _MAX_RETRIES, "stale": _STALE_RUNNING_S},
         )
+
+
+async def _reconcile_stale_speech() -> None:
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=_STALE_RUNNING_S)
+    async with get_session() as s:
+        stale = (await s.execute(select(DeepJobRow.id, DeepJobRow.started_at).where(
+            DeepJobRow.status == "running", DeepJobRow.capability == "speech",
+            DeepJobRow.started_at < cutoff,
+        ).order_by(DeepJobRow.started_at).limit(200))).all()
+    for job_id, claim in stale:
+        await speech_jobs._stop_claim(job_id, claim)
 
 
 async def _reconcile_stale_media() -> None:
@@ -322,6 +336,10 @@ async def _release_claim(job_id: int, started_at: datetime | None) -> bool:
     must not eat the retry budget. Returns True when the row was released."""
     if started_at is None:
         return False
+    async with get_session() as s:
+        capability = await s.scalar(select(DeepJobRow.capability).where(DeepJobRow.id == job_id))
+    if capability == "speech":
+        return await speech_jobs._stop_claim(job_id, started_at)
     if await media_quarantine(job_id, started_at):
         return True
     if await media_wait(job_id, started_at):
@@ -346,7 +364,7 @@ async def release_claimed_jobs() -> int:
         try:
             if await _release_claim(job_id, started_at):
                 released += 1
-                log.info("shutdown: job %d returned to pending", job_id)
+                log.info("shutdown: job %d claim resolved", job_id)
         except Exception:  # noqa: BLE001 — stale reclaim still covers it
             log.exception("shutdown: could not release job %d", job_id)
     return released
@@ -388,6 +406,14 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     Reached only from a real claimed row → Postgres-only via drain_once tests
     (skipif ON_SQLITE); the paid-only escalation branch is also driven directly
     on SQLite (test_execute_final_attempt_escalates_to_paid_only)."""
+    if row.capability == "speech":
+        with request_scope(job_request_id(row.id)):
+            try:
+                await speech_jobs._execute_queued_speech(row)
+            except Exception:  # never expose the provider's text or retry this paid lane
+                log.warning("speech job %d did not return a durable result", row.id)
+                await speech_jobs._stop_claim(row.id, row.started_at)
+        return
     req = row.request
     tag = log_tag(row.trace_id, row.labels)
     async with get_session() as s:
@@ -560,8 +586,9 @@ async def purge_finished_jobs() -> int:  # pragma: no cover — Postgres-only DE
                 "DELETE FROM deep_jobs WHERE id IN ("
                 "  SELECT id FROM deep_jobs "
                 "  WHERE status IN ('done', 'error', 'cancelled') "
-                "    AND NOT EXISTS (SELECT 1 FROM media_dispatch m WHERE m.job_id=deep_jobs.id "
-                "      AND m.phase IN ('submitting','submitted','unknown')) "
+                "    AND (capability <> 'speech' OR created_at < now() - interval '25 hours') "
+                "    AND (capability = 'speech' OR NOT EXISTS (SELECT 1 FROM media_dispatch m "
+                "      WHERE m.job_id=deep_jobs.id AND m.phase IN ('submitting','submitted','unknown'))) "
                 "    AND completed_at IS NOT NULL "
                 "    AND completed_at < now() - make_interval(days => :days) "
                 "  LIMIT :batch"
@@ -758,6 +785,7 @@ async def _dispatch(stop: asyncio.Event,
                 if ticks_until_purge <= 0:
                     ticks_until_purge = _PURGE_EVERY_TICKS
                     await purge_finished_jobs()
+                    await speech_jobs._purge_speech_audio()
                     await purge_old_logs()
             free = _MAX_CONCURRENCY - len(inflight)
             if free > 0:

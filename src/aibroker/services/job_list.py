@@ -1,7 +1,7 @@
 """Read-only list of one project's jobs filtered by a label (GET /v1/jobs?label.k=v).
 
 Keyset paging on `id` with a high-watermark snapshot: the first page records max(id) of the
-project and every later page is bounded by it (`id <= hw`), so a walk covers the jobs that existed
+project's generic-visible jobs (never private typed media), and every later page is bounded by it (`id <= hw`), so a walk covers the jobs that existed
 when it started. Not atomic: a listed job's status can change between pages. Only metadata columns
 are selected - never the request, result or error text.
 """
@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow
+from aibroker.services.deep_jobs import _generic_job_visible
 from aibroker.services.job_queue import JOB_RETENTION_DAYS
 
 MAX_ID = 2**63 - 1   # BIGINT ceiling: a larger cursor value would be a DB error, not a 422
@@ -95,7 +96,7 @@ def _has_label(col: Any, key: str, value: str, dialect: str) -> Any:
 
 def _filters(project_id: int, key: str, value: str, trace_id: str | None, dialect: str,
              agent_open: bool) -> list[Any]:
-    conds = [DeepJobRow.project_id == project_id,
+    conds = [DeepJobRow.project_id == project_id, _generic_job_visible(),
              _has_label(DeepJobRow.labels, key, value, dialect)]
     if trace_id is not None:
         conds.append(DeepJobRow.trace_id == trace_id)
@@ -159,7 +160,7 @@ async def list_jobs(
         base = _filters(project_id, key, value, trace_id, dialect, agent_open)
         if cursor is None:
             hw = (await s.execute(select(func.max(DeepJobRow.id)).where(
-                DeepJobRow.project_id == project_id))).scalar() or 0
+                DeepJobRow.project_id == project_id, _generic_job_visible()))).scalar() or 0
             after = 0
             quiet = await _quiet(s, base, hw, agent_open, agent_readable)
         else:

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     GEMINI_ASR_TIMEOUT_S: float = 60.0
     # Gemini TTS (/v1/speech): a voice note of a few sentences renders in ~3-10 s.
     GEMINI_TTS_TIMEOUT_S: float = 60.0
+    ASYNC_SPEECH_ADMISSION_ENABLED: bool = False  # turn on only once all job workers understand speech
     # Gemini Omni video (/v1/video/jobs): ONE ceiling for the whole generation: the
     # create call, waiting for the hosted file to become ACTIVE, and the download.
     GEMINI_VIDEO_TIMEOUT_S: float = 420.0

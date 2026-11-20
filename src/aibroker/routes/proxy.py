@@ -12,6 +12,7 @@ import base64
 import logging
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -74,6 +75,7 @@ from aibroker.providers.subscriptions import (
 from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, scope_for
+from aibroker.services import speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
     IdempotencyConflict,
@@ -840,6 +842,9 @@ def _require_agent_read_access(ctx: ProjectCtx, row: Any) -> None:
     """Re-authorize reading an agent/subscription job. The gate runs at read time,
     not only at submit, so revoking llm:agent or dropping the project from
     AGENT_ALLOWED_PROJECT_IDS also closes already-created results on EVERY poll route."""
+    # Speech audio and receipt status are only served by the scoped no-store routes.
+    if row.capability == "speech":
+        raise HTTPException(404, "job not found")
     if not row.capability.startswith("agent:"):
         return
     if not ctx.has_scope(AGENT_SCOPE):
@@ -858,7 +863,7 @@ async def deep_poll(
     response: Response,
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
-    row = await get_job(job_id, ctx.project.id)
+    row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
@@ -899,13 +904,134 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
     """200 + the job's CURRENT poll body for an Idempotency-Key replay (never a new job)."""
-    row = await get_job(job_id, ctx.project.id)
+    row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:  # pragma: no cover — pruned between the key lookup and this read
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
     content = {**jsonable_encoder(_job_response(row, await _row_files(row))), "poll_url": f"/v1/jobs/{job_id}"}
     return JSONResponse(content, headers={
         "Idempotent-Replay": "true", REQUEST_ID_HEADER: job_request_id(job_id)})
+
+
+_SPEECH_PRIVATE = {"Cache-Control": "private, no-store"}
+_SPEECH_KEY_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+
+class _SpeechJobStatus(BaseModel):
+    job_id: int
+    status: Literal["pending", "running", "done", "error", "unknown", "cancelled"]
+    status_url: str
+    result_url: str | None = None
+    poll_after_s: int | None = None
+    error_code: str | None = None
+
+
+def _speech_key(key: str, *, check_age: bool = True) -> str:
+    try:
+        check_token(key, "Idempotency-Key")
+        prefix, stamp, identity = key.split("-", 2)
+        parsed = UUID(identity)
+        if (prefix != "tts" or len(stamp) != 13 or not stamp.isascii() or not stamp.isdecimal()
+                or parsed.version != 4 or str(parsed) != identity):
+            raise ValueError
+    except ValueError as exc:
+        raise HTTPException(422, "invalid speech idempotency key", headers=_SPEECH_PRIVATE) from exc
+    if not check_age:
+        return key
+    now = int(datetime.now(UTC).timestamp() * 1000)
+    created = int(stamp)
+    if created > now + 120_000 or created < now - _SPEECH_KEY_MAX_AGE_MS:
+        raise HTTPException(422, "expired or future speech idempotency key", headers=_SPEECH_PRIVATE)
+    return key
+
+
+async def _speech_status(project_id: int, job_id: int) -> _SpeechJobStatus:
+    row = await speech_jobs._read_speech_job(project_id, job_id)
+    if row is None:
+        raise HTTPException(404, "speech job not found", headers=_SPEECH_PRIVATE)
+    state = "unknown" if row.error_message == "speech_outcome_unknown" else row.status
+    path = f"/v1/speech/jobs/{job_id}"
+    return _SpeechJobStatus(
+        job_id=job_id, status=state, status_url=path,
+        result_url=f"{path}/result" if state == "done" else None,
+        poll_after_s=2 if state in ("pending", "running") else None,
+        error_code=row.error_message if state in ("error", "unknown") else None,
+    )
+
+
+@router.post("/speech/jobs", response_model=_SpeechJobStatus, status_code=202,
+             responses={200: {"model": _SpeechJobStatus, "description": "Idempotent replay"}})
+async def speech_job_submit(
+    body: SpeechRequest,
+    response: Response,
+    idempotency_key: Annotated[str, Header(description="tts-<unix-ms>-<uuid-v4>")],
+    ctx: ProjectCtx = Depends(require_project),
+) -> _SpeechJobStatus:
+    _require_capability_scope(ctx, scope_for("speech"))
+    if not get_settings().ASYNC_SPEECH_ADMISSION_ENABLED:
+        raise HTTPException(503, "speech admission disabled", headers=_SPEECH_PRIVATE)
+    key = _speech_key(idempotency_key)
+    _validate_pin(body.model, "speech")
+    if speech_jobs._queued_speech_model(body.model) is None:
+        raise HTTPException(400 if body.model else 503, "unsupported queued speech model",
+                            headers=_SPEECH_PRIVATE)
+    try:
+        accepted = await submit_job_ex(
+            project=ctx.project, capability="speech",
+            messages=[], model=body.model, max_tokens=0, temperature=0.0,
+            response_format=None, workflow=body.workflow, idempotency_key=key,
+            keyed_admission=True,
+            extra={"speech_text": body.text, "speech_voice": body.voice, "speech_style": body.style},
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(409, "idempotency_key_conflict", headers=_SPEECH_PRIVATE) from exc
+    response.headers.update(_SPEECH_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(accepted.job_id)
+    if accepted.replayed:
+        response.status_code = 200
+        response.headers["Idempotent-Replay"] = "true"
+        return await _speech_status(ctx.project.id, accepted.job_id)
+    return _SpeechJobStatus(job_id=accepted.job_id, status="pending",
+                            status_url=f"/v1/speech/jobs/{accepted.job_id}", poll_after_s=2)
+
+
+@router.get("/speech/jobs/by-key/{key}", response_model=_SpeechJobStatus)
+async def speech_job_by_key(
+    key: str, response: Response, ctx: ProjectCtx = Depends(require_project),
+) -> _SpeechJobStatus:
+    _require_capability_scope(ctx, scope_for("speech"))
+    job_id = await speech_jobs._read_speech_id_by_key(ctx.project.id, _speech_key(key, check_age=False))
+    if job_id is None:
+        raise HTTPException(404, "speech job not found", headers=_SPEECH_PRIVATE)
+    response.headers.update(_SPEECH_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return await _speech_status(ctx.project.id, job_id)
+
+
+@router.get("/speech/jobs/{job_id}", response_model=_SpeechJobStatus)
+async def speech_job_status(
+    job_id: int, response: Response, ctx: ProjectCtx = Depends(require_project),
+) -> _SpeechJobStatus:
+    _require_capability_scope(ctx, scope_for("speech"))
+    response.headers.update(_SPEECH_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return await _speech_status(ctx.project.id, job_id)
+
+
+@router.get("/speech/jobs/{job_id}/result", response_class=Response)
+async def speech_job_result(job_id: int, ctx: ProjectCtx = Depends(require_project)) -> Response:
+    _require_capability_scope(ctx, scope_for("speech"))
+    job = await _speech_status(ctx.project.id, job_id)
+    if job.status != "done":
+        raise HTTPException(409, "speech result not available", headers=_SPEECH_PRIVATE)
+    hit = await speech_jobs._read_speech_audio(ctx.project.id, job_id)
+    if hit is None:
+        raise HTTPException(410, "speech result expired", headers=_SPEECH_PRIVATE)
+    audio, mime = hit
+    return Response(content=audio, media_type=mime, headers={
+        **_SPEECH_PRIVATE, "X-Content-Type-Options": "nosniff",
+        REQUEST_ID_HEADER: job_request_id(job_id),
+    })
 
 
 @router.post("/jobs", response_model=JobSubmitResponse, status_code=status.HTTP_202_ACCEPTED,
@@ -1046,39 +1172,151 @@ async def jobs_submit(
     )
 
 
+_ASR_PRIVATE = {
+    "Cache-Control": "private, no-store",
+    "X-Broker-Job-Contract": "transcription-keyed-v1",
+}
+
+
+class _TranscriptionJobStatus(BaseModel):
+    job_id: int
+    status: Literal["pending", "running", "done", "error", "cancelled"]
+    poll_url: str
+    poll_after_s: int | None = None
+    error_code: str | None = None
+    text: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    model_served: str | None = None
+    cost_usd: float | None = None
+    latency_ms: int | None = None
+
+
+def _asr_key(key: str) -> str:
+    try:
+        return check_token(key, "Idempotency-Key")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc), headers=_ASR_PRIVATE) from exc
+
+
+async def _typed_asr_status(
+    project_id: int, *, job_id: int | None = None, key: str | None = None,
+) -> _TranscriptionJobStatus:
+    row = await transcription_jobs._read_transcription(project_id, job_id=job_id, key=key)
+    if row is None:
+        raise HTTPException(404, "keyed transcription job not found", headers=_ASR_PRIVATE)
+    state, error = row.state, None
+    if state == "error":
+        error = "transcription_failed"
+    elif state == "done" and row.text is None:
+        state, error = "error", ("transcript_too_large" if row.too_large else "transcript_unavailable")
+    return _TranscriptionJobStatus(
+        job_id=row.id, status=state, poll_url=f"/v1/transcribe/jobs/{row.id}",
+        poll_after_s=2 if state in ("pending", "running") else None, error_code=error,
+        text=row.text if state == "done" else None,
+        provider=row.provider, model=row.model, model_served=row.model_served,
+        cost_usd=row.cost_usd, latency_ms=row.latency_ms,
+    )
+
+
+def _require_typed_asr_scope(ctx: ProjectCtx) -> None:
+    if not ctx.has_scope(scope_for("transcription")):
+        raise HTTPException(403, "project lacks scope: llm:audio", headers=_ASR_PRIVATE)
+
+
+@router.get("/transcribe/jobs/by-key/{key}", response_model=_TranscriptionJobStatus)
+async def transcribe_job_by_key(
+    key: str, response: Response, ctx: ProjectCtx = Depends(require_project),
+) -> _TranscriptionJobStatus:
+    _require_typed_asr_scope(ctx)
+    item = await _typed_asr_status(ctx.project.id, key=_asr_key(key))
+    response.headers.update(_ASR_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(item.job_id)
+    return item
+
+
+@router.get("/transcribe/jobs/{job_id}", response_model=_TranscriptionJobStatus)
+async def transcribe_job_status(
+    job_id: int, response: Response, ctx: ProjectCtx = Depends(require_project),
+) -> _TranscriptionJobStatus:
+    _require_typed_asr_scope(ctx)
+    item = await _typed_asr_status(ctx.project.id, job_id=job_id)
+    response.headers.update(_ASR_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(item.job_id)
+    return item
+
+
+_ASR_SUBMIT_RESPONSES = {
+    200: {"model": _TranscriptionJobStatus, "description": "Existing typed job; no new dispatch"},
+    409: {"description": "idempotency_key_conflict"},
+}
+
+
 @router.post("/transcribe/jobs", response_model=JobSubmitResponse,
-             status_code=status.HTTP_202_ACCEPTED)
+             status_code=status.HTTP_202_ACCEPTED, responses=_ASR_SUBMIT_RESPONSES)
 async def transcribe_submit(
     response: Response,
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
+    idempotency_key: Annotated[str | None, Header(
+        description="Stable key for one audio upload, scoped to this project")] = None,
     ctx: ProjectCtx = Depends(require_project),
-) -> JobSubmitResponse:
-    """Audio → text, ASYNC: returns a job_id immediately, poll GET /v1/jobs/{id}.
+) -> JobSubmitResponse | JSONResponse:
+    """Compatibility audio queue route. New keyed clients use /v1/transcribe/keyed-jobs."""
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
 
-    Same chain and result as POST /v1/transcribe; the difference is who waits.
-    A slow provider in the chain (gemini/openai on a long clip) can take
-    tens of seconds, which is past some client read timeouts, so a
-    synchronous call simply LOST those transcripts when groq's daily quota was
-    spent. Queued, that slow path gets to finish and the caller polls for it,
-    with the queue's retries/backpressure/restart-survival on top.
 
-    The sync endpoint stays for the fast path (groq, ~750ms) and for callers
-    that prefer one round-trip."""
+@router.post("/transcribe/keyed-jobs", response_model=JobSubmitResponse,
+             status_code=status.HTTP_202_ACCEPTED, responses=_ASR_SUBMIT_RESPONSES)
+async def transcribe_keyed_submit(
+    response: Response,
+    idempotency_key: Annotated[str, Header(description="Required stable key for one audio upload")],
+    file: UploadFile = File(...),
+    workflow: str | None = Query(None),
+    ctx: ProjectCtx = Depends(require_project),
+) -> JobSubmitResponse | JSONResponse:
+    """Idempotent typed admission; pre-upgrade replicas cannot accept this path."""
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
+
+
+async def _submit_transcription(
+    response: Response, file: UploadFile, workflow: str | None,
+    idempotency_key: str | None, ctx: ProjectCtx,
+) -> JobSubmitResponse | JSONResponse:
+    """Shared queue admission and receipt shaping; no transcription in this request."""
     _require_capability_scope(ctx, scope_for("transcription"))
+    key = _asr_key(idempotency_key) if idempotency_key is not None else None
     audio = await _read_audio_upload(file)
-    await admit_request(ctx.project)
-    job_id = await submit_job(  # pragma: no cover — needs the real queue (Postgres)
-        project=ctx.project, capability="transcription",
-        messages=[], model=None, max_tokens=0, temperature=0.0,
-        response_format=None, workflow=workflow,
-        extra={AUDIO_FIELD: base64.b64encode(audio).decode(),
-               "filename": file.filename or "audio.ogg"},
-    )
-    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover — same
-    return JobSubmitResponse(  # pragma: no cover — same
-        job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=2,
-    )
+    extra = {AUDIO_FIELD: base64.b64encode(audio).decode(), "filename": file.filename or "audio.ogg"}
+    if key is None:  # preserve existing unkeyed admission, deduplication, and generic poll URL
+        await admit_request(ctx.project)
+        job_id = await submit_job(
+            project=ctx.project, capability="transcription",
+            messages=[], model=None, max_tokens=0, temperature=0.0,
+            response_format=None, workflow=workflow, extra=extra,
+        )
+        poll_url = f"/v1/jobs/{job_id}"
+    else:
+        try:
+            outcome = await submit_job_ex(
+                project=ctx.project, capability="transcription",
+                messages=[], model=None, max_tokens=0, temperature=0.0,
+                response_format=None, workflow=workflow, extra=extra,
+                idempotency_key=key, keyed_admission=True,
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(409, "idempotency_key_conflict", headers=_ASR_PRIVATE) from exc
+        if outcome.replayed:
+            item = await _typed_asr_status(ctx.project.id, job_id=outcome.job_id)
+            return JSONResponse(jsonable_encoder(item), headers={
+                **_ASR_PRIVATE, "Idempotent-Replay": "true",
+                REQUEST_ID_HEADER: job_request_id(item.job_id),
+            })
+        job_id = outcome.job_id
+        poll_url = f"/v1/transcribe/jobs/{job_id}"
+        response.headers.update(_ASR_PRIVATE)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return JobSubmitResponse(job_id=job_id, poll_url=poll_url, poll_after_s=2)
 
 
 # ─── video — prompt → short clip (Gemini Omni, paid keys only, async) ──────
@@ -1179,7 +1417,7 @@ async def jobs_poll(
     response: Response,
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
-    row = await get_job(job_id, ctx.project.id)
+    row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
@@ -1208,7 +1446,7 @@ async def jobs_tool_result(
     _require_capability_scope(ctx, AGENT_SCOPE)
     if not project_allowed(ctx.project.id):
         raise AgentProjectNotAllowed(ctx.project.id)
-    row = await get_job(job_id, ctx.project.id)
+    row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:
         raise HTTPException(404, "job not found")
     violation = policy_violation(ctx.project.id, row.request.get("model"),

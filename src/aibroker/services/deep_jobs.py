@@ -26,14 +26,16 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
-from sqlalchemy import null, select, text, update
+from sqlalchemy import and_, null, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from aibroker.db import get_session
 from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_stale_statement, retry_terminal_write
 from aibroker.services.job_meta import log_tag
+from aibroker.services.request_cap import admit_keyed_request
 
 # Where async transcription parks its base64 audio inside `request`. The queue
 # stores payloads as JSONB, which can't hold raw bytes — and putting the blob in
@@ -107,8 +109,9 @@ def priority_name(code: int | None) -> str:
 class IdempotencyConflict(Exception):
     """The Idempotency-Key was already used by this project with a different payload."""
 
-    def __init__(self, existing_job_id: int) -> None:
+    def __init__(self, existing_job_id: int, *, private_lane: bool = False) -> None:
         self.existing_job_id = existing_job_id
+        self.private_lane = private_lane
         super().__init__(f"idempotency key already used by job {existing_job_id} with a different payload")
 
 
@@ -132,14 +135,22 @@ def build_request(
     }
 
 
-async def find_by_idempotency_key(project_id: int, key: str) -> tuple[int, str | None] | None:
-    """(job id, payload_hash) of this project's job that used `key`, or None."""
+def _generic_job_visible() -> ColumnElement[bool]:
+    """The generic ID, listing, and cancellation APIs never expose typed media jobs."""
+    return and_(
+        DeepJobRow.capability != "speech",
+        or_(DeepJobRow.capability != "transcription", DeepJobRow.idempotency_key.is_(None)),
+    )
+
+
+async def find_by_idempotency_key(project_id: int, key: str) -> tuple[int, str | None, bool] | None:
+    """(job id, payload_hash, generic visibility) of this project's job that used `key`."""
     async with get_session() as s:
         row = (await s.execute(
-            select(DeepJobRow.id, DeepJobRow.payload_hash)
+            select(DeepJobRow.id, DeepJobRow.payload_hash, _generic_job_visible())
             .where(DeepJobRow.project_id == project_id, DeepJobRow.idempotency_key == key)
         )).first()
-    return (row[0], row[1]) if row else None
+    return (row[0], row[1], bool(row[2])) if row else None
 
 
 async def replayed_job_id(project_id: int, key: str, phash: str) -> int | None:
@@ -149,7 +160,7 @@ async def replayed_job_id(project_id: int, key: str, phash: str) -> int | None:
     if hit is None:
         return None
     if hit[1] != phash:
-        raise IdempotencyConflict(hit[0])
+        raise IdempotencyConflict(hit[0], private_lane=not hit[2])
     return hit[0]
 
 
@@ -245,6 +256,7 @@ async def submit_job_ex(
     labels: dict[str, str] | None = None,
     idempotency_key: str | None = None,
     priority: int = PRIORITY_BATCH,
+    keyed_admission: bool = False,
 ) -> SubmitOutcome:
     """ENQUEUE a job for any chat `capability` and return its id immediately.
 
@@ -265,7 +277,15 @@ async def submit_job_ex(
     request = build_request(messages=messages, model=model, max_tokens=max_tokens,
                             temperature=temperature, response_format=response_format,
                             workflow=workflow, extra=extra)
-    phash = payload_hash(project.id, capability, request)
+    if keyed_admission and (not idempotency_key or capability not in {"speech", "transcription"}):
+        raise ValueError("Keyed admission requires an idempotent typed media request")
+    phash = (
+        hashlib.sha256(
+            json.dumps([f"{capability}-keyed-v1", project.id, request],
+                       sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:32]
+        if keyed_admission else payload_hash(project.id, capability, request)
+    )
     if idempotency_key:
         existing = await replayed_job_id(project.id, idempotency_key, phash)
         if existing is not None:
@@ -288,6 +308,8 @@ async def submit_job_ex(
                 s.add(row)
                 await s.flush()
                 job_id = row.id
+                if keyed_admission:
+                    await admit_keyed_request(s, project.id)
                 await _notify_dispatcher(s)      # delivered at this transaction's commit
         except IntegrityError:
             # Lost the (project_id, idempotency_key) race: the winner's job is the answer.
@@ -410,7 +432,7 @@ class JobView(NamedTuple):
 _POLL_REQUEST_KEYS = ("model", "account_id", "client_job")
 
 
-async def get_job(job_id: int, project_id: int) -> JobView | None:
+async def get_job(job_id: int, project_id: int, *, generic: bool = False) -> JobView | None:
     """Fetch a job, scoped to the caller's own project, WITHOUT loading the
     `request` JSONB: only the three JSON paths the poll needs are selected.
     Pure read — every
@@ -418,6 +440,9 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
     retries) is owned by the dispatcher (services/job_queue.py). It used to
     lazily flip a stale `pending` row to error, but that raced the dispatcher
     and prematurely failed jobs still legitimately retrying under backoff."""
+    filters = [DeepJobRow.id == job_id, DeepJobRow.project_id == project_id]
+    if generic:
+        filters.append(_generic_job_visible())
     async with get_session() as s:
         r = (await s.execute(
             select(
@@ -428,7 +453,7 @@ async def get_job(job_id: int, project_id: int) -> JobView | None:
                 DeepJobRow.started_at, DeepJobRow.completed_at, DeepJobRow.run_after,
                 DeepJobRow.priority,
                 *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
-            ).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
+            ).where(*filters)
         )).one_or_none()
     if r is None:
         return None

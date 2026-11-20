@@ -6,6 +6,7 @@ and covered by the skipif-SQLite tests at the bottom.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from aibroker.services.deep_jobs import IdempotencyConflict, payload_hash, submi
 from aibroker.services.job_control import cancel_job, cancel_matching
 from aibroker.services.job_meta import log_tag, resolve_trace_id
 from aibroker.services.llm_service import CANCELLED, run_chat
+from aibroker.services.request_cap import RequestCapExhausted
 from tests.test_routes_proxy import _make_project
 
 ON_SQLITE = "sqlite" in os.environ.get("DATABASE_URL", "")
@@ -699,3 +701,214 @@ async def test_claim_stale_reclaim_and_purge_treat_cancelled_correctly():
     async with get_session() as s:
         assert await s.get(DeepJobRow, ids["cancelled"]) is None                   # pruned like done/error
         assert (await s.get(DeepJobRow, ids["pending"])).status == "running"
+
+
+async def test_transcribe_idempotent_replay_and_project_isolation():
+    key, pid = await _make_project(["llm:audio", "llm:chat"])
+    other, other_pid = await _make_project(["llm:audio"])
+    reserved = "sim-asr:v1:synthetic"
+    client = TestClient(app)
+    path = "/v1/transcribe/jobs?workflow=preview"
+
+    def send(project_key, *, name="phone.ogg", audio=b"synthetic audio", url=path):
+        return client.post(url, headers=_h(project_key, **{"Idempotency-Key": reserved}),
+                           files={"file": (name, audio, "audio/ogg")})
+
+    first = send(key)
+    assert first.status_code == 202, first.text
+    first_id = first.json()["job_id"]
+    poll_url = f"/v1/transcribe/jobs/{first_id}"
+    assert first.json()["poll_url"] == poll_url
+    assert first.headers["X-Broker-Job-Contract"] == "transcription-keyed-v1"
+    assert first.headers["cache-control"] == "private, no-store"
+    replay = send(key)
+    assert replay.status_code == 200 and replay.json()["job_id"] == first_id
+    assert replay.headers["Idempotent-Replay"] == "true"
+    for changed in (send(key, name="different.ogg"), send(key, audio=b"different"),
+                    send(key, url="/v1/transcribe/jobs?workflow=other")):
+        assert changed.status_code == 409
+    conflict = await _submit(client, key, **{"Idempotency-Key": reserved})
+    assert conflict.status_code == 409
+    assert "existing_job_id" not in conflict.json()["detail"]
+    foreign = send(other)
+    assert foreign.status_code == 202 and foreign.json()["job_id"] != first_id
+    recovery = f"/v1/transcribe/jobs/by-key/{reserved}"
+    recovered = client.get(recovery, headers=_h(key))
+    assert recovered.status_code == 200 and recovered.json()["job_id"] == first_id
+    assert recovered.headers["cache-control"] == "private, no-store"
+    assert client.get(recovery, headers=_h(other)).json()["job_id"] == foreign.json()["job_id"]
+    assert client.get(poll_url, headers=_h(other)).status_code == 404
+    assert await _count(pid) == await _count(other_pid) == 1
+
+
+@pytest.mark.skipif(ON_SQLITE, reason="needs PostgreSQL unique and project-row locks")
+async def test_transcribe_duplicate_admission_charges_once(monkeypatch):
+    _, pid = await _make_project(["llm:audio"])
+    async with get_session() as s:
+        project = await s.get(ProjectRow, pid)
+        project.total_request_cap = 1
+        project.total_requests_used = 0
+
+    first_lookup = deep_jobs.replayed_job_id
+    barrier = asyncio.Barrier(2)
+    calls = 0
+
+    async def miss_then_race(*args):
+        nonlocal calls
+        value = await first_lookup(*args)
+        calls += 1
+        if calls <= 2:
+            assert value is None
+            await barrier.wait()
+        return value
+
+    monkeypatch.setattr(deep_jobs, "replayed_job_id", miss_then_race)
+
+    async def submit(key):
+        return await submit_job_ex(
+            project=project, capability="transcription", messages=[], model=None,
+            max_tokens=0, temperature=0.0, response_format=None, workflow="preview",
+            extra={deep_jobs.AUDIO_FIELD: "c3ludGhldGlj", "filename": "phone.ogg"},
+            idempotency_key=key, keyed_admission=True,
+        )
+
+    outcomes = await asyncio.wait_for(
+        asyncio.gather(submit("sim-asr:v1:race"), submit("sim-asr:v1:race")), timeout=10,
+    )
+    assert outcomes[0].job_id == outcomes[1].job_id
+    assert sorted(outcome.replayed for outcome in outcomes) == [False, True]
+    with pytest.raises(RequestCapExhausted):
+        await submit("sim-asr:v1:new")
+    assert await _count(pid) == 1
+    async with get_session() as s:
+        assert (await s.get(ProjectRow, pid)).total_requests_used == 1
+
+
+async def test_transcription_key_scope_validation_and_legacy():
+    restricted_key, restricted_pid = await _make_project(["llm:chat"])
+    key, pid = await _make_project(["llm:audio"])
+    client = TestClient(app)
+    path = "/v1/transcribe/jobs"
+    upload = {"file": ("voice.ogg", b"synthetic", "audio/ogg")}
+    assert client.post(path, headers=_h(
+        restricted_key, **{"Idempotency-Key": "valid"}),
+        files=upload).status_code == 403
+    assert client.post(path, headers=_h(
+        key, **{"Idempotency-Key": "bad key"}),
+        files=upload).status_code == 422
+    assert await _count(pid) == await _count(restricted_pid) == 0
+
+    legacy = client.post(path, headers=_h(key), files=upload)
+    assert legacy.status_code == 202 and legacy.json()["labels"] is None
+    legacy_id = legacy.json()["job_id"]
+    assert legacy.json()["poll_url"] == f"/v1/jobs/{legacy_id}"
+    assert (await _row(legacy_id)).idempotency_key is None
+    assert client.get(f"/v1/jobs/{legacy_id}", headers=_h(key)).status_code == 200
+    assert client.get(f"/v1/transcribe/jobs/{legacy_id}", headers=_h(key)).status_code == 404
+
+    async with get_session() as s:
+        project = await s.get(ProjectRow, pid)
+        project.total_request_cap = 1
+        project.total_requests_used = 1
+    denied = client.post(path, headers=_h(
+        key, **{"Idempotency-Key": "sim-asr:v1:full"}),
+        files=upload)
+    assert denied.status_code == 429, denied.text
+    assert await _count(pid) == 1
+
+
+async def test_keyed_transcription_typed_scope_and_generic_controls_are_isolated():
+    key, pid = await _make_project(["llm:audio", "llm:chat"])
+    other, _ = await _make_project(["llm:audio"])
+    client = TestClient(app)
+    marker = "transcription-keyed-v1"
+    submit = "/v1/transcribe/jobs?workflow=voice"
+    body = {"file": ("voice.ogg", b"synthetic", "audio/ogg")}
+    legacy = client.post(submit, headers=_h(key), files=body)
+    assert legacy.status_code == 202
+    lid = legacy.json()["job_id"]
+    await _set(lid, status="done", labels={"mix": "scope"}, trace_id="scope")
+    missing = client.get("/v1/transcribe/jobs/by-key/asr:probe", headers=_h(key))
+    assert missing.status_code == 404 and missing.headers["X-Broker-Job-Contract"] == marker
+    assert missing.headers["cache-control"] == "private, no-store"
+    keyed = client.post(submit, headers=_h(key, **{"Idempotency-Key": "asr:test"}), files=body)
+    assert keyed.status_code == 202
+    jid = keyed.json()["job_id"]
+    await _set(jid, status="pending", labels={"mix": "scope", "private": "yes"}, trace_id="scope")
+    by_key = "/v1/transcribe/jobs/by-key/asr:test"
+    by_id = f"/v1/transcribe/jobs/{jid}"
+    assert client.get(by_key, headers=_h(other)).status_code == 404
+    assert client.get(by_id, headers=_h(other)).status_code == 404
+    for path in (f"/v1/jobs/{jid}", f"/v1/deep/{jid}"):
+        assert client.get(path, headers=_h(key)).status_code == 404
+    generic = client.get("/v1/jobs?label.mix=scope&limit=1", headers=_h(key)).json()
+    assert [job["job_id"] for job in generic["jobs"]] == [lid]
+    assert generic["pagination_complete"] and generic["no_nonterminal_in_filter"]
+    assert generic["high_watermark"] == lid and generic["next_cursor"] is None
+    assert client.post(f"/v1/jobs/{jid}/cancel", headers=_h(key)).status_code == 404
+    for selector in ({"labels": {"private": "yes"}}, {"trace_id": "scope"}):
+        result = client.post("/v1/jobs/cancel", headers=_h(key), json=selector)
+        assert result.status_code == 200
+        assert result.json() == {"cancelled": [], "cancel_requested": [], "already_terminal": 0}
+    assert client.get(by_key, headers=_h(key)).json()["status"] == "pending"
+    assert await _count(pid) == 2
+
+    await _set(jid, status="done", result_text="🙂" * 65_536,
+               result_meta={"provider": "synthetic", "cost_usd": 0.01, "latency_ms": 9})
+    result = client.get(by_id, headers=_h(key))
+    assert result.status_code == 200 and result.headers["X-Broker-Job-Contract"] == marker
+    assert result.json()["status"] == "done" and len(result.json()["text"].encode()) == 256 * 1024
+    assert result.json()["provider"] == "synthetic" and result.json()["cost_usd"] == 0.01
+    await _set(jid, result_text="🙂" * 65_537)
+    oversized = client.get(by_key, headers=_h(key)).json()
+    assert oversized["status"] == "error"
+    assert oversized["error_code"] == "transcript_too_large" and oversized["text"] is None
+    assert client.get(f"/v1/jobs/{lid}", headers=_h(key)).status_code == 200
+
+    async with get_session() as s:
+        (await s.get(ProjectRow, pid)).allowed_scopes = ["llm:chat"]
+    for path in (by_id, by_key):
+        denied = client.get(path, headers=_h(key))
+        assert denied.status_code == 403 and denied.headers["cache-control"] == "private, no-store"
+    assert client.get(f"/v1/jobs/{jid}", headers=_h(key)).status_code == 404
+
+
+async def test_dedicated_asr_post_requires_key_without_admission_and_shares_receipt():
+    key, pid = await _make_project(["llm:audio"])
+    restricted, restricted_pid = await _make_project(["llm:chat"])
+    async with get_session() as s:
+        project = await s.get(ProjectRow, pid)
+        project.total_request_cap = 1
+        project.total_requests_used = 0
+    client = TestClient(app)
+    path = "/v1/transcribe/keyed-jobs?workflow=voice"
+    files = {"file": ("voice.ogg", b"synthetic only", "audio/ogg")}
+    headers = _h(key, **{"Idempotency-Key": "sim-asr:dedicated"})
+    missing = client.post(path, headers=_h(key), files=files)
+    assert missing.status_code == 422
+    malformed = client.post(path, headers=_h(key, **{"Idempotency-Key": "bad key"}), files=files)
+    assert malformed.status_code == 422
+    denied = client.post(path, headers=_h(restricted, **{"Idempotency-Key": "sim-asr:dedicated"}),
+                         files=files)
+    assert denied.status_code == 403
+    assert await _count(pid) == await _count(restricted_pid) == 0
+    async with get_session() as s:
+        assert (await s.get(ProjectRow, pid)).total_requests_used == 0
+
+    created = client.post(path, headers=headers, files=files)
+    assert created.status_code == 202
+    job_id = created.json()["job_id"]
+    assert created.json() == {"job_id": job_id, "status": "pending",
+                              "poll_url": f"/v1/transcribe/jobs/{job_id}", "poll_after_s": 2,
+                              "trace_id": None, "labels": None}
+    assert created.headers["X-Broker-Job-Contract"] == "transcription-keyed-v1"
+    assert created.headers["cache-control"] == "private, no-store"
+    recovered = client.get("/v1/transcribe/jobs/by-key/sim-asr:dedicated", headers=_h(key))
+    assert recovered.status_code == 200 and recovered.json()["job_id"] == job_id
+    for same in (path, "/v1/transcribe/jobs?workflow=voice"):
+        again = client.post(same, headers=headers, files=files)
+        assert again.status_code == 200 and again.json()["job_id"] == job_id
+        assert again.headers["Idempotent-Replay"] == "true"
+    assert await _count(pid) == 1
+    async with get_session() as s:
+        assert (await s.get(ProjectRow, pid)).total_requests_used == 1

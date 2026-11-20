@@ -110,3 +110,29 @@ def test_reservation_is_positive_and_grows_with_text():
 
 def test_unpriced_model_costs_zero():
     assert tts.tts_cost("gemini/not-a-model", 10, 10) == 0.0
+
+
+async def test_typed_transport_keeps_credible_usage_on_invalid_audio():
+    body = _ok_body()
+    body["candidates"][0]["content"]["parts"][0]["inlineData"]["data"] = "not-base64!"
+
+    async def fake_bounded(url, api_key, body_json, timeout, max_bytes):
+        assert url.endswith(":generateContent")
+        assert set(body_json["generationConfig"]) == {"responseModalities", "speechConfig"}
+        assert max_bytes == 500
+        return httpx.Response(200, json=body)
+
+    with patch.object(tts, "_post_bounded_tts", fake_bounded):
+        audio, meta = await tts.synthesize_via_gemini(
+            model=MODEL, text="x", voice="Kore", style=None, api_key="fake",
+            max_response_bytes=500, retain_unusable_audio=True)
+    assert audio == b""
+    assert (meta["tokens_in"], meta["tokens_out"]) == (14, 132)
+    assert meta["cost_usd"] > 0
+
+    body.pop("usageMetadata")
+    with patch.object(tts, "_post_bounded_tts", fake_bounded), \
+            pytest.raises(RuntimeError, match="no credible usage"):
+        await tts.synthesize_via_gemini(
+            model=MODEL, text="x", voice="Kore", style=None, api_key="fake",
+            max_response_bytes=500, retain_unusable_audio=True)
