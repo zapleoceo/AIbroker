@@ -24,9 +24,11 @@ router = APIRouter(tags=["jobs"])
 
 
 def idempotency_conflict(exc: IdempotencyConflict) -> HTTPException:
-    return HTTPException(409, detail={
-        "error": "idempotency_key_conflict", "existing_job_id": exc.existing_job_id,
-        "message": "Idempotency-Key was already used with a different payload"})
+    detail = {"error": "idempotency_key_conflict",
+              "message": "Idempotency-Key was already used with a different payload"}
+    if exc.private_lane:
+        return HTTPException(409, detail=detail)
+    return HTTPException(409, detail={**detail, "existing_job_id": exc.existing_job_id})
 
 
 async def known_job_id(project_id: int, key: str | None, phash: str | None) -> int | None:
@@ -122,7 +124,7 @@ class JobListResponse(BaseModel):
     no_nonterminal_in_filter: bool = Field(
         description="across the WHOLE label/trace_id-filtered set up to the watermark (status filter "
                     "ignored): no pending/running job")
-    high_watermark: int = Field(description="highest job id of the project when the walk began; "
+    high_watermark: int = Field(description="highest generic job id of the project when the walk began; "
                                             "jobs created later are not listed")
     retention_days: int = Field(description="finished jobs older than this are purged")
     as_of: datetime

@@ -14,6 +14,7 @@ upstream failure would let a caller probe forever for free.
 from __future__ import annotations
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aibroker.db import get_session
 from aibroker.db.models import ProjectRow
@@ -53,3 +54,22 @@ async def admit_request(project: ProjectRow) -> None:
     if live is None or live[0] is None:  # project deleted mid-request / cap lifted since
         return
     raise RequestCapExhausted(int(live[0]), int(live[1]))
+
+
+async def admit_keyed_request(s: AsyncSession, project_id: int) -> None:
+    """Charge the winning idempotent insert within its transaction."""
+    row = (await s.execute(
+        text(
+            "UPDATE projects SET total_requests_used = total_requests_used + 1 "
+            "WHERE id = :id AND total_request_cap IS NOT NULL "
+            "AND total_requests_used < total_request_cap RETURNING total_requests_used"
+        ), {"id": project_id},
+    )).first()
+    if row is not None:
+        return
+    live = (await s.execute(
+        text("SELECT total_request_cap, total_requests_used FROM projects WHERE id = :id"),
+        {"id": project_id},
+    )).first()
+    if live is not None and live[0] is not None:
+        raise RequestCapExhausted(int(live[0]), int(live[1]))

@@ -62,8 +62,26 @@ async def _post_gemini_tts(url: str, api_key: str, body: dict[str, Any],
         return await client.post(url, json=body, headers={"x-goog-api-key": api_key})
 
 
+async def _post_bounded_tts(url: str, api_key: str, body: dict[str, Any], timeout: float,
+                            max_response_bytes: int) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=body, headers={
+            "x-goog-api-key": api_key, "accept-encoding": "identity",
+        }) as response:
+            if response.headers.get("content-encoding", "identity").lower() != "identity":
+                raise ValueError("speech response uses unexpected encoding")
+            raw = bytearray()
+            async for chunk in response.aiter_raw(chunk_size=64 * 1024):
+                if len(raw) + len(chunk) > max_response_bytes:
+                    raise ValueError("speech response exceeds byte limit")
+                raw.extend(chunk)
+            return httpx.Response(response.status_code, content=bytes(raw))
+
+
 async def synthesize_via_gemini(
     *, model: str, text: str, voice: str, style: str | None, api_key: str,
+    max_response_bytes: int | None = None,
+    retain_unusable_audio: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     """Text → audio bytes. Errors carry the HTTP status + body text so
     classify_provider_error (429/RESOURCE_EXHAUSTED → rate_limit, 401/403 →
@@ -79,10 +97,12 @@ async def synthesize_via_gemini(
     timeout = get_settings().GEMINI_TTS_TIMEOUT_S
     t0 = time.time()
     try:
-        resp = await _bounded(
-            _post_gemini_tts(_GEMINI_TTS_URL.format(name=name), api_key, body, timeout),
-            timeout, f"gemini-tts {name}",
-        )
+        url = _GEMINI_TTS_URL.format(name=name)
+        if max_response_bytes is not None:
+            post = _post_bounded_tts(url, api_key, body, timeout, max_response_bytes)
+        else:
+            post = _post_gemini_tts(url, api_key, body, timeout)
+        resp = await _bounded(post, timeout, f"gemini-tts {name}")
     except httpx.TimeoutException as e:
         raise TimeoutError(f"gemini-tts timeout: {e}") from e
     except httpx.HTTPError as e:
@@ -93,16 +113,32 @@ async def synthesize_via_gemini(
     data = resp.json()
     parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
     inline = next((p.get("inlineData") for p in parts if p.get("inlineData")), None) or {}
-    audio = base64.b64decode(inline.get("data") or "")
-    if not audio:
-        raise RuntimeError("gemini-tts returned no audio")
+    if retain_unusable_audio:
+        # Typed queue can book a known billed response even if the bytes are unusable.
+        try:
+            audio = base64.b64decode(inline.get("data") or "", validate=True)
+        except (TypeError, ValueError):
+            audio = b""
+    else:
+        audio = base64.b64decode(inline.get("data") or "")
+        if not audio:
+            raise RuntimeError("gemini-tts returned no audio")
     usage = data.get("usageMetadata") or {}
-    tokens_in = int(usage.get("promptTokenCount") or 0)
-    tokens_out = int(usage.get("candidatesTokenCount") or 0)
+    if retain_unusable_audio:
+        tokens_in = usage.get("promptTokenCount")
+        tokens_out = usage.get("candidatesTokenCount")
+        counts = (tokens_in, tokens_out)
+        if (any(not isinstance(n, int) or isinstance(n, bool) or not 0 <= n < 2**31 for n in counts)
+                or tokens_out == 0):
+            raise RuntimeError("gemini-tts result has no credible usage evidence")
+    else:
+        tokens_in = int(usage.get("promptTokenCount") or 0)
+        tokens_out = int(usage.get("candidatesTokenCount") or 0)
     return audio, {
         "model": model,
         "model_served": served_model(model, data.get("modelVersion")),
-        "mime_type": inline.get("mimeType") or "audio/wav",
+        "mime_type": (inline.get("mimeType") if retain_unusable_audio
+                      else inline.get("mimeType") or "audio/wav"),
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_usd": tts_cost(model, tokens_in, tokens_out),

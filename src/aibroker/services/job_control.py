@@ -17,7 +17,7 @@ from aibroker.agent.runs import RunConflict, cancel_run, get_run
 from aibroker.db import get_session
 from aibroker.db.media_models import MediaDispatchRow
 from aibroker.db.models import DeepJobRow
-from aibroker.services.deep_jobs import AUDIO_FIELD, get_job
+from aibroker.services.deep_jobs import AUDIO_FIELD, _generic_job_visible, get_job
 
 IN_FLIGHT = ("pending", "running")
 CANCELLED = "cancelled"
@@ -53,7 +53,8 @@ async def _cancel_plain(job_id: int, project_id: int) -> CancelResult | None:
         # FOR UPDATE: the dispatcher claim (SKIP LOCKED) leaves a row we hold alone, so a pending
         # job is either cancelled here or claimed there - never both.
         row = (await s.execute(
-            select(DeepJobRow).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id)
+            select(DeepJobRow).where(DeepJobRow.id == job_id, DeepJobRow.project_id == project_id,
+                                     _generic_job_visible())
             .with_for_update())).scalar_one_or_none()
         if row is None:
             return None
@@ -97,7 +98,7 @@ async def _cancel_agent(job_id: int, project_id: int, status: str) -> CancelResu
 
 async def cancel_job(job_id: int, project_id: int, *, agent_allowed: bool = True) -> CancelResult | None:
     """Cancel one job of `project_id` (idempotent); None when it is not that project's."""
-    row = await get_job(job_id, project_id)
+    row = await get_job(job_id, project_id, generic=True)
     if row is None:
         return None
     if row.capability.startswith("agent:"):
@@ -115,7 +116,8 @@ async def cancel_matching(
     contain all of `labels`. `already_terminal` counts matches that finished before their cancel landed.
     Agent jobs are left alone when the project lacks the agent scope."""
     stmt = select(DeepJobRow.id, DeepJobRow.labels).where(
-        DeepJobRow.project_id == project_id, DeepJobRow.status.in_(IN_FLIGHT))
+        DeepJobRow.project_id == project_id, DeepJobRow.status.in_(IN_FLIGHT),
+        _generic_job_visible())
     if trace_id is not None:
         stmt = stmt.where(DeepJobRow.trace_id == trace_id)
     if not agent_allowed:
