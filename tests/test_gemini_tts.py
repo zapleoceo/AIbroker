@@ -136,3 +136,39 @@ async def test_typed_transport_keeps_credible_usage_on_invalid_audio():
         await tts.synthesize_via_gemini(
             model=MODEL, text="x", voice="Kore", style=None, api_key="fake",
             max_response_bytes=500, retain_unusable_audio=True)
+
+
+class _OfflineResponseStream(httpx.AsyncByteStream):
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aiter__(self):
+        yield self.data
+
+
+@pytest.mark.parametrize(("data", "encoding", "error"), [
+    (b"12345", "identity", None),
+    (b"123456", "identity", "exceeds byte limit"),
+    (b"12345", "gzip", "unexpected encoding"),
+])
+async def test_bounded_tts_stream_preserves_response_byte_contract(
+    monkeypatch, data, encoding, error,
+):
+    client_type = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, headers={"content-encoding": encoding},
+                              stream=_OfflineResponseStream(data))
+
+    def fake_client(**kwargs):
+        return client_type(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(tts.httpx, "AsyncClient", fake_client)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            await tts._post_bounded_tts("https://offline.test", "fixture", {}, 2.0, 5)
+    else:
+        response = await tts._post_bounded_tts("https://offline.test", "fixture", {}, 2.0, 5)
+        assert response.status_code == 200 and response.content == data
