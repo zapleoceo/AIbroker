@@ -261,7 +261,11 @@ async def pick_and_reserve(
         f"(k.daily_limit = 0 OR {FRESH_DAILY_USED_SQL} < k.daily_limit)",
     ]
     params: dict[str, object] = {"provider": provider, "scope": scope, **month_params()}
-    if require_tier:
+    if require_tier == "free":
+        # "trial" keys (free credits, e.g. NVIDIA) cost nothing either: a free pass that
+        # skipped them left trial-only providers unreachable by pinned walks (2026-11-21).
+        conds.append("k.tier IN ('free', 'trial')")
+    elif require_tier:
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
     if models:
@@ -430,7 +434,10 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
 _OPTIONAL_USAGE_COLS: tuple[tuple[str, str], ...] = (
     ("model_served", "ms"),     # migration 011
     ("request_id", "rq"),       # migration 015
+    ("key_tier", "kt"),         # migration 032 (copied from api_keys.tier, no param)
 )
+# Optional columns whose value is an expression rather than a bound parameter.
+_USAGE_COL_EXPR = {"key_tier": "(SELECT tier FROM api_keys WHERE id = :k)"}
 
 
 def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
@@ -440,7 +447,7 @@ def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
     for col, param in _OPTIONAL_USAGE_COLS:
         if col not in missing:
             cols.append(col)
-            vals.append(f":{param}")
+            vals.append(_USAGE_COL_EXPR.get(col, f":{param}"))
     cols += ["capability", "workflow", "tokens_in", "tokens_out", "cache_read_tokens",
              "cache_write_tokens", "cost_usd", "latency_ms", "status", "error_kind",
              "http_status", "created_at"]
@@ -595,7 +602,7 @@ async def record_usage(
         _missing_usage_cols.update(named)
         log.warning(
             "usage_log optional column(s) %s missing (%s) — recording without them; "
-            "apply infra/sql/migrations/011 and 015 (stays off until process restart)",
+            "apply infra/sql/migrations/011, 015 and 032 (stays off until process restart)",
             sorted(_missing_usage_cols), e,
         )
         return await _write(frozenset(_missing_usage_cols))
