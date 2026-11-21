@@ -350,6 +350,35 @@ broker finishes its fallback chain). See `docs/api.md`.
   Postgres CI job (`tests/test_job_queue.py`) and `# pragma: no cover`'d for
   the SQLite diff-cover run.
 
+## Long-poll waiters (`services/job_wait.py`)
+
+`GET /v1/jobs/{id}?wait=N` and `POST /v1/jobs/wait` (contract in [api.md](api.md), "Long-poll job results")
+hold no DB session and no thread while they wait. Each waiter registers an `asyncio.Event` per job id in
+its API process and sleeps on it. Three things set the event:
+
+- **Redis pub/sub (fast path, sub-second).** Every terminal write through `deep_jobs._finish` (chat,
+  structured, vision, transcription, image, video, vivix) publishes the job id on the Redis channel
+  `aib:jobs:terminal`. One subscriber task per API process wakes the matching waiters.
+- **Per-process sweep (safety net).** While anyone waits, one query per second checks all ids being
+  waited on for a terminal status. It catches transitions written by paths that do not publish
+  (stale-run reaper, agent runs, media reconciliation) and Redis outages. Its cost is bounded per process,
+  not per waiter, and it does not run when nobody waits.
+- **Lost wake-up guard.** A waiter registers its events first and only then does the one DB re-check,
+  so a transition that lands in between is caught by that check.
+
+Without `REDIS_URL` the module runs sweep-only, which means about a 1 s wake-up. A Redis outage costs
+only that latency. Waits are capped at 25 s, below the 120 s `proxy_read_timeout` that `infra/nginx-aib.conf`
+already sets on these paths, so no nginx change is needed.
+
+**Code map.** `wait_any()` registers an `asyncio.Event` for each id, then re-checks the DB once, and sleeps
+until an event fires or the wait ends. `publish_terminal()` is called by `deep_jobs._finish` and publishes
+the id on Redis (it also wakes local waiters directly). `terminal_ids()` is the one-query status check used
+by the waiter and by the sweep. `TooManyWaiters` is raised when a project holds `MAX_WAITERS_PER_PROJECT`
+open waits and maps to HTTP 429. `get_jobs()` is the batch form of `get_job`, used by `POST /v1/jobs/wait`.
+The route handler `jobs_wait` (in `routes/proxy.py`) takes the request model `JobsWaitRequest` and returns
+`JobsWaitResponse`.
+
+
 ## Tests & CI
 
 `.github/workflows/ci.yml` runs on every push/PR: a **unit** job on in-memory

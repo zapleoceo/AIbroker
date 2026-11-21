@@ -186,6 +186,7 @@ class UsageLogRow(Base):
     # returned to the client as X-Request-Id. NULL on rows predating migration
     # 015 and on attempts made outside a request scope (monitor probes).
     request_id: Mapped[str | None] = mapped_column(String(64))
+    key_tier: Mapped[str | None] = mapped_column(String(10))   # migration 032
     capability: Mapped[str | None] = mapped_column(String(30))
     workflow: Mapped[str | None] = mapped_column(String(50))
     tokens_in: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -253,24 +253,26 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
-| `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
+| `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` (+ `key_tier`) | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`\|`cancelled`; also `trace_id`, `labels`) |
+| `GET` | `/v1/jobs/{job_id}?wait=<seconds>` | — | same `JobResponse` as the plain poll; long poll: returns as soon as the job is terminal, else the pending state after `wait` s (optional, number ≥ 0, clamped to 25; default 0 = immediate). See "Long-poll job results" |
+| `POST` | `/v1/jobs/wait` | `{"ids": [int \| numeric string, 1..100], "wait": number ≥ 0 (default 25, clamped to 25)}` | `{done, pending, unknown}`: batch long poll, returns as soon as ANY listed job is terminal. See "Long-poll job results" |
 | `POST` | `/v1/jobs/{job_id}/cancel` | — | `{job_id, state, status}` — `state` is `cancelled`, `cancel_requested` or `already_terminal`; `404` for another project's job. See "Cancel" below |
 | `POST` | `/v1/jobs/cancel` | `{"trace_id": …}` **or** `{"labels": {…}}` | `{cancelled: [ids], cancel_requested: [ids], already_terminal: n}` — bulk cancel of this project's in-flight jobs |
 | `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content, terminal?}` (`terminal: true` requires `success: true` and a tool the job named in `terminal_tools`: the job then ends `done` with empty text instead of another model turn) | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its deadline (`AGENT_TOOL_WAIT_S`: 90 s in production, code default 300 s) without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
 | `POST` | `/v1/deep` | `DeepRequest` | `DeepSubmitResponse` — **alias** for `/v1/jobs?capability=chat:deep` (backward-compat); same image checks as `/v1/jobs` |
-| `POST` | `/v1/transcribe/jobs` | multipart `file` | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
+| `POST` | `/v1/transcribe/jobs` | multipart `file` (+ `?key_tier=`) | `JobSubmitResponse` (async — `202` + `job_id`, poll `GET /v1/jobs/{id}`) |
 | `GET` | `/v1/deep/{job_id}` | — | `JobResponse` — alias for `/v1/jobs/{job_id}`; same agent re-authorization on every read |
 | `POST`/`GET` | `/v1/agent/runs`, `/v1/agent/runs/{id}`, `/v1/agent/runs/{id}/events`, `/v1/agent/runs/{id}/cancel` | `AgentRunRequest` | Owner-only agent runs require `llm:agent` and the effective project gate/policy. Legacy mode uses `AGENT_ALLOWED_PROJECT_IDS` OR dashboard enable, with dashboard model/account policy overriding `AGENT_PROJECT_POLICY` when nonempty. Converted `accounts-v1` projects use only dashboard enable and provider-qualified account selection, admitting that provider's catalog candidates without env fallback. The request still uses a bare `account_id` with its capability. All projects fail closed before the first snapshot load. Reads re-check the effective policy against the stored model/account/capability (403 `agent_policy_missing`, `model_not_allowed`, `account_not_allowed`). See [agent-runs.md](agent-runs.md#legal--scope-note). |
 | `POST` | `/v1/embed?provider=<p>` | `EmbedRequest` | `EmbedResponse` (**sync — stays sync**, see below) |
-| `POST` | `/v1/transcribe` | multipart `file` | `TranscribeResponse` (**sync — stays sync**) |
+| `POST` | `/v1/transcribe` | multipart `file` (+ `?key_tier=`) | `TranscribeResponse` (**sync — stays sync**) |
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
-| `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
-| `POST` | `/v1/video/jobs` | `VideoJobRequest` | `JobSubmitResponse` (**async** — `202` + `job_id`, poll `GET /v1/jobs/{id}`; clip as `video_base64`, see below) |
-| `POST` | `/v1/images/jobs` | `ImageJobRequest` | `202` `{job_id, status: "pending", poll_url, poll_after_s: 5, trace_id, labels}` (**async** — poll `GET /v1/jobs/{id}`; image as `image_base64`, see `/v1/images/jobs` below) |
+| `POST` | `/v1/speech` | `SpeechRequest` (+ `key_tier`) | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
+| `POST` | `/v1/video/jobs` | `VideoJobRequest` (+ `key_tier`) | `JobSubmitResponse` (**async** — `202` + `job_id`, poll `GET /v1/jobs/{id}`; clip as `video_base64`, see below) |
+| `POST` | `/v1/images/jobs` | `ImageJobRequest` (+ `key_tier`) | `202` `{job_id, status: "pending", poll_url, poll_after_s: 5, trace_id, labels}` (**async** — poll `GET /v1/jobs/{id}`; image as `image_base64`, see `/v1/images/jobs` below) |
 | `WebSocket` | `/v1/live` | `LiveStart` + audio/text frames | streaming audio + transcript — see below |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
-| `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
+| `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, by_workflow, limits}` - what this project spent, from `usage_log` (see below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
@@ -562,6 +564,19 @@ contract is: on that message, **stop resubmitting and retry after the next UTC
 midnight**, when daily caps reset. The owner also gets a 24h-throttled alert, so
 a silently-capped project is visible rather than invisibly stalled.
 
+**Provider rejected the request (2026-11-22).** When every provider the job tried refuses the request
+itself (HTTP 400 or 422, for example Gemini's `INVALID_ARGUMENT`) and nothing else failed, the job ends
+at once as a terminal `error`: `provider <name> rejected the request (HTTP 400): <provider's message>`,
+for example `provider gemini rejected the request (HTTP 400): The specified schema produces a constraint
+that has too many states for serving`. No key rotation and no requeue happen, so resubmit only after the
+request is changed. Bad keys, throttles, billing, gone models and over-size prompts do not produce this error.
+
+**json_schema limits on Gemini.** Gemini serves a `json_schema` only within its state limits, and a 400
+"too many states for serving" means the schema is too complex. Keep the schema simple: avoid a large
+`maxItems` on arrays of objects, very long `enum` lists, numeric `minimum`/`maximum` bounds and complex
+string `format`s. When you hit the 400, remove the `maxItems` first; it was the cause of the SIM attention
+schema failure.
+
 **In-flight dedup (2026-07-16, migration 010).** An identical
 `POST /v1/jobs` payload (same project, capability, and canonical request
 body) submitted within **30 minutes** while the prior job is still
@@ -615,7 +630,7 @@ safe to retry. The key is unique **per project** (a partial unique index on
 | No key | the in-flight dedup above, unchanged |
 
 The canonical payload is the stored request: `model`, capability, `messages`, `max_tokens`, `temperature`,
-`response_format`, `workflow`, `tools`/`tool_choice` — key order does not matter. `trace_id`, `labels`, `priority`,
+`response_format`, `workflow`, `tools`/`tool_choice`, and `key_tier` only when it is not `auto` (see [Key tier](#key-tier-2026-11-21)) — key order does not matter. `trace_id`, `labels`, `priority`,
 headers and timestamps are excluded, so re-sending with another trace id is still a replay (the stored job
 keeps its original trace). Two simultaneous submits with one key race on the unique index; the loser gets
 the winner's job (`200` replay) or the `409`. For subscription pins (`claude-sub/…`, `codex-sub/…`) the
@@ -702,6 +717,60 @@ budget. `chat:deep` is **async-only** (nemotron runs minutes);
 `POST /v1/chat` returns `410 Gone` for every capability. `POST /v1/deep` +
 `GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
 endpoints.
+
+### Long-poll job results — `GET /v1/jobs/{id}?wait` and `POST /v1/jobs/wait`
+
+Instead of polling every 1–2 s, a client can hold a request open until its job (or any of
+its jobs) finishes. Both forms return the same job payloads as the plain poll. Without `wait`
+(or with `wait=0`) `GET /v1/jobs/{id}` behaves exactly as before.
+
+**`GET /v1/jobs/{id}?wait=<seconds>`**
+
+- `wait` is optional: a number ≥ 0, clamped to 25. Default `0` = the old immediate poll.
+- If the job is already terminal (`done` | `error` | `cancelled`) the response returns at once.
+- Otherwise it returns as soon as the job becomes terminal, or with the current pending state
+  after `wait` seconds.
+- The body is exactly the plain poll body (`JobResponse`, including `poll_after_s` while pending).
+- `404` unknown or another project's job; `422` negative `wait`; `429` too many open long polls
+  (see caps below).
+
+**`POST /v1/jobs/wait`**
+
+Body: `{"ids": [123, "124"], "wait": 25}`
+
+- `ids`: 1..100 entries, each an integer or a numeric string. Duplicates are collapsed.
+- `wait`: number ≥ 0, default 25, clamped to 25.
+
+Response `200`:
+
+```
+{"done":    [ <job payload, exactly as GET /v1/jobs/{id} returns it>, ... ],
+ "pending": [ 125, ... ],
+ "unknown": [ "999", "abc" ]}
+```
+
+- The call returns as soon as ANY listed job is terminal. All terminal jobs are returned in
+  `done`, in request order. If some are already terminal it returns immediately.
+- After `wait` seconds with nothing finished: `done: []` and all of the caller's jobs in `pending`.
+- `pending` is a list of integer ids of the caller's jobs that are not terminal yet.
+- `unknown` lists ids that are not this project's pollable jobs: another project's, pruned,
+  malformed, typed speech jobs and keyed transcription jobs (they have their own poll routes), and
+  agent jobs the project may no longer read. They never fail the whole batch, and the broker
+  never retries them.
+- Errors: `422` for an empty list, more than 100 ids or a negative `wait`; `401`/`403` without a
+  valid project key; `429` with `Retry-After: 2` when the project already holds 200 open long
+  polls (counted per API worker process).
+
+**Caps.** A project may hold at most 200 open long polls per API worker process. Above that,
+both forms answer `429` with `Retry-After: 2`. Plain polls are never limited by this.
+
+**Client guidance.** Run one waiter per process that calls `POST /v1/jobs/wait` with all of its
+outstanding ids and `wait=25` in a loop. This replaces per-job 1–2 s polling. The `poll_after_s`
+of submit responses still applies to plain `GET /v1/jobs/{id}` polling.
+
+How the wake-up works (in-process waiters, Redis channel, sweep) is described in
+[architecture.md](architecture.md#long-poll-waiters-servicesjob_waitpy).
+
 
 ### List jobs by label — `GET /v1/jobs?label.<key>=<value>`
 
@@ -864,6 +933,7 @@ Response: `{audio_base64, mime_type, voice, audio_s, provider, model, model_serv
 cost_usd, latency_ms, key_label, request_id}`. `mime_type` is `audio/wav` (24 kHz mono 16-bit PCM, verified
 live 2026-11-11); `audio_s` is the duration in seconds.
 
+- **`key_tier`** (optional): `auto` or `paid`; `free` is `422` because speech runs on paid keys only. See [Key tier](#key-tier-2026-11-21). `/v1/speech/jobs` takes the same field.
 - **Paid keys only.** The lane rotates gemini keys with `tier='paid'` and scope `llm:speech` (`run_speech`). A free key is never picked.
 - **Caps apply.** The reservation goes through `run_attempt` like the other lanes. A spent project or global daily cap returns `502` with the cap message (not `503`).
 - **Price.** `gemini-3.8-flash-tts`: $0.50 per million text tokens in, $9.00 per million audio tokens out (25 audio tokens per second, about $0.0135 per minute of speech). Google list price through 2026-12-31; it doubles from 2027-01-01. The lite model is $0.50 / $6.00 per million (about $0.009 per minute). See [pricing.md](pricing.md).
@@ -949,6 +1019,8 @@ Body (`VideoJobRequest`):
 - `model` (optional): a pin, as for the other lanes. Only `gemini/gemini-omni-1.2-flash` serves video; a pin to a model that does not is `400`.
 - `workflow` (optional): the usual tag.
 
+- `key_tier` (optional): `auto` (default) or `paid`; `free` is `422` because video runs on paid keys only. See [Key tier](#key-tier-2026-11-21).
+
 Response `202`: `{job_id, poll_url, poll_after_s: 10}`.
 
 Poll `GET /v1/jobs/{id}` as usual. A finished Gemini video job has `text: null` and carries `video_base64` (the MP4, base64), `mime_type` (`video/mp4`) and `video_s` (clip length in seconds), plus the usual `provider`, `model`, `model_served`, `cost_usd`, `latency_ms`, `key_label` and `request_id`. The queued request keeps the prompt and reference image in its `video` payload (`video_job_payload` / `video_request_from_job`); the dispatcher's `video` branch runs it through `_run_video_job`.
@@ -988,6 +1060,7 @@ Body (`ImageJobRequest`):
 - `image_size`: `1K` (default), `2K` or `4K` (`IMAGE_SIZES`).
 - `model` (optional): a pin. Only the image models serve the lane: `gemini/gemini-3.1-flash-image` (default), `gemini/gemini-3-pro-image` and `gemini/gemini-3.1-flash-lite-image`. Any other model is `400`.
 - `workflow`, `trace_id`, `labels`, `priority` (`interactive` or `batch`): as for `POST /v1/jobs`.
+- `key_tier` (optional): `auto` (default) or `paid`; `free` is `422` because images run on paid keys only. See [Key tier](#key-tier-2026-11-21).
 
 Optional headers: `Idempotency-Key` (the same key with the same payload returns `200` and the same job; the same key with another payload is `409`) and `X-Trace-Id`. An identical in-flight request without `Idempotency-Key` is deduplicated to the same job, the existing `deep_jobs` behaviour.
 
@@ -1039,7 +1112,7 @@ Errors: `{"type": "error", "code": ..., "detail": "..."}` then close with `4000 
 
 - **start.** `voice` (one of 30 prebuilt voices, default `Kore`); `system` (system prompt, max 60k chars);
   `language` (BCP-47, e.g. `ru-RU`); `greeting` (optional typed first user turn — model speaks first);
-  `model` (optional pin); `workflow` (optional tag); `max_seconds` (session ceiling in seconds, default/max `LIVE_MAX_SESSION_S`=540).
+  `model` (optional pin); `workflow` (optional tag); `max_seconds` (session ceiling in seconds, default/max `LIVE_MAX_SESSION_S`=540); `key_tier` (optional: `auto` default, `paid` accepted and changes nothing since live runs on paid keys only; `free` or any unknown value is `422` and the socket closes, see [Key tier](#key-tier-2026-11-21)).
 - **ready.** `input_rate_hz` (16000), `output_rate_hz` (24000), `max_seconds` (effective ceiling after constraints).
 - **transcript.** `role` (`user`|`assistant`), `text` (one fragment; consecutive same-role fragments are merged in the final transcript).
 - **done.** `transcript` (cleaned: fragments merged, whitespace normalized, blank turns dropped); `model`, `voice`, `duration_s` (wall-clock), `tokens_in`, `tokens_out`, `cost_usd`, `key_label`, `request_id` (usage row id), `end_reason` (`caller_hung_up`, `caller_ended`, `upstream_closed`, `upstream_error`, `time_limit`, `upstream_go_away`).
@@ -1130,7 +1203,7 @@ rate-limited cloud providers — burning CPU for nothing.
 ### `/v1/transcribe` (audio → text)
 
 Multipart upload, field name `file` (≤25 MB — Whisper's limit). Optional
-`?workflow=` query tag. Chain (2026-10-04): `gemini` (`gemini-3.5-transcribe`)
+`?workflow=` query tag and `?key_tier=auto|paid|free` (see [Key tier](#key-tier-2026-11-21)). Chain (2026-10-04): `gemini` (`gemini-3.5-transcribe`)
 → `groq` whisper-large-v3-turbo (free fallback) → `openai` whisper-1. Returns
 `{text, provider, model, cost_usd, latency_ms, key_label, request_id}`.
 
@@ -1234,22 +1307,31 @@ Response:
   "from": "2026-11-01",
   "to": "2026-11-14",
   "currency": "USD",
-  "total": {"calls": 412, "cost_usd": 3.817254, "tokens_in": 1834200, "tokens_out": 96150},
+  "total": {"calls": 412, "cost_usd": 3.817254, "tokens_in": 1834200, "tokens_out": 96150, "cache_read_tokens": 1020000, "cache_hit_ratio": 0.556},
   "by_capability": [
-    {"capability": "chat:deep", "calls": 37, "cost_usd": 2.91, "tokens_in": 1200000, "tokens_out": 40100},
-    {"capability": "chat:fast", "calls": 375, "cost_usd": 0.907254, "tokens_in": 634200, "tokens_out": 56050}
+    {"capability": "chat:deep", "calls": 37, "cost_usd": 2.91, "tokens_in": 1200000, "tokens_out": 40100, "cache_read_tokens": 900000, "cache_hit_ratio": 0.75},
+    {"capability": "chat:fast", "calls": 375, "cost_usd": 0.907254, "tokens_in": 634200, "tokens_out": 56050, "cache_read_tokens": 120000, "cache_hit_ratio": 0.1892}
   ],
   "by_day": [
-    {"day": "2026-11-12", "calls": 200, "cost_usd": 2.0, "tokens_in": 900000, "tokens_out": 50000},
-    {"day": "2026-11-13", "calls": 212, "cost_usd": 1.817254, "tokens_in": 934200, "tokens_out": 46150}
+    {"day": "2026-11-12", "calls": 200, "cost_usd": 2.0, "tokens_in": 900000, "tokens_out": 50000, "cache_read_tokens": 500000, "cache_hit_ratio": 0.5556},
+    {"day": "2026-11-13", "calls": 212, "cost_usd": 1.817254, "tokens_in": 934200, "tokens_out": 46150, "cache_read_tokens": 520000, "cache_hit_ratio": 0.5566}
+  ],
+  "by_workflow": [
+    {"workflow": "sim-reply", "calls": 300, "cost_usd": 3.0, "tokens_in": 1000000, "tokens_out": 60000, "cache_read_tokens": 900000, "cache_hit_ratio": 0.9},
+    {"workflow": "other", "calls": 112, "cost_usd": 0.817254, "tokens_in": 834200, "tokens_out": 36150, "cache_read_tokens": 120000, "cache_hit_ratio": 0.1438}
   ],
   "limits": {"daily_cap_usd": 5.0, "monthly_cap_usd": 60.0, "today_usd": 1.817254, "month_usd": 3.817254}
 }
 ```
 
-- `total`, `by_capability` and `by_day` share one shape: `calls`, `cost_usd`, `tokens_in`,
-  `tokens_out`, summed over the range. `by_capability` is sorted most expensive first;
-  `by_day` is in date order and lists only days with calls.
+- `total`, `by_capability`, `by_day` and `by_workflow` share one shape: `calls`, `cost_usd`,
+  `tokens_in`, `tokens_out`, `cache_read_tokens`, `cache_hit_ratio`, summed over the range.
+  `by_capability` and `by_workflow` are sorted most expensive first; `by_day` is in date order
+  and lists only days with calls.
+- `cache_read_tokens` is the prompt-cache subset of `tokens_in`. `cache_hit_ratio` is
+  `cache_read_tokens / tokens_in`, rounded to 4 decimals, and `null` when `tokens_in` is 0.
+- `by_workflow` groups by the request's `workflow` (key `workflow`); calls without one are
+  listed under `"other"`.
 - `limits` holds the project's caps (`null` when a cap is not set) and the spend for today and
   for the current UTC month. These two figures are independent of `from` / `to`.
 - `currency` is always `"USD"`. Costs are rounded to 6 decimal places.
@@ -1269,7 +1351,11 @@ canonical name (`"gpt-oss-120b"`, which several providers serve).
 | `gemini/gemini-2.5-flash` | exactly that model on its provider; never another provider, never rotated |
 | `gpt-oss-120b` (served by cerebras, groq, cloudflare) | exactly that model on each provider that serves it, in a **fixed order**: free-tier keys of every provider first (providers by `ProviderSpec.rank`), then paid keys. No shuffling — the same request walks the same way every time |
 | not in the catalog | **`400`** with close-match suggestions, before anything is queued |
-| in the catalog but not a model for that capability, or its provider is not in the capability's chain | **`400`** (`does not serve …` / `not served by any provider of the … chain`) |
+| in the catalog but not a model for that capability, or no provider of the capability's pin chain serves it (see the next section) | **`400`** (`does not serve …` / `not served by any provider of the … chain`) |
+
+Pin-only models are never in the default walk and are served only when pinned. They are listed in [providers.md](providers.md) (Gemini pinned text models, and "Catalog refresh 2026-11-21") and priced in [pricing.md](pricing.md). Examples: `gemini/gemini-4-neon`, `gemini/gemini-3.8-flash`, `anthropic/claude-sonnet-5-5`, `openai/gpt-6.2-sol`, `openrouter/moonshotai/kimi-k3.1-pro`, `cohere/command-a-plus-05-2026`, `cloudflare/@cf/zai-org/glm-5.3`.
+
+**Pin chain for chat-family lanes (2026-11-21).** For a chat-family lane (`chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`, `chat:deep`, `structured`, `prefilter`, `translate`) a pinned `model` may be served by **any** provider that registers a chat-family model, not only by the lane's own chain. The order is the lane's own chain first, then the providers of the other chat lanes, then providers that sit in no chat walk (mistral, cohere). Unpinned fallback walks are unchanged. So `POST /v1/jobs?capability=structured` with `"model": "openrouter/moonshotai/kimi-k3.1-pro"` works although openrouter is not in the structured walk. A JSON request still filters out JSON-incapable providers (zai). The chain is `pin_chain_for(capability)` in `routing/chains.py`; `chain_for` is the unpinned walk.
 
 Chat lanes are interchangeable for pinning (a model wired for `prefilter` may be pinned
 on `chat:fast`); an embedding model cannot be pinned on chat. The project still needs the
@@ -1319,7 +1405,7 @@ paid last). Free-tier keys bill $0 whatever the nominal price shows.
 `intelligence_index` is the Artificial Analysis Intelligence Index (v4.3) as a float, or `null`.
 It is looked up by the model's exact canonical name (`providers.catalog.canonical_name`: last
 path segment, lower-cased, version included) in the static table in `providers/model_scores.py`.
-That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`.
+That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`, plus rows added 2026-11-21 from the live leaderboard: `claude-fable-5-2` 65, `gpt-6.2-astra` 62, `gemini-4-neon` 61, `gemini-4-carbon` 60, `gpt-6.2-sol` 57, `gemini-4-hydrogen` 54, `gpt-6.1-terra` 51, `gemini-4-argon` 50, `kimi-k3.1-pro` 46, `glm-5.3` 32, `minimax-m3.1-flash` 29, `glm-5.3-flash` 28, `deepseek-v4-pro` 23 and `qwen3.8-27b` 20. `gemini-3.8-flash` has no AA row, so it is `null`. The rows are the same in the `/v1/models` `intelligence_index` field; the attribution above applies.
 There is no fuzzy or nearest-version matching: a model missing from the table is `null`, not a
 guess. Wherever a score is shown, the attribution `Benchmarks: Artificial Analysis` goes with it;
 the `/ask2many` page shows it.
@@ -1352,6 +1438,8 @@ subscription model whose image generation was verified live
 (`AGENT_SUBSCRIPTION_IMAGE_OUTPUT_VERIFIED_MODELS`; the image comes back as a PNG in the poll's
 `files`, from a job without client tools), `["text"]` for chat, subscription and transcription
 routes, `["audio"]` for speech and live routes, `["video"]` for video, `null` otherwise.
+
+`POST /v1/jobs` request field `key_tier` (`auto` default, `paid` or `free`): which tier of provider keys serves the request, see [Key tier](#key-tier-2026-11-21).
 
 `POST /v1/jobs` request field `no_shell` (boolean, default `false`): for a `codex-sub` model
 without `tools`, the Codex CLI runs with every command tool disabled (shell, unified exec, code
@@ -1420,6 +1508,72 @@ never spends a paid key where the walk heads with a free provider. Callers need 
 nothing; send a stable `workflow` to get a stable family. A stable `prompt_cache_key`
 derived from the family is sent to providers that document one (OpenAI, Mistral, Cerebras:
 `prompt_cache_key`; OpenRouter: `session_id`).
+
+Since 2026-11-22 the family also includes the prompt prefix: `(project, workflow, capability, pinned model, prefix)`, where `prefix` is `prefix_fingerprint` of the system messages and the first 4096 characters of the history before the last message. Requests with different system prompts (for example several personas of one workflow) keep separate pins and separate `prompt_cache_key` values. Details in [routing.md](routing.md).
+
+## Prompt caching tips (2026-11-22)
+
+The broker never prepends anything to the prompt, so the cache is decided by how the client builds each request. For the same conversation, keep the start of the prompt byte-identical:
+
+1. Send a stable `workflow` and one prompt family per persona. The route pin and the provider `prompt_cache_key` both follow the prompt prefix, so parallel personas with different system prompts each keep their own warm key (see [routing.md](routing.md), 2026-11-22).
+2. Gemini FREE keys have small per-model daily quotas. A pin on one breaks at 429 and the walk re-pins. Send `key_tier: "paid"` to keep a request family on the single paid key.
+3. What does and does not break prompt caching:
+   - Does not break it (broker side): the json_schema downgrade hint is appended to the END of the last user message, so the prefix stays intact. `workflow`, `labels`, `trace_id`, `priority`, `key_tier` and `Idempotency-Key` never reach the provider. `response_format` and `max_tokens` go to generation config, not the cached prefix. On Gemini, `temperature` is dropped for gemini-3.x. Anthropic cache breakpoints are placed by the broker (`providers/prompt_cache.py`); anthropic and deepseek are cache-sticky per key.
+   - Breaks it (caller side): anything that changes per request inside the system prompt or the early history (timestamps, random ids, re-ordered memory blocks); changing the model; sending `tools` in a different order or with different definitions (tools are part of the cached prefix on Anthropic and OpenAI); on Gemini, prompts shorter than the implicit-cache minimum (about 1024 tokens for Flash, 4096 for Pro; check Google's current minimum).
+
+## Key tier (2026-11-21)
+
+`key_tier` lets the caller choose which tier of provider keys serves a request. It is an optional
+field, default `"auto"`.
+
+| `key_tier` | Behaviour |
+|---|---|
+| `auto` (default) | Today's walk: free-tier keys first, paid keys after. The job queue's final retry walks paid keys only. |
+| `paid` | Paid-tier keys only, from the first attempt; no free-key attempts. For latency-sensitive replies: measured Gemini 3.5/3.6-flash at 20-50 s on free keys against 2-3 s on the paid key. |
+| `free` | Free keys only: tier `free` or `trial` (both cost nothing; `trial` covers the NVIDIA trial key). Keys of tier `paid` are never used, not even on the final retry. |
+
+**Where it is accepted**
+
+- JSON body of `POST /v1/jobs`, for every capability (`chat:*`, `structured`, `vision`, `prefilter`, `translate`, `chat:deep`).
+- Query parameter `?key_tier=` on `POST /v1/transcribe`, `POST /v1/transcribe/jobs` and `POST /v1/transcribe/keyed-jobs`. These routes are multipart; the audio stays in the body.
+- JSON body of `POST /v1/speech`, `POST /v1/speech/jobs`, `POST /v1/images/jobs` and `POST /v1/video/jobs`, and the `start` message of the `/v1/live` WebSocket.
+
+Subscription models (`claude-sub/...`, `codex-sub/...`) run on their own accounts and ignore the field.
+
+**Speech, image, video and live** run on paid keys only. `auto` and `paid` are accepted and change nothing. `free` is rejected with `422`.
+
+**Errors**
+
+- An unknown value is `422` (JSON body and query alike).
+- `free` on `/v1/speech*`, `/v1/images/jobs`, `/v1/video/jobs` or the `/v1/live` start message is `422` (on live the socket then closes with `4422`):
+  `key_tier 'free' is not available for <lane>: only paid keys serve it`.
+- `free` or `paid` with no key of that tier able to serve: the job keeps retrying as usual and finally
+  errors with `no provider available for <capability> with a free key (key_tier=free)` (or `with a paid key (key_tier=paid)`).
+
+**Idempotency.** `key_tier` is part of the stored request and of the payload hash only when it is not
+`auto`, so the hashes of existing clients do not change. The same `Idempotency-Key` with a different
+`key_tier` is a `409` (`idempotency_key_conflict`), like any other body change.
+
+**Examples.**
+
+```json
+POST /v1/jobs?capability=chat:smart
+{"messages": [{"role": "user", "content": "Reply in one sentence: has the order shipped?"}],
+ "max_tokens": 200, "key_tier": "paid"}
+```
+
+```
+POST /v1/transcribe/jobs?key_tier=paid      (multipart, field `file`)
+POST /v1/transcribe?key_tier=free           (multipart, field `file`)
+```
+
+**Measuring it.** Every attempt records the tier of the key that served it in `usage_log.key_tier`
+(migration 032, copied from `api_keys.tier` at insert; NULL on older rows). Latency by tier:
+
+```sql
+SELECT provider, model, key_tier, percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)
+FROM usage_log WHERE status='ok' AND created_at > now()-interval '7 days' GROUP BY 1,2,3;
+```
 
 ## Request body limits (2026-10-02)
 

@@ -405,6 +405,9 @@ async def _finish(
             completed_at=datetime.now(UTC).replace(tzinfo=None),
             request=text(_strip_audio_sql(s.bind.dialect.name)),
         ).execution_options(synchronize_session=False))
+    if status in ("done", "error", "cancelled"):
+        from aibroker.services.job_wait import publish_terminal
+        await publish_terminal(job_id)
 
 
 class JobView(NamedTuple):
@@ -430,6 +433,34 @@ class JobView(NamedTuple):
 
 
 _POLL_REQUEST_KEYS = ("model", "account_id", "client_job")
+
+
+async def get_jobs(job_ids: list[int], project_id: int, *,
+                   generic: bool = False) -> dict[int, JobView]:
+    """get_job for many ids in one query (POST /v1/jobs/wait): only the caller's own
+    project's rows; ids of other projects or of pruned jobs are simply absent."""
+    if not job_ids:
+        return {}
+    filters = [DeepJobRow.id.in_(job_ids), DeepJobRow.project_id == project_id]
+    if generic:
+        filters.append(_generic_job_visible())
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(
+                DeepJobRow.id, DeepJobRow.project_id, DeepJobRow.capability,
+                DeepJobRow.status, DeepJobRow.result_text, DeepJobRow.result_meta,
+                DeepJobRow.error_message, DeepJobRow.created_at, DeepJobRow.trace_id,
+                DeepJobRow.labels, DeepJobRow.cancel_requested,
+                DeepJobRow.started_at, DeepJobRow.completed_at, DeepJobRow.run_after,
+                DeepJobRow.priority,
+                *(DeepJobRow.request[k] for k in _POLL_REQUEST_KEYS),
+            ).where(*filters)
+        )).all()
+    out = {}
+    for r in rows:
+        request = {k: v for k, v in zip(_POLL_REQUEST_KEYS, r[15:], strict=True) if v is not None}
+        out[r[0]] = JobView(*r[:15], request=request)
+    return out
 
 
 async def get_job(job_id: int, project_id: int, *, generic: bool = False) -> JobView | None:
