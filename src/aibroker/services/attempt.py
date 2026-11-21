@@ -215,6 +215,7 @@ class Attempt:
     reserve: bool = True                    # False: $0 call that must not be refused by a cap
     penalize: bool = True                   # False: book the error but never cool/kill the key
     pinned_model: str | None = None         # part of the affinity key
+    prefix: str = ""                        # prompt-prefix fingerprint (affinity key)
     note_affinity: bool = True
     reservation_id: str | None = field(default=None, init=False)
     media_dispatch: Any = None
@@ -396,7 +397,8 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     # worked, so the NEXT request lands where the provider-side cache is warm.
     if a.note_affinity:
         await affinity.note_success(a.project.id, a.workflow, a.capability,
-                                    a.pinned_model, a.provider, a.model, a.key.id)
+                                    a.pinned_model, a.provider, a.model, a.key.id,
+                                    prefix=a.prefix)
     return AttemptResult(Flow.SUCCESS, payload=payload, meta=meta, usage_id=usage_id)
 
 

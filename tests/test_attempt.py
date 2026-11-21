@@ -75,7 +75,8 @@ async def test_success_records_the_row_releases_and_repins(rig):
     assert (kw["tokens_in"], kw["tokens_out"], kw["cost_usd"]) == (10, 5, 0.25)
     assert (kw["cache_read_tokens"], kw["cache_write_tokens"]) == (3, 1)
     assert kw["model_served"] == "exact-m"
-    rig.note.assert_awaited_once_with(1, "w", "chat:fast", "gpt-oss-120b", "groq", "groq/m", 4)
+    rig.note.assert_awaited_once_with(1, "w", "chat:fast", "gpt-oss-120b", "groq", "groq/m", 4,
+                                     prefix="")
 
 
 async def test_free_key_books_zero_and_never_releases(rig):
