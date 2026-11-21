@@ -5,11 +5,11 @@ asyncio.Event for its job ids in this process and sleeps on it. Two things set i
 
 - Redis pub/sub (fast path, sub-second): every terminal transition written through
   `deep_jobs._finish` (chat, structured, vision, transcription, image, video, vivix)
-  and agent runs publishes the job id on CHANNEL; one subscriber task per process
+  publishes the job id on CHANNEL; one subscriber task per process
   wakes the matching waiters.
 - A per-process sweep (safety net): while anyone waits, ONE query per SWEEP_S checks
   every registered id for a terminal status, so a transition written by a path that
-  does not publish (stale-run reaper, media reconciliation) or a Redis outage still
+  does not publish (agent runs, stale-run reaper, media reconciliation) or a Redis outage still
   wakes the waiter within about a second. DB load is bounded per process, not per waiter.
 
 Lost-wakeup race: a waiter registers first, then reads the DB once; a transition that
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 CHANNEL = "aib:jobs:terminal"
 TERMINAL_STATUSES = ("done", "error", "cancelled")
-MAX_WAIT_S = 25          # below nginx / Cloudflare read timeouts (nginx location: 35 s)
+MAX_WAIT_S = 25          # well below nginx (120 s proxy_read_timeout) and Cloudflare (100 s)
 MAX_IDS = 100
 MAX_WAITERS_PER_PROJECT = 200
 RETRY_AFTER_S = 2
