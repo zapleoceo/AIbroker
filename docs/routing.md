@@ -65,6 +65,8 @@
 > key where the walk heads with a free provider. A stable `prompt_cache_key` derived from the
 > same family is sent where documented (`ProviderSpec.cache_key_param`).
 
+> **2026-11-22 (cache affinity per prompt prefix).** The ROUTE pin key is now `(project_id, workflow or '', capability, pinned model or '', prefix) -> (provider, model, key_id)`. `prefix` is `affinity.prefix_fingerprint(messages)`: a 16-hex sha256 of every system message in full plus the first `PREFIX_CHARS` (4096) characters of the conversation before the last message. It is `''` when there is no prefix (a lone user message); such requests keep the 2026-10-03 workflow-level key unchanged. `lookup_route`, `note_route` and `note_success` take `prefix`; `run_chat` computes it once per request and `Attempt.prefix` carries it to the success re-pin. The provider `prompt_cache_key` (`cache_key_for`: openai/mistral/cerebras `prompt_cache_key`, openrouter `session_id`) includes the same fingerprint. Effect: parallel requests with different system prompts (e.g. several SIM personas in workflow `sim-reply`) each keep their own pin instead of overwriting one shared pin, and the same persona keeps landing on the key whose provider-side cache is warm, moving on only when that key is cooling, capped or erroring. Motivation: Gemini's implicit cache is per API key (usage_log showed 73-75% cache_read on one key against 0-30% when a workflow rotated across free keys). Trade-off: Gemini FREE keys have small per-model daily quotas, so a pin on a free key breaks at 429 and the walk re-pins; `key_tier: "paid"` keeps a request family on the single paid key. `GET /v1/usage` now reports `cache_read_tokens` and `cache_hit_ratio` per bucket; client-side tips are in [api.md](api.md#prompt-caching-tips-2026-11-22).
+
 > **2026-07-16 (dashboard: hard-capped keys show "day cap", not "alive")**: a
 > key whose per-key day cost cap (`daily_cost_used_usd ≥ daily_cost_cap_usd`)
 > or day request limit (`daily_used ≥ daily_limit > 0`) is spent rendered as
@@ -1948,6 +1950,9 @@ queue to `run_chat` as `key_tier`, next to `paid_only` (`services/llm_service.py
 - `free`: every pick is restricted to tier `free` or `trial` (both cost nothing), never `paid`. The escalation never fires, not even on the final retry. If no free key can serve, the job is requeued as capacity frees up and ends with `no provider available for <capability> with a free key (key_tier=free)`.
 
 Speech, image and video lanes already run on paid keys only, so `key_tier` is validated there (`free` is `422`) and not routed.
+
+**Code map.** `routing/key_tier.py`: `KeyTier` (the literal type), `normalize()` reads a stored request's tier (missing or unknown → `auto`),
+`paid_lane()` is the request-model validator that rejects `free` on the paid-only lanes (speech, image, video, live).
 
 ## Storm-honesty wave (2026-07-16)
 

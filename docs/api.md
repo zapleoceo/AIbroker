@@ -186,7 +186,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/images/jobs` | `ImageJobRequest` (+ `key_tier`) | `202` `{job_id, status: "pending", poll_url, poll_after_s: 5, trace_id, labels}` (**async** — poll `GET /v1/jobs/{id}`; image as `image_base64`, see `/v1/images/jobs` below) |
 | `WebSocket` | `/v1/live` | `LiveStart` + audio/text frames | streaming audio + transcript — see below |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
-| `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
+| `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, by_workflow, limits}` - what this project spent, from `usage_log` (see below) |
 
 For a subscription job, `requested_model` is the exact route pin from the
 request. Older jobs without a request pin retain `requested_model: null` in
@@ -1208,22 +1208,31 @@ Response:
   "from": "2026-11-01",
   "to": "2026-11-14",
   "currency": "USD",
-  "total": {"calls": 412, "cost_usd": 3.817254, "tokens_in": 1834200, "tokens_out": 96150},
+  "total": {"calls": 412, "cost_usd": 3.817254, "tokens_in": 1834200, "tokens_out": 96150, "cache_read_tokens": 1020000, "cache_hit_ratio": 0.556},
   "by_capability": [
-    {"capability": "chat:deep", "calls": 37, "cost_usd": 2.91, "tokens_in": 1200000, "tokens_out": 40100},
-    {"capability": "chat:fast", "calls": 375, "cost_usd": 0.907254, "tokens_in": 634200, "tokens_out": 56050}
+    {"capability": "chat:deep", "calls": 37, "cost_usd": 2.91, "tokens_in": 1200000, "tokens_out": 40100, "cache_read_tokens": 900000, "cache_hit_ratio": 0.75},
+    {"capability": "chat:fast", "calls": 375, "cost_usd": 0.907254, "tokens_in": 634200, "tokens_out": 56050, "cache_read_tokens": 120000, "cache_hit_ratio": 0.1892}
   ],
   "by_day": [
-    {"day": "2026-11-12", "calls": 200, "cost_usd": 2.0, "tokens_in": 900000, "tokens_out": 50000},
-    {"day": "2026-11-13", "calls": 212, "cost_usd": 1.817254, "tokens_in": 934200, "tokens_out": 46150}
+    {"day": "2026-11-12", "calls": 200, "cost_usd": 2.0, "tokens_in": 900000, "tokens_out": 50000, "cache_read_tokens": 500000, "cache_hit_ratio": 0.5556},
+    {"day": "2026-11-13", "calls": 212, "cost_usd": 1.817254, "tokens_in": 934200, "tokens_out": 46150, "cache_read_tokens": 520000, "cache_hit_ratio": 0.5566}
+  ],
+  "by_workflow": [
+    {"workflow": "sim-reply", "calls": 300, "cost_usd": 3.0, "tokens_in": 1000000, "tokens_out": 60000, "cache_read_tokens": 900000, "cache_hit_ratio": 0.9},
+    {"workflow": "other", "calls": 112, "cost_usd": 0.817254, "tokens_in": 834200, "tokens_out": 36150, "cache_read_tokens": 120000, "cache_hit_ratio": 0.1438}
   ],
   "limits": {"daily_cap_usd": 5.0, "monthly_cap_usd": 60.0, "today_usd": 1.817254, "month_usd": 3.817254}
 }
 ```
 
-- `total`, `by_capability` and `by_day` share one shape: `calls`, `cost_usd`, `tokens_in`,
-  `tokens_out`, summed over the range. `by_capability` is sorted most expensive first;
-  `by_day` is in date order and lists only days with calls.
+- `total`, `by_capability`, `by_day` and `by_workflow` share one shape: `calls`, `cost_usd`,
+  `tokens_in`, `tokens_out`, `cache_read_tokens`, `cache_hit_ratio`, summed over the range.
+  `by_capability` and `by_workflow` are sorted most expensive first; `by_day` is in date order
+  and lists only days with calls.
+- `cache_read_tokens` is the prompt-cache subset of `tokens_in`. `cache_hit_ratio` is
+  `cache_read_tokens / tokens_in`, rounded to 4 decimals, and `null` when `tokens_in` is 0.
+- `by_workflow` groups by the request's `workflow` (key `workflow`); calls without one are
+  listed under `"other"`.
 - `limits` holds the project's caps (`null` when a cap is not set) and the spend for today and
   for the current UTC month. These two figures are independent of `from` / `to`.
 - `currency` is always `"USD"`. Costs are rounded to 6 decimal places.
@@ -1400,6 +1409,18 @@ never spends a paid key where the walk heads with a free provider. Callers need 
 nothing; send a stable `workflow` to get a stable family. A stable `prompt_cache_key`
 derived from the family is sent to providers that document one (OpenAI, Mistral, Cerebras:
 `prompt_cache_key`; OpenRouter: `session_id`).
+
+Since 2026-11-22 the family also includes the prompt prefix: `(project, workflow, capability, pinned model, prefix)`, where `prefix` is `prefix_fingerprint` of the system messages and the first 4096 characters of the history before the last message. Requests with different system prompts (for example several personas of one workflow) keep separate pins and separate `prompt_cache_key` values. Details in [routing.md](routing.md).
+
+## Prompt caching tips (2026-11-22)
+
+The broker never prepends anything to the prompt, so the cache is decided by how the client builds each request. For the same conversation, keep the start of the prompt byte-identical:
+
+1. Send a stable `workflow` and one prompt family per persona. The route pin and the provider `prompt_cache_key` both follow the prompt prefix, so parallel personas with different system prompts each keep their own warm key (see [routing.md](routing.md), 2026-11-22).
+2. Gemini FREE keys have small per-model daily quotas. A pin on one breaks at 429 and the walk re-pins. Send `key_tier: "paid"` to keep a request family on the single paid key.
+3. What does and does not break prompt caching:
+   - Does not break it (broker side): the json_schema downgrade hint is appended to the END of the last user message, so the prefix stays intact. `workflow`, `labels`, `trace_id`, `priority`, `key_tier` and `Idempotency-Key` never reach the provider. `response_format` and `max_tokens` go to generation config, not the cached prefix. On Gemini, `temperature` is dropped for gemini-3.x. Anthropic cache breakpoints are placed by the broker (`providers/prompt_cache.py`); anthropic and deepseek are cache-sticky per key.
+   - Breaks it (caller side): anything that changes per request inside the system prompt or the early history (timestamps, random ids, re-ordered memory blocks); changing the model; sending `tools` in a different order or with different definitions (tools are part of the cached prefix on Anthropic and OpenAI); on Gemini, prompts shorter than the implicit-cache minimum (about 1024 tokens for Flash, 4096 for Pro; check Google's current minimum).
 
 ## Key tier (2026-11-21)
 

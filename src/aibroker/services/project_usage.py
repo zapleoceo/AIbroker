@@ -23,6 +23,12 @@ class Bucket:
     cost_usd: float
     tokens_in: int = 0
     tokens_out: int = 0
+    cache_read_tokens: int = 0
+
+    @property
+    def cache_hit_ratio(self) -> float | None:
+        """Share of input tokens served from the provider's prompt cache."""
+        return round(self.cache_read_tokens / self.tokens_in, 4) if self.tokens_in else None
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,7 @@ class ProjectUsage:
     total: Bucket
     by_capability: list[Bucket] = field(default_factory=list)
     by_day: list[Bucket] = field(default_factory=list)
+    by_workflow: list[Bucket] = field(default_factory=list)
     daily_cap_usd: float | None = None
     monthly_cap_usd: float | None = None
     today_usd: float = 0.0
@@ -73,13 +80,18 @@ async def project_usage(project: ProjectRow, start: date, end: date,
     )
     sums = (func.count(UsageLogRow.id), func.coalesce(func.sum(UsageLogRow.cost_usd), 0.0),
             func.coalesce(func.sum(UsageLogRow.tokens_in), 0),
-            func.coalesce(func.sum(UsageLogRow.tokens_out), 0))
+            func.coalesce(func.sum(UsageLogRow.tokens_out), 0),
+            func.coalesce(func.sum(UsageLogRow.cache_read_tokens), 0))
     day = func.date(UsageLogRow.created_at)    # date() exists in both PostgreSQL and SQLite
     async with get_session() as s:
-        calls, cost, t_in, t_out = (await s.execute(select(*sums).where(*in_range))).one()
+        calls, cost, t_in, t_out, c_read = (await s.execute(select(*sums).where(*in_range))).one()
         caps = (await s.execute(
             select(UsageLogRow.capability, *sums).where(*in_range)
             .group_by(UsageLogRow.capability).order_by(func.sum(UsageLogRow.cost_usd).desc())
+        )).all()
+        flows = (await s.execute(
+            select(UsageLogRow.workflow, *sums).where(*in_range)
+            .group_by(UsageLogRow.workflow).order_by(func.sum(UsageLogRow.cost_usd).desc())
         )).all()
         days = (await s.execute(
             select(day, *sums).where(*in_range).group_by(day).order_by(day)
@@ -87,13 +99,14 @@ async def project_usage(project: ProjectRow, start: date, end: date,
         today_usd = await _spent(s, project.id, today, today + timedelta(days=1))
         month_usd = await _spent(s, project.id, today.replace(day=1), today + timedelta(days=1))
 
-    def bucket(key: object, n: int, usd: float, a: int, b: int) -> Bucket:
-        return Bucket(str(key or "other"), int(n), round(float(usd), 6), int(a), int(b))
+    def bucket(key: object, n: int, usd: float, a: int, b: int, c: int = 0) -> Bucket:
+        return Bucket(str(key or "other"), int(n), round(float(usd), 6), int(a), int(b), int(c))
 
     return ProjectUsage(
         start=start, end=end,
-        total=bucket("total", calls, cost, t_in, t_out),
+        total=bucket("total", calls, cost, t_in, t_out, c_read),
         by_capability=[bucket(*row) for row in caps],
+        by_workflow=[bucket(*row) for row in flows],
         by_day=[bucket(str(row[0])[:10], *row[1:]) for row in days],
         daily_cap_usd=project.daily_cost_cap_usd, monthly_cap_usd=project.monthly_cost_cap_usd,
         today_usd=round(today_usd, 6), month_usd=round(month_usd, 6),

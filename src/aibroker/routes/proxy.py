@@ -1629,13 +1629,15 @@ async def usage_endpoint(
 
     def sums(b: Bucket) -> dict[str, Any]:
         return {"calls": b.calls, "cost_usd": b.cost_usd,
-                "tokens_in": b.tokens_in, "tokens_out": b.tokens_out}
+                "tokens_in": b.tokens_in, "tokens_out": b.tokens_out,
+                "cache_read_tokens": b.cache_read_tokens, "cache_hit_ratio": b.cache_hit_ratio}
 
     return {
         "from": usage.start.isoformat(), "to": usage.end.isoformat(), "currency": "USD",
         "total": sums(usage.total),
         "by_capability": [{"capability": b.key, **sums(b)} for b in usage.by_capability],
         "by_day": [{"day": b.key, **sums(b)} for b in usage.by_day],
+        "by_workflow": [{"workflow": b.key, **sums(b)} for b in usage.by_workflow],
         "limits": {"daily_cap_usd": usage.daily_cap_usd, "monthly_cap_usd": usage.monthly_cap_usd,
                    "today_usd": usage.today_usd, "month_usd": usage.month_usd},
     }
