@@ -145,6 +145,8 @@ def price_info(spec: ModelSpec) -> dict[str, object]:
 def input_modalities(spec: ModelSpec) -> list[str] | None:
     """Input types accepted by the Broker on this model's configured lanes."""
     if "vision" in spec.capabilities:
+        return ["text", "image", *(k for k in ("video", "pdf") if k in spec.media_inputs)]
+    if "image" in spec.capabilities:
         return ["text", "image"]
     if "transcription" in spec.capabilities or "live" in spec.capabilities:
         return ["audio"]
@@ -170,6 +172,8 @@ def output_modalities(spec: ModelSpec) -> list[str] | None:
         return ["audio"]
     if "video" in spec.capabilities:
         return ["video"]
+    if "image" in spec.capabilities:
+        return ["image"]
     if spec.pricing == "subscription" or "transcription" in spec.capabilities or any(
         capability_family(cap) == "chat" for cap in spec.capabilities
     ):

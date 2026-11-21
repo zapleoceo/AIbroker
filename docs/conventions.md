@@ -24,6 +24,7 @@ src/aibroker/
     llm_service.py     run_chat/run_embed/run_decision/run_transcribe/run_speech/run_live — the WALKS
     live_service.py    relay — relay audio both ways; LiveRequest/LiveOutcome/Transcript
     video_service.py   run_video (the video lane), VideoOutcome, VideoFailed, video_job_payload / video_request_from_job
+    image_service.py   run_image (the image lane), ImageOutcome, ImageFailed, image_job_payload / image_request_from_job
     attempt.py         the ONE key-attempt template (reserve→call→release→gate→record→affinity)
     job_queue.py       dispatcher_loop — claims + drains pending jobs
     deep_jobs.py       submit/poll + payload-hash dedup + Idempotency-Key replay
@@ -34,12 +35,14 @@ src/aibroker/
     compare.py         /ask2many fan-out, one-question guard, history (project model-compare)
   providers/
     registry.py        ProviderSpec/ModelSpec + views (leaf)
+    media_inputs.py    leaf: inline video/PDF helpers for vision (data_url_of, declared_mime, block_kind, media_kinds, media_chars, gemini_media_messages); ModelSpec.media_inputs / reads_media live in registry.py
     specs.py           ordered registration of provider definitions
     provider_specs/    one build_provider(...) definition per provider
     catalog.py         pin-able models, resolve_pin, GET /v1/models rows
-    transport.py       Chat/Embed/Transcribe/Decide/Live/Video Protocols + registered dispatch (VideoTransport, generate_video)
+    transport.py       Chat/Embed/Transcribe/Decide/Live/Video/Image Protocols + registered dispatch (VideoTransport, generate_video, ImageTransport, generate_image)
     litellm_client.py  litellm chat/embed/whisper transport
     local_vision.py / gemini_asr.py / gemini_tts.py / gemini_live.py / gemini_video.py   raw-HTTP/WebSocket: GeminiVideoTransport, VideoRequest, VideoRejected, generate_via_gemini, interaction_body; GeminiLiveSession / GeminiLiveTransport, connect_gemini_live; LiveEvent, ParsedMessage, LiveClosed, WebSocketLike, setup_message, audio_message, text_message, parse_server_message
+    gemini_image.py    raw-HTTP image generation: GeminiImageTransport, ImageRequest, ImageRejected, image_body, image_cost, estimate_image_cost, generate_via_gemini
     cost.py            pricing (litellm map + registry overrides, per-minute audio, live cost)
     prompt_cache.py    anthropic marks, cache-token parsing, stable cache-key param
     provider_errors.py Error classification (sign tables + verdicts)
@@ -48,6 +51,7 @@ src/aibroker/
   routes/
     health.py          / + /healthz + /v1/health
     proxy.py           /v1/jobs + /v1/embed + /v1/speech + /v1/video/jobs
+    images.py          POST /v1/images/jobs (async image lane) — images_submit, ImageJobRequest, ImageReference, decode_references
     live.py            /v1/live (WebSocket) — live_endpoint
     jobs_control.py    GET /v1/jobs?label.k=v + /v1/jobs/{id}/cancel + /v1/jobs/cancel
     compare.py         /ask2many public compare page + /ask2many/api/* (no login)

@@ -21,6 +21,7 @@ import json
 from typing import Any
 
 from aibroker.providers.context_limits import content_chars
+from aibroker.providers.media_inputs import gemini_media_messages
 
 
 class ProviderAdapter:
@@ -98,6 +99,10 @@ class _GeminiAdapter(ProviderAdapter):
         # model's own default applies (2026-10-03 review). 2.x keeps it.
         if tail.startswith("gemini-3"):
             kwargs.pop("temperature", None)
+        # Inline video arrives as `video_url` blocks (providers/media_inputs.py);
+        # litellm's Gemini transformation reads video only from `file` blocks.
+        if "messages" in kwargs:
+            kwargs["messages"] = gemini_media_messages(kwargs["messages"])
 
 
 # Keys LiteLLM can leave a forced-tool JSON reply wrapped in. Claude has no

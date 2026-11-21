@@ -1142,6 +1142,10 @@ docker compose up -d
 > the firewall: allow :80 only from Cloudflare's published ranges, so a direct
 > origin request is dropped even by someone who knows the IP.
 
+## nginx: `/v1/images/jobs` location (2026-11-21)
+
+`infra/nginx-aib.conf` gets `location = /v1/images/jobs` with `client_max_body_size 28m`, the same limit as `/v1/jobs`, which now also carries inline video and PDF. **The deploy script does not apply nginx config.** Apply this by hand on the server: insert only the new `location = /v1/images/jobs { ... }` block next to the `/v1/jobs` location, then check with `nginx -t` and reload. Do not overwrite the server file with the repo copy: the server file has drifted (for example it has a `/v1/live` WebSocket location the repo file lacks).
+
 ## Rotating keys
 
 - `ADMIN_KEY`: edit `.env`, `docker compose up -d --force-recreate api`.

@@ -226,6 +226,18 @@ routing name in the tooltip.
 
 Errors: every upstream HTTP error is raised as `gemini-video HTTP <status> (...)`, the form `classify_provider_error` reads (a status that follows a keyword such as `HTTP`): a 429 cools the key (rate_limit), a 401/403 marks it dead (auth), and a 400 becomes `VideoRejected` (`gemini-video HTTP 400: ...`).
 
+## Gemini image generation (image, 2026-11-21)
+
+`gemini` is the only provider in the `image` chain. Models, all Standard-tier prices per 1M tokens from Google's 2026-11 pricing page: `gemini/gemini-3.1-flash-image` (default, "Nano Banana 2", $0.50 in / $60 out), `gemini/gemini-3-pro-image` ("Nano Banana Pro", $2.00 in / $120 out) and `gemini/gemini-3.1-flash-lite-image` ("Nano Banana 2 Lite", $0.25 in / $30 out, not tuned for several references). They are registered in `provider_specs/gemini.py` (pricing override, transport `gemini_image`). `GET /v1/models` shows them with `capabilities: ["image"]`, `modalities: ["text", "image"]` and `output_modalities: ["image"]`; the dashboard lists them under the "Images / Картинки" chip.
+
+Transport `GeminiImageTransport` (`providers/gemini_image.py`, raw HTTP, not LiteLLM): `generate_via_gemini` POSTs the body built by `image_body` to `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`. References go first as `inline_data` parts, then the prompt text. `generationConfig` is `{responseModalities: ["IMAGE"], imageConfig: {imageSize, aspectRatio?}}`. The call takes an `ImageRequest`, and `generate_image` (`providers/transport.py`, Protocol `ImageTransport`) dispatches to it. Upstream accepts up to 14 references (4 character and 10 object); the broker caps a request at 8. A refused prompt is raised as `ImageRejected`.
+
+Cost (`image_cost`, pre-call estimate `estimate_image_cost`): prompt tokens x input price + (candidate + thought tokens) x image output price, an upper bound from the reported usage. Image output tokens: 1120 at 1K, 1680 at 2K and 2520 at 4K for `gemini-3.1-flash-image` (about $0.067 at 1K); 1120 at 1K and 2K and 2000 at 4K for `gemini-3-pro-image` (about $0.134 at 1K). Timeout `GEMINI_IMAGE_TIMEOUT_S` (180 s, `config.py`); a timeout is a `RuntimeError`, so it does not cool the key. Paid keys only with scope `llm:image`; the service is `run_image` (`services/image_service.py`, see [api.md](api.md#v1imagesjobs--prompt--image-2026-11-21)).
+
+Live-verified 2026-11-21: two PNG references and a prompt gave a 768x1376 JPEG (9:16, 1K) in 8.4 s, with 544 prompt and 1429 candidate tokens (about $0.086).
+
+**Vision media (2026-11-21).** The gemini vision models also read inline video and PDF (`GEMINI_MEDIA_INPUTS` in `providers/media_inputs.py`, `ModelSpec.media_inputs` in `providers/registry.py`). Other vision models are skipped for such requests; `gemini_media_messages` rewrites video blocks to litellm `file` blocks. Details in [api.md](api.md) Vision.
+
 ## Adding a new provider
 
 One registry entry — see [how-to-add-provider.md](how-to-add-provider.md).

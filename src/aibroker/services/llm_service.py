@@ -37,6 +37,7 @@ from aibroker.providers.decisions import (
     JEV_INPUT_USD_PER_TOKEN,
     estimate_tokens,
 )
+from aibroker.providers.media_inputs import media_kinds
 from aibroker.providers.observations import learned_ceilings
 from aibroker.providers.peak_pricing import peak_multiplier
 from aibroker.providers.prompt_cache import cache_key_for
@@ -47,6 +48,7 @@ from aibroker.providers.registry import (
     max_keys_for,
     model_for,
     paid_providers,
+    reads_media,
     rotation_for,
     spec_or_default,
 )
@@ -427,8 +429,16 @@ async def run_chat(
         )
 
     est_tokens = estimate_prompt_tokens(messages)
+    # Inline video / PDF: only models that read them inline may be walked (Gemini),
+    # every other provider would drop or reject the block.
+    media = media_kinds(messages)
     if model:
         targets = resolve_pin(model, capability, chain_for(capability))
+        if media:
+            targets = [t for t in targets if reads_media(t.model, media)]
+            if not targets:
+                raise UnknownModel(model, [], f"model {model!r} does not read inline "
+                                              f"{'/'.join(sorted(media))}")
         if tools:
             targets = [t for t in targets if t.provider in TOOL_PROVIDERS
                        and (pinned_tool_provider is None or t.provider == pinned_tool_provider)]
@@ -444,6 +454,8 @@ async def run_chat(
         if tools:
             chain = [p for p in chain if p in TOOL_PROVIDERS
                      and (pinned_tool_provider is None or p == pinned_tool_provider)]
+        if media:
+            chain = [p for p in chain if _media_pool(p, capability, None, media)]
         chain = await _size_filtered(chain, est_tokens, capability)
         steps = [_Step(p) for p in chain]
     if tools:
@@ -451,6 +463,8 @@ async def run_chat(
 
     steps = await _with_affinity(steps, project.id, workflow, capability, model,
                                  paid_only=paid_only)
+    if media:
+        steps = [s for s in steps if s.model is None or reads_media(s.model, media)]
     attempt_cap = _attempt_budget([s.provider for s in steps])
     base_tier = "paid" if paid_only else None
     degraded_free = False   # a spent paid budget downgrades the REST of the walk
@@ -487,7 +501,10 @@ async def run_chat(
                             capability, int(call_timeout), provider)
                 return None
             primary = model_for(provider, capability)
-            pool = _model_pool(provider, capability, primary, step.model)
+            pool = (_media_pool(provider, capability, step.model, media) if media
+                    else _model_pool(provider, capability, primary, step.model))
+            if media and not pool:
+                break   # no model of this provider reads the attachment
             key = await pick_and_reserve(provider, scope=scope,
                                           require_tier=require_tier,
                                           project_id=project.id,
@@ -585,6 +602,13 @@ def _model_pool(provider: str, capability: str, primary: str | None,
     if primary is None:
         return []
     return [primary, *(m for m in rotation_for(provider, capability) if m != primary)]
+
+
+def _media_pool(provider: str, capability: str, pinned: str | None,
+                media: frozenset[str]) -> list[str]:
+    """The provider's model pool narrowed to models that read every `media` kind."""
+    pool = _model_pool(provider, capability, model_for(provider, capability), pinned)
+    return [m for m in pool if reads_media(m, media)]
 
 
 async def _rotate_model(pool: list[str], api_key_id: int, start: int) -> str:

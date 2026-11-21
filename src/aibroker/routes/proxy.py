@@ -66,6 +66,8 @@ from aibroker.providers.job_contract import (
     subscription_prompt_problem,
     subscription_request_problem,
 )
+from aibroker.providers.media_inputs import media_kinds
+from aibroker.providers.registry import reads_media
 from aibroker.providers.subscriptions import (
     PROVIDERS,
     subscription_model,
@@ -104,7 +106,7 @@ from aibroker.services.request_cap import admit_request
 from aibroker.services.speech_service import SpeechFailed, run_speech
 from aibroker.services.tool_contract import ToolDefinition, tool_model_provider, validate_choice
 from aibroker.services.video_service import VIDEO_FIELD, video_job_payload
-from aibroker.services.vision_payload import inline_image_problem
+from aibroker.services.vision_payload import inline_image_problem, inline_media_problem
 from aibroker.services.vivix_jobs import VivixDisabled
 from aibroker.services.vivix_jobs import submit as submit_vivix
 from aibroker.telemetry.request_context import REQUEST_ID_HEADER, job_request_id
@@ -288,6 +290,20 @@ def _validate_pin(model: str | None, capability: str, chain: list[str] | None = 
         catalog.resolve_pin(model, capability, chain if chain is not None else chain_for(capability))
     except UnknownModel as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+
+
+def _validate_media_pin(model: str | None, capability: str,
+                        messages: list[dict[str, Any]]) -> None:
+    """A pinned model must read the request's inline video / PDF (Gemini models list
+    them in GET /v1/models `modalities`): 400 here, not a job that can never run."""
+    media = media_kinds(messages)
+    if not model or not media:
+        return
+    targets = catalog.resolve_pin(model, capability, chain_for(capability))
+    if not any(reads_media(t.model, media) for t in targets):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"model {model!r} does not read inline {'/'.join(sorted(media))}; "
+                            "pin a model whose GET /v1/models modalities list it")
 
 
 class ModelsResponse(BaseModel):
@@ -642,9 +658,13 @@ class DeepJobResponse(BaseModel):
     files: list[dict[str, Any]] | None = None
     video_base64: str | None = Field(
         None, description="video jobs only: the finished clip (base64); `text` stays null")
+    image_base64: str | None = Field(
+        None, description="image jobs (POST /v1/images/jobs) only: the finished image "
+                          "(base64, type in `mime_type`); `text` stays null")
     video_url: str | None = None
     billing_status: str | None = None
-    mime_type: str | None = Field(None, description="video jobs only, e.g. video/mp4")
+    mime_type: str | None = Field(
+        None, description="video / image jobs only, e.g. video/mp4, image/jpeg")
     video_s: float | None = Field(None, description="video jobs only: clip length, seconds")
     # Vision only, and only when the self-hosted `local` provider answered:
     # what the image was, and what shape `text` is in. Additive on purpose —
@@ -674,16 +694,26 @@ class DeepJobResponse(BaseModel):
 
 
 def _require_image_access(ctx: ProjectCtx, messages: list[dict[str, Any]], *,
-                          check_decode: bool = True) -> None:
-    """image_url blocks are gated by content, not capability name: any job carrying
-    one reaches a vision-capable model, so it needs llm:vision (403, checked first)
-    and, unless `check_decode` is off, an inline image some provider can decode (400)."""
-    if not any(isinstance(m.get("content"), list) and any(
+                          check_decode: bool = True, capability: str | None = None) -> None:
+    """image_url / video_url / file blocks are gated by content, not capability name:
+    any job carrying one reaches a vision-capable model, so it needs llm:vision (403,
+    checked first). Inline video / PDF also need capability=vision and must pass
+    inline_media_problem (400); unless `check_decode` is off, an inline image must be
+    one some provider can decode (400)."""
+    media = media_kinds(messages)
+    has_image = any(isinstance(m.get("content"), list) and any(
         isinstance(b, dict) and b.get("type") == "image_url" for b in m["content"])
-        for m in messages):
+        for m in messages)
+    if not has_image and not media:
         return
     _require_capability_scope(ctx, scope_for("vision"))
-    if check_decode and (problem := inline_image_problem(messages)):
+    if media:
+        if capability != "vision":
+            raise HTTPException(400, "inline video / PDF (video_url or file blocks) "
+                                     "require capability=vision")
+        if problem := inline_media_problem(messages):
+            raise HTTPException(400, problem)
+    if has_image and check_decode and (problem := inline_image_problem(messages)):
         # A file no provider can decode must fail HERE, permanently — not walk
         # the chain, retry eight times and be resubmitted by the client (see
         # services/vision_payload.py for the 8-passes-in-24h case behind this).
@@ -701,7 +731,7 @@ async def deep_submit(
     result. Real latency has been observed up to ~8 minutes."""
     _require_capability_scope(ctx, scope_for("chat:deep"))
     messages = [m.model_dump() for m in body.messages]
-    _require_image_access(ctx, messages)
+    _require_image_access(ctx, messages, capability="chat:deep")
     _validate_pin(body.model, "chat:deep")
     await admit_request(ctx.project)
     # submit_deep_job needs a real autoincrementing BIGSERIAL id — SQLite
@@ -811,9 +841,11 @@ def _job_response(row: Any, files: Any = _SYNC_FILES) -> DeepJobResponse:
             finish_reason="tool_calls" if call else None,
         )
     is_video = getattr(row, "capability", None) == "video"
+    is_image = getattr(row, "capability", None) == "image"
     return DeepJobResponse(
-        job_id=row.id, status="done", text=None if is_video else row.result_text,
+        job_id=row.id, status="done", text=None if is_video or is_image else row.result_text,
         video_base64=row.result_text if is_video else None,
+        image_base64=row.result_text if is_image else None,
         video_url=meta.get("video_url"), billing_status=meta.get("billing_status"),
         mime_type=meta.get("mime_type"), video_s=meta.get("video_s"),
         provider=meta.get("provider"), model=meta.get("model"),
@@ -1072,7 +1104,7 @@ async def jobs_submit(
         raise HTTPException(400, "unsupported_for_subscription_model: no_shell")
     # Subscription jobs validate their own attachments in subscription_messages.
     _require_image_access(ctx, [m.model_dump(exclude_unset=True) for m in body.messages],
-                          check_decode=subscription is None)
+                          check_decode=subscription is None, capability=capability)
     if subscription is not None:
         if not ctx.has_scope(AGENT_SCOPE):
             raise HTTPException(403, f"project lacks scope: {AGENT_SCOPE}")
@@ -1148,6 +1180,7 @@ async def jobs_submit(
             and (problem := json_schema_problem(body.response_format))):   # never parse-only
         raise HTTPException(400, problem)
     messages = [m.model_dump(exclude_unset=True) for m in body.messages]
+    _validate_media_pin(body.model, capability, messages)
     await admit_request(ctx.project)
     try:
         outcome = await submit_job_ex(

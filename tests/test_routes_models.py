@@ -31,7 +31,7 @@ async def test_models_lists_every_pinnable_model_with_provider_and_price():
     assert by_id["local/qwen3vl"]["price"]["kind"] == "local"
     assert by_id["local/qwen3vl"]["modalities"] == ["text", "image"]
     assert by_id["local/qwen3vl"]["supports_tools"] is False
-    assert flash["modalities"] == ["text", "image"]
+    assert flash["modalities"] == ["text", "image", "video", "pdf"]
     assert by_id["cerebras/gpt-oss-120b"]["supports_tools"] is False
     assert by_id["groq/whisper-large-v3-turbo"]["modalities"] == ["audio"]
     assert by_id["groq/whisper-large-v3-turbo"]["price"]["usd_per_minute"] > 0

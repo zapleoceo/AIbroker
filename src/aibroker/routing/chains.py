@@ -37,6 +37,7 @@ Capability = Literal[
     "speech",
     "live",
     "video",
+    "image",
 ]
 
 
@@ -79,6 +80,9 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     "live": ["gemini"],
     # Short video clips: Gemini Omni Flash, PAID keys only, async job (see run_video).
     "video": ["gemini"],
+    # Image generation from a prompt + reference images: Gemini image models, PAID keys
+    # only, async job (see run_image). The Codex subscription route stays separate.
+    "image": ["gemini"],
 }
 
 
@@ -110,6 +114,8 @@ CAPABILITY_SCOPE: dict[Capability, str] = {
     "live": "llm:live",
     # Its own opt-in scope: one clip costs cents to a dollar, far above any text call.
     "video": "llm:video",
+    # Its own opt-in scope: one image costs ~$0.05-0.25, a paid-only lane.
+    "image": "llm:image",
 }
 
 
