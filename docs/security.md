@@ -64,6 +64,7 @@ The public form is `GET /signup`, which solves the proof of work in the browser.
   `SignupRateLimited` (429), `SignupNameInvalid` and `SignupContactRefused` (422), `PowInvalid` and
   `SignupTelegramInvalid` (400), and `SignupNotEligible` (409). The request cap raises `RequestCapExhausted`,
   which `main.py` turns into the stable 429 body.
+- **Anti-bot names.** `ProofOfWork` is the `pow` object of the signup body; `VerifyRequest` / `VerifyResponse` are the models of `POST /v1/signup/verify`; `is_disposable()` is the throwaway-domain check; `leading_zero_bits()` is the PoW difficulty check; `signup_page` is the `GET /signup` web form handler.
 - The `X-Forwarded-For` header is only as trustworthy as the proxy in front; a spoofed header can
   dodge the per-IP limit (not the global one). Lower `SIGNUP_PER_DAY` or flip the kill switch if abused.
 
