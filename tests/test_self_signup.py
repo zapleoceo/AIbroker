@@ -29,6 +29,15 @@ _DB = os.environ.get("DATABASE_URL", "")
 ON_POSTGRES = "postgres" in _DB or "asyncpg" in _DB
 
 
+@pytest.fixture(autouse=True)
+def _legacy_signup_rules(monkeypatch):
+    """These tests predate the anti-bot guards (tests/test_signup_guard.py covers them):
+    no proof of work, and an unverified project keeps the full request cap."""
+    monkeypatch.setattr(get_settings(), "SIGNUP_POW_BITS", 0)
+    monkeypatch.setattr(get_settings(), "SIGNUP_UNVERIFIED_REQUEST_CAP",
+                        get_settings().SIGNUP_REQUEST_CAP)
+
+
 def _ip(n: int = 1) -> dict[str, str]:
     return {"X-Forwarded-For": f"203.0.113.{n}, 10.0.0.1"}
 

@@ -133,6 +133,15 @@ class Settings(BaseSettings):
     SIGNUP_REQUEST_CAP: int = 100
     # Comma-separated (a plain env var cannot carry a list without JSON).
     SIGNUP_DEFAULT_SCOPES: str = "llm:chat,llm:embed"
+    # Anti-bot (2026-11-21, docs/api.md "Quick start: self-signup"): a proof-of-work
+    # challenge (GET /v1/signup/challenge; 0 bits = off), Telegram verification that
+    # lifts an unverified project's tiny cap to SIGNUP_REQUEST_CAP, projects per
+    # Telegram account, signups per contact-email domain per day.
+    SIGNUP_POW_BITS: int = 18
+    SIGNUP_POW_TTL_S: int = 600
+    SIGNUP_UNVERIFIED_REQUEST_CAP: int = 10
+    SIGNUP_PER_TELEGRAM: int = 2
+    SIGNUP_PER_EMAIL_DOMAIN_PER_DAY: int = 5
 
     @property
     def signup_scopes(self) -> list[str]:

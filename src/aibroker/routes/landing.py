@@ -374,16 +374,18 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       </div>
       <div class="mode" id="signup">
         <div class="mode-head">
-          <h3 data-i18n="how.signup.h" data-en="Get a key in one call" data-ru="Ключ одним запросом"></h3>
+          <h3 data-i18n="how.signup.h" data-en="Get a key yourself" data-ru="Ключ самостоятельно"></h3>
           <span class="mode-tag" data-i18n="how.signup.tag" data-en="No approval" data-ru="Без одобрения"></span>
         </div>
         <p data-i18n="how.signup.desc"
-           data-en="Any service can mint its own project key: free providers only ($0/day) and 100 requests in total. Enough to connect and test. Need more? Ask the owner to raise the limits. The key is shown once."
-           data-ru="Любой сервис может сам получить проектный ключ: только бесплатные провайдеры ($0/день) и 100 запросов всего. Достаточно, чтобы подключиться и протестировать. Нужно больше — попросите владельца поднять лимиты. Ключ показывается один раз."></p>
-        <pre><code>curl -X POST https://aib.zapleo.com/v1/signup \
+           data-en="Any service can mint its own project key at /signup: free providers only ($0/day). A small anti-bot puzzle is solved in the browser; signing in with Telegram verifies the project and unlocks 100 requests in total (10 without it). Need more? Ask the owner to raise the limits. The key is shown once."
+           data-ru="Любой сервис может сам получить проектный ключ на /signup: только бесплатные провайдеры ($0/день). Небольшая анти-бот задача решается в браузере; вход через Telegram верифицирует проект и открывает 100 запросов всего (без него 10). Нужно больше — попросите владельца поднять лимиты. Ключ показывается один раз."></p>
+        <pre><code># browser: https://aib.zapleo.com/signup
+# API: GET /v1/signup/challenge, solve it, then
+curl -X POST https://aib.zapleo.com/v1/signup \
   -H "Content-Type: application/json" \
-  -d '{{ "name": "my-service", "contact": "me@example.com" }}'
-# → {{"project_key": "aib_prj_...", "limits": {{...}}}}</code></pre>
+  -d '{{ "name": "my-service", "pow": {{"challenge": "...", "nonce": "..."}} }}'
+# → {{"project_key": "aib_prj_...", "verified": false, "limits": {{...}}}}</code></pre>
       </div>
     </div>
   </div>
@@ -822,7 +824,9 @@ _LLMS_TXT = """# AIbroker
 - [/healthz](https://aib.zapleo.com/healthz) — liveness probe
 - [/v1/health](https://aib.zapleo.com/v1/health) — per-provider key health
 - `POST /v1/signup` — no auth: mint your own project key (free providers only, $0/day,
-  100 requests in total, `llm:chat` + `llm:embed`); body `{"name": "...", "contact": "...", "purpose": "..."}`;
+  `llm:chat` + `llm:embed`; 10 requests in total, 100 once verified with Telegram); first
+  `GET /v1/signup/challenge` and solve the proof of work, then body `{"name": "...", "contact": "...",
+  "purpose": "...", "pow": {"challenge": "...", "nonce": "..."}}`; web form: /signup;
   the key is returned once. Over the limit: `429 {"error": "request_cap_exhausted"}` — ask the owner to raise it
 - `POST /v1/jobs?capability=...` — submit a chat job, returns a `job_id` (needs `X-Project-Key`)
 - `GET /v1/jobs/{id}` — poll for the job result
