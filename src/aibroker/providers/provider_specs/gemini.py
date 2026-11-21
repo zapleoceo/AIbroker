@@ -18,6 +18,35 @@ _VISION_MODELS = ("gemini/gemini-2.5-flash", *GEMINI_VISION_ROTATION)
 GEMINI_CHAT_LANES = ("chat:fast", "chat:smart", "chat:sales", "chat:code",
                      "chat:edit", "structured", "prefilter", "translate")
 
+
+def _pin_only(inp: float, out: float, cache: float, note: str) -> dict:
+    """A text model callers may pin on chat:* / structured; never walked unpinned.
+    Native JSON schema (responseJsonSchema) live-verified for each on 2026-11-21."""
+    return {"capabilities": GEMINI_CHAT_LANES, "pricing": "override", "input_usd_per_mtok": inp,
+            "output_usd_per_mtok": out, "cache_read_usd_per_mtok": cache,
+            "litellm_extra": {"supports_response_schema": True}, "note": note}
+
+
+# Newest text models, pin-only (SIM persona comparison, 2026-11-21). Present in
+# ListModels on every broker key; Standard-tier list prices per 1M tokens from the
+# 2026-11-21 pricing page (<=200k). Gemini 4 Neon/Carbon/Argon have NO free tier
+# (free keys answer 429 "limit 0", the per-(key, model) cooldown then parks them
+# and the pinned walk lands on the paid key). gemini-3.7-flash is not added: Google
+# serves it as gemini-3.8-flash (modelVersion) and the pricing page no longer lists it.
+_PINNED_TEXT_MODELS = {
+    "gemini/gemini-4-neon": _pin_only(
+        3.00, 15.00, 0.15, "Gemini 4 Neon; paid keys only; thinks even at 'low' (~200 tok)"),
+    "gemini/gemini-4-carbon": _pin_only(
+        2.00, 10.00, 0.10,
+        "Gemini 4 Carbon; paid keys only; price doubles 2026-12-01; 40-110 s live"),
+    "gemini/gemini-4-hydrogen": _pin_only(
+        1.50, 7.50, 0.075, "Gemini 4 Hydrogen (GA); free tier exists"),
+    "gemini/gemini-4-argon": _pin_only(
+        2.00, 10.00, 0.10, "Gemini 4 Argon; paid keys only; price doubles 2026-12-01"),
+    "gemini/gemini-3.8-flash": _pin_only(
+        0.75, 3.75, 0.075, "Gemini 3.8 Flash; free tier exists; price doubles 2027-01-01"),
+}
+
 SPEC = build_provider(
     "gemini", rank=30, max_keys=3, cooldown_base_s=60, adapter=_GeminiAdapter(),
     native_tools=True,
@@ -81,7 +110,7 @@ SPEC = build_provider(
         "gemini/gemini-omni-1.2-flash": {
             "transport": "gemini_video", "pricing": "override", "register": False,
             "input_usd_per_mtok": 1.50, "output_usd_per_mtok": 12.00,
-            "note": "Gemini Omni Flash video, 3-15 s with native audio; not live-verified"},
+            "note": "Gemini Omni Flash video, 3-15 s with native audio; live-verified 2026-11-21"},
         # Image generation from a prompt + reference images (/v1/images/jobs, paid keys
         # only, providers/gemini_image.py). 2026-11 pricing page, Standard tier: text/image
         # in, image out per 1M tokens; a 1K image is 1120 output tokens (~$0.067 on
@@ -101,5 +130,6 @@ SPEC = build_provider(
             "input_usd_per_mtok": 0.25, "output_usd_per_mtok": 30.00,
             "note": "Nano Banana 2 Lite; cheapest, not tuned for several references"},
         **{m: {"media_inputs": GEMINI_MEDIA_INPUTS} for m in _VISION_MODELS},
+        **_PINNED_TEXT_MODELS,
     },
 )

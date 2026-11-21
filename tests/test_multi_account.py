@@ -559,4 +559,5 @@ def test_catalog_lists_opus_and_haiku_but_keeps_them_unverified(monkeypatch):
         assert rows[f"claude-sub/{model}"]["available"] is False
         assert subscription_model_verified(f"claude-sub/{model}") is False
     assert rows["claude-sub/claude-sonnet-5-5"]["available"] is True
-    assert not any("fable" in r_id for r_id in rows)
+    # Fable is an API model (anthropic/, openrouter/) but not a claude-sub candidate.
+    assert not any("fable" in r_id for r_id in rows if r_id.startswith("claude-sub/"))

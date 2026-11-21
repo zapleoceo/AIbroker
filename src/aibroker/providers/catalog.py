@@ -30,12 +30,11 @@ from aibroker.providers.subscriptions import (
     subscription_tools_accepted,
     subscription_tools_advertised,
 )
+from aibroker.routing.chains import CHAT_FAMILY
 
 # Capabilities that are the same KIND of call: a model wired for one chat lane
 # can legitimately be pinned on another (callers pin a specific gemini version).
-_CHAT_FAMILY = frozenset({"chat:fast", "chat:smart", "chat:sales", "chat:code",
-                          "chat:edit", "chat:deep", "structured", "prefilter",
-                          "translate"})
+_CHAT_FAMILY = CHAT_FAMILY
 
 
 def capability_family(capability: str) -> str:

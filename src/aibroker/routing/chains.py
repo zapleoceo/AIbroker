@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Literal
 
 from aibroker.providers.registry import (
+    all_models,
     model_for,
     paid_providers,
     providers_with_json,
@@ -165,6 +166,31 @@ def chain_for(capability: Capability) -> list[str]:
     if capability not in CAPABILITY_CHAINS:
         raise ValueError(f"unknown capability: {capability}")
     return list(CAPABILITY_CHAINS[capability])
+
+
+# Lanes that are the same KIND of call (a chat completion): a model wired for one
+# chat lane can legitimately be pinned on another (providers/catalog._serves).
+CHAT_FAMILY = frozenset({"chat:fast", "chat:smart", "chat:sales", "chat:code",
+                         "chat:edit", "chat:deep", "structured", "prefilter",
+                         "translate"})
+
+
+def pin_chain_for(capability: Capability) -> list[str]:
+    """Providers that may serve a PINNED model on `capability`: the lane's own chain,
+    then, for a chat-family lane, every other chat lane's providers and finally any
+    provider that registers a chat-family model (mistral, cohere: in no chat walk).
+    A pin is the caller's explicit choice, so e.g. an openrouter model pinned on
+    `structured` is served by openrouter although openrouter is not in the
+    structured fallback walk. Unpinned walks are untouched (they use chain_for)."""
+    chain = chain_for(capability)
+    if capability in CHAT_FAMILY:
+        for cap, providers in CAPABILITY_CHAINS.items():
+            if cap in CHAT_FAMILY:
+                chain += [p for p in providers if p not in chain]
+        for m in all_models():
+            if m.provider not in chain and m.capabilities & CHAT_FAMILY:
+                chain.append(m.provider)
+    return chain
 
 
 def scope_for(capability: Capability) -> str:

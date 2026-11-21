@@ -46,7 +46,7 @@ def test_sonnet5_is_permanently_2_and_10_per_million():
 def test_registered_overrides():
     assert a.estimate_llm_cost("cloudflare/@cf/openai/gpt-oss-120b", 1_000_000, 1_000_000)         == pytest.approx(0.35 + 0.75)
     assert a.estimate_llm_cost("nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b", 10**6, 10**6) == 0.0
-    assert is_priced("cloudflare/@cf/llava-hf/llava-1.5-7b-hf")
+    assert is_priced("cloudflare/@cf/google/gemma-4-26b-a4b-it")
 
 
 def test_groq_whisper_bills_ten_second_minimum():
