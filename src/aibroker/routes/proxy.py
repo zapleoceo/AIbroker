@@ -76,7 +76,7 @@ from aibroker.providers.subscriptions import (
 )
 from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
-from aibroker.routing import chain_for, scope_for
+from aibroker.routing import chain_for, pin_chain_for, scope_for
 from aibroker.services import job_wait, speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
@@ -288,7 +288,8 @@ def _validate_pin(model: str | None, capability: str, chain: list[str] | None = 
     if not model:
         return
     try:
-        catalog.resolve_pin(model, capability, chain if chain is not None else chain_for(capability))
+        catalog.resolve_pin(model, capability,
+                            chain if chain is not None else pin_chain_for(capability))
     except UnknownModel as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
 
@@ -300,7 +301,7 @@ def _validate_media_pin(model: str | None, capability: str,
     media = media_kinds(messages)
     if not model or not media:
         return
-    targets = catalog.resolve_pin(model, capability, chain_for(capability))
+    targets = catalog.resolve_pin(model, capability, pin_chain_for(capability))
     if not any(reads_media(t.model, media) for t in targets):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"model {model!r} does not read inline {'/'.join(sorted(media))}; "

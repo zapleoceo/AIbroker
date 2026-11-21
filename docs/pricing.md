@@ -61,6 +61,34 @@ The usage write after a successful paid call runs as its own tracked task behind
 
 Standard-tier list prices, Google pricing page 2026-11. Reference images are input tokens. Cost is prompt tokens x input price + (candidate + thought tokens) x image output price, an upper bound from the reported usage. The pre-call reservation (`estimate_image_cost`) is only an estimate; the booked cost is `image_cost`. A live 1K call with two PNG references (544 prompt and 1429 candidate tokens) cost about $0.086. Paid keys only.
 
+## Gemini pinned text models (2026-11-21)
+
+* `gemini/gemini-4-neon`: $3.00/M in, $15.00/M out, $0.15/M cache read. Paid keys only.
+* `gemini/gemini-4-carbon`: $2.00/M in, $10.00/M out, $0.10/M cache read through 2026-11-30; $4.00 / $20.00 / $0.20 from 2026-12-01. Paid keys only.
+* `gemini/gemini-4-hydrogen`: $1.50/M in, $7.50/M out, $0.075/M cache read. GA, free tier exists.
+* `gemini/gemini-4-argon`: $2.00/M in, $10.00/M out, $0.10/M cache read through 2026-11-30; $4.00 / $20.00 / $0.20 from 2026-12-01. Paid keys only.
+* `gemini/gemini-3.8-flash`: $0.75/M in, $3.75/M out, $0.075/M cache read through 2026-12-31; $1.50 / $7.50 / $0.15 from 2027-01-01. Free tier exists.
+
+Standard-tier list prices, Google pricing page 2026-11-21, up to 200k context. Registered as override prices (`_PINNED_TEXT_MODELS` in `providers/provider_specs/gemini.py`), not from LiteLLM's map.
+
+## Pin-only models (catalog refresh 2026-11-21)
+
+Prices per 1M tokens (input / output), cache read where listed. Pin-only models are never in a walk; see [providers.md](providers.md), "Catalog refresh 2026-11-21", for the ids. Official-docs prices are for providers with no active broker key (anthropic, openai, cerebras, sambanova).
+
+* **anthropic** (Anthropic pricing, 2026-11-21): fable-5-2 $8 / $40 (cache $0.20); opus-5-5 $4 / $20 (cache $0.20); sonnet-5-5 $2 / $10 (cache $0.10); haiku-5-5 $0.10 / $0.50 up to 100k prompt tokens, $0.50 / $2.50 above.
+* **openai** (OpenAI pricing, standard tier up to 272k, 2026-11-21): gpt-6.2-astra $8 / $40 (cached $0.40); gpt-6.2-sol $2 / $10 (cached $0.10); gpt-6.1-terra $1 / $5 (cached $0.05); gpt-6-luna $0.10 / $0.50 (cached $0.01).
+* **cerebras**: qwen-3.8-27b $0.99 / $1.49 (override).
+* **sambanova** (plans pricing page, 2026-11-21): GLM-5.3 $2.80 / $8.80; MiniMax-M3.1-Flash $0.30 / $1.20.
+* **groq**: openai/gpt-oss-20b $0.075 / $0.30; qwen/qwen3.8-27b $0.80 / $4.00 (LiteLLM map).
+* **mistral**: mistral-medium-latest $1.50 / $7.50 (the chat:smart default); ministral-14b-latest and ministral-3b-latest from LiteLLM's map.
+* **cohere**: command-a-plus-05-2026 $0.30 / $1.50 (cache $0.15, OpenRouter passthrough rate); command-a-03-2025 $2.50 / $10 (LiteLLM map).
+* **deepseek**: deepseek-v4-pro $0.66 miss / $0.022 hit / $1.98 out, off-peak; peak is 2x (`peak_multiplier`).
+* **zai**: glm-5.3-flash is booked as $0 on our free-tier key; Z.ai's list price is $0.15 / $0.50.
+* **nvidia_nim**: the six pin-only models are $0 (credits-based free tier, no LiteLLM price).
+* **cloudflare** (Workers AI model catalog, 2026-11-21): gemma-4-26b-a4b-it $0.10 / $0.30 (cache $0.05); gpt-oss-20b $0.20 / $0.30; inkling-2-small $0.30 / $1.00 (cache $0.10); qwen3.8-27b $0.45 / $3.20 (cache $0.05); glm-5.3 $1.40 / $4.40 (cache $0.26); deepseek-v4.1-flash-1017 $0.30 / $1.20 (cache $0.006). The last three need the Workers Paid plan.
+* **openrouter** (public `/api/v1/models` fields, checked 2026-11-21): claude-fable-5.2 $8 / $40; claude-sonnet-5.5 $2 / $10; claude-haiku-5.5 $0.10 / $0.50 (above 100k prompt tokens $0.50 / $2.50); gpt-6.2-sol $2 / $10 (above 272k $4 / $15); gemini-4-hydrogen $1.50 / $7.50; qwen4-max $1.425 / $4.275; deepseek-v4.1-flash-1017 $0.15 / $0.60; kimi-k3.1-pro $0.253 / $8.80; glm-5.3 $0.0699 / $1.40; mistral-large-4-0 $0.70 / $2.10. The `:free` models (ling-3.2-flash, particle-1, nemotron-3.5-super-vl) are $0.
+* **openrouter/moonshotai/kimi-k3** price corrected to $0.192 in / $16 out (was $0.45 / $15).
+
 ## Models we register ourselves (`litellm.register_model`)
 
 | Model | Price | Source / date |
@@ -68,7 +96,7 @@ Standard-tier list prices, Google pricing page 2026-11. Reference images are inp
 | `voyage/voyage-4` | $0.06/M in | Voyage list price, 2026-07-16 |
 | `deepseek/deepseek-flash` | $0.15 miss / $0.003 hit / $0.60 out per M (off-peak) | DeepSeek list, 2026-09-12 |
 | `nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b` | $0 | build.nvidia.com hosted API is free-tier; 2026-10-03 |
-| `cloudflare/@cf/llava-hf/llava-1.5-7b-hf` | $0 | Beta, absent from Cloudflare's pricing page; 2026-10-03 |
+| `cloudflare/@cf/google/gemma-4-26b-a4b-it` | $0.10 in / $0.30 out per M (LiteLLM map; cache read $0.05) | Replaces the llava-1.5-7b-hf row (2026-10-03), which was removed from the Workers AI catalog 2026-11-21 |
 
 `cloudflare/@cf/openai/gpt-oss-120b` ($0.35 in / $0.75 out per M) comes from LiteLLM's
 map and matches developers.cloudflare.com/workers-ai/platform/pricing (2026-10-03).
