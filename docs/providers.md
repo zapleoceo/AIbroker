@@ -90,12 +90,12 @@ computed and discarded:
 | **openrouter** (not in `chat:fast`/`structured` chains since 2026-10-02) | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — | google/gemma-4-31b-it:free | google/gemma-4-31b-it:free | — |
 | **anthropic** | claude-haiku-4-5 | claude-sonnet-5 | **claude-sonnet-5** | claude-sonnet-5 | claude-sonnet-5 | — |
 | **openai** | gpt-5-mini | gpt-5 | — | gpt-5 | gpt-5-mini | — |
-| **mistral** (chained nowhere since 2026-09-12 — free tier at 0 RPM) | mistral-small-latest | mistral-large-latest | — | codestral-latest | — | — |
+| **mistral** (chained nowhere since 2026-09-12 — free tier at 0 RPM) | mistral-small-latest | mistral-medium-latest (2026-11-21: `mistral-large-latest` is gone upstream) | — | codestral-latest | — | — |
 | **cohere** (chained only for `embedding` since 2026-10-02; the chat models are known but not chained) | command-r7b-12-2024 | command-r7b-12-2024 | — | command-r7b-12-2024 | — | embed-english-v3.0 |
 | **sambanova** (all 9 keys deleted 2026-10-02 — revoked by SambaNova, `401 invalid_api_key` since 2026-09-28; still chained, holds no keys) | gemma-4-31B-it | DeepSeek-V3.2 | DeepSeek-V3.2 | DeepSeek-V3.2 | gemma-4-31B-it | — |
-| **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/llava-hf/llava-1.5-7b-hf | — |
+| **cloudflare** | @cf/openai/gpt-oss-120b | @cf/openai/gpt-oss-120b | — | @cf/openai/gpt-oss-120b | @cf/google/gemma-4-26b-a4b-it (2026-11-21: llava is gone from the Workers AI catalog) | — |
 | **nvidia** | — (chat:deep only: nemotron-3-ultra-550b-a55b) | — | — | — | — | — |
-| **zai** | glm-4.7-flash | — | — | — | — | — |
+| **zai** | glm-5.3-flash (2026-11-21: glm-4.7-flash left the free key's list) | — | — | — | — | — |
 | **voyage** | — | — | — | — | — | voyage-4 |
 
 2026-09-12 — model refresh from a live `/models` inventory on our own keys
@@ -249,6 +249,41 @@ Cost (`image_cost`, pre-call estimate `estimate_image_cost`): prompt tokens x in
 Live-verified 2026-11-21: two PNG references and a prompt gave a 768x1376 JPEG (9:16, 1K) in 8.4 s, with 544 prompt and 1429 candidate tokens (about $0.086).
 
 **Vision media (2026-11-21).** The gemini vision models also read inline video and PDF (`GEMINI_MEDIA_INPUTS` in `providers/media_inputs.py`, `ModelSpec.media_inputs` in `providers/registry.py`). Other vision models are skipped for such requests; `gemini_media_messages` rewrites video blocks to litellm `file` blocks. Details in [api.md](api.md) Vision.
+
+## Catalog refresh 2026-11-21 (pin-only models, changed defaults, upstream facts)
+
+Upstream model lists were fetched with the broker's own keys, except anthropic, openai, cerebras and sambanova, which have no active broker key: their entries come from the official docs. **Pin-only** models are never in a default, a rotation or an unpinned walk; a caller reaches one with `model=` (see [api.md](api.md), "Pinning a model"). A pin on a chat-family lane may be served by any provider that registers a chat-family model (`pin_chain_for`, [routing.md](routing.md), 2026-11-21). Prices are per 1M tokens (input / output) and are in [pricing.md](pricing.md).
+
+Pin-only models per provider (ids are `provider/model`):
+
+- **anthropic** (official docs; all read images; native JSON schema): `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`.
+- **openai** (official docs; read images; `gpt-6.2-astra` documents json_schema, the others leave it unset): `gpt-6.2-astra`, `gpt-6.2-sol`, `gpt-6.1-terra`, `gpt-6-luna`.
+- **cerebras** (public catalog; no active key): `qwen-3.8-27b`, chat:fast / smart / code and structured.
+- **sambanova** (official docs; all labelled Preview; no active key): `GLM-5.3` (text only), `MiniMax-M3.1-Flash` (image and video input). `DeepSeek-V3.2` is kept although the docs no longer list it: it is the pinned chat:smart / sales / code model.
+- **groq**: `openai/gpt-oss-20b` and `qwen/qwen3.8-27b` (json_schema listed in Groq's structured-outputs docs; qwen3.8 reads images upstream but groq is not in the vision chain). `gpt-oss-safeguard-20b` is a guard model and is skipped.
+- **mistral**: `ministral-14b-latest` and `ministral-3b-latest` (vision input; no `vision` lane). Prices from LiteLLM's map.
+- **cohere**: `command-a-plus-05-2026` (vision input, reasoning) and `command-a-03-2025`. Cohere's `/v1/models` exposes json_schema under `features`.
+- **deepseek**: `deepseek-v4-pro` (off-peak prices; peak is 2x). The `/models` endpoint returns only `deepseek-flash` and `deepseek-v4-pro`.
+- **nvidia** (`nvidia_nim/…`, chat:deep only, credits-based free tier, no LiteLLM price): `moonshotai/kimi-k3.1-pro`, `mistralai/mistral-large-4-1t-a52b`, `nvidia/nemotron-3.5-super-vl-120b-a12b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `google/gemma-4-31b-it`, `minimaxai/minimax-m3.1-flash`.
+- **cloudflare** (`@cf/…`): `google/gemma-4-26b-a4b-it` (vision; LiteLLM price), `openai/gpt-oss-20b` (LiteLLM price), `qwen/qwen3.8-27b` (vision), `thinkingmachines/inkling-2-small` (vision), `zai-org/glm-5.3` and `deepseek-ai/deepseek-v4.1-flash-1017` (vision). The last three, `inkling-2-small`, `glm-5.3` and `deepseek-v4.1-flash-1017`, need the Workers Paid plan. The pins price from the Workers AI model catalog `price` property.
+- **openrouter**: `anthropic/claude-fable-5.2`, `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5`, `openai/gpt-6.2-sol`, `google/gemini-4-hydrogen`, `qwen/qwen4-max`, `deepseek/deepseek-v4.1-flash-1017`, `moonshotai/kimi-k3.1-pro`, `z-ai/glm-5.3`, `mistralai/mistral-large-4-0` (paid key), and the `:free` models `inclusionai/ling-3.2-flash:free`, `particle-ai/particle-1:free` and `nvidia/nemotron-3.5-super-vl:free`. Prices are OpenRouter's public `/api/v1/models` fields, checked 2026-11-21.
+- **gemini**: see "Gemini pinned text models" above.
+
+Changed defaults, only where the old model left upstream:
+
+- **zai** `chat:fast` and `prefilter` default `glm-4.7-flash` -> `glm-5.3-flash` (`glm-4.7-flash` and `glm-4.5-flash` are gone from the free key's list; the probe model is `glm-5.3-flash` too). Booked as free: the key is the free tier, though Z.ai lists $0.15 in / $0.50 out per 1M.
+- **cloudflare** `vision` default `@cf/llava-hf/llava-1.5-7b-hf` (gone from the catalog) -> `@cf/google/gemma-4-26b-a4b-it`.
+- **mistral** `chat:smart` default `mistral-large-latest` (gone from `/v1/models`) -> `mistral-medium-latest` (Medium 3.5, $1.50 / $7.50).
+- **openrouter/moonshotai/kimi-k3** price fixed: $0.192 in / $16 out per 1M (was $0.45 / $15).
+
+Upstream facts worth knowing:
+
+- **OpenAI**: `gpt-5` and `gpt-5-mini` shut down 2026-12-11, and `gpt-4o-mini` on 2027-01-14. The current defaults and the probe still use them. Follow-up needed before 2026-12-11: move the defaults and the probe to a live model.
+- **OpenRouter**: `typesafe/jev-1.13` and `inception/mercury-decide:free` are live but not listed by `/models`; they are not added.
+- **Gemini**: `gemini-3.7-flash` is served as `gemini-3.8-flash` and is not added. One free gemini key returned 401 during the refresh and is out of rotation until it is replaced.
+- **DeepSeek**: `/models` returns only `deepseek-flash` and `deepseek-v4-pro`.
+- **Cohere**: `/v1/models` exposes json_schema under `features`.
+- **SambaNova**: every model is labelled Preview in the docs.
 
 ## Adding a new provider
 
