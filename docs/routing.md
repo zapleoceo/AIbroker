@@ -39,6 +39,18 @@
 > were forwarded to the provider). The 2026-09-26 incident stays the reason a pin never
 > crosses a provider's key.
 
+> **2026-11-21 (pin chain for chat-family lanes).** A pinned `model` on a chat-family lane
+> (`chat:*`, `structured`, `prefilter`, `translate`) is no longer limited to the lane's own
+> chain. `routing/chains.py:pin_chain_for(capability)` gives the providers allowed to serve
+> the pin: the lane's own chain first, then the providers of the other chat-family lanes,
+> then any provider that registers a chat-family model (mistral, cohere: in no chat walk).
+> `CHAT_FAMILY` is defined there and `providers/catalog.py` imports it. Unpinned walks still
+> use `chain_for` and are unchanged, so the fallback order of every lane is the same as
+> before. A pin is the caller's explicit choice; the no-crossing rule of 2026-09-26 is kept
+> for keys (a pin still runs on one provider's own keys) and for the JSON filter (zai stays
+> out of JSON requests). Pin-only models (never in any walk) are listed in `docs/providers.md`
+> ("Catalog refresh 2026-11-21").
+
 > **2026-10-03 (cache affinity for all capabilities).** `routing/affinity.py` extends the
 > per-(project, provider) key pin (kept, same TTL) with a ROUTE pin: `(project_id, workflow
 > or '', capability, pinned model or '') -> (provider, model, key_id)`, TTL

@@ -61,6 +61,7 @@ from aibroker.routing import (
     deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     pick_and_reserve,
+    pin_chain_for,
     scope_for,
 )
 from aibroker.routing.chains import free_first_walk
@@ -438,7 +439,7 @@ async def run_chat(
     # every other provider would drop or reject the block.
     media = media_kinds(messages)
     if model:
-        targets = resolve_pin(model, capability, chain_for(capability))
+        targets = resolve_pin(model, capability, pin_chain_for(capability))
         if media:
             targets = [t for t in targets if reads_media(t.model, media)]
             if not targets:

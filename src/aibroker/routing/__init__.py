@@ -6,6 +6,7 @@ from aibroker.routing.chains import (
     deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     is_known_capability,
+    pin_chain_for,
     scope_for,
 )
 from aibroker.routing.cost_guard import CostGuardError, release_cost, reserve_cost
@@ -21,6 +22,7 @@ __all__ = [
     "deprioritize_deepseek_for_savings",
     "deprioritize_for_json",
     "is_known_capability",
+    "pin_chain_for",
     "pick_and_reserve",
     "release_cost",
     "reserve_cost",
