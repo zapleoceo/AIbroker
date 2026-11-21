@@ -6,10 +6,14 @@ Two layers, ONE module, ONE TTL (`AFFINITY_TTL_S`, default 2h):
   * KEY pin, (project, provider) -> api_key_id. The original mechanism: the
     selector prefers the pinned key as a tie-break (and cache-sticky providers pin
     to it outright). Picks a KEY inside a provider.
-  * ROUTE pin, (project, workflow, capability, pinned model) -> (provider, model,
-    key_id). Added for ALL capabilities: picks the whole target. A new request
-    tries it first and moves on only when it is cooling / capped / errored; the
-    walk then re-pins to whatever succeeded.
+  * ROUTE pin, (project, workflow, capability, pinned model, prompt prefix) ->
+    (provider, model, key_id). Added for ALL capabilities: picks the whole target.
+    A new request tries it first and moves on only when it is cooling / capped /
+    errored; the walk then re-pins to whatever succeeded. The prompt-prefix
+    fingerprint (2026-11-22, `prefix_fingerprint`) keeps each distinct prefix -
+    e.g. one persona's system prompt - on its own key, so parallel personas of one
+    workflow no longer overwrite each other's pin (Gemini's implicit cache is per
+    API key: 73-75% hits on one key vs 0-30% when a workflow rotated keys).
 
 Both live in `shared_state` (Redis, shared across workers, fail-open) with an
 in-process dict as the fallback, so a single node / Redis-down / SQLite test run
@@ -19,8 +23,10 @@ behaves identically. The same affinity key also seeds the stable
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from aibroker.config import get_settings
 from aibroker.providers.registry import paid_providers
@@ -83,11 +89,34 @@ class AffinityTarget:
     key_id: int
 
 
+PREFIX_CHARS = 4096
+
+
+def prefix_fingerprint(messages: list[dict[str, Any]] | None) -> str:
+    """Short hash of the cacheable prompt prefix: every system message in full plus
+    the first PREFIX_CHARS of the conversation before the last message (the new
+    turn). '' when there is no prefix (a single user message): such requests share
+    the workflow-level pin as before."""
+    if not messages:
+        return ""
+    system = [m.get("content") for m in messages if isinstance(m, dict)
+              and m.get("role") == "system"]
+    rest = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"][:-1]
+    if not system and not rest:
+        return ""
+    head = json.dumps(rest, ensure_ascii=False, sort_keys=True, default=str)[:PREFIX_CHARS]
+    blob = json.dumps(system, ensure_ascii=False, sort_keys=True, default=str) + "\x1e" + head
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
 def route_key(project_id: int, workflow: str | None, capability: str,
-              pinned_model: str | None) -> str:
-    """Redis/dict key for a request family. workflow and pin are '' when absent."""
-    digest = hashlib.sha256(
-        f"{workflow or ''}\x1f{capability}\x1f{pinned_model or ''}".encode()).hexdigest()[:20]
+              pinned_model: str | None, prefix: str = "") -> str:
+    """Redis/dict key for a request family. workflow, pin and prefix are '' when absent
+    (so a request without a prefix keeps the pre-2026-11-22 key)."""
+    raw = f"{workflow or ''}\x1f{capability}\x1f{pinned_model or ''}"
+    if prefix:
+        raw += f"\x1f{prefix}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:20]
     return f"aib:raff:{project_id}:{digest}"
 
 
@@ -101,9 +130,9 @@ def reset() -> None:
 
 
 async def lookup_route(project_id: int, workflow: str | None, capability: str,
-                       pinned_model: str | None) -> AffinityTarget | None:
+                       pinned_model: str | None, prefix: str = "") -> AffinityTarget | None:
     """The pinned target for this request family, or None (miss / expired)."""
-    key = route_key(project_id, workflow, capability, pinned_model)
+    key = route_key(project_id, workflow, capability, pinned_model, prefix)
     raw = await shared_state.get_json(key)
     if isinstance(raw, dict) and {"p", "m", "k"} <= raw.keys():
         try:
@@ -121,8 +150,9 @@ async def lookup_route(project_id: int, workflow: str | None, capability: str,
 
 
 async def note_route(project_id: int, workflow: str | None, capability: str,
-                     pinned_model: str | None, target: AffinityTarget) -> None:
-    key = route_key(project_id, workflow, capability, pinned_model)
+                     pinned_model: str | None, target: AffinityTarget,
+                     prefix: str = "") -> None:
+    key = route_key(project_id, workflow, capability, pinned_model, prefix)
     _routes[key] = (target, time.monotonic())
     await shared_state.set_json(
         key, {"p": target.provider, "m": target.model, "k": target.key_id}, ttl_s())
@@ -130,12 +160,12 @@ async def note_route(project_id: int, workflow: str | None, capability: str,
 
 async def note_success(
     project_id: int, workflow: str | None, capability: str, pinned_model: str | None,
-    provider: str, model: str, key_id: int,
+    provider: str, model: str, key_id: int, prefix: str = "",
 ) -> None:
     """Re-pin BOTH layers to what just succeeded."""
     await note_affinity_shared(project_id, provider, key_id)
     await note_route(project_id, workflow, capability, pinned_model,
-                     AffinityTarget(provider, model, key_id))
+                     AffinityTarget(provider, model, key_id), prefix)
 
 
 def may_promote(target: AffinityTarget, head_provider: str | None, *, paid_only: bool) -> bool:

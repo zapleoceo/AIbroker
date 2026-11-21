@@ -320,7 +320,7 @@ def _pinned_steps(targets: list[PinTarget], *, paid_only: bool) -> list[_Step]:
 
 async def _with_affinity(
     steps: list[_Step], project_id: int, workflow: str | None, capability: str,
-    pinned: str | None, *, paid_only: bool,
+    pinned: str | None, *, paid_only: bool, prefix: str = "",
 ) -> list[_Step]:
     """Put the request family's affine (provider, model, key) in front of the walk.
 
@@ -331,7 +331,7 @@ async def _with_affinity(
     already applied) — and a paid target never jumps a free head."""
     if not steps:
         return steps
-    target = await affinity.lookup_route(project_id, workflow, capability, pinned)
+    target = await affinity.lookup_route(project_id, workflow, capability, pinned, prefix)
     if target is None or not affinity.may_promote(target, steps[0].provider,
                                                   paid_only=paid_only):
         return steps
@@ -467,8 +467,9 @@ async def run_chat(
     if tools:
         est_tokens += len(json.dumps(tools, ensure_ascii=False)) // 3 + 1
 
+    prefix = affinity.prefix_fingerprint(messages)
     steps = await _with_affinity(steps, project.id, workflow, capability, model,
-                                 paid_only=paid_only)
+                                 paid_only=paid_only, prefix=prefix)
     if media:
         steps = [s for s in steps if s.model is None or reads_media(s.model, media)]
     if free_only:
@@ -540,7 +541,7 @@ async def run_chat(
                     pool, key.id, (rotation_base + attempt_in_provider) % len(pool))
             if not use_model:
                 break  # provider can't serve this capability → next step
-            ck = cache_key_for(project.id, workflow or "", capability, model or "")
+            ck = cache_key_for(project.id, workflow or "", capability, model or "", prefix)
             res = await run_attempt(Attempt(
                 key=key, project=project, provider=provider, model=use_model,
                 capability=capability, workflow=workflow, est_tokens=est_tokens,
@@ -558,7 +559,7 @@ async def run_chat(
                 check=_chat_gate(provider=provider, key_id=key.id,
                                  response_format=response_format, tools=tools,
                                  tool_choice=tool_choice),
-                pinned_model=model,
+                pinned_model=model, prefix=prefix,
             ))
             flow = res.flow
             if flow is not Flow.SUCCESS:
