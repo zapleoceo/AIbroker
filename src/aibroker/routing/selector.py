@@ -430,7 +430,10 @@ def _recover_set_sql(status: str, error_kind: str | None) -> str:
 _OPTIONAL_USAGE_COLS: tuple[tuple[str, str], ...] = (
     ("model_served", "ms"),     # migration 011
     ("request_id", "rq"),       # migration 015
+    ("key_tier", "kt"),         # migration 032 (copied from api_keys.tier, no param)
 )
+# Optional columns whose value is an expression rather than a bound parameter.
+_USAGE_COL_EXPR = {"key_tier": "(SELECT tier FROM api_keys WHERE id = :k)"}
 
 
 def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
@@ -440,7 +443,7 @@ def _insert_sql(*, missing: frozenset[str] = frozenset()) -> str:
     for col, param in _OPTIONAL_USAGE_COLS:
         if col not in missing:
             cols.append(col)
-            vals.append(f":{param}")
+            vals.append(_USAGE_COL_EXPR.get(col, f":{param}"))
     cols += ["capability", "workflow", "tokens_in", "tokens_out", "cache_read_tokens",
              "cache_write_tokens", "cost_usd", "latency_ms", "status", "error_kind",
              "http_status", "created_at"]
@@ -595,7 +598,7 @@ async def record_usage(
         _missing_usage_cols.update(named)
         log.warning(
             "usage_log optional column(s) %s missing (%s) — recording without them; "
-            "apply infra/sql/migrations/011 and 015 (stays off until process restart)",
+            "apply infra/sql/migrations/011, 015 and 032 (stays off until process restart)",
             sorted(_missing_usage_cols), e,
         )
         return await _write(frozenset(_missing_usage_cols))
