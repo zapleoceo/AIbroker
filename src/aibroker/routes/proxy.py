@@ -78,12 +78,13 @@ from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, pin_chain_for, scope_for
 from aibroker.routing.key_tier import KeyTier, paid_lane
-from aibroker.services import speech_jobs, transcription_jobs
+from aibroker.services import job_wait, speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
     IdempotencyConflict,
     build_request,
     get_job,
+    get_jobs,
     next_poll_after_s,
     payload_hash,
     priority_name,
@@ -1472,18 +1473,100 @@ async def video_submit(
     return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
 
 
+def _too_many_waiters() -> HTTPException:
+    return HTTPException(
+        429, f"too many open long polls for this project (max {job_wait.MAX_WAITERS_PER_PROJECT})",
+        headers={"Retry-After": str(job_wait.RETRY_AFTER_S)})
+
+
+async def _long_wait(ctx: ProjectCtx, ids: list[int], wait: float) -> None:
+    try:
+        await job_wait.wait_any(ctx.project.id, ids, min(wait, job_wait.MAX_WAIT_S))
+    except job_wait.TooManyWaiters as exc:
+        raise _too_many_waiters() from exc
+
+
 @router.get("/jobs/{job_id}", response_model=DeepJobResponse)
 async def jobs_poll(
     job_id: int,
     response: Response,
+    wait: float = Query(0, ge=0, description="long poll: return as soon as the job is terminal, "
+                                             "else the pending state after this many seconds "
+                                             "(clamped to 25)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
     row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
-    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row, await _row_files(row))  # pragma: no cover
+    if wait > 0 and row.status not in job_wait.TERMINAL_STATUSES:
+        await _long_wait(ctx, [job_id], wait)
+        row = await get_job(job_id, ctx.project.id, generic=True) or row
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return _job_response(row, await _row_files(row))
+
+
+class JobsWaitRequest(BaseModel):
+    ids: list[int | str] = Field(min_length=1, max_length=job_wait.MAX_IDS,
+                                 description="job ids (int or numeric string), at most 100")
+    wait: float = Field(job_wait.MAX_WAIT_S, ge=0,
+                        description="seconds to wait for any job to finish (clamped to 25)")
+
+
+class JobsWaitResponse(BaseModel):
+    done: list[DeepJobResponse] = Field(
+        description="terminal jobs (done | error | cancelled), each exactly as GET /v1/jobs/{id}")
+    pending: list[int] = Field(description="the caller's jobs that are not terminal yet")
+    unknown: list[str] = Field(
+        default_factory=list,
+        description="ids that are not this project's pollable jobs (foreign, pruned, typed "
+                    "speech / keyed transcription, malformed); never retried by the broker")
+
+
+def _job_id_of(raw: int | str) -> int | None:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+@router.post("/jobs/wait", response_model=JobsWaitResponse)
+async def jobs_wait(body: JobsWaitRequest, ctx: ProjectCtx = Depends(require_project)
+                    ) -> JobsWaitResponse:
+    """Batch long poll: returns as soon as ANY listed job of the caller's project is
+    terminal (all terminal ones are returned), or after `wait` s with done=[]."""
+    ids: list[int] = []
+    unknown: list[str] = []
+    for raw in body.ids:
+        job_id = _job_id_of(raw)
+        if job_id is None:
+            unknown.append(str(raw))
+        elif job_id not in ids:
+            ids.append(job_id)
+    rows = await get_jobs(ids, ctx.project.id, generic=True)
+    visible: dict[int, Any] = {}
+    for job_id in ids:
+        row = rows.get(job_id)
+        if row is None:
+            unknown.append(str(job_id))
+            continue
+        try:
+            _require_agent_read_access(ctx, row)
+        except HTTPException:
+            unknown.append(str(job_id))
+            continue
+        visible[job_id] = row
+    pending = [i for i, r in visible.items() if r.status not in job_wait.TERMINAL_STATUSES]
+    if body.wait > 0 and pending and len(pending) == len(visible):
+        await _long_wait(ctx, pending, body.wait)
+        visible.update(await get_jobs(pending, ctx.project.id, generic=True))
+    done = [_job_response(r, await _row_files(r)) for r in visible.values()
+            if r.status in job_wait.TERMINAL_STATUSES]
+    return JobsWaitResponse(
+        done=done, pending=[i for i, r in visible.items()
+                            if r.status not in job_wait.TERMINAL_STATUSES],
+        unknown=unknown)
 
 
 # ─── Model catalog ──────────────────────────────────────────────────────────

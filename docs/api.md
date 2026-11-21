@@ -169,6 +169,8 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/chat?capability=<cap>` | — | **`410 Gone`** — sync chat removed 2026-07-10; use `/v1/jobs` |
 | `POST` | `/v1/jobs?capability=<cap>` | `ChatRequest` (+ `key_tier`) | `JobSubmitResponse` (async — `202` + `job_id`). **The way to do chat.** |
 | `GET` | `/v1/jobs/{job_id}` | — | `JobResponse` (poll: `pending`\|`done`\|`error`\|`cancelled`; also `trace_id`, `labels`) |
+| `GET` | `/v1/jobs/{job_id}?wait=<seconds>` | — | same `JobResponse` as the plain poll; long poll: returns as soon as the job is terminal, else the pending state after `wait` s (optional, number ≥ 0, clamped to 25; default 0 = immediate). See "Long-poll job results" |
+| `POST` | `/v1/jobs/wait` | `{"ids": [int \| numeric string, 1..100], "wait": number ≥ 0 (default 25, clamped to 25)}` | `{done, pending, unknown}`: batch long poll, returns as soon as ANY listed job is terminal. See "Long-poll job results" |
 | `POST` | `/v1/jobs/{job_id}/cancel` | — | `{job_id, state, status}` — `state` is `cancelled`, `cancel_requested` or `already_terminal`; `404` for another project's job. See "Cancel" below |
 | `POST` | `/v1/jobs/cancel` | `{"trace_id": …}` **or** `{"labels": {…}}` | `{cancelled: [ids], cancel_requested: [ids], already_terminal: n}` — bulk cancel of this project's in-flight jobs |
 | `POST` | `/v1/jobs/{job_id}/tool-results` | `{call_id, success, content, terminal?}` (`terminal: true` requires `success: true` and a tool the job named in `terminal_tools`: the job then ends `done` with empty text instead of another model turn) | `202` with `{accepted: bool}` for the authenticated project's pending Codex subscription tool call; an accepted result is always delivered, while a call past its deadline (`AGENT_TOOL_WAIT_S`: 90 s in production, code default 300 s) without a result, or a still-waiting call withdrawn after lease loss, gets `409`; see [subscription tool loop](subscription-tool-loop.md) |
@@ -629,6 +631,60 @@ budget. `chat:deep` is **async-only** (nemotron runs minutes);
 `POST /v1/chat` returns `410 Gone` for every capability. `POST /v1/deep` +
 `GET /v1/deep/{job_id}` remain as backward-compatible aliases of the generic
 endpoints.
+
+### Long-poll job results — `GET /v1/jobs/{id}?wait` and `POST /v1/jobs/wait`
+
+Instead of polling every 1–2 s, a client can hold a request open until its job (or any of
+its jobs) finishes. Both forms return the same job payloads as the plain poll. Without `wait`
+(or with `wait=0`) `GET /v1/jobs/{id}` behaves exactly as before.
+
+**`GET /v1/jobs/{id}?wait=<seconds>`**
+
+- `wait` is optional: a number ≥ 0, clamped to 25. Default `0` = the old immediate poll.
+- If the job is already terminal (`done` | `error` | `cancelled`) the response returns at once.
+- Otherwise it returns as soon as the job becomes terminal, or with the current pending state
+  after `wait` seconds.
+- The body is exactly the plain poll body (`JobResponse`, including `poll_after_s` while pending).
+- `404` unknown or another project's job; `422` negative `wait`; `429` too many open long polls
+  (see caps below).
+
+**`POST /v1/jobs/wait`**
+
+Body: `{"ids": [123, "124"], "wait": 25}`
+
+- `ids`: 1..100 entries, each an integer or a numeric string. Duplicates are collapsed.
+- `wait`: number ≥ 0, default 25, clamped to 25.
+
+Response `200`:
+
+```
+{"done":    [ <job payload, exactly as GET /v1/jobs/{id} returns it>, ... ],
+ "pending": [ 125, ... ],
+ "unknown": [ "999", "abc" ]}
+```
+
+- The call returns as soon as ANY listed job is terminal. All terminal jobs are returned in
+  `done`, in request order. If some are already terminal it returns immediately.
+- After `wait` seconds with nothing finished: `done: []` and all of the caller's jobs in `pending`.
+- `pending` is a list of integer ids of the caller's jobs that are not terminal yet.
+- `unknown` lists ids that are not this project's pollable jobs: another project's, pruned,
+  malformed, typed speech jobs and keyed transcription jobs (they have their own poll routes), and
+  agent jobs the project may no longer read. They never fail the whole batch, and the broker
+  never retries them.
+- Errors: `422` for an empty list, more than 100 ids or a negative `wait`; `401`/`403` without a
+  valid project key; `429` with `Retry-After: 2` when the project already holds 200 open long
+  polls (counted per API worker process).
+
+**Caps.** A project may hold at most 200 open long polls per API worker process. Above that,
+both forms answer `429` with `Retry-After: 2`. Plain polls are never limited by this.
+
+**Client guidance.** Run one waiter per process that calls `POST /v1/jobs/wait` with all of its
+outstanding ids and `wait=25` in a loop. This replaces per-job 1–2 s polling. The `poll_after_s`
+of submit responses still applies to plain `GET /v1/jobs/{id}` polling.
+
+How the wake-up works (in-process waiters, Redis channel, sweep) is described in
+[architecture.md](architecture.md#long-poll-waiters-servicesjob_waitpy).
+
 
 ### List jobs by label — `GET /v1/jobs?label.<key>=<value>`
 
