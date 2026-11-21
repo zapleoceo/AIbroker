@@ -77,28 +77,36 @@ async def publish_terminal(job_id: int) -> None:
         log.debug("job_wait: publish %s failed: %s", job_id, e)
 
 
-async def _subscribe_forever() -> None:  # pragma: no cover — needs a live Redis
+async def _subscribe_while_waiting() -> None:  # pragma: no cover — needs a live Redis
+    """Redis subscriber that lives only while this process has waiters (no idle task,
+    no idle connection): it exits within a second of the last waiter leaving."""
     url = _redis_url()
     if not url:
         return
     import redis.asyncio as redis_asyncio
-    while True:
+    while _waiters:
+        client = None
         try:
-            client = redis_asyncio.from_url(url, socket_connect_timeout=2,
-                                            socket_timeout=None, health_check_interval=30)
+            client = redis_asyncio.from_url(url, socket_connect_timeout=2, socket_timeout=5)
             pubsub = client.pubsub(ignore_subscribe_messages=True)
             await pubsub.subscribe(CHANNEL)
-            async for message in pubsub.listen():
-                if message.get("type") == "message":
+            while _waiters:
+                message = await pubsub.get_message(timeout=1.0)
+                if message and message.get("type") == "message":
                     try:
                         _wake(int(message["data"]))
                     except (TypeError, ValueError):
                         continue
+            await pubsub.aclose()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — the sweep covers the outage
             log.warning("job_wait: redis subscriber down (%s); sweep-only for now", e)
-            await asyncio.sleep(5)
+            await asyncio.sleep(min(5.0, SWEEP_S * 5))
+        finally:
+            if client is not None:
+                with contextlib.suppress(Exception):
+                    await client.aclose()
 
 
 async def terminal_ids(ids: list[int]) -> set[int]:
@@ -110,11 +118,13 @@ async def terminal_ids(ids: list[int]) -> set[int]:
         return set(rows.all())
 
 
-async def _sweep_forever() -> None:
-    while True:
+async def _sweep_while_waiting() -> None:
+    """One status query per SWEEP_S for every id being waited on; exits as soon as
+    this process has no waiters (restarted by the next one)."""
+    while _waiters:
         await asyncio.sleep(SWEEP_S)
         if not _waiters:
-            continue
+            return
         try:
             for job_id in await terminal_ids(list(_waiters)):
                 _wake(job_id)
@@ -125,6 +135,8 @@ async def _sweep_forever() -> None:
 
 
 def _ensure_started() -> None:
+    """(Re)start the sweep and the subscriber in this loop unless they already run.
+    Called after the waiter registered, so the tasks see a non-empty registry."""
     global _tasks_loop
     loop = asyncio.get_running_loop()
     if _tasks and _tasks_loop is loop and not any(t.done() for t in _tasks):
@@ -133,8 +145,8 @@ def _ensure_started() -> None:
         if not t.done() and _tasks_loop is loop:
             t.cancel()
     _tasks_loop = loop
-    _tasks[:] = [asyncio.create_task(_sweep_forever(), name="job-wait-sweep"),
-                 asyncio.create_task(_subscribe_forever(), name="job-wait-redis")]
+    _tasks[:] = [asyncio.create_task(_sweep_while_waiting(), name="job-wait-sweep"),
+                 asyncio.create_task(_subscribe_while_waiting(), name="job-wait-redis")]
 
 
 async def stop() -> None:
@@ -151,11 +163,11 @@ async def wait_any(project_id: int, ids: list[int], wait_s: float) -> None:
         return
     if _per_project[project_id] >= MAX_WAITERS_PER_PROJECT:
         raise TooManyWaiters
-    _ensure_started()
     event = asyncio.Event()
     _per_project[project_id] += 1
     for job_id in ids:
         _waiters.setdefault(job_id, set()).add(event)
+    _ensure_started()
     try:
         if await terminal_ids(ids):        # registered first: no lost wake-up
             return
