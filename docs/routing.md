@@ -2211,3 +2211,35 @@ tightened: an exception without a `status_code` attribute whose message names a 
 (`Error code: 400`) is treated as a neutral client error too, so a 400 that merely
 contains "unauthorized"/"forbidden" can no longer kill a healthy key. Explicit
 bad-key phrasings ("API key not valid") and the billing phrases still win.
+
+## Request rejected by the provider: HTTP 400 / 422 (2026-11-22)
+
+Job 628563: Gemini answered 400 on every call (`The specified schema produces a constraint
+that has too many states for serving`), and the walk rotated every key and requeued the job up
+to 8 times while the poll showed `pending`. The trigger was `maxItems: 50` on an array of
+objects in a `json_schema` (removing `maxItems` alone fixes it; `pattern` and `maxLength` were fine).
+
+Classification (`providers/provider_errors.py`):
+
+- `is_request_rejected(exc, provider)` is true when the provider refused the **request itself**:
+  HTTP 400 or 422, or no status code and an `INVALID_ARGUMENT` body. It is false for anything
+  `classify_provider_error` files as `rate_limit` or `auth` (a bad key, such as Gemini's 400
+  "API key not valid", stays an auth failure), for billing states, for a gone model
+  (`is_model_unavailable`) and for an over-size prompt (`is_too_large_error`).
+- `rejection_message(exc)` returns the provider's own text: the JSON `message` when the body
+  carries one, whitespace collapsed, at most 600 characters.
+
+Flow verdict (`services/attempt.py`, `_handle_call_error`): `Flow.REQUEST_REJECTED`. The check runs
+after the model-unavailable branch and before `_penalize`, so the attempt is booked in `usage_log`
+as before, the key is **not** penalised or cooled, and the provider's message is logged with
+secrets scrubbed. `run_chat` then leaves that provider without trying its sibling keys, because
+they would refuse the same request, and moves to the next provider in the chain.
+
+Outcome (`services/llm_service.py`): the first such rejection is kept as `RequestRejected(provider,
+message)`. If every provider tried refused the request and nothing else failed (no other failures and
+no content failures), `run_chat` returns it. If anything else failed, the usual outcome applies and
+a later provider can still answer.
+
+Job (`services/job_queue.py`, `_execute`): a `RequestRejected` outcome ends the job at once with
+status `error`, no retry and no requeue. The error text is `provider <name> rejected the request
+(HTTP 400): <provider message>`; `GET /v1/jobs/{id}` shows it in `error` (see [api.md](api.md)).

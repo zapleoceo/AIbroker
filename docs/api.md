@@ -476,6 +476,19 @@ contract is: on that message, **stop resubmitting and retry after the next UTC
 midnight**, when daily caps reset. The owner also gets a 24h-throttled alert, so
 a silently-capped project is visible rather than invisibly stalled.
 
+**Provider rejected the request (2026-11-22).** When every provider the job tried refuses the request
+itself (HTTP 400 or 422, for example Gemini's `INVALID_ARGUMENT`) and nothing else failed, the job ends
+at once as a terminal `error`: `provider <name> rejected the request (HTTP 400): <provider's message>`,
+for example `provider gemini rejected the request (HTTP 400): The specified schema produces a constraint
+that has too many states for serving`. No key rotation and no requeue happen, so resubmit only after the
+request is changed. Bad keys, throttles, billing, gone models and over-size prompts do not produce this error.
+
+**json_schema limits on Gemini.** Gemini serves a `json_schema` only within its state limits, and a 400
+"too many states for serving" means the schema is too complex. Keep the schema simple: avoid a large
+`maxItems` on arrays of objects, very long `enum` lists, numeric `minimum`/`maximum` bounds and complex
+string `format`s. When you hit the 400, remove the `maxItems` first; it was the cause of the SIM attention
+schema failure.
+
 **In-flight dedup (2026-07-16, migration 010).** An identical
 `POST /v1/jobs` payload (same project, capability, and canonical request
 body) submitted within **30 minutes** while the prior job is still

@@ -43,7 +43,7 @@ from aibroker.providers.peak_pricing import peak_multiplier
 from aibroker.providers.prompt_cache import cache_key_for
 
 # Re-exported: tests and services/__init__ import classify_provider_error from here.
-from aibroker.providers.provider_errors import classify_provider_error
+from aibroker.providers.provider_errors import classify_provider_error, rejection_message
 from aibroker.providers.registry import (
     max_keys_for,
     model_for,
@@ -71,7 +71,7 @@ from aibroker.services.attempt import Attempt, AttemptResult, Flow, Rejection, r
 from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
 
 __all__ = [
-    "BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED_MONTHLY", "CONTENT_FAILED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
+    "BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED_MONTHLY", "CONTENT_FAILED", "ChatOutcome", "RequestRejected", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
     "EmbedOutcome", "EmbedRequestInvalid", "TranscribeFailed", "TranscribeOutcome", "classify_provider_error",
     "run_chat", "run_decision", "run_embed", "run_transcribe",
 ]
@@ -233,6 +233,18 @@ class _ContentFailed:
 
 
 CONTENT_FAILED = _ContentFailed()
+
+
+class RequestRejected:
+    """run_chat result when every provider that was tried refused the REQUEST itself
+    (HTTP 400 / INVALID_ARGUMENT - e.g. a json_schema Gemini cannot serve) and nothing
+    else went wrong. Retrying cannot help: the job fails at once with `message`, the
+    provider's own error text."""
+    __slots__ = ("message", "provider")
+
+    def __init__(self, provider: str, message: str) -> None:
+        self.provider = provider
+        self.message = message
 
 
 class _Cancelled:
@@ -484,6 +496,7 @@ async def run_chat(
         _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
     attempts = 0
     content_failures = 0     # attempts that came back EmptyBody / InvalidJSON
+    rejected: RequestRejected | None = None   # first provider 400 on the request itself
     other_failures = False   # any failure that a later retry could plausibly cure
     for step in steps:
         provider = step.provider
@@ -562,6 +575,10 @@ async def run_chat(
                 pinned_model=model, prefix=prefix,
             ))
             flow = res.flow
+            if flow is Flow.REQUEST_REJECTED:
+                if rejected is None and res.error is not None:
+                    rejected = RequestRejected(provider, rejection_message(res.error))
+                break      # sibling keys would refuse it the same way; next provider
             if flow is not Flow.SUCCESS:
                 if res.rejection in _CONTENT_FAILURES:
                     content_failures += 1
@@ -598,6 +615,8 @@ async def run_chat(
             if flow is Flow.NEXT_PROVIDER:
                 break
             # Flow.NEXT_KEY — walk to this provider's next key
+    if rejected is not None and not other_failures and not content_failures:
+        return rejected
     if content_failures and not other_failures:
         return CONTENT_FAILED
     return None
