@@ -1925,6 +1925,18 @@ shot, not that an answer materializes without budget.
 > shot to fail. It's now gated on `has_paid_tail(capability)`, so a paid-tail-less
 > capability's final retry stays a normal free-lane walk.
 
+### Per-request key tier (2026-11-21)
+
+The client's `key_tier` field ([api.md, Key tier](api.md#key-tier-2026-11-21)) is passed from the job
+queue to `run_chat` as `key_tier`, next to `paid_only` (`services/llm_service.py`). The job queue sets
+`paid_only` on the final retry only for `auto`; the other two values are handled inside `run_chat`:
+
+- `auto` (default): unchanged. Free-first walk, and the final retry escalates to the paid tail through `paid_only` when `has_paid_tail` is true.
+- `paid`: `paid_only` is forced on for every attempt, so every pick demands a paid-tier key from the first attempt. No free-key attempt is made, and the final-retry escalation is not computed.
+- `free`: every pick is restricted to tier `free` (not `trial`, not `paid`). The escalation never fires, not even on the final retry. If no free key can serve, the job is requeued as capacity frees up and ends with `no provider available for <capability> with a free key (key_tier=free)`.
+
+Speech, image and video lanes already run on paid keys only, so `key_tier` is validated there (`free` is `422`) and not routed.
+
 ## Storm-honesty wave (2026-07-16)
 
 A confirmed prod incident: a project's `$0.50/day` cap was spent, so
