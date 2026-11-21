@@ -65,3 +65,18 @@ def test_gemini_4_scores_and_38_unscored():
         "gemini-4-neon": 61.0, "gemini-4-carbon": 60.0,
         "gemini-4-hydrogen": 54.0, "gemini-4-argon": 50.0}
     assert "gemini-3.8-flash" not in SCORES
+
+
+def test_pinned_chat_model_resolves_on_structured_outside_its_walk():
+    from aibroker.routing.chains import chain_for, pin_chain_for
+
+    # The unpinned structured walk is unchanged ...
+    assert "openrouter" not in chain_for("structured")
+    # ... but an explicit pin of a chat-family model of any chat-lane provider is served.
+    assert pin_chain_for("structured")[:len(chain_for("structured"))] == chain_for("structured")
+    for provider in ("openrouter", "deepseek", "sambanova", "cerebras", "nvidia"):
+        assert provider in pin_chain_for("structured")
+    targets = resolve_pin("openrouter/moonshotai/kimi-k3", "structured", pin_chain_for("structured"))
+    assert [t.provider for t in targets] == ["openrouter"]
+    # Non-chat lanes keep their own chain only.
+    assert pin_chain_for("vision") == chain_for("vision")
