@@ -261,7 +261,11 @@ async def pick_and_reserve(
         f"(k.daily_limit = 0 OR {FRESH_DAILY_USED_SQL} < k.daily_limit)",
     ]
     params: dict[str, object] = {"provider": provider, "scope": scope, **month_params()}
-    if require_tier:
+    if require_tier == "free":
+        # "trial" keys (free credits, e.g. NVIDIA) cost nothing either: a free pass that
+        # skipped them left trial-only providers unreachable by pinned walks (2026-11-21).
+        conds.append("k.tier IN ('free', 'trial')")
+    elif require_tier:
         conds.append("k.tier = :tier")
         params["tier"] = require_tier
     if models:

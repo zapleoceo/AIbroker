@@ -31,7 +31,7 @@
 > (`providers/catalog.resolve_pin`): routing id or bare canonical name -> the ordered
 > `(provider, model)` targets that serve it (ranked: free providers by `ProviderSpec.rank`,
 > paid last). `run_chat` walks them as `_pinned_steps`: **free-tier keys of every candidate
-> first, then paid keys**, one fixed order, no rotation, no reshuffle. Unknown model or a
+> first, then paid keys**, one fixed order, no rotation, no reshuffle. The free pass of a pinned walk (and the degraded free-only tail) includes `trial`-tier keys as well as `free`. Unknown model or a
 > lane it cannot serve -> `UnknownModel` -> **HTTP 400 with suggestions** at submit (a job
 > queued before a registry change fails terminally instead of retrying). This replaces the
 > 2026-09-26 behaviour below ("a pinned model stays on its own provider": qualified ids
@@ -1933,7 +1933,7 @@ queue to `run_chat` as `key_tier`, next to `paid_only` (`services/llm_service.py
 
 - `auto` (default): unchanged. Free-first walk, and the final retry escalates to the paid tail through `paid_only` when `has_paid_tail` is true.
 - `paid`: `paid_only` is forced on for every attempt, so every pick demands a paid-tier key from the first attempt. No free-key attempt is made, and the final-retry escalation is not computed.
-- `free`: every pick is restricted to tier `free` (not `trial`, not `paid`). The escalation never fires, not even on the final retry. If no free key can serve, the job is requeued as capacity frees up and ends with `no provider available for <capability> with a free key (key_tier=free)`.
+- `free`: every pick is restricted to tier `free` or `trial` (both cost nothing), never `paid`. The escalation never fires, not even on the final retry. If no free key can serve, the job is requeued as capacity frees up and ends with `no provider available for <capability> with a free key (key_tier=free)`.
 
 Speech, image and video lanes already run on paid keys only, so `key_tier` is validated there (`free` is `422`) and not routed.
 

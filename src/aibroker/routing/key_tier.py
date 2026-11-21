@@ -6,7 +6,7 @@ A caller may pick which tier of provider keys serves its request:
   queue's final retry paid-only.
 - ``paid``: paid-tier keys only, from the first attempt (latency-sensitive replies:
   Gemini free keys run 20-50 s where the paid key answers in 2-3 s).
-- ``free``: keys of tier ``free`` only (not ``trial`` or ``paid``); never a paid key, not even
+- ``free``: keys of tier ``free`` or ``trial`` (both cost nothing); never a paid key, not even
   on the final retry.
 
 Subscription models (claude-sub / codex-sub) run on their own accounts and ignore it.

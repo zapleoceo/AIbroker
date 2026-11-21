@@ -158,3 +158,15 @@ async def test_usage_row_records_the_key_tier():
     async with get_session() as s:
         row = await s.get(UsageLogRow, usage_id)
     assert row.key_tier == "free"
+
+
+@pytest.mark.skipif("postgres" not in __import__("os").environ.get("DATABASE_URL", ""),
+                    reason="pick_and_reserve SQL is Postgres-only (as tests/test_selector.py)")
+async def test_free_tier_pick_includes_trial_keys():
+    """NVIDIA's only key is tier "trial": a pinned walk's free pass must reach it."""
+    from aibroker.routing.selector import pick_and_reserve
+
+    kid = await _add_key("nvidia", "trial-key", tier="trial")
+    key = await pick_and_reserve("nvidia", "llm:chat", require_tier="free")
+    assert key is not None and key.id == kid
+    assert await pick_and_reserve("nvidia", "llm:chat", require_tier="paid") is None

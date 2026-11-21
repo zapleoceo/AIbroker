@@ -1350,7 +1350,7 @@ field, default `"auto"`.
 |---|---|
 | `auto` (default) | Today's walk: free-tier keys first, paid keys after. The job queue's final retry walks paid keys only. |
 | `paid` | Paid-tier keys only, from the first attempt; no free-key attempts. For latency-sensitive replies: measured Gemini 3.5/3.6-flash at 20-50 s on free keys against 2-3 s on the paid key. |
-| `free` | Free-tier keys only (tier `free`). Keys of tier `trial` (for example the NVIDIA trial key) and of tier `paid` are never used, not even on the final retry. |
+| `free` | Free keys only: tier `free` or `trial` (both cost nothing; `trial` covers the NVIDIA trial key). Keys of tier `paid` are never used, not even on the final retry. |
 
 **Where it is accepted**
 
