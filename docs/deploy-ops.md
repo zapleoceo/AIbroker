@@ -151,6 +151,8 @@ plus the `ix_deep_jobs_dedup` index for in-flight job dedup — the code
 degrades to plain inserts (with a logged warning) if it lands first, but
 dedup stays off until the migration is applied.
 
+Migration 033 (`033_projects_signup_verification.sql`, 2026-11-21) adds the nullable `projects.signup_verified_at` and `projects.signup_telegram_id` columns, plus a partial index on the latter, for Telegram-verified self-signup and the per-Telegram project limit. Apply it BEFORE the code lands: the ORM selects both columns on every authenticated request. `infra/sql/init.sql` mirrors it too. Existing projects are unaffected: both columns are nullable and stored caps are kept.
+
 **Rollout order for migration 020 (important).** On `master` the dispatcher claims with
 `UPDATE … RETURNING *` and builds `DeepJobRow(**row)` after the commit, so once the new columns exist
 that code raises `TypeError` on the unknown keys: claimed jobs sit in `running`, are dropped, and only the
@@ -1117,7 +1119,11 @@ docker compose up -d
 | `GLOBAL_DAILY_CAP_USD` | global daily spend cap |
 | `SIGNUP_ENABLED` | kill switch for `POST /v1/signup` (default `true`) |
 | `SIGNUP_PER_IP_PER_DAY` / `SIGNUP_PER_DAY` | self-signup rate limits (defaults 3 / 50, rolling 24h) |
-| `SIGNUP_REQUEST_CAP` | lifetime request cap given to a new self-signup project (default 100) |
+| `SIGNUP_REQUEST_CAP` | lifetime request cap of a verified self-signup project (default 100) |
+| `SIGNUP_UNVERIFIED_REQUEST_CAP` | lifetime request cap of an unverified self-signup project (default 10); Telegram verification raises it to `SIGNUP_REQUEST_CAP` |
+| `SIGNUP_POW_BITS` / `SIGNUP_POW_TTL_S` | proof-of-work difficulty of `POST /v1/signup` (default 18 leading zero bits, `0` = off) and challenge lifetime, single use (default 600 s) |
+| `SIGNUP_PER_TELEGRAM` | self-signup projects per Telegram account, lifetime (default 2) |
+| `SIGNUP_PER_EMAIL_DOMAIN_PER_DAY` | self-signups per contact-email domain, rolling 24h (default 5) |
 | `SIGNUP_DEFAULT_SCOPES` | comma-separated scopes of a self-signup project (default `llm:chat,llm:embed`) |
 | `PUBLIC_HOST` | for absolute URLs on login page |
 | `LOG_LEVEL` | INFO / DEBUG; applied by `aibroker.logging_setup.configure_logging` in the api AND in every agent worker (`run_worker`) - before 2026-10-14 the workers never configured logging and dropped all INFO |

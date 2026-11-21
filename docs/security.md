@@ -17,27 +17,54 @@
 
 ## Self-signup abuse limits
 
-`POST /v1/signup` (`routes/signup.py`, logic in `services/signup.py`) is the one route that
-creates credentials without auth, so it is boxed in:
+`POST /v1/signup` (`routes/signup.py`, logic in `services/signup.py`, anti-bot checks in
+`services/signup_guard.py`) is the one route that creates credentials without auth, so it is boxed in.
+The public form is `GET /signup`, which solves the proof of work in the browser.
 
 - **Blast radius per key.** A signed-up project has `daily_cost_cap_usd = 0` (free providers only;
-  `cost_guard` refuses any paid estimate) and a lifetime `total_request_cap` (default 100),
-  enforced atomically by `admit_request` in `services/request_cap.py`
-  (`UPDATE ... WHERE used < cap RETURNING`, so concurrent requests cannot overshoot).
-  Exhaustion answers `429 {"error": "request_cap_exhausted"}`.
-- **Signup rate.** `SIGNUP_PER_IP_PER_DAY` (default 3, client IP via `client_ip`, the first
-  `X-Forwarded-For` entry) and `SIGNUP_PER_DAY` (default 50), rolling 24h, counted from the
-  `projects` rows (`self_signup`, `signup_ip`, `created_at`). `SIGNUP_ENABLED=false` is the kill
-  switch (`403 signup_disabled`). The count-then-insert is not serialised across the two workers,
-  so a burst can overshoot a limit by a request or two; the per-key caps bound the spend.
-- **Visibility.** Every signup writes an audit row `project.self_signup` (actor `signup`, with
-  contact, purpose and IP) and sends the owner a Telegram alert (`alert("self_signup")`, throttled
-  to one per 5 minutes). Self-signup projects carry a badge and a filter in the dashboard; delete or
+  `cost_guard` refuses any paid estimate) and a lifetime `total_request_cap`: 10 while unverified
+  (`SIGNUP_UNVERIFIED_REQUEST_CAP`), 100 once verified (`SIGNUP_REQUEST_CAP`). The cap is enforced
+  atomically by `admit_request` in `services/request_cap.py` (`UPDATE ... WHERE used < cap RETURNING`, so
+  concurrent requests cannot overshoot). Exhaustion answers `429 {"error": "request_cap_exhausted"}`.
+  Verification only ever raises a cap, never lowers it.
+- **Proof of work (cost for bots).** Each signup must carry a solved challenge from `GET /v1/signup/challenge`:
+  `<issued_unix>.<random hex>.<signature>`, HMAC-signed with `TOKEN_SECRET`, so no table is needed. The
+  nonce must give `SIGNUP_POW_BITS` (18) leading zero bits of `sha256(challenge + ":" + nonce)`, about
+  260k hashes per signup. A challenge is valid for `SIGNUP_POW_TTL_S` (600 s) and only once: the replay
+  guard is a Redis `SET NX` (when `REDIS_URL` is set, with a 0.5 s timeout) and falls back to a per-process
+  set. Without Redis, a challenge can be redeemed once per worker. `SIGNUP_POW_BITS=0` switches the check off.
+- **Telegram verification (cost for humans).** A project is verified when its owner proves a Telegram
+  account with the Login Widget payload, signed with the bot token and at most a day old. It is given at
+  signup (`telegram`) or later through `POST /v1/signup/verify`. The Telegram id is stored on the project
+  (`projects.signup_telegram_id`, migration 033) and bounds projects per account (`SIGNUP_PER_TELEGRAM`, 2,
+  lifetime). Why Telegram rather than email: the broker has no SMTP, the bot already powers the dashboard
+  login on this domain, and a Telegram account is phone-backed. Cloudflare Turnstile was not used because it
+  needs a site key from the owner's Cloudflare account (a possible follow-up).
+- **Disposable email.** A contact email on a built-in list of throwaway domains (`DISPOSABLE_DOMAINS`, subdomains
+  included) is refused (`422 disposable_email`). The list is not exhaustive; the per-domain limit and the
+  Telegram verification bound the rest.
+- **Signup rate.** Four limits, rolling 24h, counted from the `projects` rows (`self_signup`, `signup_ip`,
+  `owner_email`, `created_at`): `SIGNUP_PER_IP_PER_DAY` (3, client IP via `client_ip`, the first
+  `X-Forwarded-For` entry), `SIGNUP_PER_DAY` (50, global), `SIGNUP_PER_EMAIL_DOMAIN_PER_DAY` (5, per
+  contact-email domain), and `SIGNUP_PER_TELEGRAM` (2 projects per Telegram account, lifetime). A refusal is
+  `429 signup_rate_limited` with `scope` = `ip`, `global`, `email_domain` or `telegram` and `Retry-After: 3600`.
+  `SIGNUP_ENABLED=false` is the kill switch (`403 signup_disabled`). The count-then-insert is not serialised
+  across the two workers, so a burst can overshoot a limit by a request or two; the per-key caps bound the spend.
+- **Visibility.** Every signup writes an audit row `project.self_signup` (actor `signup`, with contact,
+  purpose, IP, Telegram id and whether it was verified). A verification writes `project.signup_verified`.
+  The owner gets a Telegram alert (`alert("self_signup")`, throttled to one per 5 minutes) saying whether
+  the project is verified. Self-signup projects carry a badge and a filter in the dashboard; delete or
   disable one like any other project.
-- **Code map.** `signup_endpoint` (body `SignupRequest`, answer `SignupResponse` / `SignupLimits`)
-  calls `self_signup` (returns `SignupResult`); `slugify_name` builds the name. Refusals are the
-  exceptions `SignupDisabled` (403), `SignupRateLimited` (429) and `SignupNameInvalid` (422). The
-  request cap raises `RequestCapExhausted`, which `main.py` turns into the stable 429 body.
+- **Existing projects.** Manual projects and earlier self-signups are unaffected. Migration 033 adds only
+  nullable columns, and caps already stored are kept.
+- **Code map.** `signup_endpoint` (`POST /v1/signup`, body `SignupRequest`, answer `SignupResponse` /
+  `SignupLimits`) calls `self_signup` (returns `SignupResult`); `signup_challenge` issues the proof of work
+  through `issue_challenge`, and `check_pow` (`services/signup_guard.py`) verifies it; `signup_verify` calls
+  `verify_signup`. `slugify_name` builds the name. Refusals are the exceptions `SignupDisabled` (403),
+  `SignupRateLimited` (429), `SignupNameInvalid` and `SignupContactRefused` (422), `PowInvalid` and
+  `SignupTelegramInvalid` (400), and `SignupNotEligible` (409). The request cap raises `RequestCapExhausted`,
+  which `main.py` turns into the stable 429 body.
+- **Anti-bot names.** `ProofOfWork` is the `pow` object of the signup body; `VerifyRequest` / `VerifyResponse` are the models of `POST /v1/signup/verify`; `is_disposable()` is the throwaway-domain check; `leading_zero_bits()` is the PoW difficulty check; `signup_page` is the `GET /signup` web form handler.
 - The `X-Forwarded-For` header is only as trustworthy as the proxy in front; a spoofed header can
   dodge the per-IP limit (not the global one). Lower `SIGNUP_PER_DAY` or flip the kill switch if abused.
 

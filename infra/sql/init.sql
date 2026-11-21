@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS projects (
   total_requests_used INTEGER NOT NULL DEFAULT 0,
   self_signup BOOLEAN NOT NULL DEFAULT FALSE,
   signup_ip VARCHAR(64),
+  signup_verified_at TIMESTAMP,                     -- 033: Telegram-verified self-signup
+  signup_telegram_id BIGINT,                        -- 033
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   notes TEXT NOT NULL DEFAULT '',
   agent_enabled BOOLEAN NOT NULL DEFAULT FALSE,     -- 026: dashboard agent access
@@ -30,6 +32,8 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS ix_projects_active ON projects(is_active);
 CREATE INDEX IF NOT EXISTS ix_projects_self_signup_created ON projects(created_at) WHERE self_signup;
+CREATE INDEX IF NOT EXISTS ix_projects_signup_telegram
+  ON projects(signup_telegram_id) WHERE signup_telegram_id IS NOT NULL;
 
 -- ─── API keys (the actual provider credentials) ─────────────────────────────
 CREATE TABLE IF NOT EXISTS api_keys (

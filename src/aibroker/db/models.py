@@ -57,6 +57,9 @@ class ProjectRow(Base):
     self_signup: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=sa_expr.false(), nullable=False)
     signup_ip: Mapped[str | None] = mapped_column(String(64))
+    # Migration 033: a self-signup proved a Telegram account (services/signup.py).
+    signup_verified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    signup_telegram_id: Mapped[int | None] = mapped_column(BigInteger)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Agent access edited on the dashboard (migration 026; agent/project_access.py).

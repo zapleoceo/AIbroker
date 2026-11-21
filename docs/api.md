@@ -14,46 +14,128 @@ login routes are excluded from the public `/openapi.json` (2026-10-02).
 
 ## Quick start: self-signup
 
-Any service can get itself a working key with one unauthenticated call, no approval:
+Any service can get itself a working key without an approval queue, in one of two ways:
+
+- **Web form:** [`/signup`](https://aib.zapleo.com/signup). The page solves the anti-bot proof of work in
+  the browser, offers the Telegram Login Widget to verify the project, and has a "verify an existing key"
+  box (paste the key, sign in with Telegram, press Verify).
+- **API:** fetch a challenge, solve it, then post the signup.
+
+**1. Get a challenge** (single use, valid 10 minutes, stateless):
+
+```bash
+curl https://aib.zapleo.com/v1/signup/challenge
+```
+
+```json
+{
+  "challenge": "1795000000.5c1f0e9a7b3d2f4e8a6b1c0d.9e41f0c2a7b3d8e5f1a2b3c4d5e6f708",
+  "difficulty_bits": 18,
+  "expires_in_s": 600,
+  "algorithm": "sha256(challenge + ':' + nonce) must start with difficulty_bits zero bits; nonce is a decimal integer"
+}
+```
+
+`challenge` is `<issued_unix>.<hex>.<signature>`, HMAC-signed by the broker. Solve it: find a decimal
+`nonce` such that `sha256(challenge + ":" + nonce)` has at least `difficulty_bits` leading zero bits
+(18 bits is about 260k hashes: a second or two in a browser, well under a second in Python):
+
+```python
+import hashlib
+
+def solve(challenge: str, bits: int) -> str:
+    n = 0
+    while True:
+        digest = hashlib.sha256(f"{challenge}:{n}".encode()).digest()
+        if int.from_bytes(digest, "big") >> (256 - bits) == 0:  # top `bits` bits are zero
+            return str(n)
+        n += 1
+
+nonce = solve(challenge, 18)
+```
+
+**2. Sign up:**
 
 ```bash
 curl -X POST https://aib.zapleo.com/v1/signup \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-service", "contact": "me@example.com", "purpose": "connect + test"}'
+  -d '{"name": "my-service", "contact": "me@example.com", "purpose": "connect + test",
+       "pow": {"challenge": "1795000000.5c1f0e9a7b3d2f4e8a6b1c0d.9e41f0c2a7b3d8e5f1a2b3c4d5e6f708",
+               "nonce": "2940"}}'
 ```
 
 ```json
 {
   "name": "my-service",
   "project_key": "aib_prj_...",
-  "limits": {"daily_cost_cap_usd": 0.0, "total_request_cap": 100,
+  "verified": false,
+  "limits": {"daily_cost_cap_usd": 0.0, "total_request_cap": 10,
              "scopes": ["llm:chat", "llm:embed"]},
   "docs_url": "https://aib.zapleo.com/docs",
-  "upgrade": "Need more? Contact the owner with your project name to raise the limits."
+  "verify_url": "https://aib.zapleo.com/signup#verify",
+  "upgrade": "Verified projects get the full request cap; need more? Contact the owner with your project name to raise the limits."
 }
 ```
 
 Send `project_key` as `X-Project-Key` on every other call. **It is shown once** - store it.
 
-- `name` (required) is normalised to a lowercase slug (`My Bot!` -> `my-bot`, 2-60 chars). It must
+- `name` (required, 2-100 chars) is normalised to a lowercase slug (`My Bot!` -> `my-bot`, 2-60 chars). It must
   be unique: on a clash a `-<4 hex>` suffix is appended, so always read the returned `name`.
-  `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
+- `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades. An email
+  on a throwaway-mail domain (a built-in list such as `mailinator.com`, `yopmail.com`, `guerrillamail.com`;
+  subdomains included) is refused with `422 disposable_email`.
+- `pow` (required unless the owner set `SIGNUP_POW_BITS=0`) is the solved challenge: `challenge` and `nonce`.
+  A challenge is single use; a replayed, expired or forged one is refused with `400 pow_invalid`.
+- `telegram` (optional) is the Telegram Login Widget payload (`id`, `first_name`, `username`, `auth_date`,
+  `hash`, ...) signed with the broker's bot token and at most a day old. A valid payload verifies the project
+  at once; an invalid one is refused with `400 telegram_invalid`.
+
+**Verified or not.** An unverified project gets a lifetime cap of **10** requests
+(`SIGNUP_UNVERIFIED_REQUEST_CAP`); a verified one gets **100** (`SIGNUP_REQUEST_CAP`). Both are $0/day, free
+providers only, with scopes `llm:chat` and `llm:embed` (`SIGNUP_DEFAULT_SCOPES`).
+
 - **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
-  not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
+  not "unlimited" - `NULL` is). `total_request_cap` is a lifetime count of **client requests**:
   one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe`, `/v1/video/jobs`, `/v1/images/jobs` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
   (`GET /v1/jobs/{id}`), `/v1/models` and requests rejected for scope or body errors are free.
-  A request counts once admitted, even if the provider then fails. Default scopes are `llm:chat` and
-  `llm:embed` (`SIGNUP_DEFAULT_SCOPES`).
+  A request counts once admitted, even if the provider then fails.
+
+**3. Verify later (optional, raises the cap to 100).** An unverified project sends its key and a Telegram payload:
+
+```bash
+curl -X POST https://aib.zapleo.com/v1/signup/verify \
+  -H "X-Project-Key: aib_prj_..." \
+  -H "Content-Type: application/json" \
+  -d '{"telegram": {"id": 123456789, "first_name": "Ann", "username": "ann", "auth_date": 1795000000, "hash": "..."}}'
+```
+
+```json
+{"name": "my-service", "verified": true,
+ "limits": {"daily_cost_cap_usd": 0.0, "total_request_cap": 100, "scopes": ["llm:chat", "llm:embed"]}}
+```
+
+The key does not change. The cap rises to `SIGNUP_REQUEST_CAP` and is never lowered. Each Telegram account
+may own at most `SIGNUP_PER_TELEGRAM` (2) projects, lifetime.
+
 - **Errors.**
 
 | Status | `error` | Meaning |
 |---|---|---|
-| `422` | `invalid_name` | the name has fewer than 2 usable characters (`a-z`, `0-9`) |
+| `400` | `pow_invalid` | the proof of work is missing, forged, expired (older than `SIGNUP_POW_TTL_S`, 600 s), already used, or does not meet `SIGNUP_POW_BITS`: fetch a new challenge |
+| `400` | `telegram_invalid` | the Telegram payload is unsigned, forged, or older than a day (`/v1/signup` and `/v1/signup/verify`) |
 | `403` | `signup_disabled` | the owner turned self-signup off (`SIGNUP_ENABLED=false`) |
-| `429` | `signup_rate_limited` | too many signups: `scope` is `ip` (default 3/day per address) or `global` (default 50/day); `Retry-After` is set |
+| `422` | `invalid_name` | the name has fewer than 2 usable characters (`a-z`, `0-9`) |
+| `422` | `disposable_email` | the contact email is on a throwaway-mail domain |
+| `429` | `signup_rate_limited` | a limit is reached; `scope` is `ip` (`SIGNUP_PER_IP_PER_DAY`, 3/day per address), `global` (`SIGNUP_PER_DAY`, 50/day), `email_domain` (`SIGNUP_PER_EMAIL_DOMAIN_PER_DAY`, 5/day per contact domain) or `telegram` (`SIGNUP_PER_TELEGRAM`, 2 projects per Telegram account, lifetime); `Retry-After: 3600` is set |
+| `409` | `not_eligible` | `POST /v1/signup/verify` only: the project is already verified, or is not a self-signup |
 | `429` | `request_cap_exhausted` | on any later call: the project spent its lifetime allowance, body `{"error": "request_cap_exhausted", "limit": 100, "used": 100, "message": "..."}` |
 
+- **Settings.** `SIGNUP_ENABLED`, `SIGNUP_PER_IP_PER_DAY` (3), `SIGNUP_PER_DAY` (50), `SIGNUP_PER_EMAIL_DOMAIN_PER_DAY` (5),
+  `SIGNUP_PER_TELEGRAM` (2), `SIGNUP_POW_BITS` (18, `0` = off), `SIGNUP_POW_TTL_S` (600),
+  `SIGNUP_UNVERIFIED_REQUEST_CAP` (10), `SIGNUP_REQUEST_CAP` (100), `SIGNUP_DEFAULT_SCOPES`. See [deploy-ops](deploy-ops.md).
+- **Existing projects.** Projects created by hand or by earlier self-signups are unaffected: their stored caps are
+  kept, and the new `signup_verified_at` / `signup_telegram_id` columns (migration 033) are nullable.
 - **More limits.** Message the owner with the project `name`; they raise `total_request_cap` and the
   daily cost cap in the dashboard (project -> Settings; a blank request cap = unlimited). Projects
   created before this feature have no request cap.
@@ -62,7 +144,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/signup` | Self-signup: returns a restricted project key once ($0/day, 100 requests total) - see [Quick start](#quick-start-self-signup) |
+| `POST` | `/v1/signup` | Self-signup: returns a restricted project key once ($0/day; 10 requests, 100 once verified with Telegram; needs a solved `pow` challenge) - see [Quick start](#quick-start-self-signup) |
 | `GET` | `/` | Public bilingual (EN/RU) landing page — product overview, OG/Twitter/Schema.org metadata |
 | `GET` | `/robots.txt` | Crawler policy — index everything except `/admin/`, `/dashboard`, `/api/` |
 | `GET` | `/sitemap.xml` | XML sitemap with hreflang EN/RU alternates |
