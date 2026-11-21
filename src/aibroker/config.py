@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     GEMINI_VIDEO_TIMEOUT_S: float = 420.0
     # Seconds between two looks at the hosted file while it is still processing.
     GEMINI_VIDEO_POLL_S: float = 5.0
+    # Gemini image generation (/v1/images/jobs): one generateContent call; a 1K image
+    # with two references took 8.4 s live (2026-11-21), 4K on the Pro model far longer.
+    GEMINI_IMAGE_TIMEOUT_S: float = 180.0
     # Gemini Live (/v1/live): connect + setup ceiling per key attempt, and the
     # longest call. Google closes one Live WebSocket after ~10 min (goAway first),
     # so a call is capped below that; the reservation covers the whole ceiling.

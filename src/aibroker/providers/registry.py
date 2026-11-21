@@ -63,6 +63,9 @@ class ModelSpec:
     litellm_extra: Mapping[str, Any] = field(default_factory=dict)
     register: bool = True                      # push an "override" into litellm's map
     note: str = ""                             # one-line rationale, details in docs/history
+    # Inline input kinds beyond text/image the model reads on the vision lane
+    # ("video", "pdf"); a request carrying one walks only such models.
+    media_inputs: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +223,12 @@ def cooldown_base_for(provider: str) -> int:
 
 def quotas() -> dict[str, Quota]:
     return {n: s.quota for n, s in REGISTRY.items()}
+
+
+def reads_media(model: str, kinds: frozenset[str]) -> bool:
+    """True when `model` reads every inline media kind in `kinds` (video, pdf)."""
+    spec = model_spec(model)
+    return bool(spec) and kinds <= spec.media_inputs
 
 
 def model_for(provider: str, capability: str) -> str | None:

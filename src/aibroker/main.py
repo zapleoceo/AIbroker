@@ -26,6 +26,7 @@ from aibroker.routes import (
     compare,
     dashboard,
     health,
+    images,
     jobs_control,
     landing,
     live,
@@ -210,6 +211,7 @@ app.include_router(landing.router)
 app.include_router(compare.router)
 app.include_router(health.router)
 app.include_router(proxy.router, prefix="/v1")
+app.include_router(images.router, prefix="/v1")
 app.include_router(jobs_control.router, prefix="/v1")
 app.include_router(agent.router, prefix="/v1")
 app.include_router(signup.router, prefix="/v1")

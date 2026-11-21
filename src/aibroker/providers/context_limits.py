@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from aibroker.providers.media_inputs import MEDIA_BLOCK_TYPES, media_chars
+
 # Bootstrap seeds live on ProviderSpec.max_request_tokens (None = no known ceiling).
 
 # Safety margin so a prompt that just barely fits doesn't overflow once the
@@ -79,6 +81,8 @@ def content_chars(content: Any) -> int:
                 continue
             if block.get("type") == "text":
                 total += len(block.get("text") or "")
+            elif block.get("type") in MEDIA_BLOCK_TYPES:
+                total += media_chars(block)   # inline video / PDF: scales with size
             else:
                 total += 1000   # image/audio block proxy
         return total

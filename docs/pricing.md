@@ -18,6 +18,7 @@ numbers here are what a PAID key would be charged. Code: `providers/pricing.py`
 | Gemini chat transcription | Token price; the audio part of the prompt is billed at the model's audio rate (see below). |
 | Gemini TTS (`speech`) | Token price: text tokens in at the text rate, audio tokens out at the audio output rate (`providers/gemini_tts.py` `tts_cost`). See Gemini audio. |
 | Gemini Omni video (`video`) | Token price: input tokens at the text rate, video output tokens at the video rate (`providers/gemini_video.py` `video_cost`). See Gemini Omni video. |
+| Gemini image (`image`) | Token price: prompt tokens at the text input rate, image output tokens (candidate + thought tokens) at the image output rate (`providers/gemini_image.py` `image_cost`). See Gemini image. |
 | `local/*` (Qwen3-VL) | Free, no external bill. |
 
 The usage write after a successful paid call runs as its own tracked task behind `asyncio.shield` (`services/attempt.py`). The provider has already billed, so the ledger row lands even if the client disconnects: the cancel is raised at once and does not wait for the write, which completes in the background. A failed background write is logged with `log.error` (key, project, model).
@@ -51,6 +52,14 @@ The usage write after a successful paid call runs as its own tracked task behind
 * Gemini Live (`gemini/gemini-3.8-live`, `live`, WebSocket BidiGenerateContent, 2026-11-13): $0.75/M text tokens in, $4.50/M text tokens out, $3.00/M audio tokens in, $12.00/M audio tokens out. Audio rates are ~$0.005/min of input speech heard (~30 input tokens/s), ~$0.018/min of output speech spoken (~25 output tokens/s). Google list price (2026-11-13). The pre-call reservation (`estimate_live_cost`) assumes the session runs at full capacity (both sides speaking continuously) for the session ceiling (`LIVE_MAX_SESSION_S`=540 s); the booked cost (`live_cost`) is computed from the actual usage reported by Google, split by modality (`LiveUsage.text_in`, `audio_in`, `text_out`, `audio_out`). See `providers/gemini_live.py`.
 
 * Gemini Omni video (`gemini/gemini-omni-1.2-flash`, `video`, Interactions API, 2026-11-14): $1.50/M input tokens, $12.00/M video output tokens. Google bills 1,931 output tokens per second of video at 360p and 5,792 at 720p, so about $0.023/s at 360p and $0.07/s at 720p: a 5 s 360p clip is about $0.12, a 5 s 720p clip about $0.35. No free tier. The pre-call reservation (`estimate_video_cost`) is estimated from the prompt length (plus 1,500 tokens for a reference image) and the table's output tokens (`video_output_tokens`). The booked cost (`video_cost`) uses the `usage.total_input_tokens` / `total_output_tokens` the response reports, else the tokens-per-second table.
+
+## Gemini image (`image`, 2026-11-21)
+
+* `gemini/gemini-3.1-flash-image` (Nano Banana 2, default): $0.50/M text input, $60/M image output. A 1K image is 1120 output tokens (about $0.067), 2K 1680 (about $0.10), 4K 2520 (about $0.15).
+* `gemini/gemini-3-pro-image` (Nano Banana Pro): $2.00/M text input, $120/M image output. 1K and 2K are 1120 tokens (about $0.134), 4K 2000 tokens (about $0.24).
+* `gemini/gemini-3.1-flash-lite-image` (Nano Banana 2 Lite): $0.25/M text input, $30/M image output, not tuned for several references.
+
+Standard-tier list prices, Google pricing page 2026-11. Reference images are input tokens. Cost is prompt tokens x input price + (candidate + thought tokens) x image output price, an upper bound from the reported usage. The pre-call reservation (`estimate_image_cost`) is only an estimate; the booked cost is `image_cost`. A live 1K call with two PNG references (544 prompt and 1429 candidate tokens) cost about $0.086. Paid keys only.
 
 ## Models we register ourselves (`litellm.register_model`)
 

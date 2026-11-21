@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aibroker.providers.adapters import _GeminiAdapter
+from aibroker.providers.media_inputs import GEMINI_MEDIA_INPUTS
 from aibroker.providers.registry import ProbeSpec, Quota, build_provider
 
 GEMINI_CHAT_ROTATION = ("gemini/gemini-3.5-flash-lite",
@@ -11,6 +12,9 @@ GEMINI_CHAT_ROTATION = ("gemini/gemini-3.5-flash-lite",
 GEMINI_VISION_ROTATION = ("gemini/gemini-3.5-flash-lite",
                           "gemini/gemini-3.5-flash",
                           "gemini/gemini-3.1-flash-lite")
+# Every model the vision lane can reach on gemini (default + rotation) reads
+# inline video and PDF too (services/llm_service keeps such requests on them).
+_VISION_MODELS = ("gemini/gemini-2.5-flash", *GEMINI_VISION_ROTATION)
 GEMINI_CHAT_LANES = ("chat:fast", "chat:smart", "chat:sales", "chat:code",
                      "chat:edit", "structured", "prefilter", "translate")
 
@@ -20,7 +24,8 @@ SPEC = build_provider(
     transport_factories={"gemini_asr": "aibroker.providers.gemini_asr:GeminiAsrTransport",
                          "gemini_tts": "aibroker.providers.gemini_tts:GeminiTtsTransport",
                          "gemini_live": "aibroker.providers.gemini_live:GeminiLiveTransport",
-                         "gemini_video": "aibroker.providers.gemini_video:GeminiVideoTransport"},
+                         "gemini_video": "aibroker.providers.gemini_video:GeminiVideoTransport",
+                         "gemini_image": "aibroker.providers.gemini_image:GeminiImageTransport"},
     quota=Quota(req_per_day=1_500, doc="https://ai.google.dev/gemini-api/docs/rate-limits"),
     # Free-quota providers (gemini 20/day/model, cohere 1000/month, mistral monthly,
     # openrouter :free ~50/day) probe via free unmetered key-list endpoints, never a
@@ -41,7 +46,8 @@ SPEC = build_provider(
               "transcription": "gemini/gemini-3.5-transcribe",
               "speech": "gemini/gemini-3.8-flash-tts",
               "live": "gemini/gemini-3.8-live",
-              "video": "gemini/gemini-omni-1.2-flash"},
+              "video": "gemini/gemini-omni-1.2-flash",
+              "image": "gemini/gemini-3.1-flash-image"},
     rotation={**dict.fromkeys(GEMINI_CHAT_LANES, GEMINI_CHAT_ROTATION),
               "vision": GEMINI_VISION_ROTATION},
     model_meta={   # dedicated ASR model needs raw generateContent (not litellm)
@@ -76,5 +82,24 @@ SPEC = build_provider(
             "transport": "gemini_video", "pricing": "override", "register": False,
             "input_usd_per_mtok": 1.50, "output_usd_per_mtok": 12.00,
             "note": "Gemini Omni Flash video, 3-15 s with native audio; not live-verified"},
+        # Image generation from a prompt + reference images (/v1/images/jobs, paid keys
+        # only, providers/gemini_image.py). 2026-11 pricing page, Standard tier: text/image
+        # in, image out per 1M tokens; a 1K image is 1120 output tokens (~$0.067 on
+        # 3.1 Flash Image). Live-verified 2026-11-21: 2 references -> 9:16 JPEG in 8.4 s.
+        "gemini/gemini-3.1-flash-image": {
+            "transport": "gemini_image", "pricing": "override", "register": False,
+            "input_usd_per_mtok": 0.50, "output_usd_per_mtok": 60.00,
+            "note": "Nano Banana 2; up to 14 references (4 characters + 10 objects)"},
+        "gemini/gemini-3-pro-image": {
+            "transport": "gemini_image", "pricing": "override", "register": False,
+            "capabilities": ("image",),
+            "input_usd_per_mtok": 2.00, "output_usd_per_mtok": 120.00,
+            "note": "Nano Banana Pro; strongest identity keeping (5 character references)"},
+        "gemini/gemini-3.1-flash-lite-image": {
+            "transport": "gemini_image", "pricing": "override", "register": False,
+            "capabilities": ("image",),
+            "input_usd_per_mtok": 0.25, "output_usd_per_mtok": 30.00,
+            "note": "Nano Banana 2 Lite; cheapest, not tuned for several references"},
+        **{m: {"media_inputs": GEMINI_MEDIA_INPUTS} for m in _VISION_MODELS},
     },
 )

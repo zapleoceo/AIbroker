@@ -42,7 +42,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 |---|---|
 | `llm:chat` | `/v1/jobs?capability=chat:*` (+ `structured`/`prefilter`/`translate`) access |
 | `llm:embed` | `/v1/embed` access — any provider |
-| `llm:vision` | `capability=vision` access; also required for any `image_url` block on `/v1/jobs` (any capability) or `/v1/deep` |
+| `llm:vision` | `capability=vision` access; also required for any `image_url` block on `/v1/jobs` (any capability) or `/v1/deep`; also for `video_url` and video or PDF `file` blocks (2026-11-21) |
 | `llm:edit` | `capability=chat:edit` — reserved edit/coach lane |
 | `llm:deep` | `/v1/deep` — deep-reasoning models |
 | `llm:agent` | Subscription Claude/Codex backends selected by `model` on `/v1/jobs`, and `/v1/agent/runs`. Re-checked on every read of an `agent:*` job and of `/v1/agent/runs` results, so revoking it closes existing results |
@@ -50,6 +50,7 @@ Defined in `projects.allowed_scopes` (JSON array of strings).
 | `llm:speech` | `/v1/speech` (`capability=speech`) — Gemini text → speech; paid gemini keys only |
 | `llm:live` | `/v1/live` (WebSocket) — Gemini Live real-time voice call; paid gemini keys only |
 | `llm:video` | `/v1/video/jobs` (`capability=video`) — Gemini Omni video clips; paid gemini keys only; not in the default scopes |
+| `llm:image` | `/v1/images/jobs` (lane `image`) — Gemini image generation (Nano Banana models, `gemini/gemini-3.1-flash-image` and siblings); paid gemini keys only; not in the default scopes. The key and the project both need it |
 
 Capability scopes stay in sync across `chains.CAPABILITY_SCOPE`,
 `dashboard_scopes._KNOWN_SCOPES` (provider key forms), and this table.

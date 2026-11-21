@@ -36,7 +36,7 @@ Send `project_key` as `X-Project-Key` on every other call. **It is shown once** 
   `contact` (email or handle) and `purpose` are optional and only help the owner decide on upgrades.
 - **Limits.** `daily_cost_cap_usd = 0` means *free providers only* (a paid-tier key is refused unless the model is registry-known free, so an unpriced model priced at $0 is refused; free-tier and `trial` keys are unaffected; `0` is
   not "unlimited" - `NULL` is). `total_request_cap = 100` is a lifetime count of **client requests**:
-  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe`, `/v1/video/jobs` and
+  one per `POST` to `/v1/jobs`, `/v1/deep`, `/v1/embed`, `/v1/decisions`, `/v1/speech`, `/v1/transcribe`, `/v1/video/jobs`, `/v1/images/jobs` and
   `/v1/transcribe/jobs`, however many providers the broker tries behind it. Polling
   (`GET /v1/jobs/{id}`), `/v1/models` and requests rejected for scope or body errors are free.
   A request counts once admitted, even if the provider then fails. Default scopes are `llm:chat` and
@@ -181,6 +181,7 @@ adaptive cooldowns), so a CDN/browser must never cache a snapshot.
 | `POST` | `/v1/decisions` | `DecisionRequest` | `DecisionResponse` (**sync**, typed choice — see below) |
 | `POST` | `/v1/speech` | `SpeechRequest` | `SpeechResponse` (**sync**, text → WAV audio as base64 — see below) |
 | `POST` | `/v1/video/jobs` | `VideoJobRequest` | `JobSubmitResponse` (**async** — `202` + `job_id`, poll `GET /v1/jobs/{id}`; clip as `video_base64`, see below) |
+| `POST` | `/v1/images/jobs` | `ImageJobRequest` | `202` `{job_id, status: "pending", poll_url, poll_after_s: 5, trace_id, labels}` (**async** — poll `GET /v1/jobs/{id}`; image as `image_base64`, see `/v1/images/jobs` below) |
 | `WebSocket` | `/v1/live` | `LiveStart` + audio/text frames | streaming audio + transcript — see below |
 | `GET` | `/v1/models` | - | `{object:"list", data:[model…]}` - local, API and explicit subscription route ids, each with `intelligence_index` (see [subscription-models.md](subscription-models.md) and below) |
 | `GET` | `/v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` | - | `{from, to, currency, total, by_capability, by_day, limits}` - what this project spent, from `usage_log` (see below) |
@@ -883,6 +884,38 @@ See [Vivix integration and remaining gates](vivix.md).
 - **Price.** About $0.12 for a 5 s 360p clip, about $0.35 for a 5 s 720p clip. See [pricing.md](pricing.md).
 - **Errors.** `403` without `llm:video`; `422` invalid body; `400` bad image or a pinned model that does not serve video. Generation failures show on the job, not at submit.
 
+### `/v1/images/jobs` — prompt → image (2026-11-21)
+
+Asynchronous only: `202` with a `job_id` at once, then poll `GET /v1/jobs/{id}`. Lane `image`, scope `llm:image`, chain `gemini` only (`chains.CAPABILITY_CHAINS["image"]`). Submit is `images_submit` (`routes/images.py`). The job runs `run_image` (`services/image_service.py`), which calls `generate_image` (`providers/transport.py`, Protocol `ImageTransport`) and the raw Gemini transport `GeminiImageTransport` (`providers/gemini_image.py`). The Codex subscription image route (`POST /v1/jobs` with a `codex-sub` model) is unchanged and separate.
+
+```json
+POST /v1/images/jobs
+{"prompt": "A paper boat drifts down a rain-soaked street at dusk, watercolor",
+ "references": [{"image_base64": "data:image/png;base64,...."}],
+ "aspect_ratio": "9:16", "image_size": "1K", "workflow": "sim-cover"}
+```
+
+Body (`ImageJobRequest`):
+- `prompt` (required): 1–8000 characters, not blank.
+- `references` (optional): 0–8 items `{"image_base64": "<base64 or data:image/...;base64,...>", "mime": optional}`. `mime` is `image/jpeg`, `image/png` or `image/webp`; the real type is read from the bytes. JPEG, PNG and WebP only. Each reference is at most 7 MB decoded and all of them together at most 20 MB. Bad base64, an unsupported format or an oversize item is `400` (`ImageReference`, `decode_references`).
+- `aspect_ratio`: `null` (the model decides, the default) or one of `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9` (`IMAGE_ASPECT_RATIOS`).
+- `image_size`: `1K` (default), `2K` or `4K` (`IMAGE_SIZES`).
+- `model` (optional): a pin. Only the image models serve the lane: `gemini/gemini-3.1-flash-image` (default), `gemini/gemini-3-pro-image` and `gemini/gemini-3.1-flash-lite-image`. Any other model is `400`.
+- `workflow`, `trace_id`, `labels`, `priority` (`interactive` or `batch`): as for `POST /v1/jobs`.
+
+Optional headers: `Idempotency-Key` (the same key with the same payload returns `200` and the same job; the same key with another payload is `409`) and `X-Trace-Id`. An identical in-flight request without `Idempotency-Key` is deduplicated to the same job, the existing `deep_jobs` behaviour.
+
+Response `202`: `{job_id, status: "pending", poll_url: "/v1/jobs/{id}", poll_after_s: 5, trace_id, labels}`.
+
+Poll `GET /v1/jobs/{id}`. A finished image job has `text: null` and carries `image_base64` (a new `DeepJobResponse` field: the image bytes, base64), `mime_type` (`image/jpeg` or `image/png`, as the model returned it), `cost_usd`, `provider`, `model`, `tokens_in`, `tokens_out`, `latency_ms` and `request_id`. The queued request keeps the prompt and references in its `image` payload (`image_job_payload` / `image_request_from_job`, `services/image_service.py`); the dispatcher's `image` branch runs it through `run_image`. `run_image` returns an `ImageOutcome`.
+
+- **Paid keys only.** `run_image` rotates gemini keys with `tier='paid'` that hold scope `llm:image`. The key and the project both need the scope. A free key is never picked. With no such key the job is requeued like any job with no capacity.
+- **Caps apply.** The spend goes through the usual reservation (`estimate_image_cost`) and is booked with `image_cost` after the call. A spent project or global cap ends the job with the normal budget message.
+- **Refusals and retries.** `ImageRejected` (HTTP 400, a prompt blocked through `promptFeedback.blockReason`, or a reply with no image) ends the job in `error` at once, with no other key and no retry. Other failures are retried at most `IMAGE_MAX_RETRIES` (2) times (`job_queue._max_retries_for`, the same cap as video), because every finished image is billed. `ImageFailed` is the outcome when every key failed.
+- **No media fence.** The generation is one synchronous Google call with no remote job id to resume. A worker that dies after Google has answered runs the call again and pays for one more image; the retry cap bounds that.
+- **Timeout.** `GEMINI_IMAGE_TIMEOUT_S` (default 180 s). Running out of time raises a plain `RuntimeError`, not `TimeoutError`, so the paid key is not cooled.
+- **Errors.** `403` without `llm:image`; `422` invalid body (blank prompt, unknown `aspect_ratio` or `image_size`, more than 8 references); `400` bad reference or a pinned model that does not serve `image`. Generation failures show on the job, not at submit.
+
 ### `/v1/live` — real-time voice call (2026-11-13)
 
 WebSocket-based real-time speech-to-speech via Gemini Live. The caller streams audio and receives
@@ -948,6 +981,23 @@ Chain: `local` (self-hosted Qwen3-VL, see below) → `gemini` → `sambanova` �
 `openrouter` → `deepseek` → `openai`. The regular walk is **free-only**
 (`free_first_walk`, `FREE_WALK_CAPABILITIES`): the paid providers (`deepseek`,
 `openai`) are tried only on the job queue's final retry (`paid_only`).
+
+#### Inline video and PDF (2026-11-21)
+
+The vision lane also takes video and PDF attachments, inline only: base64 `data:` URLs in `messages[].content`. A remote URL is `400`.
+
+- video: `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}`, MIME `video/mp4`, `video/webm` or `video/quicktime`. A `file` block that carries a video data URL works too.
+- PDF: `{"type":"file","file":{"file_data":"data:application/pdf;base64,...","filename":"x.pdf"}}` (OpenAI's file block shape).
+
+Limits: each attachment is at most 20 MB decoded, and all video and PDF bytes of one request together are at most 20 MB (`MAX_MEDIA_BYTES` in `services/vision_payload.py`). The bytes must match the declared container (MP4/MOV `ftyp`, WebM EBML, PDF `%PDF-`), otherwise `400`. nginx caps the `/v1/jobs` body at 28 MB, so inline video or PDF must fit in that body after base64.
+
+Gate (`routes/proxy.py` `_require_image_access`): any `video_url` block, or a `file` block with video, needs `llm:vision` (`403` without it) and `capability=vision` (`400` otherwise). Validation is `inline_media_problem` (`services/vision_payload.py`, `400`). A pinned `model` must read the media (`_validate_media_pin`, `400` "does not read inline ..."). `inline_image_problem` now hints "send video as a video_url block" or "send a PDF as a file block" when an `image_url` block actually holds a video or PDF.
+
+Routing (`services/llm_service.run_chat`): when a request carries video or PDF, the walk keeps only the models whose `ModelSpec.media_inputs` cover those kinds (`reads_media`, `providers/registry.py`). Today that is the gemini vision models only: gemini-2.5-flash, gemini-3.5-flash-lite, gemini-3.5-flash and gemini-3.1-flash-lite (`GEMINI_MEDIA_INPUTS`). `local` (Qwen3-VL), sambanova, openrouter, deepseek and openai are skipped. Free gemini keys go first, as for every vision job; the paid gemini key is used only on the final retry. Image-only vision requests are unchanged and still start at `local`. `GET /v1/models` shows the gemini vision models with `"modalities": ["text","image","video","pdf"]`.
+
+Gemini adapter: `gemini_media_messages` (`providers/media_inputs.py`) rewrites `video_url` blocks into litellm `file` blocks inside `_GeminiAdapter.prepare` (`providers/adapters.py`). It works on a copy and never mutates the stored request. The leaf helpers in that module are `data_url_of`, `declared_mime`, `block_kind`, `media_kinds` and `media_chars`; `media_chars` is the token proxy that `estimate_prompt_tokens` uses (about 1000 tokens per MB of video, 4000 per MB of PDF, at least 1000). The constants are `VIDEO_MIMES`, `PDF_MIME`, `GEMINI_MEDIA_INPUTS` and `MEDIA_BLOCK_TYPES`.
+
+Live-verified 2026-11-21 with the paid gemini key through litellm 1.103.2 on gemini-3.5-flash-lite: an mp4 sent as a `video_url` block (converted to `file`), an mp4 sent as an `image_url` block, and a PDF sent as a `file` block were all answered correctly.
 
 #### `local` — self-hosted Qwen3-VL-4B (2026-08-31)
 
@@ -1042,6 +1092,7 @@ instead of grepping timestamps against provider/model/workflow.
 | `/v1/speech` | `llm:speech` |
 | `/v1/live` | `llm:live` |
 | `/v1/video/jobs` | `llm:video` |
+| `/v1/images/jobs` | `llm:image` |
 | `/v1/usage` | none (any project key) |
 
 ## Admin (X-Admin-Key required)
@@ -1194,7 +1245,7 @@ Non-subscription rows have neither field. See [subscription-models.md](subscript
 
 `modalities` lists input types accepted on this route's configured Broker lanes:
 `["text", "image"]` for a vision lane, `["audio"]` for transcription and live, and
-`["text"]` for chat, embedding and speech, `["text", "image"]` for video. It is `null` when the lane does not define
+`["text"]` for chat, embedding and speech, `["text", "image"]` for video, and `["text", "image"]` for image jobs (their output is `output_modalities: ["image"]`). The gemini vision models list `["text", "image", "video", "pdf"]`. It is `null` when the lane does not define
 one of these inputs. For API models, `supports_tools` is `true` only when native
 tools are enabled for the provider in Broker and the installed LiteLLM model
 map confirms function calling. It is `false` when Broker's adapter rejects tools, and `null`
@@ -1287,7 +1338,7 @@ derived from the family is sent to providers that document one (OpenAI, Mistral,
 ## Request body limits (2026-10-02)
 
 nginx (`infra/nginx-aib.conf`) allows 4 MB by default, 26 MB on
-`/v1/transcribe*` and 28 MB on `/v1/jobs`. Application limits behind it: 25 MB
+`/v1/transcribe*` and 28 MB on `/v1/jobs` and `/v1/images/jobs` (2026-11-21; inline video and PDF on `/v1/jobs` count against the same 28 MB). Application limits behind it: 25 MB
 audio (`_MAX_AUDIO_BYTES`) and 20 MB per decoded image (`_MAX_IMAGE_BYTES`).
 Over the nginx limit the caller gets `413` from nginx before the app sees the
 request.

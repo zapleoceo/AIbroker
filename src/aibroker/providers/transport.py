@@ -8,8 +8,8 @@ dispatch through it, so no caller special-cases a provider.
 
 Return convention for every method: `(payload, meta)` where meta carries at least
 model, model_served, tokens_in, tokens_out, cost_usd, latency_ms.
-`synthesize` (text -> speech) and `generate_video` (prompt -> clip) return media
-bytes as their payload; `open_live`
+`synthesize` (text -> speech), `generate_video` (prompt -> clip) and
+`generate_image` (prompt + references -> image) return media bytes as their payload; `open_live`
 (speech <-> speech) returns a streaming session instead.
 """
 from __future__ import annotations
@@ -47,6 +47,12 @@ class SpeechTransport(Protocol):
 @runtime_checkable
 class VideoTransport(Protocol):
     async def generate_video(self, *, model: str, request: Any,
+                             api_key: str) -> tuple[bytes, dict[str, Any]]: ...
+
+
+@runtime_checkable
+class ImageTransport(Protocol):
+    async def generate_image(self, *, model: str, request: Any,
                              api_key: str) -> tuple[bytes, dict[str, Any]]: ...
 
 
@@ -149,6 +155,14 @@ async def generate_video(*, model: str, request: Any,
     extra = {"dispatch": dispatch} if dispatch is not None else {}
     return await transport_for(model).generate_video(
         model=model, request=request, api_key=api_key, **extra)
+
+
+async def generate_image(*, model: str, request: Any,
+                         api_key: str) -> tuple[bytes, dict[str, Any]]:
+    """Prompt (+ reference images) -> image bytes through the model's transport;
+    `request` is a providers.gemini_image.ImageRequest (meta carries mime_type)."""
+    return await transport_for(model).generate_image(
+        model=model, request=request, api_key=api_key)
 
 
 async def open_live(*, model: str, voice: str, system: str, language: str | None,
