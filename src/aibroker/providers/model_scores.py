@@ -53,6 +53,12 @@ SCORES: dict[str, Score] = {
     "gpt-5": Score(22.98, "gpt-5", "GPT-5 (High)"),
     "gpt-5-mini": Score(16.77, "gpt-5-mini", "GPT-5 mini (High)"),
     "gpt-oss-120b": Score(11.6, "gpt-oss-120b", "gpt-oss-120b (High)"),
+    # Added 2026-11-21 from the live leaderboard (SOURCE) for the SIM persona comparison;
+    # one row each, the AA variant is in aa_name. gemini-3.8-flash has no AA row: unscored.
+    "gemini-4-neon": Score(61.0, "gemini-4-neon", "Gemini 4 Neon (xhigh)"),
+    "gemini-4-carbon": Score(60.0, "gemini-4-carbon", "Gemini 4 Carbon (high)"),
+    "gemini-4-hydrogen": Score(54.0, "gemini-4-hydrogen", "Gemini 4 Hydrogen (xhigh)"),
+    "gemini-4-argon": Score(50.0, "gemini-4-argon", "Gemini 4 Argon (high)"),
     "gemini-3.5-flash": Score(32.6, "gemini-3-5-flash", "Gemini 3.5 Flash (High)"),
     "gemini-3.5-flash-lite": Score(22.17, "gemini-3-5-flash-lite", "Gemini 3.5 Flash-Lite"),
     "gemini-3.6-flash": Score(33.98, "gemini-3-6-flash", "Gemini 3.6 Flash (High)"),

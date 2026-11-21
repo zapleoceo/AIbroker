@@ -61,6 +61,16 @@ The usage write after a successful paid call runs as its own tracked task behind
 
 Standard-tier list prices, Google pricing page 2026-11. Reference images are input tokens. Cost is prompt tokens x input price + (candidate + thought tokens) x image output price, an upper bound from the reported usage. The pre-call reservation (`estimate_image_cost`) is only an estimate; the booked cost is `image_cost`. A live 1K call with two PNG references (544 prompt and 1429 candidate tokens) cost about $0.086. Paid keys only.
 
+## Gemini pinned text models (2026-11-21)
+
+* `gemini/gemini-4-neon`: $3.00/M in, $15.00/M out, $0.15/M cache read. Paid keys only.
+* `gemini/gemini-4-carbon`: $2.00/M in, $10.00/M out, $0.10/M cache read through 2026-11-30; $4.00 / $20.00 / $0.20 from 2026-12-01. Paid keys only.
+* `gemini/gemini-4-hydrogen`: $1.50/M in, $7.50/M out, $0.075/M cache read. GA, free tier exists.
+* `gemini/gemini-4-argon`: $2.00/M in, $10.00/M out, $0.10/M cache read through 2026-11-30; $4.00 / $20.00 / $0.20 from 2026-12-01. Paid keys only.
+* `gemini/gemini-3.8-flash`: $0.75/M in, $3.75/M out, $0.075/M cache read through 2026-12-31; $1.50 / $7.50 / $0.15 from 2027-01-01. Free tier exists.
+
+Standard-tier list prices, Google pricing page 2026-11-21, up to 200k context. Registered as override prices (`_PINNED_TEXT_MODELS` in `providers/provider_specs/gemini.py`), not from LiteLLM's map.
+
 ## Models we register ourselves (`litellm.register_model`)
 
 | Model | Price | Source / date |

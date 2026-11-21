@@ -1185,6 +1185,8 @@ canonical name (`"gpt-oss-120b"`, which several providers serve).
 | not in the catalog | **`400`** with close-match suggestions, before anything is queued |
 | in the catalog but not a model for that capability, or its provider is not in the capability's chain | **`400`** (`does not serve …` / `not served by any provider of the … chain`) |
 
+Pin-only models are never in the default walk and are served only when pinned: the Gemini 4 models `gemini/gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon` and `gemini/gemini-3.8-flash` (see [providers.md](providers.md), Gemini pinned text models).
+
 Chat lanes are interchangeable for pinning (a model wired for `prefilter` may be pinned
 on `chat:fast`); an embedding model cannot be pinned on chat. The project still needs the
 capability's scope and a key of that provider — pinning grants nothing. The final-retry
@@ -1233,7 +1235,7 @@ paid last). Free-tier keys bill $0 whatever the nominal price shows.
 `intelligence_index` is the Artificial Analysis Intelligence Index (v4.3) as a float, or `null`.
 It is looked up by the model's exact canonical name (`providers.catalog.canonical_name`: last
 path segment, lower-cased, version included) in the static table in `providers/model_scores.py`.
-That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`.
+That table is a snapshot captured 2026-10-03 from Orchestra's `aa_snapshot_2026-10-03.yaml`, plus rows added 2026-11-21 from the live leaderboard: `gemini-4-neon` 61, `gemini-4-carbon` 60, `gemini-4-hydrogen` 54 and `gemini-4-argon` 50. `gemini-3.8-flash` has no AA row, so it is `null`.
 There is no fuzzy or nearest-version matching: a model missing from the table is `null`, not a
 guess. Wherever a score is shown, the attribution `Benchmarks: Artificial Analysis` goes with it;
 the `/ask2many` page shows it.

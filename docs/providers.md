@@ -222,9 +222,21 @@ routing name in the tooltip.
 
 `gemini` is the only provider in the `video` chain. Model `gemini/gemini-omni-1.2-flash` (`transport: gemini_video`, `pricing: override`, not registered with LiteLLM). Veo is no longer served on the Gemini API; Omni Flash is Google's named replacement. Transport `GeminiVideoTransport` (`providers/gemini_video.py`, raw HTTP, not LiteLLM): `generate_via_gemini` POSTs the body built by `interaction_body` to `https://generativelanguage.googleapis.com/v1beta/interactions` (`response_format` `type: "video"`, `delivery: "uri"`). A still-running interaction is polled by id; a hosted clip is polled until its file is `ACTIVE`, then downloaded. Inline base64 `data` is accepted too. The whole generation runs under one ceiling, `GEMINI_VIDEO_TIMEOUT_S` (420 s), polled every `GEMINI_VIDEO_POLL_S` (5 s). Input modalities `["text", "image"]`, output `["video"]`; the dashboard lists it under the "Video" capability chip group. Paid keys only; the decision is recorded in [history/provider-choices.md](history/provider-choices.md).
 
-**Not verified against a live key.** The transport was written from Google's published docs (2026-11). Not live until the owner approves (not part of the code change): add scope `llm:video` to a paid gemini key and to the consuming project. Until then video jobs cannot find a key.
+**Live-verified 2026-11-21** with a paid gemini key (job 627633: a 5 s 9:16 720p clip, 38 s, $0.349). Scope `llm:video` must be on the paid gemini key and on the consuming project; without it video jobs cannot find a key.
 
 Errors: every upstream HTTP error is raised as `gemini-video HTTP <status> (...)`, the form `classify_provider_error` reads (a status that follows a keyword such as `HTTP`): a 429 cools the key (rate_limit), a 401/403 marks it dead (auth), and a 400 becomes `VideoRejected` (`gemini-video HTTP 400: ...`).
+
+## Gemini pinned text models (chat:*, structured, 2026-11-21)
+
+`gemini` serves five text models that are **pin-only**: they are never in the default or rotation walk. A caller reaches one with `model=` on any `chat:*` lane or `structured`, e.g. `"model": "gemini-4-neon"` (id `gemini/gemini-4-neon`). All five support native JSON schema. Standard-tier list prices per 1M tokens (input / output / cache read) from Google's pricing page, 2026-11-21, up to 200k context. The Artificial Analysis index is in brackets. Code: `_PINNED_TEXT_MODELS` in `providers/provider_specs/gemini.py`; scores in `providers/model_scores.py`.
+
+- `gemini/gemini-4-neon` ($3.00 / $15.00 / $0.15, index 61): paid keys only. It thinks about 200 tokens even at reasoning "low", so callers need `max_tokens` of at least about 1024.
+- `gemini/gemini-4-carbon` ($2.00 / $10.00 / $0.10 through 2026-11-30, $4 / $20 / $0.20 from 2026-12-01, index 60): paid keys only. Very slow, 40-110 s per call live, and the broker's per-call timeout is 60 s, so it can time out.
+- `gemini/gemini-4-hydrogen` ($1.50 / $7.50 / $0.075, index 54): GA, free tier exists.
+- `gemini/gemini-4-argon` ($2.00 / $10.00 / $0.10 through 2026-11-30, $4 / $20 / $0.20 from 2026-12-01, index 50): paid keys only.
+- `gemini/gemini-3.8-flash` ($0.75 / $3.75 / $0.075 through 2026-12-31, $1.50 / $7.50 / $0.15 from 2027-01-01, unscored: no AA row): free tier exists.
+
+A pinned walk tries free-tier keys first. On the three paid-only models a free key answers 429 (quota "limit 0"); the per-(key, model) cooldown parks that pair and the walk falls through to the paid key. `gemini-3.7-flash` is not added: Google serves it as `gemini-3.8-flash` and its pricing page no longer lists it.
 
 ## Gemini image generation (image, 2026-11-21)
 
