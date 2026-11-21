@@ -404,8 +404,8 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
         <div class="feat-icon">01</div>
         <h3 data-i18n="f1.t" data-en="Free-first routing" data-ru="Free-first маршрутизация"></h3>
         <p data-i18n="f1.d"
-           data-en="Per-capability chains try free tiers first (chat:fast is free-only). The money lanes are the deliberate exception: chat:smart tries free Gemini first and keeps DeepSeek as the paid fallback; chat:sales leads with Claude Sonnet. Each money lane has its own daily cap."
-           data-ru="Цепочки по способностям сначала пробуют free-тарифы (chat:fast — только бесплатные). Денежные линии — осознанное исключение: chat:smart сначала пробует бесплатный Gemini, а DeepSeek остаётся платным запасным; chat:sales ведёт Claude Sonnet. У каждой денежной линии свой дневной кап."></p>
+           data-en="Per-capability chains try free tiers first (chat:fast is free-only). A few quality lanes keep a paid model in the chain under their own daily cap (chat:smart tries free Gemini first, DeepSeek is its paid fallback), and any request can pin an exact model from GET /v1/models."
+           data-ru="Цепочки по способностям сначала пробуют free-тарифы (chat:fast — только бесплатные). Несколько линий с упором на качество держат платную модель в цепочке под своим дневным капом (chat:smart сначала пробует бесплатный Gemini, DeepSeek — платный запасной), а любой запрос может закрепить точную модель из GET /v1/models."></p>
       </div>
       <div class="feat">
         <div class="feat-icon">02</div>
@@ -576,12 +576,12 @@ curl https://aib.zapleo.com/v1/jobs/123 -H "X-Project-Key: aib_prj_..."</code></
       </div>
       <div class="tier featured">
         <div class="tier-name" data-i18n="price.t2" data-en="Hosted (this instance)" data-ru="Хостинг (этот инстанс)"></div>
-        <div class="tier-price" data-i18n="price.t2.p" data-en="invite-only" data-ru="по приглашению"></div>
-        <div class="tier-desc" data-i18n="price.d2" data-en="Use aib.zapleo.com for personal projects on request." data-ru="Используйте aib.zapleo.com для личных проектов по запросу."></div>
+        <div class="tier-price" data-i18n="price.t2.p" data-en="self-signup" data-ru="самостоятельная регистрация"></div>
+        <div class="tier-desc" data-i18n="price.d2" data-en="Get a free-tier project key on aib.zapleo.com with one request; paid providers on request." data-ru="Получите ключ проекта на free-тарифах на aib.zapleo.com одним запросом; платные провайдеры — по запросу."></div>
         <ul>
           <li data-i18n="price.t2.1" data-en="No setup" data-ru="Без настройки"></li>
           <li data-i18n="price.t2.2" data-en="Shared free-tier pool" data-ru="Общий пул free-тарифов"></li>
-          <li data-i18n="price.t2.3" data-en="Owner approves each project key" data-ru="Владелец одобряет каждый ключ проекта"></li>
+          <li data-i18n="price.t2.3" data-en="Self-signup keys: free providers, request cap" data-ru="Ключи самостоятельной регистрации: бесплатные провайдеры, лимит запросов"></li>
           <li data-i18n="price.t2.4" data-en="Best-effort uptime" data-ru="Uptime — best-effort"></li>
         </ul>
         <a href="https://t.me/zapleoceo" class="btn btn-primary" data-i18n="price.t2.cta" data-en="Request access" data-ru="Запросить доступ"></a>
@@ -799,9 +799,9 @@ _LLMS_TXT = """# AIbroker
   queue so they can be polled and are purged after 7 days.
 - **Capabilities**: requests are tagged with one of @@CAPABILITIES@@. Each maps
   to an ordered provider chain and a required scope. Most chains are
-  free-first; `chat:smart` (free Gemini first, DeepSeek as the paid fallback)
-  and `chat:sales` (Claude Sonnet-led) are the money lanes where answer quality
-  outranks price, each bounded by its own daily cap. `chat:sales`
+  free-first; a few quality lanes (`chat:smart`: free Gemini first, DeepSeek as
+  the paid fallback; `chat:sales`: Claude Sonnet-led) keep a paid model in the
+  chain, each bounded by its own daily cap. `chat:sales`
   additionally keeps Sonnet's reasoning on — it does not force JSON through
   tool-use, because on that model the two are mutually exclusive. `chat:deep`
   is a dedicated long-context/reasoning lane (1M-token context, no latency

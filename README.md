@@ -1,12 +1,14 @@
 # AIbroker
 
-Centralized key broker for AI/LLM provider API keys. Self-hosted, async,
-production-ready from day one.
+A universal router for LLM and media providers: one project key and one API
+in front of many providers (chat, structured output, vision, embeddings,
+transcription, speech, images, video), shared by several projects. Self-hosted,
+async, free-first routing with per-project cost caps.
 
 ## What it does
 
 - Holds a pool of API keys for many providers (LLM and arbitrary HTTP APIs)
-- Authenticates client projects (Vera, Stepan, future) via per-project keys
+- Authenticates client projects (any number of them) via per-project keys
 - Selects the best available key for each request (LRU + cost/cooldown aware)
 - Health-monitors keys (auto cooldown on 429, mark dead on 401/403)
 - **Proxy mode only** — the broker calls the provider with its own key and
@@ -21,7 +23,7 @@ production-ready from day one.
 
 ```
 ┌─── client projects ────┐
-│ Vera, Stepan, …        │  HTTPS, X-Project-Key
+│ any client project     │  HTTPS, X-Project-Key
 └──────────┬─────────────┘
            ▼
 ┌──────────────────────────────────────────────────────┐

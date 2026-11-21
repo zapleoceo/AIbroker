@@ -1,5 +1,9 @@
 # API reference
 
+AI Broker is a universal router for LLM and media providers: one project key and one API in
+front of many providers (chat, structured output, vision, embeddings, transcription, speech,
+images, video), shared by several projects, with free-first routing and per-project cost caps.
+
 Native agent tool calls: see [native tools contract](native-tools.md) for optional
 `tools`/`tool_choice`, tool-result history, validation and rollout limitations.
 
@@ -337,7 +341,7 @@ Before pushing, run `bash scripts/docs_gate.sh` with a fresh `origin/master` (`-
 goes through `/v1/transcribe/jobs`, `embedding` through `/v1/embed`, `decision`
 through `/v1/decisions`, `speech` through `/v1/speech`, `video` through `/v1/video/jobs`.)
 
-`chat:sales` (2026-07-23) is the "smart LLM, no rigid script" sales lane:
+`chat:sales` (2026-07-23, name kept for compatibility) is a quality chat lane:
 Claude Sonnet leads the chain on its own daily cap (chain: anthropic → gemini →
 deepseek → sambanova). Uses the ordinary `llm:chat` scope. Like every other lane it FORCES
 JSON when you send `response_format` (Claude has no native `json_object` mode,
@@ -1072,7 +1076,7 @@ different thing: the `usage_log.id` of the winning attempt's row (unchanged).
 
 A completed chat `JobResponse` and `EmbedResponse`/`TranscribeResponse`
 all carry `request_id` — the `usage_log.id` for that exact call. Log it on
-your side (Stepan/Vera); if a call misbehaves, quote it back to us and we can
+your side; if a call misbehaves, quote it back to us and we can
 look the row up directly (`/dashboard/projects/{id}` — the "Recent 50 calls"
 table's leading `req id` column, sortable, also usable as a search target)
 instead of grepping timestamps against provider/model/workflow.

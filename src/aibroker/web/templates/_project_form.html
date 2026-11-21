@@ -15,7 +15,7 @@
   <div class="form-grid">
     <div class="field span-2"><label for="pf-name">{{ t("Name", "Имя") }}</label>
       <input id="pf-name" name="name" type="text" required maxlength="100" value="{{ project.name if editing else '' }}"
-             {{ ph("lowercase, e.g. stepan", "lowercase, напр. stepan") }}>
+             {{ ph("lowercase, e.g. my-app", "lowercase, напр. my-app") }}>
       <small>{{ t("Shown in logs and the dashboard; max 100 characters.", "Показывается в логах и панели; до 100 символов.") }}</small></div>
     <div class="field"><label for="pf-email">{{ t("Owner email", "Email владельца") }}</label>
       <input id="pf-email" name="owner_email" type="email" value="{{ (project.owner_email or '') if editing else '' }}" {{ ph("optional", "необязательно") }}></div>
