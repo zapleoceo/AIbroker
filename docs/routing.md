@@ -1949,6 +1949,9 @@ queue to `run_chat` as `key_tier`, next to `paid_only` (`services/llm_service.py
 
 Speech, image and video lanes already run on paid keys only, so `key_tier` is validated there (`free` is `422`) and not routed.
 
+**Code map.** `routing/key_tier.py`: `KeyTier` (the literal type), `normalize()` reads a stored request's tier (missing or unknown → `auto`),
+`paid_lane()` is the request-model validator that rejects `free` on the paid-only lanes (speech, image, video, live).
+
 ## Storm-honesty wave (2026-07-16)
 
 A confirmed prod incident: a project's `$0.50/day` cap was spent, so
