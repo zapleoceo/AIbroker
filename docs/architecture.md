@@ -4,7 +4,7 @@
 
 ```
 ┌─── client projects ────┐
-│ Vera, Stepan, …        │  HTTPS, X-Project-Key
+│ any client project     │  HTTPS, X-Project-Key
 └──────────┬─────────────┘
            ▼
 ┌──────────────────────────────────────────────────────┐

@@ -103,7 +103,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
 app = FastAPI(
     title="AIbroker",
     version=__version__,
-    description="Centralized key broker for AI provider API keys",
+    description=("Universal router for LLM and media providers: one project key and one API "
+                 "in front of many providers (chat, structured output, vision, embeddings, "
+                 "transcription, speech, images, video) with free-first routing and "
+                 "per-project cost caps. Self-signup: POST /v1/signup."),
     lifespan=lifespan,
     redoc_url=None,  # Swagger UI at /docs is enough
 )
