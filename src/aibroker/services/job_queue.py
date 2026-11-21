@@ -43,6 +43,7 @@ from aibroker.db.models import DeepJobRow, ProjectRow
 from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
+from aibroker.routing.key_tier import normalize as normalize_key_tier
 from aibroker.services import speech_jobs
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.image_service import (
@@ -393,6 +394,7 @@ async def _run_transcription_job(project: ProjectRow, req: dict[str, Any]):  # p
         project=project, audio=audio,
         filename=req.get("filename") or "audio.ogg",
         workflow=req.get("workflow"),
+        key_tier=normalize_key_tier(req.get("key_tier")),
     )
 
 
@@ -467,7 +469,10 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # capability's chain actually reaches a paid provider with a wired model —
     # else (e.g. chat:deep is nvidia-only) demanding a paid key is a guaranteed
     # no-op, so the final retry stays a normal walk instead.
-    paid_only = row.retry_count >= _MAX_RETRIES - 1 and has_paid_tail(row.capability)
+    key_tier = normalize_key_tier(req.get("key_tier"))
+    # key_tier "paid" is paid-only from the first attempt (run_chat), "free" never escalates.
+    paid_only = (key_tier == "auto" and row.retry_count >= _MAX_RETRIES - 1
+                 and has_paid_tail(row.capability))
     if paid_only:
         log.info("final retry — paid tail only, job %d%s", row.id, tag)
     try:
@@ -490,6 +495,7 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                     paid_only=paid_only,
                     tools=req.get("tools"), tool_choice=req.get("tool_choice"),
                     should_stop=lambda: cancel_flag(row.id),
+                    key_tier=key_tier,
                 )
     except MediaUnknown as e:
         if not await media_quarantine(row.id, row.started_at):
@@ -540,7 +546,9 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if outcome is None:
         # No provider available right now — retry as capacity frees up.
         await _requeue_or_fail(row.id, row.retry_count,
-                                f"no provider available for {row.capability}",
+                                f"no provider available for {row.capability}"
+                                + (f" with a {key_tier} key (key_tier={key_tier})"
+                                   if key_tier != "auto" else ""),
                                 expect_started_at=row.started_at)
         return
     # getattr-with-default: a TranscribeOutcome carries no token/cache counters

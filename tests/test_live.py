@@ -376,6 +376,8 @@ async def test_route_requires_the_live_scope():
     ({"type": "start", "voice": "Alice"}, 422),
     ({"type": "hello"}, 422),
     ({"type": "start", "model": "gemini-2.5-flash"}, 400),
+    ({"type": "start", "key_tier": "free"}, 422),     # live is a paid-only lane
+    ({"type": "start", "key_tier": "gold"}, 422),
 ])
 async def test_route_rejects_bad_start_messages(start, code):
     plain, _ = await _make_project(["llm:live"])

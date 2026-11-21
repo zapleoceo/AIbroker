@@ -77,6 +77,7 @@ from aibroker.providers.subscriptions import (
 from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
 from aibroker.routing import chain_for, pin_chain_for, scope_for
+from aibroker.routing.key_tier import KeyTier, paid_lane
 from aibroker.services import job_wait, speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
@@ -172,6 +173,10 @@ class ChatRequest(BaseModel):
     # Codex subscription jobs only, no `tools`: the CLI runs with its command tools disabled
     # (image generation stays on), so the model cannot write files through a shell.
     no_shell: bool = False
+    # Key tier for this request (docs/api.md "Key tier"): "auto" keeps the free-first walk,
+    # "paid" uses only paid keys from the first attempt, "free" only free keys. Ignored by
+    # subscription models.
+    key_tier: KeyTier = "auto"
     # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
     trace_id: str | None = None
@@ -449,6 +454,7 @@ async def _read_audio_upload(file: UploadFile) -> bytes:
 async def transcribe_endpoint(
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> TranscribeResponse:
     """Audio → text, SYNCHRONOUS. Multipart `file`. Chain: groq → local →
@@ -461,7 +467,7 @@ async def transcribe_endpoint(
     try:
         outcome = await run_transcribe(
             project=ctx.project, audio=audio,
-            filename=file.filename or "audio.ogg", workflow=workflow,
+            filename=file.filename or "audio.ogg", workflow=workflow, key_tier=key_tier,
         )
     except TranscribeFailed as e:
         raise HTTPException(502, f"transcription failed: {e}") from e
@@ -499,6 +505,13 @@ class SpeechRequest(BaseModel):
     model: str | None = Field(None, description="override the lane model "
                                                 "(gemini-3.8-flash-tts by default)")
     workflow: str | None = None
+    # docs/api.md "Key tier": speech runs on paid keys only, so "free" is rejected.
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "speech")
 
     @field_validator("text")
     @classmethod
@@ -933,7 +946,9 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
                 "tool_choice": body.tool_choice,
                 # only when set, so payload hashes of older clients do not change
                 **({"terminal_tools": body.terminal_tools} if body.terminal_tools else {})}
-               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {}))
+               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {})
+        # only when not "auto", so payload hashes of existing clients do not change
+        | ({"key_tier": body.key_tier} if body.key_tier != "auto" else {}))
 
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
@@ -1190,8 +1205,10 @@ async def jobs_submit(
             messages=messages,
             model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
             response_format=body.response_format, workflow=body.workflow,
-            extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
-                    "tool_choice": body.tool_choice} if body.tools else None),
+            extra=(({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
+                     "tool_choice": body.tool_choice} if body.tools else {})
+                   # only when not "auto": the payload hash of existing clients is unchanged
+                   | ({"key_tier": body.key_tier} if body.key_tier != "auto" else {})) or None,
             trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
             priority=priority,
         )
@@ -1295,10 +1312,11 @@ async def transcribe_submit(
     workflow: str | None = Query(None),
     idempotency_key: Annotated[str | None, Header(
         description="Stable key for one audio upload, scoped to this project")] = None,
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse | JSONResponse:
     """Compatibility audio queue route. New keyed clients use /v1/transcribe/keyed-jobs."""
-    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx, key_tier)
 
 
 @router.post("/transcribe/keyed-jobs", response_model=JobSubmitResponse,
@@ -1308,21 +1326,23 @@ async def transcribe_keyed_submit(
     idempotency_key: Annotated[str, Header(description="Required stable key for one audio upload")],
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse | JSONResponse:
     """Idempotent typed admission; pre-upgrade replicas cannot accept this path."""
-    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx, key_tier)
 
 
 async def _submit_transcription(
     response: Response, file: UploadFile, workflow: str | None,
-    idempotency_key: str | None, ctx: ProjectCtx,
+    idempotency_key: str | None, ctx: ProjectCtx, key_tier: str = "auto",
 ) -> JobSubmitResponse | JSONResponse:
     """Shared queue admission and receipt shaping; no transcription in this request."""
     _require_capability_scope(ctx, scope_for("transcription"))
     key = _asr_key(idempotency_key) if idempotency_key is not None else None
     audio = await _read_audio_upload(file)
-    extra = {AUDIO_FIELD: base64.b64encode(audio).decode(), "filename": file.filename or "audio.ogg"}
+    extra = {AUDIO_FIELD: base64.b64encode(audio).decode(), "filename": file.filename or "audio.ogg",
+             **({"key_tier": key_tier} if key_tier != "auto" else {})}
     if key is None:  # preserve existing unkeyed admission, deduplication, and generic poll URL
         await admit_request(ctx.project)
         job_id = await submit_job(
@@ -1375,6 +1395,13 @@ class VideoJobRequest(BaseModel):
     model: str | None = Field(None, description="override the lane model "
                                                 "(gemini-omni-1.2-flash by default)")
     workflow: str | None = None
+    # docs/api.md "Key tier": video runs on paid keys only, so "free" is rejected.
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "video")
 
     @field_validator("prompt")
     @classmethod

@@ -100,7 +100,9 @@ CREATE TABLE IF NOT EXISTS usage_log (
   -- dashboard project drill-down that SELECTs u.model_served)
   model_served VARCHAR(120),
   -- migration 015: groups the attempts of one client request (X-Request-Id)
-  request_id VARCHAR(64)
+  request_id VARCHAR(64),
+  -- migration 032: tier of the key that served the attempt (free|paid|trial)
+  key_tier VARCHAR(10)
 );
 CREATE INDEX IF NOT EXISTS ix_usage_project_date ON usage_log(project_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_usage_key_date ON usage_log(api_key_id, created_at);
