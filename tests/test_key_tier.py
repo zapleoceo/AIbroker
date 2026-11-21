@@ -170,3 +170,10 @@ async def test_free_tier_pick_includes_trial_keys():
     key = await pick_and_reserve("nvidia", "llm:chat", require_tier="free")
     assert key is not None and key.id == kid
     assert await pick_and_reserve("nvidia", "llm:chat", require_tier="paid") is None
+
+
+def test_live_start_accepts_paid_and_auto():
+    from aibroker.routes.live import LiveStart
+
+    assert LiveStart.model_validate({"type": "start", "key_tier": "paid"}).key_tier == "paid"
+    assert LiveStart.model_validate({"type": "start"}).key_tier == "auto"

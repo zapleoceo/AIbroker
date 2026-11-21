@@ -957,7 +957,7 @@ Errors: `{"type": "error", "code": ..., "detail": "..."}` then close with `4000 
 
 - **start.** `voice` (one of 30 prebuilt voices, default `Kore`); `system` (system prompt, max 60k chars);
   `language` (BCP-47, e.g. `ru-RU`); `greeting` (optional typed first user turn — model speaks first);
-  `model` (optional pin); `workflow` (optional tag); `max_seconds` (session ceiling in seconds, default/max `LIVE_MAX_SESSION_S`=540).
+  `model` (optional pin); `workflow` (optional tag); `max_seconds` (session ceiling in seconds, default/max `LIVE_MAX_SESSION_S`=540); `key_tier` (optional: `auto` default, `paid` accepted and changes nothing since live runs on paid keys only; `free` or any unknown value is `422` and the socket closes, see [Key tier](#key-tier-2026-11-21)).
 - **ready.** `input_rate_hz` (16000), `output_rate_hz` (24000), `max_seconds` (effective ceiling after constraints).
 - **transcript.** `role` (`user`|`assistant`), `text` (one fragment; consecutive same-role fragments are merged in the final transcript).
 - **done.** `transcript` (cleaned: fragments merged, whitespace normalized, blank turns dropped); `model`, `voice`, `duration_s` (wall-clock), `tokens_in`, `tokens_out`, `cost_usd`, `key_label`, `request_id` (usage row id), `end_reason` (`caller_hung_up`, `caller_ended`, `upstream_closed`, `upstream_error`, `time_limit`, `upstream_go_away`).
@@ -1360,16 +1360,16 @@ field, default `"auto"`.
 
 - JSON body of `POST /v1/jobs`, for every capability (`chat:*`, `structured`, `vision`, `prefilter`, `translate`, `chat:deep`).
 - Query parameter `?key_tier=` on `POST /v1/transcribe`, `POST /v1/transcribe/jobs` and `POST /v1/transcribe/keyed-jobs`. These routes are multipart; the audio stays in the body.
-- JSON body of `POST /v1/speech`, `POST /v1/speech/jobs`, `POST /v1/images/jobs` and `POST /v1/video/jobs`.
+- JSON body of `POST /v1/speech`, `POST /v1/speech/jobs`, `POST /v1/images/jobs` and `POST /v1/video/jobs`, and the `start` message of the `/v1/live` WebSocket.
 
 Subscription models (`claude-sub/...`, `codex-sub/...`) run on their own accounts and ignore the field.
 
-**Speech, image and video** run on paid keys only. `auto` and `paid` are accepted and change nothing. `free` is rejected with `422`.
+**Speech, image, video and live** run on paid keys only. `auto` and `paid` are accepted and change nothing. `free` is rejected with `422`.
 
 **Errors**
 
 - An unknown value is `422` (JSON body and query alike).
-- `free` on `/v1/speech*`, `/v1/images/jobs` or `/v1/video/jobs` is `422`:
+- `free` on `/v1/speech*`, `/v1/images/jobs`, `/v1/video/jobs` or the `/v1/live` start message is `422` (on live the socket then closes with `4422`):
   `key_tier 'free' is not available for <lane>: only paid keys serve it`.
 - `free` or `paid` with no key of that tier able to serve: the job keeps retrying as usual and finally
   errors with `no provider available for <capability> with a free key (key_tier=free)` (or `with a paid key (key_tier=paid)`).
