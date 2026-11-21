@@ -221,6 +221,35 @@ _MODEL_UNAVAILABLE_SIGNS = (
 )
 
 
+_PROVIDER_MESSAGE_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def is_request_rejected(exc: Exception, provider: str | None = None) -> bool:
+    """True when the provider refused the REQUEST itself (HTTP 400 / 422, e.g. Gemini
+    INVALID_ARGUMENT for a json_schema with "too many states"): not a bad key, a
+    throttle, a billing state, a gone model or an over-size prompt. Every other key of
+    the same provider would answer the same, so the walk must not rotate keys over it,
+    and when no provider accepts it the job fails at once (2026-11-22, job 628563)."""
+    if classify_provider_error(exc, provider) != "error" or is_model_unavailable(exc):
+        return False
+    from aibroker.providers.context_limits import is_too_large_error
+    if is_too_large_error(exc):
+        return False
+    status = http_status_of(exc)
+    if status in (400, 422):
+        return True
+    return status is None and "invalid_argument" in str(exc).lower()
+
+
+def rejection_message(exc: Exception, limit: int = 600) -> str:
+    """The provider's own error text (the JSON `message` when the body carries one)."""
+    text = str(exc)
+    m = _PROVIDER_MESSAGE_RE.search(text)
+    if m:
+        text = m.group(1).encode().decode("unicode_escape", errors="replace")
+    return " ".join(text.split())[:limit]
+
+
 def is_model_unavailable(exc: Exception) -> bool:
     if type(exc).__name__ == "NotFoundError":
         return True

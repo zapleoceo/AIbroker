@@ -57,6 +57,7 @@ from aibroker.services.job_meta import log_tag
 from aibroker.services.llm_service import (
     CANCELLED,
     CONTENT_FAILED,
+    RequestRejected,
     _BudgetExhausted,
     cap_message,
     run_chat,
@@ -536,6 +537,16 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
                     + ("jobs paused until 00:00 UTC" if outcome.window == "daily"
                        else "jobs paused until the 1st of next month, 00:00 UTC"),
                     throttle_min=24 * 60)
+        return
+    if isinstance(outcome, RequestRejected):
+        # The provider refused the request itself (schema / payload): no retry can
+        # change that, so the job fails now with the provider's own words.
+        log.warning("job %d (%s) rejected by %s: %s%s", row.id, row.capability,
+                    outcome.provider, outcome.message, tag)
+        await _finish(row.id, status="error",
+                      error_message=f"provider {outcome.provider} rejected the request "
+                                    f"(HTTP 400): {outcome.message}",
+                      expect_started_at=row.started_at)
         return
     if outcome is CONTENT_FAILED:
         await _requeue_or_fail(
