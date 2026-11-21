@@ -370,6 +370,14 @@ Without `REDIS_URL` the module runs sweep-only, which means about a 1 s wake-up.
 only that latency. Waits are capped at 25 s, below the 120 s `proxy_read_timeout` that `infra/nginx-aib.conf`
 already sets on these paths, so no nginx change is needed.
 
+**Code map.** `wait_any()` registers an `asyncio.Event` for each id, then re-checks the DB once, and sleeps
+until an event fires or the wait ends. `publish_terminal()` is called by `deep_jobs._finish` and publishes
+the id on Redis (it also wakes local waiters directly). `terminal_ids()` is the one-query status check used
+by the waiter and by the sweep. `TooManyWaiters` is raised when a project holds `MAX_WAITERS_PER_PROJECT`
+open waits and maps to HTTP 429. `get_jobs()` is the batch form of `get_job`, used by `POST /v1/jobs/wait`.
+The route handler `jobs_wait` (in `routes/proxy.py`) takes the request model `JobsWaitRequest` and returns
+`JobsWaitResponse`.
+
 
 ## Tests & CI
 
