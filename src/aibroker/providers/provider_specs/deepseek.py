@@ -22,5 +22,19 @@ SPEC = build_provider(
         "litellm_extra": {
             "max_input_tokens": 1_000_000, "max_output_tokens": 384_000,
             "litellm_provider": "deepseek", "mode": "chat", "supports_vision": True,
-            "supports_response_schema": True, "supports_prompt_caching": True}}},
+            "supports_response_schema": True, "supports_prompt_caching": True}},
+        # Pin-only (never in defaults/rotation). Upstream /models lists it today
+        # (text-only input, 1M context). Off-peak list prices per 1M tokens from
+        # https://api-docs.deepseek.com/quick_start/pricing (2026-11-21); peak is 2x
+        # (peak_multiplier). litellm's map carries the PEAK price, so override.
+        # json_schema is downgraded to json_object by _DeepseekAdapter.
+        "deepseek/deepseek-v4-pro": {
+            "capabilities": ("chat:smart", "chat:sales", "chat:code", "chat:edit", "structured"),
+            "pricing": "override", "input_usd_per_mtok": 0.66,
+            "cache_read_usd_per_mtok": 0.022, "output_usd_per_mtok": 1.98,
+            "note": "DeepSeek-V4-Pro; pin-only; text input only",
+            "litellm_extra": {
+                "max_input_tokens": 1_048_576, "max_output_tokens": 393_216,
+                "litellm_provider": "deepseek", "mode": "chat",
+                "supports_response_schema": True, "supports_prompt_caching": True}}},
 )

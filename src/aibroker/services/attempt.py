@@ -33,7 +33,9 @@ from aibroker.providers.provider_errors import (
     classify_provider_error,
     http_status_of,
     is_model_unavailable,
+    is_request_rejected,
     is_timeout,
+    rejection_message,
 )
 from aibroker.providers.registry import model_spec
 from aibroker.routing import (
@@ -59,6 +61,7 @@ class Flow(Enum):
     NEXT_KEY = auto()
     NEXT_PROVIDER = auto()
     BUDGET_EXHAUSTED = auto()  # project/global cap spent — abort the whole walk
+    REQUEST_REJECTED = auto()  # provider 400 on the request itself: no key rotation
     SUCCESS = auto()
 
 
@@ -215,6 +218,7 @@ class Attempt:
     reserve: bool = True                    # False: $0 call that must not be refused by a cap
     penalize: bool = True                   # False: book the error but never cool/kill the key
     pinned_model: str | None = None         # part of the affinity key
+    prefix: str = ""                        # prompt-prefix fingerprint (affinity key)
     note_affinity: bool = True
     reservation_id: str | None = field(default=None, init=False)
     media_dispatch: Any = None
@@ -276,6 +280,14 @@ async def _handle_call_error(a: Attempt, exc: Exception) -> Flow:
         log.warning("provider %s model %s unavailable (%s) — next provider",
                     a.provider, a.model, type(exc).__name__)
         return Flow.NEXT_PROVIDER
+    # The provider refused the request itself (400 / INVALID_ARGUMENT: schema,
+    # payload). Not the key's fault - no penalty - and its sibling keys would refuse
+    # it the same way, so the walk leaves this provider (2026-11-22).
+    if is_request_rejected(exc, a.provider):
+        await _record_error(**book)
+        log.warning("provider %s rejected the request (model %s, key %s): %s", a.provider,
+                    a.model, a.key.label, _scrub_secrets(rejection_message(exc)))
+        return Flow.REQUEST_REJECTED
     kind = (await _penalize(a.key, exc, capability=a.capability, model=a.model)) if a.penalize else \
         classify_provider_error(exc, a.provider)
     # Self-learn the size ceiling: a provider that rejects the prompt as too big
@@ -396,7 +408,8 @@ async def run_attempt(a: Attempt) -> AttemptResult:
     # worked, so the NEXT request lands where the provider-side cache is warm.
     if a.note_affinity:
         await affinity.note_success(a.project.id, a.workflow, a.capability,
-                                    a.pinned_model, a.provider, a.model, a.key.id)
+                                    a.pinned_model, a.provider, a.model, a.key.id,
+                                    prefix=a.prefix)
     return AttemptResult(Flow.SUCCESS, payload=payload, meta=meta, usage_id=usage_id)
 
 

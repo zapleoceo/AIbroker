@@ -25,6 +25,7 @@ from aibroker.routes.proxy import (
     _validate_pin,
 )
 from aibroker.routing import scope_for
+from aibroker.routing.key_tier import KeyTier, paid_lane
 from aibroker.services.deep_jobs import IdempotencyConflict, resolve_priority, submit_job_ex
 from aibroker.services.image_service import IMAGE_FIELD, image_job_payload
 from aibroker.services.job_meta import check_labels, check_token, resolve_trace_id
@@ -61,6 +62,13 @@ class ImageJobRequest(BaseModel):
     trace_id: str | None = None
     labels: dict[str, str] | None = None
     priority: Literal["interactive", "batch"] | None = None
+    # docs/api.md "Key tier": image runs on paid keys only, so "free" is rejected.
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "image")
 
     @field_validator("prompt")
     @classmethod

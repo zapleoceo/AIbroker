@@ -31,13 +31,25 @@
 > (`providers/catalog.resolve_pin`): routing id or bare canonical name -> the ordered
 > `(provider, model)` targets that serve it (ranked: free providers by `ProviderSpec.rank`,
 > paid last). `run_chat` walks them as `_pinned_steps`: **free-tier keys of every candidate
-> first, then paid keys**, one fixed order, no rotation, no reshuffle. Unknown model or a
+> first, then paid keys**, one fixed order, no rotation, no reshuffle. The free pass of a pinned walk (and the degraded free-only tail) includes `trial`-tier keys as well as `free`. Unknown model or a
 > lane it cannot serve -> `UnknownModel` -> **HTTP 400 with suggestions** at submit (a job
 > queued before a registry change fails terminally instead of retrying). This replaces the
 > 2026-09-26 behaviour below ("a pinned model stays on its own provider": qualified ids
 > restricted the walk, bare names were applied to whatever the chain reached, unknown ids
 > were forwarded to the provider). The 2026-09-26 incident stays the reason a pin never
 > crosses a provider's key.
+
+> **2026-11-21 (pin chain for chat-family lanes).** A pinned `model` on a chat-family lane
+> (`chat:*`, `structured`, `prefilter`, `translate`) is no longer limited to the lane's own
+> chain. `routing/chains.py:pin_chain_for(capability)` gives the providers allowed to serve
+> the pin: the lane's own chain first, then the providers of the other chat-family lanes,
+> then any provider that registers a chat-family model (mistral, cohere: in no chat walk).
+> `CHAT_FAMILY` is defined there and `providers/catalog.py` imports it. Unpinned walks still
+> use `chain_for` and are unchanged, so the fallback order of every lane is the same as
+> before. A pin is the caller's explicit choice; the no-crossing rule of 2026-09-26 is kept
+> for keys (a pin still runs on one provider's own keys) and for the JSON filter (zai stays
+> out of JSON requests). Pin-only models (never in any walk) are listed in `docs/providers.md`
+> ("Catalog refresh 2026-11-21").
 
 > **2026-10-03 (cache affinity for all capabilities).** `routing/affinity.py` extends the
 > per-(project, provider) key pin (kept, same TTL) with a ROUTE pin: `(project_id, workflow
@@ -52,6 +64,8 @@
 > concern about free-tier economics intact for exactly that case) and the leg refuses a paid
 > key where the walk heads with a free provider. A stable `prompt_cache_key` derived from the
 > same family is sent where documented (`ProviderSpec.cache_key_param`).
+
+> **2026-11-22 (cache affinity per prompt prefix).** The ROUTE pin key is now `(project_id, workflow or '', capability, pinned model or '', prefix) -> (provider, model, key_id)`. `prefix` is `affinity.prefix_fingerprint(messages)`: a 16-hex sha256 of every system message in full plus the first `PREFIX_CHARS` (4096) characters of the conversation before the last message. It is `''` when there is no prefix (a lone user message); such requests keep the 2026-10-03 workflow-level key unchanged. `lookup_route`, `note_route` and `note_success` take `prefix`; `run_chat` computes it once per request and `Attempt.prefix` carries it to the success re-pin. The provider `prompt_cache_key` (`cache_key_for`: openai/mistral/cerebras `prompt_cache_key`, openrouter `session_id`) includes the same fingerprint. Effect: parallel requests with different system prompts (e.g. several SIM personas in workflow `sim-reply`) each keep their own pin instead of overwriting one shared pin, and the same persona keeps landing on the key whose provider-side cache is warm, moving on only when that key is cooling, capped or erroring. Motivation: Gemini's implicit cache is per API key (usage_log showed 73-75% cache_read on one key against 0-30% when a workflow rotated across free keys). Trade-off: Gemini FREE keys have small per-model daily quotas, so a pin on a free key breaks at 429 and the walk re-pins; `key_tier: "paid"` keeps a request family on the single paid key. `GET /v1/usage` now reports `cache_read_tokens` and `cache_hit_ratio` per bucket; client-side tips are in [api.md](api.md#prompt-caching-tips-2026-11-22).
 
 > **2026-07-16 (dashboard: hard-capped keys show "day cap", not "alive")**: a
 > key whose per-key day cost cap (`daily_cost_used_usd ≥ daily_cost_cap_usd`)
@@ -1925,6 +1939,21 @@ shot, not that an answer materializes without budget.
 > shot to fail. It's now gated on `has_paid_tail(capability)`, so a paid-tail-less
 > capability's final retry stays a normal free-lane walk.
 
+### Per-request key tier (2026-11-21)
+
+The client's `key_tier` field ([api.md, Key tier](api.md#key-tier-2026-11-21)) is passed from the job
+queue to `run_chat` as `key_tier`, next to `paid_only` (`services/llm_service.py`). The job queue sets
+`paid_only` on the final retry only for `auto`; the other two values are handled inside `run_chat`:
+
+- `auto` (default): unchanged. Free-first walk, and the final retry escalates to the paid tail through `paid_only` when `has_paid_tail` is true.
+- `paid`: `paid_only` is forced on for every attempt, so every pick demands a paid-tier key from the first attempt. No free-key attempt is made, and the final-retry escalation is not computed.
+- `free`: every pick is restricted to tier `free` or `trial` (both cost nothing), never `paid`. The escalation never fires, not even on the final retry. If no free key can serve, the job is requeued as capacity frees up and ends with `no provider available for <capability> with a free key (key_tier=free)`.
+
+Speech, image and video lanes already run on paid keys only, so `key_tier` is validated there (`free` is `422`) and not routed.
+
+**Code map.** `routing/key_tier.py`: `KeyTier` (the literal type), `normalize()` reads a stored request's tier (missing or unknown → `auto`),
+`paid_lane()` is the request-model validator that rejects `free` on the paid-only lanes (speech, image, video, live).
+
 ## Storm-honesty wave (2026-07-16)
 
 A confirmed prod incident: a project's `$0.50/day` cap was spent, so
@@ -2182,3 +2211,35 @@ tightened: an exception without a `status_code` attribute whose message names a 
 (`Error code: 400`) is treated as a neutral client error too, so a 400 that merely
 contains "unauthorized"/"forbidden" can no longer kill a healthy key. Explicit
 bad-key phrasings ("API key not valid") and the billing phrases still win.
+
+## Request rejected by the provider: HTTP 400 / 422 (2026-11-22)
+
+Job 628563: Gemini answered 400 on every call (`The specified schema produces a constraint
+that has too many states for serving`), and the walk rotated every key and requeued the job up
+to 8 times while the poll showed `pending`. The trigger was `maxItems: 50` on an array of
+objects in a `json_schema` (removing `maxItems` alone fixes it; `pattern` and `maxLength` were fine).
+
+Classification (`providers/provider_errors.py`):
+
+- `is_request_rejected(exc, provider)` is true when the provider refused the **request itself**:
+  HTTP 400 or 422, or no status code and an `INVALID_ARGUMENT` body. It is false for anything
+  `classify_provider_error` files as `rate_limit` or `auth` (a bad key, such as Gemini's 400
+  "API key not valid", stays an auth failure), for billing states, for a gone model
+  (`is_model_unavailable`) and for an over-size prompt (`is_too_large_error`).
+- `rejection_message(exc)` returns the provider's own text: the JSON `message` when the body
+  carries one, whitespace collapsed, at most 600 characters.
+
+Flow verdict (`services/attempt.py`, `_handle_call_error`): `Flow.REQUEST_REJECTED`. The check runs
+after the model-unavailable branch and before `_penalize`, so the attempt is booked in `usage_log`
+as before, the key is **not** penalised or cooled, and the provider's message is logged with
+secrets scrubbed. `run_chat` then leaves that provider without trying its sibling keys, because
+they would refuse the same request, and moves to the next provider in the chain.
+
+Outcome (`services/llm_service.py`): the first such rejection is kept as `RequestRejected(provider,
+message)`. If every provider tried refused the request and nothing else failed (no other failures and
+no content failures), `run_chat` returns it. If anything else failed, the usual outcome applies and
+a later provider can still answer.
+
+Job (`services/job_queue.py`, `_execute`): a `RequestRejected` outcome ends the job at once with
+status `error`, no retry and no requeue. The error text is `provider <name> rejected the request
+(HTTP 400): <provider message>`; `GET /v1/jobs/{id}` shows it in `error` (see [api.md](api.md)).

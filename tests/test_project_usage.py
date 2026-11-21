@@ -43,9 +43,11 @@ async def test_usage_sums_only_this_project_by_capability_and_day():
     assert r.status_code == 200
     body = r.json()
     assert body["from"] == "2026-11-01" and body["to"] == "2026-12-01" and body["currency"] == "USD"
-    assert body["total"] == {"calls": 3, "cost_usd": 0.03, "tokens_in": 30, "tokens_out": 30}
+    assert body["total"] == {"calls": 3, "cost_usd": 0.03, "tokens_in": 30, "tokens_out": 30,
+                             "cache_read_tokens": 0, "cache_hit_ratio": 0.0}
     assert body["by_capability"][0] == {"capability": "speech", "calls": 2, "cost_usd": 0.03,
-                                        "tokens_in": 20, "tokens_out": 20}
+                                        "tokens_in": 20, "tokens_out": 20,
+                                        "cache_read_tokens": 0, "cache_hit_ratio": 0.0}
     assert [(d["day"], d["calls"]) for d in body["by_day"]] == [("2026-11-12", 2), ("2026-11-13", 1)]
     assert body["limits"]["daily_cap_usd"] == 5.0 and body["limits"]["monthly_cap_usd"] == 50.0
 
@@ -66,3 +68,20 @@ def test_default_range_is_the_current_month_and_ranges_are_bounded():
         except ValueError:
             continue
         raise AssertionError((start, end))
+
+
+async def test_usage_reports_cache_hit_ratio_by_workflow():
+    key, pid = await _make_project(["llm:chat"])
+    async with get_session() as s:
+        for wf, t_in, cached in (("sim-reply", 1000, 750), ("sim-reply", 1000, 700),
+                                 ("sim-photo", 400, 0)):
+            s.add(UsageLogRow(project_id=pid, provider="gemini", model="m", capability="chat:smart",
+                              workflow=wf, tokens_in=t_in, tokens_out=10, cache_read_tokens=cached,
+                              cost_usd=0.001, status="ok", created_at=datetime(2026, 11, 20, 9)))
+    body = client.get("/v1/usage", params={"from": "2026-11-01", "to": "2026-12-01"},
+                      headers={"X-Project-Key": key}).json()
+    flows = {w["workflow"]: w for w in body["by_workflow"]}
+    assert flows["sim-reply"]["cache_read_tokens"] == 1450
+    assert flows["sim-reply"]["cache_hit_ratio"] == 0.725
+    assert flows["sim-photo"]["cache_hit_ratio"] == 0.0
+    assert body["total"]["cache_hit_ratio"] == round(1450 / 2400, 4)

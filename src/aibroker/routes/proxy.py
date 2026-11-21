@@ -76,13 +76,15 @@ from aibroker.providers.subscriptions import (
 )
 from aibroker.providers.vivix_inputs import VivixJobRequest
 from aibroker.routes.jobs_control import idempotency_conflict, known_job_id
-from aibroker.routing import chain_for, scope_for
-from aibroker.services import speech_jobs, transcription_jobs
+from aibroker.routing import chain_for, pin_chain_for, scope_for
+from aibroker.routing.key_tier import KeyTier, paid_lane
+from aibroker.services import job_wait, speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
     IdempotencyConflict,
     build_request,
     get_job,
+    get_jobs,
     next_poll_after_s,
     payload_hash,
     priority_name,
@@ -171,6 +173,10 @@ class ChatRequest(BaseModel):
     # Codex subscription jobs only, no `tools`: the CLI runs with its command tools disabled
     # (image generation stays on), so the model cannot write files through a shell.
     no_shell: bool = False
+    # Key tier for this request (docs/api.md "Key tier"): "auto" keeps the free-first walk,
+    # "paid" uses only paid keys from the first attempt, "free" only free keys. Ignored by
+    # subscription models.
+    key_tier: KeyTier = "auto"
     # Client correlation (docs/api.md): stored on the job, echoed on submit and every poll, never
     # part of the payload hash. `trace_id` may also arrive as the X-Trace-Id header (body wins).
     trace_id: str | None = None
@@ -287,7 +293,8 @@ def _validate_pin(model: str | None, capability: str, chain: list[str] | None = 
     if not model:
         return
     try:
-        catalog.resolve_pin(model, capability, chain if chain is not None else chain_for(capability))
+        catalog.resolve_pin(model, capability,
+                            chain if chain is not None else pin_chain_for(capability))
     except UnknownModel as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
 
@@ -299,7 +306,7 @@ def _validate_media_pin(model: str | None, capability: str,
     media = media_kinds(messages)
     if not model or not media:
         return
-    targets = catalog.resolve_pin(model, capability, chain_for(capability))
+    targets = catalog.resolve_pin(model, capability, pin_chain_for(capability))
     if not any(reads_media(t.model, media) for t in targets):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"model {model!r} does not read inline {'/'.join(sorted(media))}; "
@@ -447,6 +454,7 @@ async def _read_audio_upload(file: UploadFile) -> bytes:
 async def transcribe_endpoint(
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> TranscribeResponse:
     """Audio → text, SYNCHRONOUS. Multipart `file`. Chain: groq → local →
@@ -459,7 +467,7 @@ async def transcribe_endpoint(
     try:
         outcome = await run_transcribe(
             project=ctx.project, audio=audio,
-            filename=file.filename or "audio.ogg", workflow=workflow,
+            filename=file.filename or "audio.ogg", workflow=workflow, key_tier=key_tier,
         )
     except TranscribeFailed as e:
         raise HTTPException(502, f"transcription failed: {e}") from e
@@ -497,6 +505,13 @@ class SpeechRequest(BaseModel):
     model: str | None = Field(None, description="override the lane model "
                                                 "(gemini-3.8-flash-tts by default)")
     workflow: str | None = None
+    # docs/api.md "Key tier": speech runs on paid keys only, so "free" is rejected.
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "speech")
 
     @field_validator("text")
     @classmethod
@@ -931,7 +946,9 @@ def _client_request(body: ChatRequest) -> dict[str, Any]:
                 "tool_choice": body.tool_choice,
                 # only when set, so payload hashes of older clients do not change
                 **({"terminal_tools": body.terminal_tools} if body.terminal_tools else {})}
-               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {}))
+               if body.tools else {}) | ({"no_shell": True} if body.no_shell else {})
+        # only when not "auto", so payload hashes of existing clients do not change
+        | ({"key_tier": body.key_tier} if body.key_tier != "auto" else {}))
 
 
 async def _replay(ctx: ProjectCtx, job_id: int) -> JSONResponse:
@@ -1188,8 +1205,10 @@ async def jobs_submit(
             messages=messages,
             model=body.model, max_tokens=body.max_tokens, temperature=body.temperature,
             response_format=body.response_format, workflow=body.workflow,
-            extra=({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
-                    "tool_choice": body.tool_choice} if body.tools else None),
+            extra=(({"tools": [t.model_dump(exclude_none=True) for t in body.tools],
+                     "tool_choice": body.tool_choice} if body.tools else {})
+                   # only when not "auto": the payload hash of existing clients is unchanged
+                   | ({"key_tier": body.key_tier} if body.key_tier != "auto" else {})) or None,
             trace_id=trace_id, labels=body.labels, idempotency_key=idempotency_key,
             priority=priority,
         )
@@ -1293,10 +1312,11 @@ async def transcribe_submit(
     workflow: str | None = Query(None),
     idempotency_key: Annotated[str | None, Header(
         description="Stable key for one audio upload, scoped to this project")] = None,
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse | JSONResponse:
     """Compatibility audio queue route. New keyed clients use /v1/transcribe/keyed-jobs."""
-    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx, key_tier)
 
 
 @router.post("/transcribe/keyed-jobs", response_model=JobSubmitResponse,
@@ -1306,21 +1326,23 @@ async def transcribe_keyed_submit(
     idempotency_key: Annotated[str, Header(description="Required stable key for one audio upload")],
     file: UploadFile = File(...),
     workflow: str | None = Query(None),
+    key_tier: KeyTier = Query("auto", description="auto | paid | free (docs/api.md Key tier)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> JobSubmitResponse | JSONResponse:
     """Idempotent typed admission; pre-upgrade replicas cannot accept this path."""
-    return await _submit_transcription(response, file, workflow, idempotency_key, ctx)
+    return await _submit_transcription(response, file, workflow, idempotency_key, ctx, key_tier)
 
 
 async def _submit_transcription(
     response: Response, file: UploadFile, workflow: str | None,
-    idempotency_key: str | None, ctx: ProjectCtx,
+    idempotency_key: str | None, ctx: ProjectCtx, key_tier: str = "auto",
 ) -> JobSubmitResponse | JSONResponse:
     """Shared queue admission and receipt shaping; no transcription in this request."""
     _require_capability_scope(ctx, scope_for("transcription"))
     key = _asr_key(idempotency_key) if idempotency_key is not None else None
     audio = await _read_audio_upload(file)
-    extra = {AUDIO_FIELD: base64.b64encode(audio).decode(), "filename": file.filename or "audio.ogg"}
+    extra = {AUDIO_FIELD: base64.b64encode(audio).decode(), "filename": file.filename or "audio.ogg",
+             **({"key_tier": key_tier} if key_tier != "auto" else {})}
     if key is None:  # preserve existing unkeyed admission, deduplication, and generic poll URL
         await admit_request(ctx.project)
         job_id = await submit_job(
@@ -1373,6 +1395,13 @@ class VideoJobRequest(BaseModel):
     model: str | None = Field(None, description="override the lane model "
                                                 "(gemini-omni-1.2-flash by default)")
     workflow: str | None = None
+    # docs/api.md "Key tier": video runs on paid keys only, so "free" is rejected.
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "video")
 
     @field_validator("prompt")
     @classmethod
@@ -1444,18 +1473,100 @@ async def video_submit(
     return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
 
 
+def _too_many_waiters() -> HTTPException:
+    return HTTPException(
+        429, f"too many open long polls for this project (max {job_wait.MAX_WAITERS_PER_PROJECT})",
+        headers={"Retry-After": str(job_wait.RETRY_AFTER_S)})
+
+
+async def _long_wait(ctx: ProjectCtx, ids: list[int], wait: float) -> None:
+    try:
+        await job_wait.wait_any(ctx.project.id, ids, min(wait, job_wait.MAX_WAIT_S))
+    except job_wait.TooManyWaiters as exc:
+        raise _too_many_waiters() from exc
+
+
 @router.get("/jobs/{job_id}", response_model=DeepJobResponse)
 async def jobs_poll(
     job_id: int,
     response: Response,
+    wait: float = Query(0, ge=0, description="long poll: return as soon as the job is terminal, "
+                                             "else the pending state after this many seconds "
+                                             "(clamped to 25)"),
     ctx: ProjectCtx = Depends(require_project),
 ) -> DeepJobResponse:
     row = await get_job(job_id, ctx.project.id, generic=True)
     if row is None:
         raise HTTPException(404, "job not found")
     _require_agent_read_access(ctx, row)
-    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)  # pragma: no cover
-    return _job_response(row, await _row_files(row))  # pragma: no cover
+    if wait > 0 and row.status not in job_wait.TERMINAL_STATUSES:
+        await _long_wait(ctx, [job_id], wait)
+        row = await get_job(job_id, ctx.project.id, generic=True) or row
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return _job_response(row, await _row_files(row))
+
+
+class JobsWaitRequest(BaseModel):
+    ids: list[int | str] = Field(min_length=1, max_length=job_wait.MAX_IDS,
+                                 description="job ids (int or numeric string), at most 100")
+    wait: float = Field(job_wait.MAX_WAIT_S, ge=0,
+                        description="seconds to wait for any job to finish (clamped to 25)")
+
+
+class JobsWaitResponse(BaseModel):
+    done: list[DeepJobResponse] = Field(
+        description="terminal jobs (done | error | cancelled), each exactly as GET /v1/jobs/{id}")
+    pending: list[int] = Field(description="the caller's jobs that are not terminal yet")
+    unknown: list[str] = Field(
+        default_factory=list,
+        description="ids that are not this project's pollable jobs (foreign, pruned, typed "
+                    "speech / keyed transcription, malformed); never retried by the broker")
+
+
+def _job_id_of(raw: int | str) -> int | None:
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+@router.post("/jobs/wait", response_model=JobsWaitResponse)
+async def jobs_wait(body: JobsWaitRequest, ctx: ProjectCtx = Depends(require_project)
+                    ) -> JobsWaitResponse:
+    """Batch long poll: returns as soon as ANY listed job of the caller's project is
+    terminal (all terminal ones are returned), or after `wait` s with done=[]."""
+    ids: list[int] = []
+    unknown: list[str] = []
+    for raw in body.ids:
+        job_id = _job_id_of(raw)
+        if job_id is None:
+            unknown.append(str(raw))
+        elif job_id not in ids:
+            ids.append(job_id)
+    rows = await get_jobs(ids, ctx.project.id, generic=True)
+    visible: dict[int, Any] = {}
+    for job_id in ids:
+        row = rows.get(job_id)
+        if row is None:
+            unknown.append(str(job_id))
+            continue
+        try:
+            _require_agent_read_access(ctx, row)
+        except HTTPException:
+            unknown.append(str(job_id))
+            continue
+        visible[job_id] = row
+    pending = [i for i, r in visible.items() if r.status not in job_wait.TERMINAL_STATUSES]
+    if body.wait > 0 and pending and len(pending) == len(visible):
+        await _long_wait(ctx, pending, body.wait)
+        visible.update(await get_jobs(pending, ctx.project.id, generic=True))
+    done = [_job_response(r, await _row_files(r)) for r in visible.values()
+            if r.status in job_wait.TERMINAL_STATUSES]
+    return JobsWaitResponse(
+        done=done, pending=[i for i, r in visible.items()
+                            if r.status not in job_wait.TERMINAL_STATUSES],
+        unknown=unknown)
 
 
 # ─── Model catalog ──────────────────────────────────────────────────────────
@@ -1518,13 +1629,15 @@ async def usage_endpoint(
 
     def sums(b: Bucket) -> dict[str, Any]:
         return {"calls": b.calls, "cost_usd": b.cost_usd,
-                "tokens_in": b.tokens_in, "tokens_out": b.tokens_out}
+                "tokens_in": b.tokens_in, "tokens_out": b.tokens_out,
+                "cache_read_tokens": b.cache_read_tokens, "cache_hit_ratio": b.cache_hit_ratio}
 
     return {
         "from": usage.start.isoformat(), "to": usage.end.isoformat(), "currency": "USD",
         "total": sums(usage.total),
         "by_capability": [{"capability": b.key, **sums(b)} for b in usage.by_capability],
         "by_day": [{"day": b.key, **sums(b)} for b in usage.by_day],
+        "by_workflow": [{"workflow": b.key, **sums(b)} for b in usage.by_workflow],
         "limits": {"daily_cap_usd": usage.daily_cap_usd, "monthly_cap_usd": usage.monthly_cap_usd,
                    "today_usd": usage.today_usd, "month_usd": usage.month_usd},
     }

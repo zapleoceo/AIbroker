@@ -43,7 +43,7 @@ from aibroker.providers.peak_pricing import peak_multiplier
 from aibroker.providers.prompt_cache import cache_key_for
 
 # Re-exported: tests and services/__init__ import classify_provider_error from here.
-from aibroker.providers.provider_errors import classify_provider_error
+from aibroker.providers.provider_errors import classify_provider_error, rejection_message
 from aibroker.providers.registry import (
     max_keys_for,
     model_for,
@@ -61,6 +61,7 @@ from aibroker.routing import (
     deprioritize_deepseek_for_savings,
     deprioritize_for_json,
     pick_and_reserve,
+    pin_chain_for,
     scope_for,
 )
 from aibroker.routing.chains import free_first_walk
@@ -70,7 +71,7 @@ from aibroker.services.attempt import Attempt, AttemptResult, Flow, Rejection, r
 from aibroker.services.tool_contract import TOOL_PROVIDERS, tool_model_provider, validate_result
 
 __all__ = [
-    "BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED_MONTHLY", "CONTENT_FAILED", "ChatOutcome", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
+    "BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED_MONTHLY", "CONTENT_FAILED", "ChatOutcome", "RequestRejected", "DecisionFailed", "DecisionOutcome", "EmbedFailed",
     "EmbedOutcome", "EmbedRequestInvalid", "TranscribeFailed", "TranscribeOutcome", "classify_provider_error",
     "run_chat", "run_decision", "run_embed", "run_transcribe",
 ]
@@ -234,6 +235,18 @@ class _ContentFailed:
 CONTENT_FAILED = _ContentFailed()
 
 
+class RequestRejected:
+    """run_chat result when every provider that was tried refused the REQUEST itself
+    (HTTP 400 / INVALID_ARGUMENT - e.g. a json_schema Gemini cannot serve) and nothing
+    else went wrong. Retrying cannot help: the job fails at once with `message`, the
+    provider's own error text."""
+    __slots__ = ("message", "provider")
+
+    def __init__(self, provider: str, message: str) -> None:
+        self.provider = provider
+        self.message = message
+
+
 class _Cancelled:
     """Sentinel run_chat returns when `should_stop` said the client cancelled the job between
     attempts. Nothing is in flight at that point; a call already sent earlier may still be billed."""
@@ -319,7 +332,7 @@ def _pinned_steps(targets: list[PinTarget], *, paid_only: bool) -> list[_Step]:
 
 async def _with_affinity(
     steps: list[_Step], project_id: int, workflow: str | None, capability: str,
-    pinned: str | None, *, paid_only: bool,
+    pinned: str | None, *, paid_only: bool, prefix: str = "",
 ) -> list[_Step]:
     """Put the request family's affine (provider, model, key) in front of the walk.
 
@@ -330,7 +343,7 @@ async def _with_affinity(
     already applied) — and a paid target never jumps a free head."""
     if not steps:
         return steps
-    target = await affinity.lookup_route(project_id, workflow, capability, pinned)
+    target = await affinity.lookup_route(project_id, workflow, capability, pinned, prefix)
     if target is None or not affinity.may_promote(target, steps[0].provider,
                                                   paid_only=paid_only):
         return steps
@@ -397,6 +410,7 @@ async def run_chat(
     tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
     should_stop: Callable[[], Awaitable[bool]] | None = None,
+    key_tier: str = "auto",
 ) -> ChatOutcome | _BudgetExhausted | _ContentFailed | _Cancelled | None:
     """Walk the capability chain; return the first provider that succeeds, else None.
 
@@ -412,7 +426,11 @@ async def run_chat(
     burning retries that cannot create budget. Returns `CONTENT_FAILED` when every
     attempt was an EmptyBody / InvalidJSON and nothing transient happened.
     `should_stop` is polled before every attempt (the job queue's cancel flag); True -> `CANCELLED`.
+    `key_tier` (routing/key_tier.py): "paid" walks paid keys only from the first attempt
+    (same shape as `paid_only`), "free" walks free-tier keys only and never escalates.
     """
+    free_only = key_tier == "free"
+    paid_only = (paid_only and not free_only) or key_tier == "paid"
     pinned_tool_provider = tool_model_provider(model) if tools else None
     scope = scope_for(capability)
 
@@ -433,7 +451,7 @@ async def run_chat(
     # every other provider would drop or reject the block.
     media = media_kinds(messages)
     if model:
-        targets = resolve_pin(model, capability, chain_for(capability))
+        targets = resolve_pin(model, capability, pin_chain_for(capability))
         if media:
             targets = [t for t in targets if reads_media(t.model, media)]
             if not targets:
@@ -461,12 +479,16 @@ async def run_chat(
     if tools:
         est_tokens += len(json.dumps(tools, ensure_ascii=False)) // 3 + 1
 
+    prefix = affinity.prefix_fingerprint(messages)
     steps = await _with_affinity(steps, project.id, workflow, capability, model,
-                                 paid_only=paid_only)
+                                 paid_only=paid_only, prefix=prefix)
     if media:
         steps = [s for s in steps if s.model is None or reads_media(s.model, media)]
+    if free_only:
+        # A pinned walk's paid pass is dropped; every other leg must land on a free key.
+        steps = [s for s in steps if s.tier != "paid"]
     attempt_cap = _attempt_budget([s.provider for s in steps])
-    base_tier = "paid" if paid_only else None
+    base_tier = "paid" if paid_only else ("free" if free_only else None)
     degraded_free = False   # a spent paid budget downgrades the REST of the walk
     # Every capability gets a wall-clock deadline so a storm walk can't outlast the
     # job's stale-reclaim window and get re-executed by another worker.
@@ -474,6 +496,7 @@ async def run_chat(
         _DEEP_FINISH_BY_S if capability == "chat:deep" else _CHAT_WALL_DEADLINE_S)
     attempts = 0
     content_failures = 0     # attempts that came back EmptyBody / InvalidJSON
+    rejected: RequestRejected | None = None   # first provider 400 on the request itself
     other_failures = False   # any failure that a later retry could plausibly cure
     for step in steps:
         provider = step.provider
@@ -531,7 +554,7 @@ async def run_chat(
                     pool, key.id, (rotation_base + attempt_in_provider) % len(pool))
             if not use_model:
                 break  # provider can't serve this capability → next step
-            ck = cache_key_for(project.id, workflow or "", capability, model or "")
+            ck = cache_key_for(project.id, workflow or "", capability, model or "", prefix)
             res = await run_attempt(Attempt(
                 key=key, project=project, provider=provider, model=use_model,
                 capability=capability, workflow=workflow, est_tokens=est_tokens,
@@ -549,9 +572,13 @@ async def run_chat(
                 check=_chat_gate(provider=provider, key_id=key.id,
                                  response_format=response_format, tools=tools,
                                  tool_choice=tool_choice),
-                pinned_model=model,
+                pinned_model=model, prefix=prefix,
             ))
             flow = res.flow
+            if flow is Flow.REQUEST_REJECTED:
+                if rejected is None and res.error is not None:
+                    rejected = RequestRejected(provider, rejection_message(res.error))
+                break      # sibling keys would refuse it the same way; next provider
             if flow is not Flow.SUCCESS:
                 if res.rejection in _CONTENT_FAILURES:
                     content_failures += 1
@@ -588,6 +615,8 @@ async def run_chat(
             if flow is Flow.NEXT_PROVIDER:
                 break
             # Flow.NEXT_KEY — walk to this provider's next key
+    if rejected is not None and not other_failures and not content_failures:
+        return rejected
     if content_failures and not other_failures:
         return CONTENT_FAILED
     return None
@@ -887,10 +916,11 @@ async def run_transcribe(
     audio: bytes,
     filename: str,
     workflow: str | None,
+    key_tier: str = "auto",
 ) -> TranscribeOutcome | None:
     """Audio → text, walking the 'transcription' chain, rotating keys within each
     provider. None → no key anywhere (503); TranscribeFailed → every provider
-    errored (502)."""
+    errored (502). `key_tier` "paid"/"free" restricts every pick to that key tier."""
     scope = scope_for("transcription")
     last_error: str | None = None
     any_key_seen = False
@@ -911,7 +941,8 @@ async def run_transcribe(
                             provider)
                 raise TranscribeFailed(last_error or "transcription deadline reached")
             key = await pick_and_reserve(provider, scope=scope, project_id=project.id,
-                                          models=[use_model] if use_model else None)
+                                          models=[use_model] if use_model else None,
+                                          require_tier=None if key_tier == "auto" else key_tier)
             if key is None:
                 break  # no (more) available key for this provider → next provider
             any_key_seen = True

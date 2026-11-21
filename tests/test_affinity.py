@@ -293,3 +293,60 @@ async def test_stable_cache_key_is_sent_per_request_family(monkeypatch):
     await _chat(svc, ["cerebras"], workflow="other")
     a, b, c = (x["cache_key"] for x in calls)
     assert a == b and a != c and a.startswith("aib-")
+
+
+def test_prefix_fingerprint_tracks_the_cacheable_prefix_only():
+    persona_a = [{"role": "system", "content": "You are Marina."},
+                 {"role": "user", "content": "hi"}]
+    persona_a_next = [{"role": "system", "content": "You are Marina."},
+                      {"role": "user", "content": "how are you?"}]
+    persona_b = [{"role": "system", "content": "You are Oleg."},
+                 {"role": "user", "content": "hi"}]
+    fp = affinity.prefix_fingerprint
+    assert fp(persona_a) == fp(persona_a_next) != ""      # the new turn is not the prefix
+    assert fp(persona_a) != fp(persona_b)                   # another persona, another pin
+    assert fp([{"role": "user", "content": "hi"}]) == ""    # no prefix: workflow-level pin
+    assert fp(None) == "" and fp([]) == ""
+    long_history = [{"role": "system", "content": "S"},
+                    *({"role": "user", "content": "x" * 1000} for _ in range(10)),
+                    {"role": "user", "content": "new"}]
+    longer = [*long_history[:-1], {"role": "assistant", "content": "y"},
+              {"role": "user", "content": "newer"}]
+    assert fp(long_history) == fp(longer)                   # only the first 4 KB count
+
+
+def test_route_key_splits_by_prefix_and_keeps_the_legacy_key_without_one():
+    legacy = affinity.route_key(1, "sim-reply", "chat:smart", None)
+    assert affinity.route_key(1, "sim-reply", "chat:smart", None, "") == legacy
+    a = affinity.route_key(1, "sim-reply", "chat:smart", None, "aaaa")
+    b = affinity.route_key(1, "sim-reply", "chat:smart", None, "bbbb")
+    assert len({legacy, a, b}) == 3
+
+
+async def test_route_pins_are_kept_per_prefix():
+    affinity.reset()
+    await affinity.note_success(7, "sim-reply", "chat:smart", None, "gemini", "m", 16, prefix="pa")
+    await affinity.note_success(7, "sim-reply", "chat:smart", None, "gemini", "m", 17, prefix="pb")
+    assert (await affinity.lookup_route(7, "sim-reply", "chat:smart", None, "pa")).key_id == 16
+    assert (await affinity.lookup_route(7, "sim-reply", "chat:smart", None, "pb")).key_id == 17
+
+
+async def test_run_chat_looks_up_the_pin_of_its_prompt_prefix(monkeypatch):
+    import aibroker.services.llm_service as svc
+
+    seen = []
+
+    async def fake_lookup(*args):
+        seen.append(args)
+
+    async def no_key(provider, scope, **kw):
+        return None
+
+    monkeypatch.setattr(svc.affinity, "lookup_route", fake_lookup)
+    monkeypatch.setattr(svc, "pick_and_reserve", no_key)
+    monkeypatch.setattr(svc, "chain_for", lambda cap: ["gemini"])
+    msgs = [{"role": "system", "content": "You are Marina."}, {"role": "user", "content": "hi"}]
+    await svc.run_chat(project=SimpleNamespace(id=7, name="p"), capability="chat:smart",
+                       messages=msgs, model=None, max_tokens=64, temperature=0.7,
+                       response_format=None, workflow="sim-reply")
+    assert seen and seen[0][-1] == affinity.prefix_fingerprint(msgs) != ""

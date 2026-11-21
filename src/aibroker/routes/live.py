@@ -34,6 +34,7 @@ from aibroker.config import get_settings
 from aibroker.providers.catalog import UnknownModel, resolve_pin
 from aibroker.routes.proxy import SPEECH_VOICES
 from aibroker.routing import chain_for, scope_for
+from aibroker.routing.key_tier import KeyTier, paid_lane
 from aibroker.services.live_service import LiveFailed, LiveRequest, run_live
 from aibroker.services.request_cap import RequestCapExhausted, admit_request
 
@@ -53,6 +54,13 @@ class LiveStart(BaseModel):
     model: str | None = None
     workflow: str | None = Field(None, max_length=120)
     max_seconds: float | None = Field(None, gt=0)
+    # docs/api.md "Key tier": live runs on paid keys only, so "free" is refused (422).
+    key_tier: KeyTier = "auto"
+
+    @field_validator("key_tier")
+    @classmethod
+    def _paid_lane_tier(_cls, v: str) -> str:
+        return paid_lane(v, "live")
 
     @field_validator("voice")
     @classmethod

@@ -305,6 +305,21 @@ docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
 
 `infra/sql/init.sql` mirrors the DDL. Existing rows stay NULL (shown as «неизвестно»); nothing is backfilled.
 
+### Key tier: migration 032 (2026-11-21)
+
+Migration 032 (`032_usage_log_key_tier.sql`) adds the nullable column `usage_log.key_tier VARCHAR(10)`: the tier
+(`free`, `paid` or `trial`) of the key that served each attempt, copied from `api_keys.tier` at insert. It is additive,
+does not rewrite the table and is not backfilled; old rows stay NULL. Apply it BEFORE deploying the code: the ORM
+model maps the column (`UsageLogRow.key_tier`). `record_usage` degrades gracefully if the column is missing (it retries
+the insert without it and logs a warning once), but the per-tier data stays empty until the migration is applied:
+
+```
+docker exec -i aibroker-postgres psql -v ON_ERROR_STOP=1 -U aibroker aibroker \
+  < /var/www/aibroker/infra/sql/migrations/032_usage_log_key_tier.sql
+```
+
+`infra/sql/init.sql` mirrors the DDL.
+
 ### Job priority: migration 023 (2026-10-21)
 
 Migration 023 (`023_deep_jobs_priority.sql`) adds `deep_jobs.priority SMALLINT NOT NULL DEFAULT 1` (0 = interactive,

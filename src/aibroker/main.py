@@ -33,6 +33,7 @@ from aibroker.routes import (
     proxy,
     signup,
 )
+from aibroker.services import job_wait
 from aibroker.services.job_queue import dispatcher_loop
 from aibroker.services.request_cap import RequestCapExhausted
 from aibroker.telemetry.request_context import new_request_id, request_scope, sanitize_request_id
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # pragma: no cover
             except (TimeoutError, asyncio.CancelledError):
                 agent_worker.cancel()
         access.cancel()
+        await job_wait.stop()
         await close_engine()
 
 
