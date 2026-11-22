@@ -1165,7 +1165,7 @@ docker compose up -d
 
 ## nginx: `/v1/images/jobs` location (2026-11-21)
 
-`infra/nginx-aib.conf` gets `location = /v1/images/jobs` with `client_max_body_size 28m`, the same limit as `/v1/jobs`, which now also carries inline video and PDF. **The deploy script does not apply nginx config.** Apply this by hand on the server: insert only the new `location = /v1/images/jobs { ... }` block next to the `/v1/jobs` location, then check with `nginx -t` and reload. Do not overwrite the server file with the repo copy: the server file has drifted (for example it has a `/v1/live` WebSocket location the repo file lacks).
+`infra/nginx-aib.conf` gets `location = /v1/images/jobs` with `client_max_body_size 28m`, the same limit as `/v1/jobs`, which now also carries inline video and PDF. **The deploy script does not apply nginx config.** Since 2026-11-22 the server file is reconciled with the repo (it had drifted: it lacked the per-IP `aib_ip` rate limit and had a `/v1/live` WebSocket block the repo lacked; both are now in `infra/nginx-aib.conf`), so `infra/nginx-aib.conf` IS the server file. Apply nginx changes by copying the whole repo file: back up the server file to `/root/aib.nginx.bak.<unix ts>`, copy `infra/nginx-aib.conf` over `/etc/nginx/sites-enabled/aib`, run `nginx -t`, then `systemctl reload nginx`. Never hand-edit the server file.
 
 ## Rotating keys
 
