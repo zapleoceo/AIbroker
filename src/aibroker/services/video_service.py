@@ -20,6 +20,8 @@ from aibroker.providers.gemini_video import (
     VideoRequest,
     estimate_video_cost,
 )
+from aibroker.providers.heygen_video import estimate_heygen_cost
+from aibroker.providers.provider_specs.heygen import HEYGEN_SCOPE
 from aibroker.providers.registry import model_for
 from aibroker.providers.transport import generate_video
 from aibroker.routing import chain_for, pick_and_reserve, scope_for
@@ -75,6 +77,7 @@ def video_job_payload(request: VideoRequest) -> dict[str, Any]:
         "aspect_ratio": request.aspect_ratio, "resolution": request.resolution,
         "image_b64": base64.b64encode(request.image).decode() if request.image else None,
         "image_mime": request.image_mime,
+        **({"provider": request.provider} if request.provider != "gemini" else {}),
     }
 
 
@@ -86,6 +89,7 @@ def video_request_from_job(payload: dict[str, Any]) -> VideoRequest:
         aspect_ratio=str(payload["aspect_ratio"]), resolution=str(payload["resolution"]),
         image=base64.b64decode(str(image_b64)) if image_b64 else None,
         image_mime=str(payload["image_mime"]) if payload.get("image_mime") else None,
+        provider=str(payload.get("provider") or "gemini"),
     )
 
 
@@ -109,7 +113,13 @@ async def run_video(
     recovering = state["phase"] != "prepared"
     if recovering and (not state["provider_id"] or state["phase"] not in ("submitted", "settled")):
         raise MediaUnknown("unknown prior submission; no paid resubmit")
-    provider = "gemini" if recovering else chain_for(CAPABILITY)[0]
+    provider = request.provider
+    if provider not in chain_for(CAPABILITY):
+        raise VideoRejected("unknown video provider")
+    if provider == "heygen" and HEYGEN_SCOPE not in project.allowed_scopes:
+        raise VideoRejected("project is not enabled for HeyGen video")
+    if recovering and not str(state["model"]).startswith(f"{provider}/"):
+        raise MediaUnknown("recovery provider does not match durable input")
     use_model = state["model"] if recovering else (
         resolve_pin(model, CAPABILITY, [provider])[0].model if model else model_for(provider, CAPABILITY))
     if not use_model:
@@ -126,7 +136,8 @@ async def run_video(
         res = await run_attempt(Attempt(
             key=key, project=project, provider=provider, model=use_model,
             capability=CAPABILITY, workflow=workflow,
-            estimated_cost=estimate_video_cost(use_model, request),
+            estimated_cost=(estimate_heygen_cost(request) if provider == "heygen"
+                            else estimate_video_cost(use_model, request)),
             call=_generate_call(use_model, request, dispatch),
             cap_flow=Flow.NEXT_KEY, pinned_model=model, note_affinity=False,
             media_dispatch=dispatch, reserve=not recovering,

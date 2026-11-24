@@ -66,7 +66,8 @@ def wired_providers() -> list[str]:
     has a model table but sits in no chain since 2026-09-12, is correctly absent.
     Deliberately NOT derived from which providers hold active keys: the public
     page must not reveal per-provider key state (see the /v1/health aggregate)."""
-    wired = [p for p in provider_names() if usable_scopes_for_provider(p)]
+    # HeyGen requires an explicit project grant and is not a public signup feature.
+    wired = [p for p in provider_names() if p != "heygen" and usable_scopes_for_provider(p)]
     paid_set = paid_providers()
     free = [p for p in wired if p not in paid_set and p != "local"]
     paid = [p for p in wired if p in paid_set]

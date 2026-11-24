@@ -80,7 +80,7 @@ CAPABILITY_CHAINS: dict[Capability, list[str]] = {
     # Real-time speech-to-speech (phone calls): Gemini Live, PAID keys only (see run_live).
     "live": ["gemini"],
     # Short video clips: Gemini Omni Flash, PAID keys only, async job (see run_video).
-    "video": ["gemini"],
+    "video": ["gemini", "heygen"],
     # Image generation from a prompt + reference images: Gemini image models, PAID keys
     # only, async job (see run_image). The Codex subscription route stays separate.
     "image": ["gemini"],
