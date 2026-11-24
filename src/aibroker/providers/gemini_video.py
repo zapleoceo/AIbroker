@@ -64,7 +64,6 @@ class VideoRequest:
     resolution: str
     image: bytes | None = None
     image_mime: str | None = None
-    provider: str = "gemini"
 
 
 def video_cost(model: str, tokens_in: int, tokens_out: int) -> float:

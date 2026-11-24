@@ -277,7 +277,7 @@ async def submit_job_ex(
     request = build_request(messages=messages, model=model, max_tokens=max_tokens,
                             temperature=temperature, response_format=response_format,
                             workflow=workflow, extra=extra)
-    if keyed_admission and (not idempotency_key or capability not in {"speech", "transcription", "video"}):
+    if keyed_admission and (not idempotency_key or capability not in {"speech", "transcription"}):
         raise ValueError("Keyed admission requires an idempotent typed media request")
     phash = (
         hashlib.sha256(

@@ -8,7 +8,6 @@ from __future__ import annotations
 from html import escape as esc
 
 from aibroker.agent.constants import AGENT_SCOPE
-from aibroker.providers.provider_specs.heygen import HEYGEN_SCOPE
 from aibroker.providers.registry import get_spec
 from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 
@@ -17,7 +16,7 @@ from aibroker.routing.chains import CAPABILITY_SCOPE, usable_scopes_for_provider
 # dashboard (that's how llm:audio went missing for Stepan2 voice, 2026-07-11).
 # dict.fromkeys keeps first-appearance order, so llm:chat renders first.
 _KNOWN_SCOPES = tuple(dict.fromkeys(CAPABILITY_SCOPE.values()))
-_PROJECT_SCOPES = tuple(dict.fromkeys((*_KNOWN_SCOPES, AGENT_SCOPE, HEYGEN_SCOPE)))
+_PROJECT_SCOPES = tuple(dict.fromkeys((*_KNOWN_SCOPES, AGENT_SCOPE)))
 
 
 def _is_known_provider(provider: str) -> bool:
