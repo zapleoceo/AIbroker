@@ -1,4 +1,4 @@
-"""Durable Gemini video dispatch fence. No network IO or in-memory recovery guarantee."""
+"""Durable paid video dispatch fence. No network IO or in-memory recovery guarantee."""
 from __future__ import annotations
 
 import hashlib
@@ -12,6 +12,7 @@ from aibroker.db.budget_models import BudgetReservationRow
 from aibroker.db.engine import get_session
 from aibroker.db.media_models import MediaDispatchRow
 from aibroker.db.models import ApiKeyRow, DeepJobRow, ProjectRow, UsageLogRow
+from aibroker.providers.provider_specs.heygen import HEYGEN_SCOPE
 
 
 class MediaUnknown(Exception):
@@ -56,7 +57,7 @@ async def claim_media_resume(job_id: int, project_id: int, expected_claim: datet
                 or receipt.project_id != project_id or not receipt.provider_id
                 or receipt.phase not in ("submitted", "settled")
                 or receipt.fingerprint != media_fingerprint(project_id, job.request)
-                or project is None or not project.is_active or "llm:video" not in project.allowed_scopes):
+                or not _project_can_dispatch(project, _video_provider(job))):
             raise MediaUnknown("receipt is not eligible for manual reconciliation")
         state = {c.name: getattr(receipt, c.name) for c in receipt.__table__.columns}
         await media_resume_key(state, project_id)
@@ -67,6 +68,19 @@ async def claim_media_resume(job_id: int, project_id: int, expected_claim: datet
         job.status, job.started_at = "running", datetime.now(UTC).replace(tzinfo=None)
         job.error_message = RECONCILIATION_RUNNING
         return job
+
+
+def _video_provider(job: DeepJobRow) -> str:
+    provider = (job.request.get("video") or {}).get("provider", "gemini")
+    if provider not in {"gemini", "heygen"}:
+        raise MediaUnknown("unknown durable video provider")
+    return provider
+
+
+def _project_can_dispatch(project: ProjectRow | None, provider: str) -> bool:
+    return bool(project is not None and project.is_active
+                and "llm:video" in project.allowed_scopes
+                and (provider != "heygen" or HEYGEN_SCOPE in project.allowed_scopes))
 
 
 def media_fingerprint(project_id: int, request: dict) -> str:
@@ -89,11 +103,11 @@ class MediaDispatch:
         ).values(id=DeepJobRow.id))
         if result.rowcount != 1:
             raise MediaUnknown("stale or foreign media claim; no submission allowed")
+        job = await session.get(DeepJobRow, self.job_id)
         if authorize_http:
             project = await session.get(ProjectRow, self.project_id)
-            if project is None or not project.is_active or "llm:video" not in project.allowed_scopes:
+            if not _project_can_dispatch(project, _video_provider(job)):
                 raise MediaUnknown("media project authorization revoked")
-        job = await session.get(DeepJobRow, self.job_id)
         if job.capability != "video" or "vivix" in job.request:
             raise MediaUnknown("dispatch context is restricted to non-Vivix video jobs")
         return job
@@ -145,7 +159,7 @@ class MediaDispatch:
                     or (hold.api_key_id, hold.project_id) != (self.key.id, self.project_id)):
                 raise ValueError("media requires a bound durable reservation before POST")
             key = await session.get(ApiKeyRow, self.key.id)
-            if (key is None or key.provider != "gemini" or key.account_id != self.key.account_id
+            if (key is None or key.provider != _video_provider(job) or key.account_id != self.key.account_id
                     or key.token_encrypted != self.key.token_encrypted or not key.is_active
                     or not key.is_alive or "llm:video" not in key.scopes):
                 raise ValueError("media account changed before dispatch")
@@ -208,7 +222,9 @@ async def media_resume_key(state: dict, project_id: int) -> ApiKeyRow:
         raise MediaUnknown("unknown media submission; no POST retry")
     async with get_session() as session:
         key = await session.get(ApiKeyRow, state["key_id"])
-        if (key is None or key.provider != "gemini" or key.account_id != state["account_id"]
+        if (key is None or key.provider not in {"gemini", "heygen"}
+                or not str(state["model"]).startswith(f"{key.provider}/")
+                or key.account_id != state["account_id"]
                 or key.tier != "paid" or not key.is_active or not key.is_alive
                 or "llm:video" not in key.scopes or hashlib.sha256(
                     key.token_encrypted.encode()).hexdigest() != state["key_fingerprint"]):
