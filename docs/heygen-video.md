@@ -1,7 +1,7 @@
 # HeyGen Video through AI Broker
 
 The default video provider remains Google Gemini. HeyGen is an explicit
-option, not an automatic fallback. This page supplements the default Gemini
+option, not an automatic fallback or a public signup feature. This page supplements the default Gemini
 video chapter in the API reference.
 
 Submit to the existing asynchronous `POST /v1/video/jobs` route with

@@ -12,7 +12,7 @@ SPEC = build_provider(
     model_meta={HEYGEN_MODEL: {
         # Override represents the standard 768p T2V rate with synthetic millisecond
         # usage units. The raw video transport bills the applicable mode/rate.
-        "transport": "heygen_video", "pricing": "override", "register": False,
+        "transport": "heygen_video", "pricing": "override", "register": True,
         "input_usd_per_mtok": 0.0, "output_usd_per_mtok": 30.0,
         "note": "HeyGen Video 1; explicit provider selection, native scene audio",
     }},
