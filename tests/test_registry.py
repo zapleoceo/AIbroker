@@ -151,7 +151,7 @@ def test_views_match_the_tables_they_replaced():
 
     assert {n for n, s in REGISTRY.items() if s.native_tools} == TOOL_PROVIDERS
     assert {"openai", "anthropic", "gemini", "mistral"} == TOOL_PROVIDERS
-    assert registry.paid_providers() == {"deepseek", "anthropic", "openai", "vivix", "heygen"}
+    assert registry.paid_providers() == {"deepseek", "anthropic", "openai", "vivix"}
     assert registry.cache_sticky_providers() == {"deepseek", "anthropic"}
     assert registry.providers_with_json("unreliable") == {"cerebras", "cohere", "openrouter", "groq"}
     assert registry.providers_with_json("incapable") == {"zai"}

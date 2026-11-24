@@ -103,7 +103,7 @@ async def test_documented_omni_raw_rest_response(monkeypatch, recovering):
 
 
 def test_video_is_its_own_paid_gemini_lane():
-    assert CAPABILITY_CHAINS["video"] == ["gemini", "heygen"]
+    assert CAPABILITY_CHAINS["video"] == ["gemini"]
     assert scope_for("video") == "llm:video"
     assert "llm:video" in usable_scopes_for_provider("gemini")
     assert "llm:video" not in usable_scopes_for_provider("openai")

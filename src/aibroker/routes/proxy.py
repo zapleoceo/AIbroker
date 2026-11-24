@@ -67,7 +67,6 @@ from aibroker.providers.job_contract import (
     subscription_request_problem,
 )
 from aibroker.providers.media_inputs import media_kinds
-from aibroker.providers.provider_specs.heygen import HEYGEN_MODEL, HEYGEN_SCOPE
 from aibroker.providers.registry import reads_media
 from aibroker.providers.subscriptions import (
     PROVIDERS,
@@ -1383,13 +1382,13 @@ VIDEO_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
 
 class VideoJobRequest(BaseModel):
-    provider: Literal["gemini", "heygen"] = "gemini"
+    provider: Literal["gemini"] = "gemini"
     prompt: str = Field(min_length=1, max_length=VIDEO_MAX_PROMPT_CHARS)
     duration_s: int = Field(5, ge=VIDEO_MIN_S, le=VIDEO_MAX_S,
                             description="clip length in whole seconds")
-    aspect_ratio: Literal["9:16", "16:9", "1:1"] = "9:16"
-    resolution: Literal["360p", "720p", "480p", "768p"] | None = Field(
-        None, description="Gemini: 360p/720p; HeyGen: 480p/768p")
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    resolution: Literal["360p", "720p"] = Field(
+        "720p", description="360p costs about a third of 720p")
     image_base64: str | None = Field(
         None, description="optional reference image (first frame / subject), base64")
     image_mime: Literal["image/jpeg", "image/png", "image/webp"] = "image/jpeg"
@@ -1454,42 +1453,16 @@ async def video_submit(
             raise HTTPException(400, "Vivix admission refused") from e
         response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
         return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
-    model = body.model
-    if body.provider == "heygen":
-        _require_capability_scope(ctx, HEYGEN_SCOPE)
-        if not idempotency_key:
-            raise HTTPException(400, "HeyGen requires Idempotency-Key")
-        try:
-            check_token(idempotency_key, "Idempotency-Key")
-        except ValueError as exc:
-            raise HTTPException(400, "Invalid Idempotency-Key") from exc
-        if body.duration_s < 5 or body.resolution not in (None, "480p", "768p"):
-            raise HTTPException(422, "HeyGen video requires 5–15 seconds and 480p/768p")
-        model = model or HEYGEN_MODEL
-    elif body.resolution not in (None, "360p", "720p") or body.aspect_ratio == "1:1":
-        raise HTTPException(422, "Gemini video requires 360p/720p and 9:16 or 16:9")
-    _validate_pin(model, "video", [body.provider])
+    _validate_pin(body.model, "video")
     try:
         image = body.reference_image()
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    await admit_request(ctx.project)
     request = VideoRequest(
         prompt=body.prompt, duration_s=body.duration_s, aspect_ratio=body.aspect_ratio,
-        resolution=body.resolution or ("768p" if body.provider == "heygen" else "720p"),
-        image=image, image_mime=body.image_mime if image else None, provider=body.provider)
-    if body.provider == "heygen":
-        try:
-            known = (await submit_job_ex(
-                project=ctx.project, capability="video", messages=[], model=model,
-                max_tokens=0, temperature=0.0, response_format=None, workflow=body.workflow,
-                extra={VIDEO_FIELD: video_job_payload(request)},
-                idempotency_key=idempotency_key, keyed_admission=True,
-            )).job_id
-        except IdempotencyConflict as exc:
-            raise idempotency_conflict(exc) from exc
-        response.headers[REQUEST_ID_HEADER] = job_request_id(known)
-        return JobSubmitResponse(job_id=known, poll_url=f"/v1/jobs/{known}", poll_after_s=10)
-    await admit_request(ctx.project)
+        resolution=body.resolution, image=image,
+        image_mime=body.image_mime if image else None)
     job_id = await submit_job(
         project=ctx.project, capability="video",
         messages=[], model=body.model, max_tokens=0, temperature=0.0,
