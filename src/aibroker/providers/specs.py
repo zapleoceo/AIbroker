@@ -13,6 +13,7 @@ from aibroker.providers.provider_specs import (
     deepseek,
     gemini,
     groq,
+    heygen,
     local,
     mistral,
     nvidia,
@@ -41,3 +42,4 @@ register(deepseek.SPEC)
 register(anthropic.SPEC)
 register(openai.SPEC)
 register(vivix.SPEC)
+register(heygen.SPEC)
