@@ -82,6 +82,7 @@ from aibroker.routing.key_tier import KeyTier, paid_lane
 from aibroker.services import job_wait, speech_jobs, transcription_jobs
 from aibroker.services.deep_jobs import (
     AUDIO_FIELD,
+    VIDEO_MCP_WORKFLOW,
     IdempotencyConflict,
     build_request,
     get_job,
@@ -1454,15 +1455,21 @@ async def video_submit(
             raise HTTPException(400, "Vivix admission refused") from e
         response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
         return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
+    if body.workflow == VIDEO_MCP_WORKFLOW:
+        raise HTTPException(400, "Workflow reserved for video MCP")
+    job_id = await submit_video_clip(body, ctx, idempotency_key if body.provider == "heygen" else None)
+    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
+    return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
+
+
+async def submit_video_clip(body: VideoJobRequest, ctx: ProjectCtx, idempotency_key: str | None) -> int:
+    """Validate and enqueue a Gemini or HeyGen clip for HTTP and MCP clients."""
+    _require_capability_scope(ctx, scope_for("video"))
     model = body.model
     if body.provider == "heygen":
         _require_capability_scope(ctx, HEYGEN_SCOPE)
         if not idempotency_key:
             raise HTTPException(400, "HeyGen requires Idempotency-Key")
-        try:
-            check_token(idempotency_key, "Idempotency-Key")
-        except ValueError as exc:
-            raise HTTPException(400, "Invalid Idempotency-Key") from exc
         if body.duration_s < 5 or body.resolution not in (None, "480p", "768p"):
             raise HTTPException(422, "HeyGen video requires 5–15 seconds and 480p/768p")
         model = model or HEYGEN_MODEL
@@ -1477,9 +1484,13 @@ async def video_submit(
         prompt=body.prompt, duration_s=body.duration_s, aspect_ratio=body.aspect_ratio,
         resolution=body.resolution or ("768p" if body.provider == "heygen" else "720p"),
         image=image, image_mime=body.image_mime if image else None, provider=body.provider)
-    if body.provider == "heygen":
+    if idempotency_key is not None:
         try:
-            known = (await submit_job_ex(
+            check_token(idempotency_key, "Idempotency-Key")
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid Idempotency-Key") from exc
+        try:
+            return (await submit_job_ex(
                 project=ctx.project, capability="video", messages=[], model=model,
                 max_tokens=0, temperature=0.0, response_format=None, workflow=body.workflow,
                 extra={VIDEO_FIELD: video_job_payload(request)},
@@ -1487,17 +1498,13 @@ async def video_submit(
             )).job_id
         except IdempotencyConflict as exc:
             raise idempotency_conflict(exc) from exc
-        response.headers[REQUEST_ID_HEADER] = job_request_id(known)
-        return JobSubmitResponse(job_id=known, poll_url=f"/v1/jobs/{known}", poll_after_s=10)
     await admit_request(ctx.project)
-    job_id = await submit_job(
+    return await submit_job(
         project=ctx.project, capability="video",
         messages=[], model=body.model, max_tokens=0, temperature=0.0,
         response_format=None, workflow=body.workflow,
         extra={VIDEO_FIELD: video_job_payload(request)},
     )
-    response.headers[REQUEST_ID_HEADER] = job_request_id(job_id)
-    return JobSubmitResponse(job_id=job_id, poll_url=f"/v1/jobs/{job_id}", poll_after_s=10)
 
 
 def _too_many_waiters() -> HTTPException:

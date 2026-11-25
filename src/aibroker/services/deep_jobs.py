@@ -43,6 +43,7 @@ from aibroker.services.request_cap import admit_keyed_request
 # but the blob is cleared the moment the job finishes (see _finish), so it never
 # accumulates. Bounded by the route's own _MAX_AUDIO_BYTES.
 AUDIO_FIELD = "audio_b64"
+VIDEO_MCP_WORKFLOW = "mcp-video"
 
 log = logging.getLogger(__name__)
 
@@ -137,9 +138,11 @@ def build_request(
 
 def _generic_job_visible() -> ColumnElement[bool]:
     """The generic ID, listing, and cancellation APIs never expose typed media jobs."""
+    workflow = DeepJobRow.request["workflow"].as_string()
     return and_(
         DeepJobRow.capability != "speech",
         or_(DeepJobRow.capability != "transcription", DeepJobRow.idempotency_key.is_(None)),
+        or_(DeepJobRow.capability != "video", workflow.is_(None), workflow != VIDEO_MCP_WORKFLOW),
     )
 
 
