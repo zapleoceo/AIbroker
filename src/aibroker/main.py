@@ -32,6 +32,7 @@ from aibroker.routes import (
     live,
     proxy,
     signup,
+    video_mcp,
 )
 from aibroker.services import job_wait
 from aibroker.services.job_queue import dispatcher_loop
@@ -224,3 +225,4 @@ app.include_router(signup.page_router)
 app.include_router(live.router, prefix="/v1")
 app.include_router(admin.router, prefix="/admin")
 app.include_router(dashboard.router)
+app.include_router(video_mcp.router)
