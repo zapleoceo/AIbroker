@@ -333,3 +333,41 @@ arguments. Tests now register those same fixture objects via module assignments;
 fixture names, dependency injection and assertions remain unchanged. Union-form
 `isinstance` checks are equivalent on the required Python 3.12 runtime. No lint
 rule or deployment threshold is disabled.
+
+### HeyGen provider responses and no-submission resolution (2026-11-27)
+
+Incident deep_job 636152 ended `media outcome unknown; automatic resubmit prohibited`
+with no HTTP status or body anywhere. `note_provider_response()` now keeps every
+failed or unexpected HeyGen answer on the job in `result_meta.provider_responses`
+(most recent 5, `PROVIDER_RESPONSES_MAX`): method, path, status (`null` when no HTTP
+status was received) and the body cut to 1000 characters (`PROVIDER_BODY_MAX`),
+redacted. It covers `POST /v3/models/videos` and `GET /v3/models/videos/{id}` when the
+answer is non-2xx, has no JSON `data` envelope, has non-object `data`, has no reachable
+response, or is a 2xx without a valid `video_id`. Request headers are never stored. The API
+key is cut out of the body verbatim on top of pattern redaction. `note_provider_response()`
+is fenced to the live claim under a row lock, so a stale worker cannot overwrite newer
+`result_meta`, and it never raises: a diagnostics failure cannot replace the real error.
+A request that got no HTTP response is noted as `no HTTP response; the request may have
+reached the provider`. If HeyGen accepted a submission (a valid `video_id`) but storing the
+receipt then failed, the `video_id` is kept on the job as `accepted video_id=…; storing the
+receipt failed`. An `unknown` media job's client-visible error ends only with the method,
+path and HTTP status of the last provider response, for example `(last provider response:
+POST /v3/models/videos HTTP 403)`; the response body stays in `result_meta.provider_responses`
+for operators, because it can describe the operator's provider account.
+
+The budget hold of an `unknown` media job is kept on purpose: the provider may have
+created and billed the video. Only reconciliation releases it. For the case without a
+provider receipt, the operator first confirms read-only on the provider side that no
+such video exists, then calls `POST /admin/media/jobs/{job_id}/resolve-no-submission`
+(`resolve_media_no_submission`, body `MediaNoSubmissionRequest`: `project_id`, and
+`evidence` of 3 to 200 characters). `resolve_unknown_without_submission()` accepts only
+a video job in status `error` whose media_dispatch phase is `unknown` and that has no
+`provider_id` and no usage booking. It releases the hold through the ordinary idempotent refund
+(`release_cost`), sets the error to `media outcome resolved: provider confirms no
+submission (<evidence>)` and writes the audit row `media.resolve_no_submission`. A job
+with a provider receipt is refused with 409; use the reconcile route above for it.
+It also refuses with 409 and writes the audit row `media.resolve_no_submission_refused`
+when a kept provider response shows an accepted submission (a `video_id`, or a 2xx `POST`),
+when the hold's API key no longer exists, or when the hold is not bound to this job and
+key. It re-checks the job and the receipt under row locks both before and after releasing
+the hold.

@@ -65,6 +65,35 @@ async def reconcile_media(job_id: int, body: MediaResumeRequest, request: Reques
     return await media_reconciliation_state(job_id, body.project_id, _)
 
 
+class MediaNoSubmissionRequest(BaseModel):
+    project_id: int
+    evidence: str = Field(min_length=3, max_length=200,
+                          description="How the provider confirmed no submission exists")
+
+
+@router.post("/media/jobs/{job_id}/resolve-no-submission")
+async def resolve_media_no_submission(job_id: int, body: MediaNoSubmissionRequest,
+                                      request: Request,
+                                      _: AdminCtx = Depends(require_admin)) -> dict:
+    """Close an `unknown` media job without a provider receipt once the provider confirms no
+    such submission exists; releases its budget hold. Refused for anything with a receipt."""
+    from aibroker.services.media_dispatch import MediaUnknown, resolve_unknown_without_submission
+
+    try:
+        result = await resolve_unknown_without_submission(job_id, body.project_id, body.evidence)
+    except MediaUnknown as exc:
+        await audit(actor="admin", action="media.resolve_no_submission_refused",
+                    target=str(job_id), metadata={"project_id": body.project_id,
+                                                  "reason": str(exc)}, ip=client_ip(request))
+        raise HTTPException(409, str(exc)) from exc
+    await audit(actor="admin", action="media.resolve_no_submission", target=str(job_id),
+                metadata={"project_id": body.project_id, "evidence": body.evidence,
+                          "reservation_id": result["reservation_id"],
+                          "reservation_state": result["reservation_state"]},
+                ip=client_ip(request))
+    return result
+
+
 # ─── Projects ───────────────────────────────────────────────────────────────
 
 

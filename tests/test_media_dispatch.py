@@ -337,3 +337,96 @@ async def test_revocation_after_post_persists_receipt_but_stops_get(media_job, m
         assert receipt.provider_id == "known-receipt" and receipt.phase == "submitted"
         assert (await session.get(BudgetReservationRow, receipt.reservation_id)).state == "held"
         assert await session.scalar(select(func.count()).select_from(UsageLogRow)) == 0
+
+
+async def test_provider_responses_are_kept_capped_and_summarised(media_job):
+    from aibroker.services.media_dispatch import (
+        PROVIDER_BODY_MAX,
+        PROVIDER_RESPONSES_MAX,
+        UNKNOWN_OUTCOME,
+        media_quarantine,
+        note_provider_response,
+    )
+
+    for i in range(PROVIDER_RESPONSES_MAX + 2):
+        await note_provider_response(1, method="POST", path="/v3/models/videos", status=403,
+                                     body=f"call {i} " + "x" * (PROVIDER_BODY_MAX * 2))
+    async with get_session() as session:
+        meta = (await session.get(DeepJobRow, 1)).result_meta
+    kept = meta["provider_responses"]
+    assert len(kept) == PROVIDER_RESPONSES_MAX and kept[-1]["body"].startswith("call 6")
+    assert all(len(r["body"]) <= PROVIDER_BODY_MAX for r in kept)
+    async with get_session() as session:
+        session.add(MediaDispatchRow(job_id=1, project_id=1, fingerprint="f", phase="submitting",
+                                     claim=media_job[2].claim))
+    assert await media_quarantine(1, media_job[2].claim)
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+    assert job.error_message.startswith(UNKNOWN_OUTCOME)
+    assert "last provider response: POST /v3/models/videos HTTP 403" in job.error_message
+
+
+async def test_resolve_unknown_without_submission_releases_the_hold(media_job):
+    from aibroker.services.media_dispatch import (
+        RESOLVED_NO_SUBMISSION,
+        resolve_unknown_without_submission,
+    )
+
+    today = datetime.now(UTC).date()
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+        job.status, job.error_message = "error", "media outcome unknown; automatic resubmit prohibited"
+        session.add(BudgetReservationRow(id="hold-1", api_key_id=1, project_id=1, amount=0.48,
+                                         day=today, month=today.replace(day=1), debit_daily=True,
+                                         debit_monthly=False, state="held"))
+        key = await session.get(ApiKeyRow, 1)
+        key.daily_reset_at, key.daily_cost_used_usd = today, 1.0
+        session.add(MediaDispatchRow(job_id=1, project_id=1, fingerprint="f", phase="unknown",
+                                     claim=media_job[2].claim, key_id=1, reservation_id="hold-1",
+                                     model="gemini/x"))
+    result = await resolve_unknown_without_submission(1, 1, "provider list shows no video")
+    assert result["reservation_state"] == "released"
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+        hold = await session.get(BudgetReservationRow, "hold-1")
+    assert job.error_message.startswith(RESOLVED_NO_SUBMISSION) and hold.state == "released"
+    async with get_session() as session:
+        assert (await session.get(ApiKeyRow, 1)).daily_cost_used_usd == pytest.approx(0.52)
+    with pytest.raises(MediaUnknown):            # wrong project
+        await resolve_unknown_without_submission(1, 2, "x")
+
+
+async def test_resolve_refuses_a_job_with_a_provider_receipt(media_job):
+    from aibroker.services.media_dispatch import resolve_unknown_without_submission
+
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+        job.status = "error"
+        session.add(MediaDispatchRow(job_id=1, project_id=1, fingerprint="f", phase="unknown",
+                                     claim=media_job[2].claim, provider_id="clip-9"))
+    with pytest.raises(MediaUnknown, match="without a provider receipt"):
+        await resolve_unknown_without_submission(1, 1, "x")
+
+
+async def test_resolve_refuses_when_a_kept_response_shows_an_accepted_video(media_job):
+    from aibroker.services.media_dispatch import resolve_unknown_without_submission
+
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, 1)
+        job.status = "error"
+        job.result_meta = {"provider_responses": [{"method": "POST", "status": None,
+                                                    "body": "accepted video_id=clip-7; storing failed"}]}
+        session.add(MediaDispatchRow(job_id=1, project_id=1, fingerprint="f", phase="unknown",
+                                     claim=media_job[2].claim))
+    with pytest.raises(MediaUnknown, match="accepted submission"):
+        await resolve_unknown_without_submission(1, 1, "x")
+
+
+async def test_an_echoed_key_is_cut_out_of_the_kept_body(media_job):
+    from aibroker.services.media_dispatch import note_provider_response
+
+    await note_provider_response(1, method="POST", path="/v3/models/videos", status=401,
+                                 body="bad key sk_V2_live_abc123 rejected", secret="sk_V2_live_abc123")
+    async with get_session() as session:
+        body = (await session.get(DeepJobRow, 1)).result_meta["provider_responses"][-1]["body"]
+    assert "sk_V2_live_abc123" not in body and "[REDACTED]" in body

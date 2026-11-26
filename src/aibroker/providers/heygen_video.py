@@ -6,6 +6,7 @@ import base64
 import hashlib
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -48,26 +49,43 @@ def _body(request: VideoRequest) -> dict[str, Any]:
     return data
 
 
+Note = Callable[..., Awaitable[None]]
+
+
 async def _checked(
     client: httpx.AsyncClient, method: str, url: str, *, api_key: str,
-    body: dict[str, Any] | None = None, idem: str | None = None,
+    body: dict[str, Any] | None = None, idem: str | None = None, note: Note | None = None,
 ) -> dict[str, Any]:
+    """One HeyGen API call. Every failed or unexpected answer is kept on the job through
+    `note` (status + body only; the key and headers never leave this function)."""
     headers = {"x-api-key": api_key}
     if idem:
         headers["Idempotency-Key"] = idem
+    path = urlsplit(url).path
+
+    async def keep(status: int | None, text: str) -> None:
+        if note is not None:
+            await note(method=method, path=path, status=status, body=text, secret=api_key)
+
     try:
         response = await client.request(method, url, json=body, headers=headers)
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
+        await keep(None, f"{type(exc).__name__}: no HTTP response; the request may have "
+                         "reached the provider")
         raise RuntimeError("HeyGen video API unreachable") from None
     if response.status_code in (400, 402, 404):
+        await keep(response.status_code, response.text)
         raise VideoRejected(f"HeyGen video HTTP {response.status_code}; request unavailable or refused")
     if response.status_code not in (200, 202):
+        await keep(response.status_code, response.text)
         raise RuntimeError(f"HeyGen video HTTP {response.status_code}")
     try:
         data = response.json()["data"]
     except (ValueError, TypeError, KeyError):
+        await keep(response.status_code, response.text)
         raise RuntimeError("HeyGen video response did not contain a data envelope") from None
     if not isinstance(data, dict):
+        await keep(response.status_code, response.text)
         raise RuntimeError("HeyGen video response data is not an object")
     return data
 
@@ -107,7 +125,11 @@ class HeyGenVideoTransport:
     async def generate_video(
         self, *, model: str, request: VideoRequest, api_key: str, dispatch: Any = None,
     ) -> tuple[bytes, dict[str, Any]]:
-        from aibroker.services.media_dispatch import MediaUnknown
+        from aibroker.services.media_dispatch import MediaUnknown, note_provider_response
+
+        async def note(**kw: Any) -> None:
+            await note_provider_response(dispatch.job_id, claim=getattr(dispatch, "claim", None),
+                                         **kw)
 
         if dispatch is None or model != HEYGEN_MODEL:
             raise MediaUnknown("HeyGen requires its own durable paid-video dispatch")
@@ -125,11 +147,20 @@ class HeyGenVideoTransport:
                     ).hexdigest()
                     await dispatch.begin()
                     data = await _checked(client, "POST", _API, api_key=api_key,
-                                          body=body, idem=idem)
+                                          body=body, idem=idem, note=note)
                     job = data.get("video_id")
                     if not isinstance(job, str) or not _ID.fullmatch(job):
+                        await note(method="POST", path=urlsplit(_API).path, status=None,
+                                   body=f"2xx answer without a valid video_id: {str(data)[:800]}")
                         raise MediaUnknown("HeyGen receipt missing or malformed; no resubmit")
-                    await dispatch.receipt(job)
+                    try:
+                        await dispatch.receipt(job)
+                    except Exception:
+                        # HeyGen accepted (and may bill) this video: keep its id on the job, so
+                        # it can never be closed as "no submission".
+                        await note(method="POST", path=urlsplit(_API).path, status=None,
+                                   body=f"accepted video_id={job}; storing the receipt failed")
+                        raise
                 else:
                     job = state["provider_id"]
                     if state["phase"] not in {"submitted", "settled"} or not (
@@ -140,7 +171,8 @@ class HeyGenVideoTransport:
                 while data.get("status") in _WAITING:
                     await asyncio.sleep(_POLL_S)
                     await dispatch.authorize_http()
-                    data = await _checked(client, "GET", f"{_API}/{job}", api_key=api_key)
+                    data = await _checked(client, "GET", f"{_API}/{job}", api_key=api_key,
+                                          note=note)
                     if data.get("video_id") != job:
                         raise MediaUnknown("HeyGen returned a receipt for another video")
                 if data.get("status") in {"cancelled", "failed"}:
