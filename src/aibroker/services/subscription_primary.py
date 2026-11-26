@@ -25,6 +25,7 @@ A request that sets `key_tier` explicitly keeps its API path. The CLI cannot app
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from datetime import UTC, datetime
@@ -57,20 +58,30 @@ PRIMARY_DEADLINE_S = 300
 # worker slot before it falls back to the API walk (both overridable per project entry).
 DEFAULT_MAX_CONCURRENT = 2
 DEFAULT_QUEUE_TIMEOUT_S = 20
+_LOCK_NAMESPACE = 0x5B5C   # two-int advisory lock: (namespace, project id)
 
 # Lanes a subscription may serve first (chat:deep stays on its long-context lane).
 PRIMARY_CAPABILITIES = frozenset({"chat:fast", "chat:smart", "chat:sales", "chat:code",
                                   "chat:edit", "structured", "prefilter", "translate"})
 
 
-def _table() -> dict[str, Any]:
-    raw = get_settings().SUBSCRIPTION_PRIMARY or "{}"
+@functools.lru_cache(maxsize=4)
+def _parse(raw: str) -> dict[str, Any]:
+    """Parsed SUBSCRIPTION_PRIMARY, cached per raw value (a bad value logs once)."""
     try:
         table = json.loads(raw)
     except ValueError:
         log.error("SUBSCRIPTION_PRIMARY is not valid JSON: subscription-first routing off")
         return {}
     return table if isinstance(table, dict) else {}
+
+
+def _table() -> dict[str, Any]:
+    return _parse(get_settings().SUBSCRIPTION_PRIMARY or "{}")
+
+
+def _configured_projects() -> list[int]:
+    return [int(k) for k in _table() if str(k).isdigit()]
 
 
 def _entry(project_id: int) -> dict[str, Any] | None:
@@ -195,8 +206,8 @@ async def hand_off(row: DeepJobRow, project: ProjectRow, req: dict[str, Any]) ->
         if s.bind.dialect.name == "postgresql":   # pragma: no cover — Postgres-only lock
             # One handoff per project at a time, so concurrent dispatcher tasks cannot
             # overshoot the cap (released at commit).
-            await s.execute(text("SELECT pg_advisory_xact_lock(:k)"),
-                            {"k": 0x5B5C0000 + project.id})
+            await s.execute(text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+                            {"ns": _LOCK_NAMESPACE, "k": project.id})
         if await _in_flight(s, project.id) >= cap:
             log.info("job %d: %s lane share full (%d) - straight to the API walk",
                      row.id, model_id, cap)
@@ -238,7 +249,8 @@ async def expire_overdue(now: datetime | None = None) -> int:
         rows = (await s.execute(
             select(DeepJobRow.id, DeepJobRow.project_id, DeepJobRow.created_at,
                    DeepJobRow.run_after, DeepJobRow.request["client_job"]["subscription_first"])
-            .where(DeepJobRow.capability == "agent:codex", DeepJobRow.status == "pending"))).all()
+            .where(DeepJobRow.capability == "agent:codex", DeepJobRow.status == "pending",
+                   DeepJobRow.project_id.in_(_configured_projects())))).all()
     expired = 0
     for job_id, project_id, created_at, handed_at, first in rows:
         if first not in (True, "true"):
