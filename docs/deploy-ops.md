@@ -585,6 +585,25 @@ after reading the auth-refresh guard in `agent-runs.md`: when `last_refresh` in 
 rotate the refresh token at once (the exact refresh timing inside Codex is UNVERIFIED); otherwise
 runs are fully parallel. A two-run live canary is still worth doing as a smoke test.
 
+## Subscription-first chat lanes (2026-11-26)
+
+`SUBSCRIPTION_PRIMARY` (`config.py`, default `"{}"` = off) lists the projects whose chat lanes try a subscription first. Value: JSON `{"<project id>": {"model": "codex-sub/<verified model>", "capabilities": ["chat:smart"]}}`. Only the lanes listed in [routing.md](routing.md#subscription-first-chat-lanes-2026-11-26) are allowed, never `chat:deep`. Invalid JSON logs an error and turns the feature off. A handoff also needs all of these, otherwise the job goes straight to the API walk with a warning:
+
+- `AGENT_SUBSCRIPTION_CODEX_ENABLED=true`;
+- the model in `AGENT_SUBSCRIPTION_VERIFIED_MODELS`;
+- the project in `AGENT_ALLOWED_PROJECT_IDS` (or allowed on the dashboard), with scope `llm:agent` granted to it.
+
+Capacity: the codex lane is shared, with concurrency `AGENT_CONCURRENCY_CODEX` (10 on prod). A run takes about 13 to 29 s (p50). Enable only low-volume lanes; vera starts with `chat:smart` only.
+
+Activation for vera (project 2) on prod:
+
+1. Confirm `codex-sub/gpt-6.1-sol` is in `AGENT_SUBSCRIPTION_VERIFIED_MODELS` and `AGENT_SUBSCRIPTION_CODEX_ENABLED=true`.
+2. Add `2` to `AGENT_ALLOWED_PROJECT_IDS`.
+3. Grant scope `llm:agent` to project 2.
+4. Set `SUBSCRIPTION_PRIMARY={"2":{"model":"codex-sub/gpt-6.1-sol","capabilities":["chat:smart"]}}` in the server `.env`, then recreate the services that read it, as for any `.env` change.
+
+Rollback: set `SUBSCRIPTION_PRIMARY={}` and recreate the same services. Jobs already handed off finish on their subscription run or fall back to the API walk, because the fallback is recorded on each job.
+
 ## Subscription live-test evidence (2026-10-13)
 
 `AGENT_SUBSCRIPTION_TESTED_MODELS` is read by the `api` service only (not the workers). It is a JSON

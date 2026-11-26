@@ -588,6 +588,16 @@ submits can still both insert). Client contract: resubmitting is harmless —
 you'll get back the in-flight `job_id`; just poll it. A request that carries an
 `Idempotency-Key` (below) opts OUT of this dedup.
 
+#### Subscription-first projects (2026-11-26)
+
+For a project the owner listed in `SUBSCRIPTION_PRIMARY`, a chat job on an allowed lane (`chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`, `structured`, `prefilter`, `translate`) may be answered first by a `codex-sub/&` subscription model. The client changes nothing: the same `POST /v1/jobs`, the same `job_id` and the same poll loop.
+
+- A subscription answer finishes the job as `done`, and the poll shows the subscription evidence as for any subscription job. It is not billed per token and does not count against the project's `$` cap.
+- The poll result has the same response shape as any chat job.
+- `max_tokens` and `temperature` are not applied on the subscription leg, because the CLI cannot set them. A client that needs exact values on every call should not rely on this lane.
+- If the subscription fails, the same `job_id` is answered later by the normal API walk. Keep polling: the job does not fail because of the subscription error.
+- A request that sets `key_tier` explicitly keeps its API path. Tool requests, client tool history and image input on a model without vision also stay on the API path.
+
 #### Priority (migration 023)
 
 `POST /v1/jobs` accepts an optional `priority`: `"interactive"` or `"batch"` (anything else is `422`).

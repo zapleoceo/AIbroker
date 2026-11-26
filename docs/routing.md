@@ -1954,6 +1954,19 @@ Speech, image and video lanes already run on paid keys only, so `key_tier` is va
 **Code map.** `routing/key_tier.py`: `KeyTier` (the literal type), `normalize()` reads a stored request's tier (missing or unknown → `auto`),
 `paid_lane()` is the request-model validator that rejects `free` on the paid-only lanes (speech, image, video, live).
 
+## Subscription-first chat lanes (2026-11-26)
+
+`SUBSCRIPTION_PRIMARY` (JSON, default `{}` = off) names, per project, a `codex-sub/&` model and the chat lanes it serves first: `{"<project id>": {"model": "codex-sub/<verified model>", "capabilities": ["chat:smart"]}}`. Allowed lanes: `chat:fast`, `chat:smart`, `chat:sales`, `chat:code`, `chat:edit`, `structured`, `prefilter`, `translate`. `chat:deep` is never listed. Code: `services/subscription_primary.py`.
+
+- `primary_model(project_id, capability)` returns the model for a listed lane, else None. Invalid JSON logs an error and turns the feature off.
+- `wants_subscription(project_id, capability, req)` is true when a model applies, the request has no `subscription_tried` mark and no explicit `key_tier`.
+- `hand_off(row, project, req)` runs in `services/job_queue.py::_execute` for the claimed chat job, before any API key is picked. It refuses (warning, then the API walk) unless all of these hold: codex route enabled, model verified, project allowed for agent runs with scope `llm:agent`, policy allows the model, no client tools or tool history, expressible request, image input only with vision. When it hands off, the same row becomes an `agent:codex` run (`pending`, `retry_count` 0) with the same prompt and `response_format`, `no_shell: true`, wall 180 s, idle 120 s and deadline 300 s from job creation (so a worker backlog also falls back). The original chat request is kept in `client_job.fallback_request`. An `AgentRunRow` is written, the worker is woken, and an audit row `subscription_first` is recorded. A job whose cancel was requested is never handed off.
+- A subscription answer finishes the job as a normal subscription job: flat rate, no `usage_log` row, the project's `$` cap untouched.
+- `revert_to_api(job, client_job, outcome, error, now)` runs inside the terminal-event transaction in `agent/runs.py::append_event` for `run.failed` and `run.timed_out`. It restores the original chat request, marks it `subscription_tried` (model, outcome, error cut to 300 chars) and re-queues it on the same lane. The dispatcher then runs the project's normal API walk for that lane, unchanged (free keys first, then the paid tail). The `$` cap still applies to that traffic. A cancelled run stays cancelled.
+- `agent/executor.py::_wait_for_quota`: a subscription-first run never waits for a quota reset. It fails at once as `quota_exhausted`, which sends the job to the API walk.
+
+Owner decision 2026-11-26 for project vera: "Sol primary, Gemini fallback", after the $0.20 daily cap was spent by free-Gemini 429s falling through to the paid Gemini key. Activation and rollback: [deploy-ops.md](deploy-ops.md#subscription-first-chat-lanes-2026-11-26).
+
 ## Storm-honesty wave (2026-07-16)
 
 A confirmed prod incident: a project's `$0.50/day` cap was spent, so

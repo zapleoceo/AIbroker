@@ -204,3 +204,9 @@ Deployments with explicit environment catalog overrides must add the two candida
 there as well; changing source defaults alone does not change those deployments.
 Documentation drafted by the Haiku subscription subagent, Broker job `623380`:
 `model_served=claude-haiku-5-5`, account `claude-2`, billing `subscription` (2026-11-18).
+
+## Subscription-first chat jobs (2026-11-26)
+
+A chat job can be answered by a subscription model even though the client asked for a normal chat capability. This happens only for a project listed in `SUBSCRIPTION_PRIMARY` ([routing.md](routing.md#subscription-first-chat-lanes-2026-11-26)). The subscription run never gets a shell (`no_shell`), because third-party chat text must not drive one. Its limits are short: wall 180 s, idle 120 s, deadline 300 s from job creation.
+
+If the subscription answers, the job finishes as a normal subscription job. If it fails (quota exhausted, 429, CLI or worker error, invalid JSON, timeout), the same job id goes back to the project's normal API walk. Subscription-first runs never wait for a quota reset; they fall back at once. The client-facing contract is in [api.md](api.md#subscription-first-projects-2026-11-26).
