@@ -587,20 +587,28 @@ runs are fully parallel. A two-run live canary is still worth doing as a smoke t
 
 ## Subscription-first chat lanes (2026-11-26)
 
-`SUBSCRIPTION_PRIMARY` (`config.py`, default `"{}"` = off) lists the projects whose chat lanes try a subscription first. Value: JSON `{"<project id>": {"model": "codex-sub/<verified model>", "capabilities": ["chat:smart"]}}`. Only the lanes listed in [routing.md](routing.md#subscription-first-chat-lanes-2026-11-26) are allowed, never `chat:deep`. Invalid JSON logs an error and turns the feature off. A handoff also needs all of these, otherwise the job goes straight to the API walk with a warning:
+`SUBSCRIPTION_PRIMARY` (`config.py`, default `"{}"` = off) lists the projects whose chat lanes try a subscription first. Value: JSON `{"<project id>": {"model": "codex-sub/<verified model>", "capabilities": ["chat:smart"]}}`. Only the lanes listed in [routing.md](routing.md#subscription-first-chat-lanes-2026-11-26) are allowed, never `chat:deep`. Invalid JSON logs an error and turns the feature off. Each entry may also set `max_concurrent` (the project's share of the codex lane, default 2) and `queue_timeout_s` (how long a handed-off run may wait for a codex slot before the API fallback, default 20). A handoff also needs all of these, otherwise the job goes straight to the API walk with a warning:
 
 - `AGENT_SUBSCRIPTION_CODEX_ENABLED=true`;
 - the model in `AGENT_SUBSCRIPTION_VERIFIED_MODELS`;
 - the project in `AGENT_ALLOWED_PROJECT_IDS` (or allowed on the dashboard), with scope `llm:agent` granted to it.
 
-Capacity: the codex lane is shared, with concurrency `AGENT_CONCURRENCY_CODEX` (10 on prod). A run takes about 13 to 29 s (p50). Enable only low-volume lanes; vera starts with `chat:smart` only. A run still `pending` past its 300 s deadline (lane full or worker down) is timed out by `expire_overdue()` in the LLM dispatcher's stale-run sweep, about every 60 s, so the Gemini fallback starts within about 360 s at worst, even with no agent worker alive. A saturated codex lane shows up as the warning `subscription-first: N pending run(s) past 300 s - back to the API walk`.
+Capacity: the codex lane is shared, with concurrency `AGENT_CONCURRENCY_CODEX` (10 on prod). A run takes about 13 to 29 s (p50).
 
-Activation for vera (project 2) on prod:
+Lane share: `max_concurrent` (default 2) caps how many of a project's subscription-first runs may be queued or running in the codex lane. At the cap the job goes straight to the API walk and the log says `lane share full`. vera (project 2) uses the default 2 of the 10 slots. The other projects' observed 7-day peak was 8 concurrent codex runs (project 21 up to 8, project 7 at 1), so vera takes the remaining 2 slots, which the others never used even at their peak. Two slots at about 4 runs/min each is about 8 jobs/min (about 480/h), against vera's roughly 50/h average; bursts of up to about 64/min overflow straight to Gemini.
+
+Slot wait: `queue_timeout_s` (default 20) is how long a handed-off run may stay `pending` without a codex worker slot before `expire_overdue()` times it out and the job goes back to the API walk. `expire_overdue()` runs every 5 s in the LLM dispatcher loop (`_sweep_subscription_first`), works with no agent worker alive, and does no query while `SUBSCRIPTION_PRIMARY` is empty. Worst case before the Gemini fallback starts: about 20 s + 5 s.
+
+Baseline before vera's Sol traffic (2026-11-19 to 2026-11-26 16:16 UTC): codex queue wait for project 21 p50 22.7 s, p95 133.3 s; project 7 p50 0.0 s, p95 0.1 s; projects 11, 12 and 13 had no codex runs.
+
+What to watch: the info log `job N: codex-sub/gpt-6.1-sol lane share full (2) - straight to the API walk` (vera's share is saturated; expected in bursts, but sustained counts mean the share is too small, so check the other projects' codex queue waits before raising it), and the warning `subscription-first: N pending run(s) got no codex slot in time - back to the API walk` (a handed-off run waited longer than `queue_timeout_s`: the lane is saturated or its worker is down).
+
+Activation for vera (project 2) on prod, all chat lanes (owner decision 2026-11-27: Sol first for every chat lane):
 
 1. Confirm `codex-sub/gpt-6.1-sol` is in `AGENT_SUBSCRIPTION_VERIFIED_MODELS` and `AGENT_SUBSCRIPTION_CODEX_ENABLED=true`.
 2. Add `2` to `AGENT_ALLOWED_PROJECT_IDS`.
 3. Grant scope `llm:agent` to project 2.
-4. Set `SUBSCRIPTION_PRIMARY={"2":{"model":"codex-sub/gpt-6.1-sol","capabilities":["chat:smart"]}}` in the server `.env`, then recreate the services that read it, as for any `.env` change.
+4. Set `SUBSCRIPTION_PRIMARY={"2":{"model":"codex-sub/gpt-6.1-sol","capabilities":["chat:fast","chat:smart","chat:sales","chat:code","chat:edit","structured","prefilter","translate"],"max_concurrent":2,"queue_timeout_s":20}}` in the server `.env`, then recreate the services that read it, as for any `.env` change.
 
 Rollback: set `SUBSCRIPTION_PRIMARY={}` and recreate the same services. Jobs already handed off finish on their subscription run or fall back to the API walk, because the fallback is recorded on each job.
 

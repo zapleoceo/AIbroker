@@ -595,7 +595,7 @@ For a project the owner listed in `SUBSCRIPTION_PRIMARY`, a chat job on an allow
 - A subscription answer finishes the job as `done`, and the poll shows the subscription evidence as for any subscription job. It is not billed per token and does not count against the project's `$` cap.
 - The poll result has the same response shape as any chat job.
 - `max_tokens` and `temperature` are not applied on the subscription leg, because the CLI cannot set them. A client that needs exact values on every call should not rely on this lane.
-- If the subscription fails, the same `job_id` is answered later by the normal API walk. Keep polling: the job does not fail because of the subscription error. A subscription-first run that no codex worker claims in time (lane full or worker down) is timed out at its 300 s deadline by a sweep that runs about every 60 s, so the answer comes from the API walk within about 360 s at worst.
+- If the subscription fails, the same `job_id` is answered later by the normal API walk. Keep polling: the job does not fail because of the subscription error. A subscription-first run that no codex worker slot claims within 20 s (`queue_timeout_s`, the default; lane full or worker down) is timed out, and the answer comes from the API walk within about 25 s at worst. A project's share of the codex lane is capped too (`max_concurrent`, default 2): when that share is full, the job goes straight to the API walk without queueing.
 - A request that sets `key_tier` explicitly, or pins an API `model`, keeps its API path and is never sent to the subscription. Tool requests, client tool history and image input on a model without vision also stay on the API path.
 
 #### Priority (migration 023)
