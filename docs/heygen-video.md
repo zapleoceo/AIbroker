@@ -25,3 +25,11 @@ reference-mode rate before the paid request.
 
 See [HeyGen Video docs](https://developers.heygen.com/docs/models/heygen-video)
 and the [separate API credits guide](https://help.heygen.com/en/articles/10060327-heygen-api-pricing-credits-explained).
+
+Failed or unexpected HeyGen answers (POST and GET of the vendor video) are kept on
+the job as `result_meta.provider_responses` by `note_provider_response()`, with the
+status and a redacted body cut to 1000 characters. An `unknown` outcome keeps its
+budget hold until reconciliation; a job without a provider receipt is closed with
+`POST /admin/media/jobs/{job_id}/resolve-no-submission` only after the provider confirms
+that no video exists. See the media receipts plan for the full contract
+(`resolve_unknown_without_submission`, `MediaNoSubmissionRequest`).
