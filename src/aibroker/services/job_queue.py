@@ -209,6 +209,10 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
     await _reconcile_stale_media()
     await _reconcile_stale_speech()
+    try:   # subscription-first runs nobody claimed in time go back to the API walk
+        await subscription_primary.expire_overdue()
+    except Exception as e:  # noqa: BLE001 — never block the stale-run sweep
+        log.warning("subscription-first deadline sweep failed: %s", e)
     async with get_session() as s:
         await s.execute(
             text(
@@ -690,7 +694,6 @@ async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     uses SKIP LOCKED) — exercised by test_job_queue.py's Postgres tests and the
     async submit→drain→poll integration tests (all skipif ON_SQLITE)."""
     await _requeue_stale_running()
-    await subscription_primary.expire_overdue()
     claimed = await _claim_batch(limit)
     if claimed:
         await asyncio.gather(*(_execute(r) for r in claimed), return_exceptions=True)
@@ -828,7 +831,6 @@ async def _dispatch(stop: asyncio.Event,
         try:
             if time.monotonic() - last_requeue >= _REQUEUE_STALE_EVERY_S:
                 await _requeue_stale_running()
-                await subscription_primary.expire_overdue()
                 last_requeue = time.monotonic()
             if listener is not None:          # Postgres-only (make_interval)
                 ticks_until_purge -= 1
