@@ -20,7 +20,8 @@ Handoff only happens when the client could have chosen the subscription itself: 
 enabled, model VERIFIED, project allowed for agent runs (AGENT_ALLOWED_PROJECT_IDS or the
 dashboard) AND scope llm:agent, policy allows the model, no client tools, expressible request.
 A request that sets `key_tier` explicitly keeps its API path. The CLI cannot apply
-`max_tokens` / `temperature`; the subscription leg ignores them.
+`max_tokens` / `temperature`; the subscription leg ignores them. The run never gets a shell
+(`no_shell`): triaged chat text is third-party input.
 """
 from __future__ import annotations
 
@@ -136,20 +137,21 @@ async def hand_off(row: DeepJobRow, project: ProjectRow, req: dict[str, Any]) ->
         "client_job": {"capability": row.capability, "provider": spec.provider,
                        "model": model_id, "response_format": req.get("response_format"),
                        "workflow": req.get("workflow"), "tools": [], "tool_choice": None,
-                       "terminal_tools": [], "subscription_first": True,
+                       "terminal_tools": [], "no_shell": True, "subscription_first": True,
                        "fallback_capability": row.capability, "fallback_request": req},
     }
     async with get_session() as s:
         moved = await s.execute(
             update(DeepJobRow)
             .where(DeepJobRow.id == row.id, DeepJobRow.status == "running",
-                   DeepJobRow.started_at == row.started_at)
+                   DeepJobRow.started_at == row.started_at,
+                   DeepJobRow.cancel_requested.is_(False))   # a cancel stays a cancel
             .values(capability=capability, request=request, status="pending",
                     started_at=None, retry_count=0, error_message=None,
                     run_after=datetime.now(UTC).replace(tzinfo=None))
             .execution_options(synchronize_session=False))
         if not moved.rowcount:
-            return False          # re-claimed or finished elsewhere: leave it alone
+            return False          # re-claimed, finished or cancelled: the API path handles it
         s.add(AgentRunRow(run_id=row.id, project_id=project.id, capability=capability,
                           task_id="jobs", account_id="owner", model=cli_model))
     log.info("job %d (%s) sent to %s first", row.id, row.capability, model_id)

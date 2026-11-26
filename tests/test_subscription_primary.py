@@ -1,6 +1,7 @@
 """Subscription-first chat lanes: the job runs on codex-sub first, back to the API walk on failure."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
@@ -24,8 +25,8 @@ _REQ = {"messages": [{"role": "system", "content": "You triage chats."},
 @pytest.fixture
 def primary_on(monkeypatch):
     s = get_settings()
-    monkeypatch.setattr(s, "SUBSCRIPTION_PRIMARY",
-                        '{"%d": {"model": "%s", "capabilities": ["chat:smart"]}}' % (PID, MODEL))
+    monkeypatch.setattr(s, "SUBSCRIPTION_PRIMARY", json.dumps(
+        {str(PID): {"model": MODEL, "capabilities": ["chat:smart"]}}))
     monkeypatch.setattr(s, "AGENT_SUBSCRIPTION_CODEX_ENABLED", True)
     monkeypatch.setattr(subscription_primary, "subscription_model_verified", lambda m: True)
     monkeypatch.setattr(subscription_primary, "project_allowed", lambda pid: True)
@@ -80,6 +81,7 @@ async def test_hand_off_turns_the_job_into_a_codex_run_in_place(primary_on):
     assert job.request["deadline_s"] == subscription_primary.PRIMARY_DEADLINE_S
     client = job.request["client_job"]
     assert client["model"] == MODEL and client["subscription_first"] is True
+    assert client["no_shell"] is True                 # third-party chat text: no shell
     assert client["fallback_capability"] == "chat:smart" and client["fallback_request"] == _REQ
     assert run is not None and run.model == "gpt-6.1-sol" and run.account_id == "owner"
     subscription_primary.wake_worker.assert_awaited_once_with("agent:codex", 990901)
@@ -167,3 +169,16 @@ async def test_quota_exhaustion_fails_over_instead_of_waiting(monkeypatch):
         {}, "subscription", SimpleNamespace(quota_backoff_base_s=60, quota_backoff_cap_s=3600))
     assert out == "failed" and finished[0][1].error_class == "quota_exhausted"
     parked.assert_not_awaited()
+
+
+async def test_a_cancelled_job_is_not_handed_off(primary_on):
+    from sqlalchemy import update
+
+    project = await _project(["llm:chat", "llm:agent"])
+    row = await _running_job(990905)
+    async with get_session() as s:
+        await s.execute(update(DeepJobRow).where(DeepJobRow.id == 990905)
+                        .values(cancel_requested=True))
+    assert not await subscription_primary.hand_off(row, project, dict(_REQ))
+    async with get_session() as s:
+        assert (await s.get(DeepJobRow, 990905)).capability == "chat:smart"
