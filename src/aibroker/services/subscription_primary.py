@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from aibroker.agent.constants import AGENT_SCOPE, project_allowed
 from aibroker.agent.policy import policy_violation
@@ -76,9 +76,10 @@ def primary_model(project_id: int, capability: str) -> str | None:
 
 
 def wants_subscription(project_id: int, capability: str, req: dict[str, Any]) -> bool:
-    """True when this claimed chat job should go to the subscription before any API key."""
+    """True when this claimed chat job should go to the subscription before any API key.
+    A job that pins an API `model` or sets `key_tier` keeps its own API path."""
     return (not req.get("subscription_tried") and not req.get("key_tier")
-            and primary_model(project_id, capability) is not None)
+            and not req.get("model") and primary_model(project_id, capability) is not None)
 
 
 def _refusal(project: ProjectRow, req: dict[str, Any], model_id: str) -> str | None:
@@ -161,6 +162,44 @@ async def hand_off(row: DeepJobRow, project: ProjectRow, req: dict[str, Any]) ->
     return True
 
 
+async def expire_overdue(now: datetime | None = None) -> int:
+    """Time out subscription-first runs still PENDING past their deadline (a full or dead codex
+    worker never claims them, and the executor checks the deadline only at claim). Runs in the
+    LLM dispatcher's tick, so it works with no agent worker alive; each timeout reverts the job
+    to the API walk through the normal terminal path. Returns how many were timed out."""
+    from aibroker.agent.events import RunTimedOut
+    from aibroker.agent.runs import RunConflict, append_event
+
+    cutoff = (now or datetime.now(UTC).replace(tzinfo=None)) - timedelta(seconds=PRIMARY_DEADLINE_S)
+    async with get_session() as s:
+        rows = (await s.execute(
+            select(DeepJobRow.id, DeepJobRow.request["client_job"]["subscription_first"])
+            .where(DeepJobRow.capability == "agent:codex", DeepJobRow.status == "pending",
+                   DeepJobRow.created_at < cutoff))).all()
+    expired = 0
+    for job_id, first in rows:
+        if first not in (True, "true"):
+            continue
+        try:
+            await append_event(job_id, RunTimedOut(limit="deadline"), only_if_pending=True)
+            expired += 1
+        except RunConflict:
+            continue                     # claimed or closed meanwhile
+    if expired:
+        log.warning("subscription-first: %d pending run(s) past %d s - back to the API walk",
+                    expired, PRIMARY_DEADLINE_S)
+    return expired
+
+
+def without_fallback_request(job: DeepJobRow, client_job: dict[str, Any]) -> None:
+    """Drop the kept original request once a subscription-first run ends for good (it would
+    otherwise double the row for the whole retention)."""
+    if "fallback_request" in client_job and isinstance(job.request, dict):
+        job.request = {**job.request,
+                       "client_job": {k: v for k, v in client_job.items()
+                                      if k != "fallback_request"}}
+
+
 def revert_to_api(job: DeepJobRow, client_job: dict[str, Any], outcome: str,
                   error: str | None, now: datetime) -> bool:
     """Called inside agent/runs.py's terminal-event transaction for a failed / timed-out
@@ -168,8 +207,9 @@ def revert_to_api(job: DeepJobRow, client_job: dict[str, Any], outcome: str,
     False when this job is not a subscription-first job (the run then ends as usual)."""
     original = client_job.get("fallback_request")
     lane = client_job.get("fallback_capability")
-    if not client_job.get("subscription_first") or not isinstance(original, dict) or not lane:
-        return False
+    if (not client_job.get("subscription_first") or not isinstance(original, dict) or not lane
+            or job.cancel_requested):
+        return False                  # a cancel stays a cancel: the run ends as usual
     job.capability = lane
     job.request = {**original, "subscription_tried": {"model": client_job.get("model"),
                                                      "outcome": outcome,

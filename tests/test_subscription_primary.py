@@ -182,3 +182,51 @@ async def test_a_cancelled_job_is_not_handed_off(primary_on):
     assert not await subscription_primary.hand_off(row, project, dict(_REQ))
     async with get_session() as s:
         assert (await s.get(DeepJobRow, 990905)).capability == "chat:smart"
+
+
+def test_a_pinned_api_model_keeps_its_api_path(primary_on):
+    assert not subscription_primary.wants_subscription(
+        PID, "chat:smart", {**_REQ, "model": "gemini/gemini-3.6-flash"})
+
+
+async def test_overdue_pending_runs_go_back_to_the_api_walk(primary_on):
+    from datetime import timedelta
+
+    project = await _project(["llm:chat", "llm:agent"])
+    row = await _running_job(990906)
+    assert await subscription_primary.hand_off(row, project, dict(_REQ))
+    async with get_session() as s:
+        created = (await s.get(DeepJobRow, 990906)).created_at
+    later = created + timedelta(seconds=subscription_primary.PRIMARY_DEADLINE_S + 5)
+    assert await subscription_primary.expire_overdue(now=later) == 1
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, 990906)
+    assert (job.capability, job.status) == ("chat:smart", "pending")
+    assert job.request["subscription_tried"]["outcome"] == "timed_out"
+    assert await subscription_primary.expire_overdue(now=later) == 0
+
+
+async def test_a_failure_after_a_cancel_request_does_not_revert(primary_on):
+    from sqlalchemy import update
+
+    project = await _project(["llm:chat", "llm:agent"])
+    row = await _running_job(990907)
+    assert await subscription_primary.hand_off(row, project, dict(_REQ))
+    async with get_session() as s:
+        await s.execute(update(AgentRunRow).where(AgentRunRow.run_id == 990907)
+                        .values(cancel_requested=True))
+    await append_event(990907, RunFailed(error_class="cli_error", message="boom"))
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, 990907)
+    assert job.capability == "agent:codex" and job.status == "error"
+
+
+async def test_the_kept_request_is_dropped_when_the_run_completes(primary_on):
+    project = await _project(["llm:chat", "llm:agent"])
+    row = await _running_job(990908)
+    assert await subscription_primary.hand_off(row, project, dict(_REQ))
+    await append_event(990908, RunCompleted(final_text="{}"))
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, 990908)
+    assert "fallback_request" not in job.request["client_job"]
+    assert job.request["client_job"]["subscription_first"] is True

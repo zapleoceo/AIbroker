@@ -35,7 +35,7 @@ from aibroker.services.deep_jobs import (
     payload_hash,
     replayed_job_id,
 )
-from aibroker.services.subscription_primary import revert_to_api
+from aibroker.services.subscription_primary import revert_to_api, without_fallback_request
 
 IN_FLIGHT = ("pending", "running")
 
@@ -329,6 +329,7 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
             # Subscription-first job (services/subscription_primary.py): a failed / timed-out
             # run hands the SAME job back to the API walk instead of ending it.
             if (job is not None and client_job and event.type in ("run.failed", "run.timed_out")
+                    and not run.cancel_requested
                     and revert_to_api(job, client_job, OUTCOME_BY_TYPE[event.type],
                                       redact(getattr(event, "error_class", "")
                                              + ": " + getattr(event, "message", ""))
@@ -388,6 +389,8 @@ async def append_event(run_id: int, event: AnyEvent, lease: Lease | None = None,
                     job.error_message = event.type
                 if first_started_at:
                     job.result_meta["first_started_at"] = first_started_at
+            if job is not None and client_job and client_job.get("fallback_request"):
+                without_fallback_request(job, client_job)
             if isinstance(job.request, dict) and job.request.get("attachments"):
                 job.request = {**job.request,
                                "attachments": strip_attachment_data(job.request["attachments"])}
