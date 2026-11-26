@@ -44,7 +44,7 @@ from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.routing.key_tier import normalize as normalize_key_tier
-from aibroker.services import speech_jobs
+from aibroker.services import speech_jobs, subscription_primary
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.image_service import (
     IMAGE_FIELD,
@@ -209,6 +209,10 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
     await _reconcile_stale_media()
     await _reconcile_stale_speech()
+    try:   # subscription-first runs nobody claimed in time go back to the API walk
+        await subscription_primary.expire_overdue()
+    except Exception as e:  # noqa: BLE001 — never block the stale-run sweep
+        log.warning("subscription-first deadline sweep failed: %s", e)
     async with get_session() as s:
         await s.execute(
             text(
@@ -470,6 +474,12 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # capability's chain actually reaches a paid provider with a wired model —
     # else (e.g. chat:deep is nvidia-only) demanding a paid key is a guaranteed
     # no-op, so the final retry stays a normal walk instead.
+    # Subscription-first projects (services/subscription_primary.py): the job goes to the
+    # subscription before any API key; it comes back here only if the subscription failed.
+    if (row.capability not in ("transcription", "video", "image")
+            and subscription_primary.wants_subscription(row.project_id, row.capability, req)
+            and await subscription_primary.hand_off(row, project, req)):
+        return
     key_tier = normalize_key_tier(req.get("key_tier"))
     # key_tier "paid" is paid-only from the first attempt (run_chat), "free" never escalates.
     paid_only = (key_tier == "auto" and row.retry_count >= _MAX_RETRIES - 1
