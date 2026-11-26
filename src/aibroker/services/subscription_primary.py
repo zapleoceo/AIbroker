@@ -25,12 +25,13 @@ A request that sets `key_tier` explicitly keeps its API path. The CLI cannot app
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from aibroker.agent.constants import AGENT_SCOPE, project_allowed
 from aibroker.agent.policy import policy_violation
@@ -53,26 +54,85 @@ log = logging.getLogger(__name__)
 PRIMARY_WALL_S = 180
 PRIMARY_IDLE_S = 120
 PRIMARY_DEADLINE_S = 300
+# Per-project share of the shared codex lane and how long a handed-off job may wait for a
+# worker slot before it falls back to the API walk (both overridable per project entry).
+DEFAULT_MAX_CONCURRENT = 2
+DEFAULT_QUEUE_TIMEOUT_S = 20
+_LOCK_NAMESPACE = 0x5B5C   # two-int advisory lock: (namespace, project id)
 
 # Lanes a subscription may serve first (chat:deep stays on its long-context lane).
 PRIMARY_CAPABILITIES = frozenset({"chat:fast", "chat:smart", "chat:sales", "chat:code",
                                   "chat:edit", "structured", "prefilter", "translate"})
 
 
-def primary_model(project_id: int, capability: str) -> str | None:
-    """The subscription model that serves `capability` first for this project, or None."""
+@functools.lru_cache(maxsize=4)
+def _parse(raw: str) -> dict[str, Any]:
+    """Parsed SUBSCRIPTION_PRIMARY, cached per raw value (a bad value logs once)."""
     try:
-        table = json.loads(get_settings().SUBSCRIPTION_PRIMARY or "{}")
+        table = json.loads(raw)
     except ValueError:
         log.error("SUBSCRIPTION_PRIMARY is not valid JSON: subscription-first routing off")
+        return {}
+    return table if isinstance(table, dict) else {}
+
+
+def _table() -> dict[str, Any]:
+    return _parse(get_settings().SUBSCRIPTION_PRIMARY or "{}")
+
+
+def _configured_projects() -> list[int]:
+    return [int(k) for k in _table() if str(k).isdigit()]
+
+
+def _entry(project_id: int) -> dict[str, Any] | None:
+    entry = _table().get(str(project_id))
+    if (not isinstance(entry, dict) or not isinstance(entry.get("model"), str)
+            or not isinstance(entry.get("capabilities"), list)):
         return None
-    entry = table.get(str(project_id)) if isinstance(table, dict) else None
-    if not isinstance(entry, dict):
+    return entry
+
+
+def _int_setting(entry: dict[str, Any], key: str, default: int) -> int:
+    value = entry.get(key, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 \
+        else default
+
+
+def max_concurrent(project_id: int) -> int:
+    """How many of this project's subscription-first runs may be in the codex lane at once."""
+    entry = _entry(project_id)
+    return _int_setting(entry, "max_concurrent", DEFAULT_MAX_CONCURRENT) if entry \
+        else DEFAULT_MAX_CONCURRENT
+
+
+def queue_timeout_s(project_id: int) -> int:
+    """How long a handed-off job may wait for a codex worker slot before the API fallback."""
+    entry = _entry(project_id)
+    return _int_setting(entry, "queue_timeout_s", DEFAULT_QUEUE_TIMEOUT_S) if entry \
+        else DEFAULT_QUEUE_TIMEOUT_S
+
+
+def primary_model(project_id: int, capability: str) -> str | None:
+    """The subscription model that serves `capability` first for this project, or None."""
+    entry = _entry(project_id)
+    if entry is None:
         return None
-    model, lanes = entry.get("model"), entry.get("capabilities")
-    if not isinstance(model, str) or not isinstance(lanes, list):
-        return None
-    return model if capability in PRIMARY_CAPABILITIES and capability in lanes else None
+    lanes = entry["capabilities"]
+    return entry["model"] if capability in PRIMARY_CAPABILITIES and capability in lanes else None
+
+
+def enabled() -> bool:
+    """Any project configured at all (lets the dispatcher skip the sweep without a query)."""
+    return bool(_table())
+
+
+async def _in_flight(s: Any, project_id: int) -> int:
+    """This project's subscription-first runs queued or running in the codex lane."""
+    rows = (await s.execute(
+        select(DeepJobRow.request["client_job"]["subscription_first"])
+        .where(DeepJobRow.project_id == project_id, DeepJobRow.capability == "agent:codex",
+               DeepJobRow.status.in_(("pending", "running"))))).all()
+    return sum(1 for (first,) in rows if first in (True, "true"))
 
 
 def wants_subscription(project_id: int, capability: str, req: dict[str, Any]) -> bool:
@@ -141,7 +201,17 @@ async def hand_off(row: DeepJobRow, project: ProjectRow, req: dict[str, Any]) ->
                        "terminal_tools": [], "no_shell": True, "subscription_first": True,
                        "fallback_capability": row.capability, "fallback_request": req},
     }
+    cap = max_concurrent(project.id)
     async with get_session() as s:
+        if s.bind.dialect.name == "postgresql":   # pragma: no cover — Postgres-only lock
+            # One handoff per project at a time, so concurrent dispatcher tasks cannot
+            # overshoot the cap (released at commit).
+            await s.execute(text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+                            {"ns": _LOCK_NAMESPACE, "k": project.id})
+        if await _in_flight(s, project.id) >= cap:
+            log.info("job %d: %s lane share full (%d) - straight to the API walk",
+                     row.id, model_id, cap)
+            return False
         moved = await s.execute(
             update(DeepJobRow)
             .where(DeepJobRow.id == row.id, DeepJobRow.status == "running",
@@ -163,22 +233,32 @@ async def hand_off(row: DeepJobRow, project: ProjectRow, req: dict[str, Any]) ->
 
 
 async def expire_overdue(now: datetime | None = None) -> int:
-    """Time out subscription-first runs still PENDING past their deadline (a full or dead codex
-    worker never claims them, and the executor checks the deadline only at claim). Runs in the
-    LLM dispatcher's tick, so it works with no agent worker alive; each timeout reverts the job
-    to the API walk through the normal terminal path. Returns how many were timed out."""
+    """Time out subscription-first runs still PENDING (no codex worker slot yet) past their
+    project's queue timeout since the handoff, or past the overall deadline since the job was
+    created. The executor checks deadlines only at claim, so a full or dead codex lane would
+    otherwise keep them; this runs in the LLM dispatcher every few seconds, works with no agent
+    worker alive, and each timeout reverts the job to the API walk through the normal terminal
+    path. Returns how many were timed out."""
     from aibroker.agent.events import RunTimedOut
     from aibroker.agent.runs import RunConflict, append_event
 
-    cutoff = (now or datetime.now(UTC).replace(tzinfo=None)) - timedelta(seconds=PRIMARY_DEADLINE_S)
+    if not enabled():
+        return 0
+    now = now or datetime.now(UTC).replace(tzinfo=None)
     async with get_session() as s:
         rows = (await s.execute(
-            select(DeepJobRow.id, DeepJobRow.request["client_job"]["subscription_first"])
+            select(DeepJobRow.id, DeepJobRow.project_id, DeepJobRow.created_at,
+                   DeepJobRow.run_after, DeepJobRow.request["client_job"]["subscription_first"])
             .where(DeepJobRow.capability == "agent:codex", DeepJobRow.status == "pending",
-                   DeepJobRow.created_at < cutoff))).all()
+                   DeepJobRow.project_id.in_(_configured_projects())))).all()
     expired = 0
-    for job_id, first in rows:
+    for job_id, project_id, created_at, handed_at, first in rows:
         if first not in (True, "true"):
+            continue
+        waited_out = handed_at is not None and (
+            now - handed_at).total_seconds() > queue_timeout_s(project_id)
+        overdue = (now - created_at).total_seconds() > PRIMARY_DEADLINE_S
+        if not (waited_out or overdue):
             continue
         try:
             await append_event(job_id, RunTimedOut(limit="deadline"), only_if_pending=True)
@@ -186,8 +266,8 @@ async def expire_overdue(now: datetime | None = None) -> int:
         except RunConflict:
             continue                     # claimed or closed meanwhile
     if expired:
-        log.warning("subscription-first: %d pending run(s) past %d s - back to the API walk",
-                    expired, PRIMARY_DEADLINE_S)
+        log.warning("subscription-first: %d pending run(s) got no codex slot in time - back to "
+                    "the API walk", expired)
     return expired
 
 

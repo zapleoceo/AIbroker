@@ -143,6 +143,8 @@ _JOB_RETENTION_BATCH = int(os.environ.get("JOB_RETENTION_BATCH", "5000"))
 # Stale-running requeue cadence. Its window is _STALE_RUNNING_S (25 min), so
 # sweeping every ~1-5 s tick bought nothing but a write-lock round trip.
 _REQUEUE_STALE_EVERY_S = 60.0
+# Subscription-first runs waiting for a codex slot are checked this often (queue timeout ~20 s).
+_SUBSCRIPTION_SWEEP_EVERY_S = 5.0
 # Dispatcher ticks between retention sweeps. The tick fires as often as once a
 # second, and this is pure housekeeping — at the 5s idle poll this is roughly
 # every 25 minutes, and a busy loop only makes it more frequent, never less.
@@ -209,10 +211,6 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
     worker_job (skipif ON_SQLITE), invisible to the SQLite diff-cover run."""
     await _reconcile_stale_media()
     await _reconcile_stale_speech()
-    try:   # subscription-first runs nobody claimed in time go back to the API walk
-        await subscription_primary.expire_overdue()
-    except Exception as e:  # noqa: BLE001 — never block the stale-run sweep
-        log.warning("subscription-first deadline sweep failed: %s", e)
     async with get_session() as s:
         await s.execute(
             text(
@@ -232,6 +230,15 @@ async def _requeue_stale_running() -> None:  # pragma: no cover
             ),
             {"max": _MAX_RETRIES, "stale": _STALE_RUNNING_S},
         )
+
+
+async def _sweep_subscription_first() -> None:
+    """Hand subscription-first runs that got no codex slot in time back to the API walk.
+    A no-op without SUBSCRIPTION_PRIMARY; never breaks the dispatcher loop."""
+    try:
+        await subscription_primary.expire_overdue()
+    except Exception as e:  # noqa: BLE001
+        log.warning("subscription-first queue sweep failed: %s", e)
 
 
 async def _reconcile_stale_speech() -> None:
@@ -694,6 +701,7 @@ async def drain_once(limit: int = _MAX_CONCURRENCY) -> int:  # pragma: no cover
     uses SKIP LOCKED) — exercised by test_job_queue.py's Postgres tests and the
     async submit→drain→poll integration tests (all skipif ON_SQLITE)."""
     await _requeue_stale_running()
+    await _sweep_subscription_first()
     claimed = await _claim_batch(limit)
     if claimed:
         await asyncio.gather(*(_execute(r) for r in claimed), return_exceptions=True)
@@ -816,6 +824,7 @@ async def _dispatch(stop: asyncio.Event,
     # it is harmless — the DELETE is idempotent and batched.
     ticks_until_purge = 0
     last_requeue = float("-inf")   # first tick (startup) always sweeps
+    last_sub_sweep = float("-inf")
     if await _dialect_name() == "postgresql":
         listener = asyncio.create_task(_listen_for_jobs(wake, stop))
     idle_timeout = _IDLE_POLL_INTERVAL_S if listener is not None else _POLL_INTERVAL_S
@@ -832,6 +841,9 @@ async def _dispatch(stop: asyncio.Event,
             if time.monotonic() - last_requeue >= _REQUEUE_STALE_EVERY_S:
                 await _requeue_stale_running()
                 last_requeue = time.monotonic()
+            if time.monotonic() - last_sub_sweep >= _SUBSCRIPTION_SWEEP_EVERY_S:
+                await _sweep_subscription_first()
+                last_sub_sweep = time.monotonic()
             if listener is not None:          # Postgres-only (make_interval)
                 ticks_until_purge -= 1
                 if ticks_until_purge <= 0:
