@@ -593,7 +593,7 @@ runs are fully parallel. A two-run live canary is still worth doing as a smoke t
 - the model in `AGENT_SUBSCRIPTION_VERIFIED_MODELS`;
 - the project in `AGENT_ALLOWED_PROJECT_IDS` (or allowed on the dashboard), with scope `llm:agent` granted to it.
 
-Capacity: the codex lane is shared, with concurrency `AGENT_CONCURRENCY_CODEX` (10 on prod). A run takes about 13 to 29 s (p50). Enable only low-volume lanes; vera starts with `chat:smart` only.
+Capacity: the codex lane is shared, with concurrency `AGENT_CONCURRENCY_CODEX` (10 on prod). A run takes about 13 to 29 s (p50). Enable only low-volume lanes; vera starts with `chat:smart` only. A run still `pending` past its 300 s deadline (lane full or worker down) is timed out by `expire_overdue()` in the LLM dispatcher's stale-run sweep, about every 60 s, so the Gemini fallback starts within about 360 s at worst, even with no agent worker alive. A saturated codex lane shows up as the warning `subscription-first: N pending run(s) past 300 s - back to the API walk`.
 
 Activation for vera (project 2) on prod:
 
