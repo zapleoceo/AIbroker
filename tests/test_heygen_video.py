@@ -84,3 +84,52 @@ def test_provider_survives_job_serialization_without_invalidating_older_jobs():
     assert video_request_from_job(video_job_payload(REQ)) == REQ
     old = VideoRequest("hello", 5, "9:16", "720p")
     assert "provider" not in video_job_payload(old)
+
+
+def _submit_dispatch():
+    return SimpleNamespace(job_id=9, load=AsyncMock(return_value={
+        "phase": "prepared", "provider_id": None, "fingerprint": "fixture"}),
+        begin=AsyncMock(), receipt=AsyncMock(), authorize_http=AsyncMock())
+
+
+@pytest.mark.parametrize(("response", "error"), [
+    (httpx.Response(403, text='{"error": "insufficient wallet balance"}'), RuntimeError),
+    (httpx.Response(200, text="<html>maintenance</html>"), RuntimeError),
+    (httpx.Response(202, json={"data": {"status": "pending"}}), MediaUnknown),
+])
+async def test_failed_or_unexpected_submit_answers_are_kept_without_the_key(
+        monkeypatch, response, error):
+    noted = AsyncMock()
+    monkeypatch.setattr("aibroker.services.media_dispatch.note_provider_response", noted)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _req: response))
+    monkeypatch.setattr(hg.httpx, "AsyncClient", lambda **_kw: client)
+    with pytest.raises(error):
+        await hg.HeyGenVideoTransport().generate_video(
+            model=HEYGEN_MODEL, request=REQ, api_key="synthetic-secret",
+            dispatch=_submit_dispatch())
+    kw = noted.await_args.kwargs
+    assert noted.await_args.args == (9,)
+    assert kw["method"] == "POST" and kw["path"] == "/v3/models/videos"
+    assert kw["status"] == (None if error is MediaUnknown else response.status_code)
+    assert "synthetic-secret" not in str(noted.await_args)
+    assert kw["body"]
+
+
+async def test_a_failed_poll_answer_is_kept(monkeypatch):
+    noted = AsyncMock()
+    monkeypatch.setattr("aibroker.services.media_dispatch.note_provider_response", noted)
+    monkeypatch.setattr(hg, "_POLL_S", 0)
+
+    def wire(req):
+        if req.method == "POST":
+            return httpx.Response(202, json={"data": {"video_id": "clip-2", "status": "pending"}})
+        return httpx.Response(500, text="upstream exploded")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(wire))
+    monkeypatch.setattr(hg.httpx, "AsyncClient", lambda **_kw: client)
+    with pytest.raises(RuntimeError):
+        await hg.HeyGenVideoTransport().generate_video(
+            model=HEYGEN_MODEL, request=REQ, api_key="synthetic", dispatch=_submit_dispatch())
+    kw = noted.await_args.kwargs
+    assert (kw["method"], kw["path"], kw["status"]) == ("GET", "/v3/models/videos/clip-2", 500)
+    assert kw["body"] == "upstream exploded"

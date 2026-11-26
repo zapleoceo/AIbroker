@@ -21,6 +21,69 @@ class MediaUnknown(Exception):
 
 RECONCILIATION_REQUIRED = "reconciliation_required"
 RECONCILIATION_RUNNING = "reconciliation_manual_running"
+UNKNOWN_OUTCOME = "media outcome unknown; automatic resubmit prohibited"
+RESOLVED_NO_SUBMISSION = "media outcome resolved: provider confirms no submission"
+PROVIDER_BODY_MAX = 1000          # characters of a provider response body kept on the job
+PROVIDER_RESPONSES_MAX = 5        # most recent provider responses kept on the job
+
+
+async def note_provider_response(job_id: int, *, method: str, path: str, status: int | None,
+                                 body: str) -> None:
+    """Keep an unexpected or failed provider HTTP response on the job (result_meta
+    `provider_responses`): method, path, status and the body cut to PROVIDER_BODY_MAX. The
+    caller passes only the response body - never request headers or the key."""
+    from aibroker.agent.redact import redact
+
+    entry = {"at": datetime.now(UTC).replace(tzinfo=None).isoformat(), "method": method,
+             "path": path, "status": status, "body": redact(body or "")[:PROVIDER_BODY_MAX]}
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, job_id)
+        if job is None:
+            return
+        meta = dict(job.result_meta or {})
+        meta["provider_responses"] = [*(meta.get("provider_responses") or []),
+                                      entry][-PROVIDER_RESPONSES_MAX:]
+        job.result_meta = meta
+
+
+def _last_response_summary(meta: dict | None) -> str:
+    responses = (meta or {}).get("provider_responses") or []
+    if not responses:
+        return ""
+    last = responses[-1]
+    body = " ".join(str(last.get("body") or "").split())[:200]
+    return f" (last provider response: {last.get('method')} {last.get('path')} " \
+           f"HTTP {last.get('status')}: {body})"
+
+
+async def resolve_unknown_without_submission(job_id: int, project_id: int,
+                                             evidence: str) -> dict:
+    """Close an `unknown` media job once the provider confirms NO submission exists (no
+    receipt was ever stored, and the provider's own list shows no such video): the job
+    keeps status error with RESOLVED_NO_SUBMISSION, and its budget hold is released through
+    the ordinary idempotent refund. Refuses anything that has a provider receipt."""
+    from aibroker.routing.cost_guard import release_cost
+
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, job_id)
+        receipt = await session.get(MediaDispatchRow, job_id)
+        if (job is None or job.project_id != project_id or job.capability != "video"
+                or job.status != "error" or receipt is None
+                or receipt.project_id != project_id or receipt.phase != "unknown"
+                or receipt.provider_id):
+            raise MediaUnknown("not an unknown media job without a provider receipt")
+        key = await session.get(ApiKeyRow, receipt.key_id) if receipt.key_id else None
+        reservation_id = receipt.reservation_id
+    if key is not None and reservation_id:
+        await release_cost(api_key=key, reservation_id=reservation_id)
+    async with get_session() as session:
+        job = await session.get(DeepJobRow, job_id)
+        job.error_message = f"{RESOLVED_NO_SUBMISSION} ({evidence[:200]})"
+        job.completed_at = job.completed_at or datetime.now(UTC).replace(tzinfo=None)
+        hold = (await session.get(BudgetReservationRow, reservation_id)
+                if reservation_id else None)
+    return {"job_id": job_id, "status": "error", "reason": job.error_message,
+            "reservation_id": reservation_id, "reservation_state": hold.state if hold else None}
 
 
 async def media_wait(job_id: int, claim: datetime | None, *, force: bool = False) -> bool:
@@ -247,6 +310,7 @@ async def media_quarantine(job_id: int, claim: datetime | None) -> bool:
             return False
         row.phase = "unknown"
         job = await session.get(DeepJobRow, job_id)
-        job.status, job.error_message = "error", "media outcome unknown; automatic resubmit prohibited"
+        job.status = "error"
+        job.error_message = (UNKNOWN_OUTCOME + _last_response_summary(job.result_meta))[:1000]
         job.completed_at = None
         return True
