@@ -44,7 +44,7 @@ from aibroker.db.resilience import retry_stale_statement
 from aibroker.providers.catalog import UnknownModel
 from aibroker.routing.chains import has_paid_tail
 from aibroker.routing.key_tier import normalize as normalize_key_tier
-from aibroker.services import speech_jobs, subscription_fallback
+from aibroker.services import speech_jobs, subscription_primary
 from aibroker.services.deep_jobs import AUDIO_FIELD, JOBS_CHANNEL, _finish
 from aibroker.services.image_service import (
     IMAGE_FIELD,
@@ -470,13 +470,13 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     # capability's chain actually reaches a paid provider with a wired model —
     # else (e.g. chat:deep is nvidia-only) demanding a paid key is a guaranteed
     # no-op, so the final retry stays a normal walk instead.
+    # Subscription-first projects (services/subscription_primary.py): the job goes to the
+    # subscription before any API key; it comes back here only if the subscription failed.
+    if (row.capability not in ("transcription", "video", "image")
+            and subscription_primary.wants_subscription(row.project_id, row.capability, req)
+            and await subscription_primary.hand_off(row, project, req)):
+        return
     key_tier = normalize_key_tier(req.get("key_tier"))
-    # Per-project subscription fallback (services/subscription_fallback.py): free keys only,
-    # then the same job goes to the subscription instead of a paid API key.
-    sub_fallback = key_tier != "paid" and subscription_fallback.applies(row.project_id,
-                                                                         row.capability)
-    if sub_fallback:
-        key_tier = "free"
     # key_tier "paid" is paid-only from the first attempt (run_chat), "free" never escalates.
     paid_only = (key_tier == "auto" and row.retry_count >= _MAX_RETRIES - 1
                  and has_paid_tail(row.capability))
@@ -530,12 +530,6 @@ async def _execute(row: DeepJobRow) -> None:  # pragma: no cover
     if outcome is CANCELLED:
         await _finish(row.id, status="cancelled", expect_started_at=row.started_at)
         return
-    if sub_fallback and (outcome is None or outcome is CONTENT_FAILED
-                         or isinstance(outcome, _BudgetExhausted)):
-        reason = ("no free provider" if outcome is None else
-                  "empty/invalid answers" if outcome is CONTENT_FAILED else "budget cap")
-        if await subscription_fallback.hand_off(row, project, req, reason):
-            return
     if isinstance(outcome, _BudgetExhausted):
         # A project/global daily or monthly cap is spent — more retries can't create budget,
         # so give up immediately with an honest message (not "no provider

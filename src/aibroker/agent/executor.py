@@ -299,6 +299,13 @@ async def _wait_for_quota(run: AgentRunRow, job: DeepJobRow, failed: ev.RunFaile
     route - never API/OpenRouter, never another account. Past the run's overall
     deadline it ends `run.failed` (quota_exhausted) carrying the CLI's wording and reset time -
     still no fallback, no retry on another account."""
+    if ((job.request or {}).get("client_job") or {}).get("subscription_first"):
+        # Subscription-first job: never wait for the quota - fail now so the job goes back to
+        # the project's API walk (services/subscription_primary.py).
+        return await _finish(run.run_id, ev.RunFailed(
+            error_class="quota_exhausted", reset_at=failed.reset_at,
+            message=f"{failed.message} (subscription-first: back to the API walk)"),
+            totals, mode, lease)
     now = _now()
     reset = None
     if failed.reset_at:

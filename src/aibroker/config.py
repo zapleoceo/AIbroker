@@ -216,10 +216,11 @@ class Settings(BaseSettings):
     # Live-test evidence per catalog id ({id: {capability: job_id_or_note}}); informational only,
     # never gates selection (that is VERIFIED_MODELS).
     AGENT_SUBSCRIPTION_TESTED_MODELS: str = "{}"
-    # Per-project subscription fallback for chat jobs (services/subscription_fallback.py):
-    # JSON {"<project id>": "codex-sub/<verified model>"}. Listed projects walk free keys only
-    # and hand an unanswered job to the subscription instead of a paid API key. "{}" = off.
-    SUBSCRIPTION_FALLBACK: str = "{}"
+    # Subscription-first chat lanes per project (services/subscription_primary.py): JSON
+    # {"<project id>": {"model": "codex-sub/<verified model>", "capabilities": ["chat:smart"]}}.
+    # A matching job runs on the subscription first and falls back to the project's normal API
+    # walk only when the subscription fails. "{}" = off.
+    SUBSCRIPTION_PRIMARY: str = "{}"
     AGENT_SUBSCRIPTION_CODEX_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_ENABLED: bool = False
     AGENT_SUBSCRIPTION_CODEX_TOOLS_VERIFIED_MODELS: str = "[]"
