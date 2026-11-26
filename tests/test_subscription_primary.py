@@ -230,3 +230,51 @@ async def test_the_kept_request_is_dropped_when_the_run_completes(primary_on):
         job = await s.get(DeepJobRow, 990908)
     assert "fallback_request" not in job.request["client_job"]
     assert job.request["client_job"]["subscription_first"] is True
+
+
+def test_lane_share_and_queue_timeout_defaults_and_overrides(primary_on, monkeypatch):
+    assert subscription_primary.max_concurrent(PID) == subscription_primary.DEFAULT_MAX_CONCURRENT
+    assert subscription_primary.queue_timeout_s(PID) == subscription_primary.DEFAULT_QUEUE_TIMEOUT_S
+    monkeypatch.setattr(get_settings(), "SUBSCRIPTION_PRIMARY", json.dumps(
+        {str(PID): {"model": MODEL, "capabilities": ["chat:smart"], "max_concurrent": 3,
+                    "queue_timeout_s": 45}}))
+    assert subscription_primary.max_concurrent(PID) == 3
+    assert subscription_primary.queue_timeout_s(PID) == 45
+    monkeypatch.setattr(get_settings(), "SUBSCRIPTION_PRIMARY", json.dumps(
+        {str(PID): {"model": MODEL, "capabilities": ["chat:smart"], "max_concurrent": 0}}))
+    assert subscription_primary.max_concurrent(PID) == subscription_primary.DEFAULT_MAX_CONCURRENT
+
+
+async def test_a_full_lane_share_sends_the_job_straight_to_the_api_walk(primary_on, monkeypatch):
+    monkeypatch.setattr(get_settings(), "SUBSCRIPTION_PRIMARY", json.dumps(
+        {str(PID): {"model": MODEL, "capabilities": ["chat:smart"], "max_concurrent": 1}}))
+    project = await _project(["llm:chat", "llm:agent"])
+    first = await _running_job(990911)
+    assert await subscription_primary.hand_off(first, project, dict(_REQ))
+    second = await _running_job(990912)
+    assert not await subscription_primary.hand_off(second, project, dict(_REQ))
+    async with get_session() as s:
+        assert (await s.get(DeepJobRow, 990912)).capability == "chat:smart"
+
+
+async def test_a_run_waiting_too_long_for_a_slot_goes_back_to_the_api_walk(primary_on):
+    from datetime import timedelta
+
+    project = await _project(["llm:chat", "llm:agent"])
+    row = await _running_job(990913)
+    assert await subscription_primary.hand_off(row, project, dict(_REQ))
+    async with get_session() as s:
+        handed = (await s.get(DeepJobRow, 990913)).run_after
+    soon = handed + timedelta(seconds=subscription_primary.DEFAULT_QUEUE_TIMEOUT_S - 5)
+    assert await subscription_primary.expire_overdue(now=soon) == 0
+    late = handed + timedelta(seconds=subscription_primary.DEFAULT_QUEUE_TIMEOUT_S + 1)
+    assert await subscription_primary.expire_overdue(now=late) == 1
+    async with get_session() as s:
+        job = await s.get(DeepJobRow, 990913)
+    assert (job.capability, job.status) == ("chat:smart", "pending")
+
+
+async def test_the_sweep_is_free_when_nothing_is_configured():
+    assert get_settings().SUBSCRIPTION_PRIMARY == "{}"
+    assert not subscription_primary.enabled()
+    assert await subscription_primary.expire_overdue() == 0
