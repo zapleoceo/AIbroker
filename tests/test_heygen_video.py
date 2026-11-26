@@ -111,7 +111,8 @@ async def test_failed_or_unexpected_submit_answers_are_kept_without_the_key(
     assert noted.await_args.args == (9,)
     assert kw["method"] == "POST" and kw["path"] == "/v3/models/videos"
     assert kw["status"] == (None if error is MediaUnknown else response.status_code)
-    assert "synthetic-secret" not in str(noted.await_args)
+    assert "synthetic-secret" not in kw["body"]
+    assert kw.get("secret") in (None, "synthetic-secret")   # only to cut it out verbatim
     assert kw["body"]
 
 
@@ -133,3 +134,17 @@ async def test_a_failed_poll_answer_is_kept(monkeypatch):
     kw = noted.await_args.kwargs
     assert (kw["method"], kw["path"], kw["status"]) == ("GET", "/v3/models/videos/clip-2", 500)
     assert kw["body"] == "upstream exploded"
+
+
+async def test_an_accepted_video_id_is_kept_when_storing_the_receipt_fails(monkeypatch):
+    noted = AsyncMock()
+    monkeypatch.setattr("aibroker.services.media_dispatch.note_provider_response", noted)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _req: httpx.Response(
+        202, json={"data": {"video_id": "clip-3", "status": "pending"}})))
+    monkeypatch.setattr(hg.httpx, "AsyncClient", lambda **_kw: client)
+    dispatch = _submit_dispatch()
+    dispatch.receipt = AsyncMock(side_effect=MediaUnknown("stale claim"))
+    with pytest.raises(MediaUnknown):
+        await hg.HeyGenVideoTransport().generate_video(
+            model=HEYGEN_MODEL, request=REQ, api_key="synthetic", dispatch=dispatch)
+    assert "video_id=clip-3" in noted.await_args.kwargs["body"]

@@ -82,6 +82,9 @@ async def resolve_media_no_submission(job_id: int, body: MediaNoSubmissionReques
     try:
         result = await resolve_unknown_without_submission(job_id, body.project_id, body.evidence)
     except MediaUnknown as exc:
+        await audit(actor="admin", action="media.resolve_no_submission_refused",
+                    target=str(job_id), metadata={"project_id": body.project_id,
+                                                  "reason": str(exc)}, ip=client_ip(request))
         raise HTTPException(409, str(exc)) from exc
     await audit(actor="admin", action="media.resolve_no_submission", target=str(job_id),
                 metadata={"project_id": body.project_id, "evidence": body.evidence,

@@ -65,12 +65,13 @@ async def _checked(
 
     async def keep(status: int | None, text: str) -> None:
         if note is not None:
-            await note(method=method, path=path, status=status, body=text)
+            await note(method=method, path=path, status=status, body=text, secret=api_key)
 
     try:
         response = await client.request(method, url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        await keep(None, f"{type(exc).__name__}: no HTTP response")
+        await keep(None, f"{type(exc).__name__}: no HTTP response; the request may have "
+                         "reached the provider")
         raise RuntimeError("HeyGen video API unreachable") from None
     if response.status_code in (400, 402, 404):
         await keep(response.status_code, response.text)
@@ -127,7 +128,8 @@ class HeyGenVideoTransport:
         from aibroker.services.media_dispatch import MediaUnknown, note_provider_response
 
         async def note(**kw: Any) -> None:
-            await note_provider_response(dispatch.job_id, **kw)
+            await note_provider_response(dispatch.job_id, claim=getattr(dispatch, "claim", None),
+                                         **kw)
 
         if dispatch is None or model != HEYGEN_MODEL:
             raise MediaUnknown("HeyGen requires its own durable paid-video dispatch")
@@ -151,7 +153,14 @@ class HeyGenVideoTransport:
                         await note(method="POST", path=urlsplit(_API).path, status=None,
                                    body=f"2xx answer without a valid video_id: {str(data)[:800]}")
                         raise MediaUnknown("HeyGen receipt missing or malformed; no resubmit")
-                    await dispatch.receipt(job)
+                    try:
+                        await dispatch.receipt(job)
+                    except Exception:
+                        # HeyGen accepted (and may bill) this video: keep its id on the job, so
+                        # it can never be closed as "no submission".
+                        await note(method="POST", path=urlsplit(_API).path, status=None,
+                                   body=f"accepted video_id={job}; storing the receipt failed")
+                        raise
                 else:
                     job = state["provider_id"]
                     if state["phase"] not in {"submitted", "settled"} or not (
